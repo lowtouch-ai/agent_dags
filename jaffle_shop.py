@@ -18,7 +18,6 @@ def on_failure_callback(context,SVC_NAME):
     exec_date=context.get("execution_date")
     dag_run = context.get('dag_run')
     log_url = context.get("task_instance").log_url
-    #log_url = log_url.replace(log_url.split('/')[2],'mpmathew-test-poc.03907124.lowtouch.cloud')
     msg = f""" 
             SVC: {svc}
             Dag: {dag}
@@ -37,7 +36,6 @@ profile_config = ProfileConfig(
 )
 
 def print_variable(**kwargs):
-  #line changed
   variable = kwargs['dag_run'].conf.get('payment_type')
   print(variable)
 
@@ -120,7 +118,4 @@ with DAG(
    
     e2 = EmptyOperator(task_id="post_dbt")
     
-
-    #e1 >> seeds_tg >> send_email >> stg_tg >> dbt_tg >> e2
 e1 >> seeds_tg >> stg_tg >> dbt_tg >> e2
-#testing16
