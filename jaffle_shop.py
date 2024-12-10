@@ -45,7 +45,7 @@ with DAG(
     schedule='0 0/12 * * *',
     tags=["sample-dag"],
     default_args = {
-    "owner": "mpmathew"
+    "owner": "airflow"
     },
     catchup=False,
 ):
