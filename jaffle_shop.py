@@ -43,7 +43,7 @@ with DAG(
     dag_id="jaffle_shop",
     start_date=datetime(2023, 11, 10),
     schedule='0 0/12 * * *',
-    tags=["mpmathew"],
+    tags=["sample-dag"],
     default_args = {
     "owner": "mpmathew"
     },
