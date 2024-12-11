@@ -9,6 +9,7 @@ from cosmos import DbtTaskGroup, RenderConfig
 from cosmos.config import ProfileConfig, ProjectConfig, ExecutionConfig
 from cosmos.profiles import PostgresUserPasswordProfileMapping
 from pathlib import Path
+import os
 
 def on_failure_callback(context,SVC_NAME):
     svc=SVC_NAME
