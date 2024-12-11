@@ -41,7 +41,7 @@ def print_variable(**kwargs):
 
 readme_path = os.path.join(os.path.dirname(os.path.realpath(file)), 'README.md')
 with open(readme_path, 'r') as file:
-readme_content = file.read()
+    readme_content = file.read()
 
 with DAG(
     dag_id="jaffle_shop",
