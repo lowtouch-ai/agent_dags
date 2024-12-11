@@ -48,9 +48,9 @@ with DAG(
     start_date=datetime(2023, 11, 10),
     schedule='0 0/12 * * *',
     tags=["sample-dag"],
+    doc_md=readme_content,
     default_args = {
-    "owner": "airflow",
-    doc_md=readme_content
+    "owner": "airflow"
     },
     catchup=False,
 ):
