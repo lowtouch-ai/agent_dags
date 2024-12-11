@@ -39,13 +39,18 @@ def print_variable(**kwargs):
   variable = kwargs['dag_run'].conf.get('payment_type')
   print(variable)
 
+readme_path = os.path.join(os.path.dirname(os.path.realpath(file)), 'README.md')
+with open(readme_path, 'r') as file:
+readme_content = file.read()
+
 with DAG(
     dag_id="jaffle_shop",
     start_date=datetime(2023, 11, 10),
     schedule='0 0/12 * * *',
     tags=["sample-dag"],
     default_args = {
-    "owner": "airflow"
+    "owner": "airflow",
+    doc_md=readme_content
     },
     catchup=False,
 ):
