@@ -19,7 +19,7 @@ default_args = {
 }
 
 # Configuration variables
-CREDENTIALS_PATH = "/appz/home/airflow/dags/credentials.json"
+CREDENTIALS_PATH = "/appz/scripts/credentials.json"
 EMAIL_ACCOUNT = Variable.get("EMAIL_ACCOUNT")  # Fetch from Airflow Variables
 LAST_CHECK_TIMESTAMP_FILE = "/appz/home/airflow/dags/last_checked_timestamp.json"
 
