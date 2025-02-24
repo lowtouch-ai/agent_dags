@@ -16,7 +16,7 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
-CREDENTIALS_PATH = "/appz/home/airflow/dags/credentials.json"
+CREDENTIALS_PATH = "/appz/scripts/credentials.json"
 EMAIL_ACCOUNT = Variable.get("EMAIL_ACCOUNT")  # Fetch from Airflow Variables
 
 def authenticate_gmail():
