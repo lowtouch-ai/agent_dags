@@ -13,21 +13,19 @@ from googleapiclient.discovery import build
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
-    "start_date": datetime(2024, 2, 18),
+    "start_date": datetime(2024, 2, 24),
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
 }
 
 # Configuration variables
-CREDENTIALS_PATH = "/appz/scripts/credentials.json"
-EMAIL_ACCOUNT = Variable.get("EMAIL_ACCOUNT")  # Fetch from Airflow Variables
-LAST_CHECK_TIMESTAMP_FILE = "/appz/home/airflow/dags/last_checked_timestamp.json"
+EMAIL_ACCOUNT = Variable.get("EMAIL_ID")  # Fetch email from Airflow Variables
+GMAIL_CREDENTIALS = Variable.get("GMAIL_CREDENTIALS", deserialize_json=True)  # Fetch OAuth credentials
+LAST_CHECK_TIMESTAMP_FILE = "/appz/cache/last_checked_timestamp.json"  # Updated timestamp file location
 
 def authenticate_gmail():
     """Authenticate Gmail API and verify that the correct email account is used."""
-    creds = None
-    if os.path.exists(CREDENTIALS_PATH):
-        creds = Credentials.from_authorized_user_file(CREDENTIALS_PATH)
+    creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
     service = build("gmail", "v1", credentials=creds)
 
     # Fetch authenticated email
@@ -35,9 +33,9 @@ def authenticate_gmail():
     logged_in_email = profile.get("emailAddress", "")
 
     if logged_in_email.lower() != EMAIL_ACCOUNT.lower():
-        raise ValueError(f"Wrong Gmail account! Expected {EMAIL_ACCOUNT}, but got {logged_in_email}")
+        raise ValueError(f" Wrong Gmail account! Expected {EMAIL_ACCOUNT}, but got {logged_in_email}")
 
-    print(f"✅ Authenticated Gmail Account: {logged_in_email}")
+    print(f" Authenticated Gmail Account: {logged_in_email}")
     return service
 
 def get_last_checked_timestamp():
@@ -53,6 +51,7 @@ def get_last_checked_timestamp():
 
 def update_last_checked_timestamp(timestamp):
     """Update the last processed timestamp in the file."""
+    os.makedirs(os.path.dirname(LAST_CHECK_TIMESTAMP_FILE), exist_ok=True)  # Ensure directory exists
     with open(LAST_CHECK_TIMESTAMP_FILE, "w") as f:
         json.dump({"last_checked": timestamp}, f)
 
