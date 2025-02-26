@@ -32,7 +32,7 @@ def authenticate_gmail():
     logged_in_email = profile.get("emailAddress", "")
 
     if logged_in_email.lower() != EMAIL_ACCOUNT.lower():
-        raise ValueError(f"❌ Wrong Gmail account! Expected {EMAIL_ACCOUNT}, but got {logged_in_email}")
+        raise ValueError(f" Wrong Gmail account! Expected {EMAIL_ACCOUNT}, but got {logged_in_email}")
 
     return service
 
@@ -47,12 +47,8 @@ def get_ai_response(user_query):
         messages=[{"role": "user", "content": user_query}],
         stream=False
     )
-    full_content=""
-    for chunk in response:
-        full_content += chunk['message']['content']
-    logging.info(f"Full content: {full_content}")
-
-    return full_content
+    
+    return response['message']['content']
 
 def send_response(**kwargs):
     email_data = kwargs['dag_run'].conf.get("email_data", {})  
@@ -60,7 +56,7 @@ def send_response(**kwargs):
     logging.info(f"Received email data: {email_data}")  
 
     if not email_data:
-        logging.warning("⚠️ No email data received! This DAG was likely triggered manually.")
+        logging.warning(" No email data received! This DAG was likely triggered manually.")
         return  
 
     service = authenticate_gmail()
