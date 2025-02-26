@@ -28,4 +28,87 @@ seeds:
           total: numeric
           shippingcost: numeric
           created: timestamp
+          updated: timestamp
+    address:
+      +schema: webshop_v2  # Ensures it loads into webshop_v2 schema
+      +column_types:
+          customerid: integer
+          firstname: text
+          lastname: text
+          address1: text
+          address2: text
+          city: text
+          zip: text  # ZIP codes often contain letters, so use TEXT
+          created: timestamp
+          updated: timestamp
+    articles:
+      +schema: webshop_v2  # Ensures data loads into webshop_v2 schema
+      +full_refresh: false  # Prevents truncation before inserting new data
+      +column_types:
+          id: integer
+          productid: integer
+          ean: text
+          colorid: integer
+          size: integer
+          description: text
+          originalprice: numeric
+          reducedprice: numeric
+          taxrate: integer
+          discountinpercent: integer
+          currentlyactive: boolean  # Assuming "t" and "f" represent true/false
+          created: timestamp
+          updated: timestamp
+    customer:
+      +schema: webshop_v2
+      +column_types:
+          id: integer
+          firstname: text
+          lastname: text
+          gender: text
+          email: text
+          dateofbirth: text  # Can be converted to DATE in a dbt model later
+          currentaddressid: integer
+          created: timestamp
+          updated: timestamp
+    labels:
+      +schema: webshop_v2
+      +column_types:
+          id: integer
+          name: text
+          slugname: text
+          icon: text
+    order_positions:
+      +schema: webshop_v2
+      +column_types:
+          id: integer
+          orderid: integer
+          articleid: integer
+          amount: integer
+          price: numeric  # Ensure "$" is removed before ingestion
+          created: timestamp
+          updated: timestamp
+    products:
+      +schema: webshop_v2
+      +column_types:
+          id: integer
+          name: text
+          labelid: integer
+          category: text
+          gender: text
+          currentlyactive: boolean  # Assuming "t" and "f" represent true/false
+          created: timestamp
           updated: timestamp 
+    stock:
+      +schema: webshop_v2
+      +column_types:
+          id: integer
+          articleid: integer
+          count: integer
+          created: timestamp
+          updated: timestamp 
+    colors:
+      +schema: webshop_v2
+      +column_types:
+          id: integer
+          name: text
+          rgb: text  # Storing HEX color codes as text
