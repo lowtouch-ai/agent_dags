@@ -5,7 +5,11 @@ from airflow.operators.python import PythonOperator
 from datetime import datetime, timedelta
 from twilio.rest import Client
 from airflow.models import Variable
-
+import json
+import logging
+import time
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 # Default args for DAG
 default_args = {
     "owner": "airflow",
@@ -34,9 +38,7 @@ with DAG(
         conf = kwargs['params']  # Accessing params
 
         # Log received parameters
-        import json
-        import logging
-        logging.info(f"Received params: {json.dumps(conf, indent=2)}")
+        logger.info(f"Received params: {json.dumps(conf, indent=2)}")
 
         message = conf["message"]
         phone_number = conf["phone_number"]
@@ -97,10 +99,28 @@ class TwilioVoiceCall:
             to=phone_number,
             from_=self.twilio_phone,
             twiml=f'<Response><Say>{message}</Say></Response>',
-            status_callback="https://yourserver.com/call_status",  # Webhook for status updates
             status_callback_event=["completed"]
         )
 
         if need_ack:
-            return f"Call initiated. Call SID: {call.sid}. Awaiting acknowledgment..."
+            return self._wait_for_call_status(call.sid)
         return f"Call initiated successfully. Call SID: {call.sid}"
+
+    def _wait_for_call_status(self, call_sid: str) -> str:
+        """
+        Poll Twilio API to get the final status of the call.
+
+        Args:
+            call_sid (str): The SID of the call to check.
+
+        Returns:
+            str: Final call status.
+        """
+    
+        for _ in range(10):  # Poll for about 50 seconds (adjust as needed)
+            call = self.client.calls(call_sid).fetch()
+            logger.info(f"Call status: {call.status}")
+            if call.status in ["completed","no-answer"] and call.duration:
+                return f"Call completed with status: {call.status} and duration: {call.duration} seconds."
+            time.sleep(5)
+        return f"Final Call status:{call.status} after waiting period."
