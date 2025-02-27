@@ -88,8 +88,10 @@ with DAG(
         logger.info(f"Call status: {call.status}")
 
         if call.status in ["completed", "no-answer", "busy", "failed"]:
+            ti.xcom_push(key="call_status", value=call.status)
             return call.status  # Return status instead of raising an error
 
+        ti.xcom_push(key="call_status", value="in-progress")
         return "in-progress"
 
     def fetch_and_save_recording(**kwargs):
@@ -144,8 +146,8 @@ with DAG(
 
     wait_task = TimeDeltaSensor(
         task_id="wait_for_call_status",
-        delta=timedelta(seconds=10),  # Wait for the call to complete
-        poke_interval=10,
+        delta=timedelta(seconds=5),  # Wait for 5 seconds
+        poke_interval=5,
         mode="poke"
     )
 
@@ -153,8 +155,8 @@ with DAG(
         task_id="check_call_status",
         python_callable=check_call_status,
         provide_context=True,
-        retries=5,  # Retries to keep checking until the call is completed
-        retry_delay=timedelta(seconds=10)
+        retries=50,  # Keeps checking until status is completed or no-answer
+        retry_delay=timedelta(seconds=5)
     )
 
     fetch_recording_task = PythonOperator(
