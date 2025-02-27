@@ -22,7 +22,7 @@ default_args = {
 # Configuration variables
 EMAIL_ACCOUNT = Variable.get("EMAIL_ID")  
 GMAIL_CREDENTIALS = Variable.get("GMAIL_CREDENTIALS", deserialize_json=True)  
-LAST_PROCESSED_EMAIL_FILE = "/appz/cache/last_processed_email.json"
+LAST_PROCESSED_EMAIL_FILE = "/appz/cache/last_processed_email.json"  # Track last responded email timestamp
 
 def authenticate_gmail():
     """Authenticate Gmail API and verify the correct email account is used."""
@@ -33,52 +33,61 @@ def authenticate_gmail():
     logged_in_email = profile.get("emailAddress", "")
 
     if logged_in_email.lower() != EMAIL_ACCOUNT.lower():
-        raise ValueError(f"Wrong Gmail account! Expected {EMAIL_ACCOUNT}, but got {logged_in_email}")
+        raise ValueError(f" Wrong Gmail account! Expected {EMAIL_ACCOUNT}, but got {logged_in_email}")
 
-    logging.info(f"Authenticated Gmail Account: {logged_in_email}")
+    logging.info(f" Authenticated Gmail Account: {logged_in_email}")
     return service
 
 def get_last_checked_timestamp():
-    """Retrieve the last processed email timestamp or fetch all unread emails if no responses exist."""
+    """Retrieve the last processed timestamp, ensuring it's in milliseconds."""
     if os.path.exists(LAST_PROCESSED_EMAIL_FILE):
         with open(LAST_PROCESSED_EMAIL_FILE, "r") as f:
             last_checked = json.load(f).get("last_processed", None)
             if last_checked:
-                logging.info(f"Retrieved last processed email timestamp: {last_checked}")
+                logging.info(f" Retrieved last processed email timestamp (milliseconds): {last_checked}")
                 return last_checked
 
-    # If no response emails have been sent, fetch all unread emails
-    logging.info("No responses sent yet, fetching all unread emails.")
-    return None
+    # If no previous timestamp, start fresh
+    current_timestamp_ms = int(time.time() * 1000)  # Store in milliseconds
+    logging.info(f" No previous timestamp, initializing to {current_timestamp_ms}")
+    update_last_checked_timestamp(current_timestamp_ms)
+    return current_timestamp_ms
+
+def update_last_checked_timestamp(timestamp):
+    """Ensure the timestamp is stored in milliseconds."""
+    os.makedirs(os.path.dirname(LAST_PROCESSED_EMAIL_FILE), exist_ok=True)
+    with open(LAST_PROCESSED_EMAIL_FILE, "w") as f:
+        json.dump({"last_processed": timestamp}, f)
+    logging.info(f" Updated last processed email timestamp (milliseconds): {timestamp}")
 
 def fetch_unread_emails(**kwargs):
-    """Fetch unread emails received after the last processed email timestamp, or all unread emails if no responses exist."""
+    """Fetch unread emails received after the last processed email timestamp."""
     service = authenticate_gmail()
     
     last_checked_timestamp = get_last_checked_timestamp()
-    if last_checked_timestamp:
-        query = f"is:unread after:{last_checked_timestamp}"
-        logging.info(f"Checking for unread emails after timestamp: {last_checked_timestamp}")
-    else:
-        query = "is:unread"  # Fetch all unread emails
-        logging.info("Fetching all unread emails (no timestamp filter).")
+
+    query = f"is:unread after:{last_checked_timestamp // 1000}"  # Convert milliseconds to seconds for Gmail API
+    logging.info(f" Fetching emails with query: {query}")
 
     results = service.users().messages().list(userId="me", labelIds=["INBOX"], q=query).execute()
     messages = results.get("messages", [])
-    logging.info(f"Found {len(messages)} unread emails in query results.")
+
+    logging.info(f" Found {len(messages)} unread emails.")
 
     unread_emails = []
-    max_timestamp = last_checked_timestamp if last_checked_timestamp else int(time.time())
+    max_timestamp = last_checked_timestamp
 
     for msg in messages:
         msg_data = service.users().messages().get(userId="me", id=msg["id"]).execute()
-
+        
         headers = {header["name"]: header["value"] for header in msg_data["payload"]["headers"]}
         sender = headers.get("From", "").lower()
-        timestamp = int(msg_data["internalDate"])  
+        timestamp = int(msg_data["internalDate"])  # Already in milliseconds
 
-        if "no-reply" in sender:
-            logging.info(f"Skipping email from {sender} (timestamp: {timestamp})")
+        logging.info(f" Processing email from {sender}, timestamp: {timestamp}")
+
+        if "no-reply" in sender or timestamp <= last_checked_timestamp:
+            logging.info(f" Skipping email from {sender} (timestamp: {timestamp})")
             continue
 
         body = msg_data.get("snippet", "")
@@ -89,14 +98,18 @@ def fetch_unread_emails(**kwargs):
             "timestamp": timestamp
         }
 
-        logging.info(f"Adding unread email: {email_object}")
+        logging.info(f" Adding unread email: {email_object}")
         unread_emails.append(email_object)
 
         if timestamp > max_timestamp:
             max_timestamp = timestamp
 
+    if unread_emails:
+        update_last_checked_timestamp(max_timestamp)
+
     kwargs['ti'].xcom_push(key="unread_emails", value=unread_emails)
 
+# Define DAG
 with DAG("webshop-email-listener",
          default_args=default_args,
          schedule_interval=timedelta(minutes=1),
@@ -109,19 +122,20 @@ with DAG("webshop-email-listener",
     )
 
     def trigger_response_tasks(**kwargs):
+        """Trigger 'webshop-email-respond' for each unread email."""
         ti = kwargs['ti']
         unread_emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="unread_emails")
 
-        logging.info(f"Retrieved {len(unread_emails) if unread_emails else 0} unread emails from XCom.")
+        logging.info(f" Retrieved {len(unread_emails) if unread_emails else 0} unread emails from XCom.")
 
         if not unread_emails:
-            logging.info("No unread emails found in XCom, skipping trigger.")
+            logging.info(" No unread emails found in XCom, skipping trigger.")
             return
 
         for email in unread_emails:
             task_id = f"trigger_response_{email['id'].replace('-', '_')}"  
 
-            logging.info(f"Triggering Response DAG with email data: {email}")  
+            logging.info(f" Triggering Response DAG with email data: {email}")  
 
             trigger_task = TriggerDagRunOperator(
                 task_id=task_id,
@@ -130,6 +144,9 @@ with DAG("webshop-email-listener",
             )
 
             trigger_task.execute(context=kwargs)  
+
+        #  Clear XCom to prevent reprocessing the same emails
+        ti.xcom_push(key="unread_emails", value=[])
 
     trigger_email_response_task = PythonOperator(
         task_id="trigger-email-response-dag",
