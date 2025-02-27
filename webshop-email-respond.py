@@ -4,10 +4,15 @@ from airflow.models import Variable
 from datetime import datetime, timedelta
 import base64
 import json
+import logging
+import re
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from ollama import Client  
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from bs4 import BeautifulSoup
 
-# Default DAG arguments
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
@@ -16,57 +21,61 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
-# Fetch configuration variables from Airflow
-EMAIL_ACCOUNT = Variable.get("EMAIL_ID")
-GMAIL_CREDENTIALS = Variable.get("GMAIL_CREDENTIALS", deserialize_json=True)
+EMAIL_ACCOUNT = Variable.get("EMAIL_ID")  
+GMAIL_CREDENTIALS = Variable.get("GMAIL_CREDENTIALS", deserialize_json=True)  
 
 def authenticate_gmail():
-    """Authenticate Gmail API and verify the correct email account is used."""
     creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
     service = build("gmail", "v1", credentials=creds)
 
-    # Fetch authenticated email
     profile = service.users().getProfile(userId="me").execute()
     logged_in_email = profile.get("emailAddress", "")
 
     if logged_in_email.lower() != EMAIL_ACCOUNT.lower():
         raise ValueError(f" Wrong Gmail account! Expected {EMAIL_ACCOUNT}, but got {logged_in_email}")
 
-    print(f" Authenticated Gmail Account: {logged_in_email}")
     return service
 
-def send_response(**kwargs):
-    """Send auto-response without modifying email read status."""
-    email_data = kwargs['dag_run'].conf  # Get email details from trigger
-    service = authenticate_gmail()
-    
-    recipient = email_data["headers"].get("From", "")
-
-    # Construct email response
-    message_body = f"Hi,\n\nThanks for reaching out. Our support team will get back to you soon.\n\nBest Regards,\nWebshop Support"
-    email_msg = f"From: me\nTo: {recipient}\nSubject: Re: {email_data['headers'].get('Subject', 'No Subject')}\n\n{message_body}"
-    encoded_message = base64.urlsafe_b64encode(email_msg.encode("utf-8")).decode("utf-8")
-
-    # Send email response
-    try:
-        service.users().messages().send(
-            userId="me",
-            body={"raw": encoded_message}
-        ).execute()
-        print(f" Response sent to {recipient}")
-    except Exception as e:
-        print(f" ERROR: Failed to send response email to {recipient}. Error: {e}")
-
-# Define DAG
-with DAG("webshop-email-respond",
-         default_args=default_args,
-         schedule_interval=None,  # This DAG is triggered dynamically
-         catchup=False) as dag:
-
-    send_response_task = PythonOperator(
-        task_id="send-response",
-        python_callable=send_response,
-        provide_context=True
+def get_ai_response(user_query):
+    client = Client(
+        host='http://agentomatic:8000',
+        headers={'x-ltai-client': 'webshop-email-respond'}
     )
 
+    response = client.chat(
+        model='webshop-email:0.5',
+        messages=[{"role": "user", "content": user_query}],
+        stream=False
+    )
+    agent_response = response['message']['content']
+    logging.info(f" Agent Response: {agent_response}")
+    return agent_response
+
+def send_response(**kwargs):
+    email_data = kwargs['dag_run'].conf.get("email_data", {})  
+
+    logging.info(f"Received email data: {email_data}")  
+
+    if not email_data:
+        logging.warning(" No email data received! This DAG was likely triggered manually.")
+        return  
+
+    service = authenticate_gmail()
+
+    sender_email = email_data["headers"].get("From", "")
+    subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
+    user_query = email_data["content"]
+    ai_response_html = get_ai_response(user_query)
+    ai_response_html = re.sub(r"^```(?:html)?\n?|```$", "", ai_response_html.strip(), flags=re.MULTILINE)
+
+    msg = MIMEMultipart()
+    msg["From"] = "me"
+    msg["To"] = sender_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(ai_response_html, "html"))
+
+    service.users().messages().send(userId="me", body={"raw": base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")}).execute()
+
+with DAG("webshop-email-respond", default_args=default_args, schedule_interval=None, catchup=False) as dag:
+    send_response_task = PythonOperator(task_id="send-response", python_callable=send_response, provide_context=True)
     send_response_task
