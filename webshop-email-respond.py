@@ -47,8 +47,9 @@ def get_ai_response(user_query):
         messages=[{"role": "user", "content": user_query}],
         stream=False
     )
-
-    return response['message']['content']
+    agent_response = response['message']['content']
+    logging.info(f" Agent Response: {agent_response}")
+    return agent_response
 
 def send_response(**kwargs):
     email_data = kwargs['dag_run'].conf.get("email_data", {})  
