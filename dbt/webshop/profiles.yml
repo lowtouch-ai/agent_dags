@@ -8,5 +8,5 @@ ai_lab:
       password: "{{env_var('AIRFLOW_POSTGRES_PASSWORD')}}"
       port: 5432
       dbname: webshop
-      schema: webshop
+      schema: webshop_v2
       threads: 6

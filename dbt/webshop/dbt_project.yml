@@ -18,19 +18,17 @@ require-dbt-version: [">=1.0.0", "<2.0.0"]
 
 seeds:
   ai_lab:
-    order:
-      +schema: webshop_v2  # Now loads into the webshop_v2 schema
+    order_seed:  # Renamed from 'order' to avoid conflict with the model
       +column_types:
-          id: integer
-          customerid: integer
-          ordertimestamp: timestamp
-          shippingaddressid: integer
-          total: numeric
-          shippingcost: numeric
-          created: timestamp
-          updated: timestamp
+        id: integer
+        customerid: integer
+        ordertimestamp: timestamp
+        shippingaddressid: integer
+        total: numeric
+        shippingcost: numeric
+        created: timestamp
+        updated: timestamp
     address:
-      +schema: webshop_v2  # Ensures it loads into webshop_v2 schema
       +column_types:
           customerid: integer
           firstname: text
@@ -42,7 +40,6 @@ seeds:
           created: timestamp
           updated: timestamp
     articles:
-      +schema: webshop_v2  # Ensures data loads into webshop_v2 schema
       +full_refresh: false  # Prevents truncation before inserting new data
       +column_types:
           id: integer
@@ -59,7 +56,6 @@ seeds:
           created: timestamp
           updated: timestamp
     customer:
-      +schema: webshop_v2
       +column_types:
           id: integer
           firstname: text
@@ -71,14 +67,12 @@ seeds:
           created: timestamp
           updated: timestamp
     labels:
-      +schema: webshop_v2
       +column_types:
           id: integer
           name: text
           slugname: text
           icon: text
     order_positions:
-      +schema: webshop_v2
       +column_types:
           id: integer
           orderid: integer
@@ -88,7 +82,6 @@ seeds:
           created: timestamp
           updated: timestamp
     products:
-      +schema: webshop_v2
       +column_types:
           id: integer
           name: text
@@ -99,7 +92,6 @@ seeds:
           created: timestamp
           updated: timestamp 
     stock:
-      +schema: webshop_v2
       +column_types:
           id: integer
           articleid: integer
@@ -107,7 +99,6 @@ seeds:
           created: timestamp
           updated: timestamp 
     colors:
-      +schema: webshop_v2
       +column_types:
           id: integer
           name: text
