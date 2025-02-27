@@ -91,8 +91,7 @@ with DAG(
             ti.xcom_push(key="call_status", value=call.status)
             return call.status  # Return status instead of raising an error
 
-        ti.xcom_push(key="call_status", value="in-progress")
-        return "in-progress"
+        raise ValueError(f"Call not yet completed: {status}")
 
     def fetch_and_save_recording(**kwargs):
         """Fetch and save the call recording if `need_ack` is True"""
