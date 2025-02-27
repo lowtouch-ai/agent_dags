@@ -6,7 +6,8 @@ from airflow.sensors.time_delta import TimeDeltaSensor
 from airflow.models import Variable
 from datetime import datetime, timedelta
 from twilio.rest import Client
-import json
+import requests
+import os
 import logging
 
 # Configure logging
@@ -17,108 +18,139 @@ logger = logging.getLogger(__name__)
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
-    "start_date": datetime(2024, 2, 18),
+    "start_date": datetime(2024, 2, 27),
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
 }
 
-# Define DAG with Params
+# Twilio Credentials
+TWILIO_ACCOUNT_SID = Variable.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = Variable.get("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = Variable.get("TWILIO_PHONE_NUMBER")
+
+# Ensure Twilio credentials are set
+if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
+    raise ValueError("Twilio credentials are missing. Set them in Airflow Variables.")
+
+# Storage directory for recordings
+STORAGE_DIR = os.path.join(os.getenv("AIRFLOW_HOME", "/opt/airflow"), "recordings")
+os.makedirs(STORAGE_DIR, exist_ok=True)  # Ensure storage directory exists
+
+# Define DAG
 with DAG(
-    "send-voice-message",
+    "twilio_voice_call_direct",
     default_args=default_args,
-    schedule_interval=None,  # Triggered manually
+    schedule_interval=None,  # Manually triggered
     catchup=False,
     render_template_as_native_obj=True,
     params={
-        "message": Param("Hello, this is a test call.", type="string", minLength=5, maxLength=500, title="Voice Message", description="Enter the message to be spoken in the call."),
-        "phone_number": Param("+1234567890", type="string", title="Phone Number", description="Enter the recipient's phone number in E.164 format."),
-        "need_ack": Param(False, type="boolean", title="Require Acknowledgment", description="Set to true if you need an acknowledgment.")
+        "phone_number": Param("+1234567890", type="string", title="Phone Number", description="Recipient's phone number."),
+        "message": Param("Hello, please leave a message after the beep.", type="string", title="Message Before Beep"),
     }
 ) as dag:
 
-    class TwilioVoiceCall:
-        """Class to handle automated voice calls using Twilio API."""
-        def __init__(self):
-            self.account_sid = Variable.get("TWILIO_ACCOUNT_SID")
-            self.auth_token = Variable.get("TWILIO_AUTH_TOKEN")
-            self.twilio_phone = Variable.get("TWILIO_PHONE_NUMBER")
-            if not all([self.account_sid, self.auth_token, self.twilio_phone]):
-                raise ValueError("Twilio credentials are missing. Check environment variables.")
-            self.client = Client(self.account_sid, self.auth_token)
-
-        def initiate_call(self, message: str, phone_number: str) -> str:
-            """Initiate a voice call and return the call SID."""
-            if not message or not phone_number:
-                raise ValueError("Both 'message' and 'phone_number' are required.")
-            call = self.client.calls.create(
-                to=phone_number,
-                from_=self.twilio_phone,
-                twiml=f'<Response><Say>{message}</Say></Response>',
-                status_callback_event=["completed"]
-            )
-            logger.info(f"Call initiated with SID: {call.sid}")
-            return call.sid
-
-        def check_call_status(self, call_sid: str) -> str:
-            """Check the status of a call by its SID."""
-            call = self.client.calls(call_sid).fetch()
-            logger.info(f"Call status: {call.status}")
-            if call.status in ["completed", "no-answer"] and call.duration:
-                return f"Call completed with status: {call.status} and duration: {call.duration} seconds."
-            return f"Current call status: {call.status}"
-
-    def send_voice_message(**kwargs):
-        """Task to initiate the voice call."""
-        conf = kwargs['params']
-        logger.info(f"Received params: {json.dumps(conf, indent=2)}")
-        message = conf["message"]
+    def initiate_call(**kwargs):
+        """Initiate the voice call using Twilio API"""
+        conf = kwargs["params"]
         phone_number = conf["phone_number"]
-        need_ack = conf.get("need_ack", False)
+        message = conf["message"]
 
-        if not message or not phone_number:
-            raise ValueError("Missing required parameters: 'message' and 'phone_number'")
+        logger.info(f"Initiating call to: {phone_number}")
 
-        twilio_call = TwilioVoiceCall()
-        call_sid = twilio_call.initiate_call(message, phone_number)
-        kwargs['ti'].xcom_push(key='call_sid', value=call_sid)
-        return {"call_sid": call_sid, "need_ack": need_ack}
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        call = client.calls.create(
+            to=phone_number,
+            from_=TWILIO_PHONE_NUMBER,
+            twiml=f"""
+            <Response>
+                <Say>{message}</Say>
+                <Record maxLength="30" playBeep="true" />
+                <Say>Thank you! Goodbye.</Say>
+            </Response>
+            """
+        )
+        
+        logger.info(f"Call initiated with SID: {call.sid}")
+        kwargs["ti"].xcom_push(key="call_sid", value=call.sid)
 
     def check_call_status(**kwargs):
-        """Task to check the call status."""
-        ti = kwargs['ti']
-        call_sid = ti.xcom_pull(key='call_sid', task_ids='send_voice_message')
-        need_ack = ti.xcom_pull(task_ids='send_voice_message')['need_ack']
+        """Check call status via Twilio API"""
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        ti = kwargs["ti"]
+        call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
 
-        if not need_ack:
-            return "Acknowledgment not required, skipping status check."
+        logger.info(f"Checking call status for SID: {call_sid}")
 
-        twilio_call = TwilioVoiceCall()
-        status = twilio_call.check_call_status(call_sid)
+        call = client.calls(call_sid).fetch()
+        logger.info(f"Call status: {call.status}")
 
-        if "completed" in status or "no-answer" in status:
-            return status
-        raise ValueError(f"Call not yet completed: {status}")
+        if call.status in ["completed", "no-answer", "busy", "failed"]:
+            return {"call_status": call.status}
+        
+        return {"call_status": f"Call not yet completed: {call.status}"}
+
+    def fetch_and_save_recording(**kwargs):
+        """Fetch and save the call recording"""
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        ti = kwargs["ti"]
+        call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
+        call_status = ti.xcom_pull(task_ids="check_call_status")
+
+        logger.info(f"Checking if recording is available for call SID: {call_sid}")
+
+        # If the call was not answered, return a message
+        if call_status["call_status"] != "completed":
+            logger.info(f"Recording unavailable. Call status: {call_status['call_status']}")
+            return {"message": f"Cannot fetch recording. Call status: {call_status['call_status']}"}
+
+        # Get the recording list for the call
+        recordings = client.recordings.list(call_sid=call_sid)
+
+        if not recordings:
+            logger.info("Recording not found yet. Try again later.")
+            return {"message": "Recording not available yet. Try again later."}
+
+        # Get the most recent recording URL
+        recording_url = f"https://api.twilio.com{recordings[0].uri.replace('.json', '.mp3')}"
+
+        # Download the MP3 file
+        response = requests.get(recording_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
+
+        if response.status_code == 200:
+            file_path = os.path.join(STORAGE_DIR, f"{call_sid}.mp3")
+            with open(file_path, "wb") as f:
+                f.write(response.content)
+
+            logger.info(f"Recording saved at {file_path}")
+            return {"message": "Recording downloaded successfully", "file_path": file_path}
+
+        return {"message": "Failed to download recording"}
 
     # Define tasks
-    send_call_task = PythonOperator(
-        task_id="send_voice_message",
-        python_callable=send_voice_message,
+    initiate_call_task = PythonOperator(
+        task_id="initiate_call",
+        python_callable=initiate_call,
         provide_context=True
     )
 
     wait_task = TimeDeltaSensor(
         task_id="wait_for_call_status",
-        delta=timedelta(seconds=5),  # Wait 5 seconds between checks
-        poke_interval=5,  # Check every 5 seconds (adjustable)
+        delta=timedelta(seconds=10),  # Wait for the call to complete
+        poke_interval=10,
+        mode="poke"
     )
 
     check_status_task = PythonOperator(
         task_id="check_call_status",
         python_callable=check_call_status,
-        provide_context=True,
-        retries=9,  # Poll up to 10 times (total ~50 seconds)
-        retry_delay=timedelta(seconds=5)
+        provide_context=True
+    )
+
+    fetch_recording_task = PythonOperator(
+        task_id="fetch_and_save_recording",
+        python_callable=fetch_and_save_recording,
+        provide_context=True
     )
 
     # Set task dependencies
-    send_call_task >> wait_task >> check_status_task
+    initiate_call_task >> wait_task >> check_status_task >> fetch_recording_task
