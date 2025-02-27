@@ -46,6 +46,7 @@ with DAG(
     params={
         "phone_number": Param("+1234567890", type="string", title="Phone Number", description="Recipient's phone number."),
         "message": Param("Hello, please leave a message after the beep.", type="string", title="Message Before Beep"),
+        "need_ack": Param(False, type="boolean", title="Require Acknowledgment", description="Set to true if you need an acknowledgment."),
     }
 ) as dag:
 
@@ -54,8 +55,9 @@ with DAG(
         conf = kwargs["params"]
         phone_number = conf["phone_number"]
         message = conf["message"]
+        need_ack = conf["need_ack"]
 
-        logger.info(f"Initiating call to: {phone_number}")
+        logger.info(f"Initiating call to: {phone_number}, need_ack: {need_ack}")
 
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         call = client.calls.create(
@@ -72,6 +74,7 @@ with DAG(
         
         logger.info(f"Call initiated with SID: {call.sid}")
         kwargs["ti"].xcom_push(key="call_sid", value=call.sid)
+        kwargs["ti"].xcom_push(key="need_ack", value=need_ack)  # Store need_ack for later use
 
     def check_call_status(**kwargs):
         """Check call status via Twilio API"""
@@ -85,23 +88,29 @@ with DAG(
         logger.info(f"Call status: {call.status}")
 
         if call.status in ["completed", "no-answer", "busy", "failed"]:
-            return {"call_status": call.status}
-        
-        return {"call_status": f"Call not yet completed: {call.status}"}
+            return call.status  # Return status instead of raising an error
+
+        return "in-progress"
 
     def fetch_and_save_recording(**kwargs):
-        """Fetch and save the call recording"""
+        """Fetch and save the call recording if `need_ack` is True"""
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         ti = kwargs["ti"]
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
         call_status = ti.xcom_pull(task_ids="check_call_status")
+        need_ack = ti.xcom_pull(task_ids="initiate_call", key="need_ack")
 
         logger.info(f"Checking if recording is available for call SID: {call_sid}")
 
-        # If the call was not answered, return a message
-        if call_status["call_status"] != "completed":
-            logger.info(f"Recording unavailable. Call status: {call_status['call_status']}")
-            return {"message": f"Cannot fetch recording. Call status: {call_status['call_status']}"}
+        # If `need_ack` is False, skip saving the recording
+        if not need_ack:
+            logger.info("need_ack is False, skipping recording download.")
+            return {"message": "Recording not needed as acknowledgment is not required."}
+
+        # Only fetch recording if the call was completed
+        if call_status != "completed":
+            logger.info(f"Recording unavailable. Call status: {call_status}")
+            return {"message": f"Cannot fetch recording. Call status: {call_status}"}
 
         # Get the recording list for the call
         recordings = client.recordings.list(call_sid=call_sid)
@@ -143,7 +152,9 @@ with DAG(
     check_status_task = PythonOperator(
         task_id="check_call_status",
         python_callable=check_call_status,
-        provide_context=True
+        provide_context=True,
+        retries=5,  # Retries to keep checking until the call is completed
+        retry_delay=timedelta(seconds=10)
     )
 
     fetch_recording_task = PythonOperator(
@@ -153,4 +164,5 @@ with DAG(
     )
 
     # Set task dependencies
-    initiate_call_task >> wait_task >> check_status_task >> fetch_recording_task
+    initiate_call_task >> wait_task >> check_status_task
+    check_status_task >> fetch_recording_task  # Only runs if call is completed
