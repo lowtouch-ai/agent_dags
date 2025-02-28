@@ -157,7 +157,7 @@ with DAG(
 
     trigger_send_voice_message = TriggerDagRunOperator(
         task_id="send-voice-message",
-        trigger_dag_id="twilio_voice_call_direct",
+        trigger_dag_id="send-voice-message",
         conf={"params": "{{ ti.xcom_pull(task_ids='generate_voice_message', key='voice_messages') }}"},
         wait_for_completion=False,
     )
@@ -170,7 +170,7 @@ with DAG(
 
     wait_for_call_completion = ExternalTaskSensor(
         task_id="wait_for_call_completion",
-        external_dag_id="twilio_voice_call_direct",
+        external_dag_id="send-voice-message",
         external_task_id="fetch_and_save_recording",
         mode="poke",
         timeout=600,
