@@ -142,10 +142,11 @@ with DAG(
         task_id="wait_for_call_completion",
         external_dag_id="twilio_voice_call_direct",
         external_task_id="fetch_and_save_recording",
-        execution_delta=timedelta(minutes=1),
+        execution_date_fn=lambda dt: dt,  # Ensures it matches the current DAG run
         mode="poke",
-        timeout=600,
-        poke_interval=10,
+        timeout=600,  # Prevents infinite waiting
+        poke_interval=10,  # Reduce load by checking every 10 seconds
+        check_existence=True  # Avoids waiting for non-existent tasks
     )
 
     update_call_status_task = PythonOperator(
