@@ -37,42 +37,44 @@ with DAG(
 ) as dag:
 
      def fetch_due_loans(**kwargs):
-        """Fetches loans that are due from the Autoloan API and retrieves the associated phone number."""
-        response = requests.get(f"{AUTOLOAN_API_URL}/loan/overdue")
-        if response.status_code == 200:
-            loans = response.json()
-            logger.info(f"Fetched {len(loans)} due loans.")
-            
-            if loans:
-                customer_id = loans[0]["customer_id"]
-                customer_response = requests.get(f"{AUTOLOAN_API_URL}/customer/{customer_id}")
-                
-                if customer_response.status_code == 200:
-                    customer_data = customer_response.json()
-                    phone_number = customer_data.get("phonenumber")
-                    loans[0]["phone"] = TEST_PHONE_NUMBER  # Add phone number to loan data
-                else:
-                    raise Exception(f"Failed to fetch customer details for ID {customer_id}")
-            
-            kwargs['ti'].xcom_push(key='due_loans', value=loans[0])
-        else:
-            raise Exception("Failed to fetch due loans from API")
-    def generate_message_using_agent(loan):
-        """Generates voice message content for each loan."""
-        client = Client(
-            host=AGENTOMATIC_API_URL,
-            headers={'x-ltai-client': 'autofinix-loan-reminder'}
-        )
-
-        response = client.chat(
-            model='autofinix:0.3',
-            messages=[{"role": "user", "content": f'Generate a voice message for the loan due reminder for the loan:{loan}'}],
-            stream=False
-        )
+    """Fetches loans that are due from the Autoloan API and retrieves the associated phone number."""
+    response = requests.get(f"{AUTOLOAN_API_URL}/loan/overdue")
+    if response.status_code == 200:
+        loans = response.json()
+        logger.info(f"Fetched {len(loans)} due loans.")
         
-        agent_response = response['message']['content']
-        logging.info(f" Agent Response: {agent_response}")
-        return agent_response
+        if loans:
+            customer_id = loans[0]["customer_id"]
+            customer_response = requests.get(f"{AUTOLOAN_API_URL}/customer/{customer_id}")
+            
+            if customer_response.status_code == 200:
+                customer_data = customer_response.json()
+                phone_number = customer_data.get("phonenumber")
+                loans[0]["phone"] = TEST_PHONE_NUMBER  # Add phone number to loan data
+            else:
+                raise Exception(f"Failed to fetch customer details for ID {customer_id}")
+        
+        kwargs['ti'].xcom_push(key='due_loans', value=loans[0])
+    else:
+        raise Exception("Failed to fetch due loans from API")
+
+def generate_message_using_agent(loan):
+    """Generates voice message content for each loan."""
+    client = Client(
+        host=AGENTOMATIC_API_URL,
+        headers={'x-ltai-client': 'autofinix-loan-reminder'}
+    )
+
+    response = client.chat(
+        model='autofinix:0.3',
+        messages=[{"role": "user", "content": f'Generate a voice message for the loan due reminder for the loan:{loan}'}],
+        stream=False
+    )
+    
+    agent_response = response['message']['content']
+    logging.info(f" Agent Response: {agent_response}")
+    return agent_response
+
     
     def generate_voice_message(**kwargs):
         """Generates voice message content for each loan."""
