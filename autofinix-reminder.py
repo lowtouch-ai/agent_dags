@@ -41,14 +41,14 @@ with DAG(
     def fetch_due_loans(**kwargs):
         """Fetches loans that are due from the Autoloan API and retrieves the associated phone number."""
         try:
-            response = requests.get(f"{AUTOLOAN_API_URL}/loan/overdue")
+            response = requests.get(f"{AUTOLOAN_API_URL}loan/overdue")
             if response.status_code == 200:
                 loans = response.json()
                 logger.info(f"Fetched {len(loans)} due loans.")
 
                 if loans:
                     customer_id = loans[0]["customer_id"]
-                    customer_response = requests.get(f"{AUTOLOAN_API_URL}/customer/{customer_id}")
+                    customer_response = requests.get(f"{AUTOLOAN_API_URL}customer/{customer_id}")
 
                     if customer_response.status_code == 200:
                         customer_data = customer_response.json()
