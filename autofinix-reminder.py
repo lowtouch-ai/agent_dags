@@ -107,10 +107,10 @@ with DAG(
     def update_call_status(**kwargs):
         """Updates the call status in the Autoloan API."""
         ti = kwargs['ti']
-        call_status = ti.xcom_pull(task_ids='wait_for_call_completion', key='call_status')
+        recording_status = ti.xcom_pull(dag_id="twilio_voice_call_direct", task_ids='fetch_and_save_recording', key='recording_status')
         loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
 
-        logger.info(f"Updated call status for Loan ID: {loans[0]['loanid']} to {call_status}")
+        logger.info(f"Updated call status for Loan ID: {loans[0]['loanid']} with recording status: {recording_status}")
 
     # Tasks
     fetch_due_loans_task = PythonOperator(
@@ -130,6 +130,8 @@ with DAG(
         trigger_dag_id="twilio_voice_call_direct",
         conf="{{ ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload') | tojson }}",
         wait_for_completion=False,
+        execution_date="{{ dag_run.start_date }}",  # Pass the execution date explicitly
+        reset_dag_run=True,  # Ensure a new run is created
     )
 
     update_reminder_status_task = PythonOperator(
@@ -138,15 +140,23 @@ with DAG(
         provide_context=True,
     )
 
+    # Custom execution_date_fn to match the triggered DAG run
+    def get_triggered_execution_date(context):
+        """Returns the execution date of the triggered twilio_voice_call_direct DAG."""
+        trigger_run_id = context['ti'].xcom_pull(task_ids='trigger_twilio_voice_call', key='run_id')
+        from airflow.models import DagRun
+        triggered_dag_run = DagRun.find(dag_id="twilio_voice_call_direct", run_id=trigger_run_id)
+        return triggered_dag_run[0].execution_date if triggered_dag_run else context['execution_date']
+
     wait_for_call_completion = ExternalTaskSensor(
         task_id="wait_for_call_completion",
         external_dag_id="twilio_voice_call_direct",
         external_task_id="fetch_and_save_recording",
-        execution_date_fn=lambda dt: dt,  # Ensures it matches the current DAG run
-        mode="poke",
-        timeout=600,  # Prevents infinite waiting
-        poke_interval=10,  # Reduce load by checking every 10 seconds
-        check_existence=True  # Avoids waiting for non-existent tasks
+        execution_date_fn=get_triggered_execution_date,  # Match the triggered DAG's execution date
+        mode="reschedule",  # More efficient than poke
+        timeout=1800,  # 30 minutes timeout to account for call duration
+        poke_interval=60,  # Check every minute
+        check_existence=True,  # Ensure the task exists before waiting
     )
 
     update_call_status_task = PythonOperator(
@@ -158,4 +168,4 @@ with DAG(
     # Task Dependencies
     fetch_due_loans_task >> generate_voice_message_task
     generate_voice_message_task >> trigger_send_voice_message >> update_reminder_status_task
-    update_reminder_status_task >> wait_for_call_completion >> update_call_status_task
+    trigger_send_voice_message >> wait_for_call_completion >> update_call_status_task
