@@ -140,10 +140,12 @@ with DAG(
         if response.status_code == 200:
             with open(file_path, "wb") as f:
                 f.write(response.content)
-
             logger.info(f"Recording saved at {file_path}")
             ti.xcom_push(key="recording_status", value="Recording Saved")
             return {"message": "Recording downloaded successfully", "file_path": file_path}
+        else:
+            ti.xcom_push(key="recording_status", value="Recording Failed")
+            return {"message": "Failed to download recording"}
 
         ti.xcom_push(key="recording_status", value="Recording Failed")
         return {"message": "Failed to download recording"}

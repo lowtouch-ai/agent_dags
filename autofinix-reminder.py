@@ -2,7 +2,8 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sensors.external_task import ExternalTaskSensor
-from airflow.models import Variable, DagRun
+from airflow.models import Variable, DagRun, TaskInstance
+from airflow.utils.session import provide_session
 from datetime import datetime, timedelta
 import json
 import requests
@@ -30,77 +31,83 @@ TEST_PHONE_NUMBER = Variable.get("TEST_PHONE_NUMBER")
 if not AUTOLOAN_API_URL:
     raise ValueError("Autoloan API URL is missing. Set it in Airflow Variables.")
 
+# Custom ExternalTaskSensor with XCom-based validation
+class XComExternalTaskSensor(ExternalTaskSensor):
+    def poke(self, context):
+        """Custom poke method to check XCom value instead of execution_date."""
+        ti = context['ti']
+        trigger_run_id = ti.xcom_pull(task_ids='trigger_twilio_voice_call', key='triggered_run_id')
+        
+        if not trigger_run_id:
+            logger.warning("No triggered_run_id found, continuing to wait...")
+            return False
+
+        # Fetch the XCom value from the external task
+        external_task_xcom = ti.xcom_pull(
+            dag_id=self.external_dag_id,
+            task_ids=self.external_task_id,
+            key='recording_status',
+            run_id=trigger_run_id  # Use run_id instead of execution_date
+        )
+
+        logger.info(f"Checking XCom recording_status for run_id {trigger_run_id}: {external_task_xcom}")
+
+        # Define completion criteria (e.g., any non-None value or specific status)
+        if external_task_xcom is not None:
+            logger.info(f"Detected completion with recording_status: {external_task_xcom}")
+            return True
+        
+        logger.info(f"Task {self.external_task_id} not yet complete for run_id {trigger_run_id}")
+        return False
+
 # Define DAG
 with DAG(
     "autoloan_reminder",
     default_args=default_args,
-    schedule_interval=None,  # Manually triggered or via scheduler
+    schedule_interval=None,
     catchup=False,
 ) as dag:
 
     def fetch_due_loans(**kwargs):
-        """Fetches loans that are due from the Autoloan API and retrieves the associated phone number."""
+        """Fetches loans that are due from the Autoloan API."""
         try:
             logger.info(f"Calling API to fetch due loans: {AUTOLOAN_API_URL}loan/overdue")
             response = requests.get(f"{AUTOLOAN_API_URL}loan/overdue")
             if response.status_code == 200:
                 loan_data = response.json()
-                overdue_loans = loan_data.get("overdue_loans", [])  # Extract the overdue loans list
-
+                overdue_loans = loan_data.get("overdue_loans", [])
                 if overdue_loans:
-                    first_loan = overdue_loans[0]  # Get the first record
-                    logger.info(f"First overdue loan details: {first_loan}")
-
+                    first_loan = overdue_loans[0]
                     customer_id = first_loan["customerid"]
-                    logger.info(f"Fetching customer details for ID: {customer_id}")
-
-                    # Fetch customer details
                     customer_response = requests.get(f"{AUTOLOAN_API_URL}customer/{customer_id}")
-
                     if customer_response.status_code == 200:
-                        customer_data = customer_response.json()
-                        first_loan["phone"] = TEST_PHONE_NUMBER  # Assign test phone number
-                        logger.info(f"Updated first loan with test phone number: {first_loan}")
+                        first_loan["phone"] = TEST_PHONE_NUMBER
                     else:
                         raise Exception(f"Failed to fetch customer details for ID {customer_id}")
-
-                kwargs['ti'].xcom_push(key='due_loans', value=[first_loan])  # Ensure it's a list
+                kwargs['ti'].xcom_push(key='due_loans', value=[first_loan])
             else:
-                logger.error(f"Failed to fetch due loans from API: {response.text}")
                 raise Exception("Failed to fetch due loans from API")
         except Exception as e:
             logger.error(f"Failed to fetch due loans: {e}")
-
-    def generate_message_using_agent(loan):
-        """Generates voice message content for each loan."""
-        try:
-            return "Your loan is due, please pay as soon as possible."
-        except Exception as e:
-            logging.error(f"Failed to generate message using agent: {e}")
-            return f"Hello, this is a reminder that your loan is due. Please contact us for more information."
 
     def generate_voice_message(**kwargs):
         """Generates voice message content for each loan."""
         ti = kwargs['ti']
         loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
-
         if not loans or not isinstance(loans, list):
             logger.error("No loans found to process")
             return
-
         messages = {
-            "phone_number": loans[0]["phone"],  # Pass only the first loan for now
-            "message": generate_message_using_agent(loans[0]),
+            "phone_number": loans[0]["phone"],
+            "message": "Your loan is due, please pay as soon as possible.",
             "need_ack": True
         }
-
         ti.xcom_push(key='voice_message_payload', value=messages)
 
     def update_reminder_status(**kwargs):
         """Marks the reminder as scheduled in the Autoloan API."""
         ti = kwargs['ti']
         loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
-
         for loan in loans:
             logger.info(f"Updated reminder status for Loan ID: {loan['loanid']}")
 
@@ -109,10 +116,8 @@ with DAG(
         ti = kwargs['ti']
         recording_status = ti.xcom_pull(dag_id="twilio_voice_call_direct", task_ids='fetch_and_save_recording', key='recording_status')
         loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
-
         logger.info(f"Updated call status for Loan ID: {loans[0]['loanid']} with recording status: {recording_status}")
 
-    # Custom trigger function to push run_id to XCom
     def trigger_with_run_id(context, dag_run_obj):
         """Custom trigger function to push the triggered run_id to XCom."""
         ti = context['ti']
@@ -138,9 +143,7 @@ with DAG(
         task_id="trigger_twilio_voice_call",
         trigger_dag_id="twilio_voice_call_direct",
         conf="{{ ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload') | tojson }}",
-        execution_date="{{ dag_run.start_date }}",  # Pass the execution date explicitly
-        reset_dag_run=True,  # Ensure a new run is created
-        python_callable=trigger_with_run_id,  # Use custom function to push run_id
+        python_callable=trigger_with_run_id,  # Push run_id to XCom
     )
 
     update_reminder_status_task = PythonOperator(
@@ -149,37 +152,13 @@ with DAG(
         provide_context=True,
     )
 
-    # Adjusted execution_date_fn to use the triggered run_id
-    def get_triggered_execution_date(logical_date, **kwargs):
-        """Returns the execution date of the triggered twilio_voice_call_direct DAG."""
-        context = kwargs.get('context', {})
-        ti = context.get('ti')
-        if not ti:
-            logger.error("TaskInstance (ti) not found in context, falling back to logical_date")
-            return logical_date
-
-        trigger_run_id = ti.xcom_pull(task_ids='trigger_twilio_voice_call', key='triggered_run_id')
-        if not trigger_run_id:
-            logger.warning("No triggered_run_id found from trigger_twilio_voice_call, using logical_date")
-            return logical_date
-
-        triggered_dag_run = DagRun.find(dag_id="twilio_voice_call_direct", run_id=trigger_run_id)
-        if triggered_dag_run and triggered_dag_run[0]:
-            execution_date = triggered_dag_run[0].execution_date
-            logger.info(f"Found execution_date {execution_date} for run_id {trigger_run_id}")
-            return execution_date
-        logger.warning("No triggered DAG run found, falling back to logical_date")
-        return logical_date
-
-    wait_for_call_completion = ExternalTaskSensor(
+    wait_for_call_completion = XComExternalTaskSensor(
         task_id="wait_for_call_completion",
         external_dag_id="twilio_voice_call_direct",
         external_task_id="fetch_and_save_recording",
-        execution_date_fn=get_triggered_execution_date,
-        mode="reschedule",  # More efficient than poke
+        mode="reschedule",  # Efficient waiting
         timeout=1800,  # 30 minutes timeout
         poke_interval=60,  # Check every minute
-        check_existence=True,  # Ensure the task exists
     )
 
     update_call_status_task = PythonOperator(
