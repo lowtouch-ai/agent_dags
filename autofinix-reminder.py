@@ -140,19 +140,32 @@ with DAG(
         provide_context=True,
     )
 
-    # Custom execution_date_fn to match the triggered DAG run
-    def get_triggered_execution_date(context):
+    # Adjusted execution_date_fn to match Airflow's expectations
+    def get_triggered_execution_date(logical_date, **kwargs):
         """Returns the execution date of the triggered twilio_voice_call_direct DAG."""
-        trigger_run_id = context['ti'].xcom_pull(task_ids='trigger_twilio_voice_call', key='run_id')
+        context = kwargs.get('context', {})  # Safely get context from kwargs
+        ti = context.get('ti')  # Extract task instance from context
+        if not ti:
+            logger.error("TaskInstance (ti) not found in context, falling back to logical_date")
+            return logical_date
+
+        trigger_run_id = ti.xcom_pull(task_ids='trigger_twilio_voice_call', key='run_id')
+        if not trigger_run_id:
+            logger.warning("No run_id found from trigger_twilio_voice_call, using logical_date")
+            return logical_date
+
         from airflow.models import DagRun
         triggered_dag_run = DagRun.find(dag_id="twilio_voice_call_direct", run_id=trigger_run_id)
-        return triggered_dag_run[0].execution_date if triggered_dag_run else context['execution_date']
+        if triggered_dag_run and triggered_dag_run[0]:
+            return triggered_dag_run[0].execution_date
+        logger.warning("No triggered DAG run found, falling back to logical_date")
+        return logical_date
 
     wait_for_call_completion = ExternalTaskSensor(
         task_id="wait_for_call_completion",
         external_dag_id="twilio_voice_call_direct",
         external_task_id="fetch_and_save_recording",
-        execution_date_fn=get_triggered_execution_date,  # Match the triggered DAG's execution date
+        execution_date_fn=get_triggered_execution_date,  # Updated function
         mode="reschedule",  # More efficient than poke
         timeout=1800,  # 30 minutes timeout to account for call duration
         poke_interval=60,  # Check every minute
