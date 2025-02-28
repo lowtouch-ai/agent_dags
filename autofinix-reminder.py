@@ -44,21 +44,27 @@ with DAG(
             logger.info(f"calling API address to fetch due loans: {AUTOLOAN_API_URL}loan/overdue")
             response = requests.get(f"{AUTOLOAN_API_URL}loan/overdue")
             if response.status_code == 200:
-                loans = response.json()
-                logger.info(f"Fetched {len(loans)} due loans.")
+                loan_data = response.json()
+                overdue_loans = loan_data.get("overdue_loans", [])  # Extract the overdue loans list
 
-                if loans:
-                    customer_id = loans[0]["customer_id"]
-                    logger.info(f"calling API address to fetch customer details: {AUTOLOAN_API_URL}customer/{customer_id}")
+                if overdue_loans:
+                    first_loan = overdue_loans[0]  # Get the first record
+                    logger.info(f"First overdue loan details: {first_loan}")
+
+                    customer_id = first_loan["customerid"]
+                    logger.info(f"Fetching customer details for ID: {customer_id}")
+
+                    # Fetch customer details
                     customer_response = requests.get(f"{AUTOLOAN_API_URL}customer/{customer_id}")
 
                     if customer_response.status_code == 200:
                         customer_data = customer_response.json()
-                        loans[0]["phone"] = TEST_PHONE_NUMBER  # Using test phone number
+                        first_loan["phone"] = TEST_PHONE_NUMBER  # Assign test phone number
+                        logger.info(f"Updated first loan with test phone number: {first_loan}")
                     else:
                         raise Exception(f"Failed to fetch customer details for ID {customer_id}")
 
-                kwargs['ti'].xcom_push(key='due_loans', value=[loans[0]])  # Ensure it's a list
+                kwargs['ti'].xcom_push(key='due_loans', value=[first_loan])  # Ensure it's a list
             else:
                 logger.error(f"Failed to fetch due loans from API:{response.text}")
                 raise Exception("Failed to fetch due loans from API")
