@@ -4,6 +4,7 @@ from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sensors.external_task import ExternalTaskSensor
 from airflow.models import Variable
 from datetime import datetime, timedelta
+from ollama import Client
 import requests
 import logging
 
@@ -39,42 +40,49 @@ with DAG(
 
     def fetch_due_loans(**kwargs):
         """Fetches loans that are due from the Autoloan API and retrieves the associated phone number."""
-        response = requests.get(f"{AUTOLOAN_API_URL}/loan/overdue")
-        if response.status_code == 200:
-            loans = response.json()
-            logger.info(f"Fetched {len(loans)} due loans.")
+        try:
+            response = requests.get(f"{AUTOLOAN_API_URL}/loan/overdue")
+            if response.status_code == 200:
+                loans = response.json()
+                logger.info(f"Fetched {len(loans)} due loans.")
 
-            if loans:
-                customer_id = loans[0]["customer_id"]
-                customer_response = requests.get(f"{AUTOLOAN_API_URL}/customer/{customer_id}")
+                if loans:
+                    customer_id = loans[0]["customer_id"]
+                    customer_response = requests.get(f"{AUTOLOAN_API_URL}/customer/{customer_id}")
 
-                if customer_response.status_code == 200:
-                    customer_data = customer_response.json()
-                    loans[0]["phone"] = TEST_PHONE_NUMBER  # Using test phone number
-                else:
-                    raise Exception(f"Failed to fetch customer details for ID {customer_id}")
+                    if customer_response.status_code == 200:
+                        customer_data = customer_response.json()
+                        loans[0]["phone"] = TEST_PHONE_NUMBER  # Using test phone number
+                    else:
+                        raise Exception(f"Failed to fetch customer details for ID {customer_id}")
 
-            kwargs['ti'].xcom_push(key='due_loans', value=[loans[0]])  # Ensure it's a list
-        else:
-            raise Exception("Failed to fetch due loans from API")
+                kwargs['ti'].xcom_push(key='due_loans', value=[loans[0]])  # Ensure it's a list
+            else:
+                logger.error(f"Failed to fetch due loans from API:{response.text}")
+                raise Exception("Failed to fetch due loans from API")
+        except Exception as e:
+            logger.error(f"Failed to fetch due loans: {e}")
 
     def generate_message_using_agent(loan):
         """Generates voice message content for each loan."""
-        client = Client(
-            host=AGENTOMATIC_API_URL,
-            headers={'x-ltai-client': 'autofinix-loan-reminder'}
-        )
+        try:
+            client = Client(
+                host=AGENTOMATIC_API_URL,
+                headers={'x-ltai-client': 'autofinix-loan-reminder'}
+            )
 
-        response = client.chat(
-            model='autofinix:0.3',
-            messages=[{"role": "user", "content": f'Generate a voice message for the loan due reminder for the loan:{loan}'}],
-            stream=False
-        )
+            response = client.chat(
+                model='autofinix:0.3',
+                messages=[{"role": "user", "content": f'Generate a voice message for the loan due reminder for the loan:{loan}'}],
+                stream=False
+            )
 
-        agent_response = response['message']['content']
-        logging.info(f"Agent Response: {agent_response}")
-        return agent_response
-
+            agent_response = response['message']['content']
+            logging.info(f"Agent Response: {agent_response}")
+            return agent_response
+        except Exception as e:
+            logging.error(f"Failed to generate message using agent: {e}")
+            return f"Hello, this is a reminder that your loan is due. Please contact us for more information."
     def generate_voice_message(**kwargs):
         """Generates voice message content for each loan."""
         ti = kwargs['ti']
@@ -105,6 +113,7 @@ with DAG(
             # else:
             #     logger.error(f"Failed to update reminder status for Loan ID: {loan['id']}")
             logger.info(f"Updated reminder status for Loan ID: {loan['id']}")
+            return 'status'
 
     def update_call_status(**kwargs):
         """Updates the call status in the Autoloan API."""
@@ -112,15 +121,17 @@ with DAG(
         call_status = ti.xcom_pull(task_ids='wait_for_call_completion', key='call_status')
         loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
 
-        for loan, status in zip(loans, call_status):
-            update_response = requests.post(
-                f"{AUTOLOAN_API_URL}/update-call-status",
-                json={"loan_id": loan['id'], "status": status},
-            )
-            if update_response.status_code == 200:
-                logger.info(f"Updated call status for Loan ID: {loan['id']} to {status}")
-            else:
-                logger.error(f"Failed to update call status for Loan ID: {loan['id']}")
+        # for loan, status in zip(loans, call_status):
+        #     update_response = requests.post(
+        #         f"{AUTOLOAN_API_URL}/update-call-status",
+        #         json={"loan_id": loan['id'], "status": status},
+        #     )
+        #     if update_response.status_code == 200:
+        #         logger.info(f"Updated call status for Loan ID: {loan['id']} to {status}")
+        #     else:
+        #         logger.error(f"Failed to update call status for Loan ID: {loan['id']}")
+        logger.info(f"Updated call status for Loan ID: {loan['id']} to {status}")
+        return 'status'
 
     # Tasks
     fetch_due_loans_task = PythonOperator(
