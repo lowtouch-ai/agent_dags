@@ -64,7 +64,7 @@ with DAG(
             from_=TWILIO_PHONE_NUMBER,
             twiml=f"""
             <Response>
-                <Say>{message}</Say>
+                <Say>{message}, acknowledge this call after beep</Say>
                 <Record maxLength="30" playBeep="true" />
                 <Say>Thank you! Goodbye.</Say>
             </Response>

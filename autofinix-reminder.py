@@ -74,20 +74,21 @@ with DAG(
     def generate_message_using_agent(loan):
         """Generates voice message content for each loan."""
         try:
-            client = Client(
-                host=AGENTOMATIC_API_URL,
-                headers={'x-ltai-client': 'autofinix-loan-reminder'}
-            )
+            # client = Client(
+            #     host=AGENTOMATIC_API_URL,
+            #     headers={'x-ltai-client': 'autofinix-loan-reminder'}
+            # )
 
-            response = client.chat(
-                model='autofinix:0.3',
-                messages=[{"role": "user", "content": f'Generate a voice message for the loan due reminder for the loan:{loan}'}],
-                stream=False
-            )
+            # response = client.chat(
+            #     model='autofinix:0.3',
+            #     messages=[{"role": "user", "content": f'Generate a voice message for the loan due reminder for the loan:{loan}'}],
+            #     stream=False
+            # )
 
-            agent_response = response['message']['content']
-            logging.info(f"Agent Response: {agent_response}")
-            return agent_response
+            # agent_response = response['message']['content']
+            # logging.info(f"Agent Response: {agent_response}")
+            # return agent_response
+            return "your loan is due please pay as soon as possible."
         except Exception as e:
             logging.error(f"Failed to generate message using agent: {e}")
             return f"Hello, this is a reminder that your loan is due. Please contact us for more information."
