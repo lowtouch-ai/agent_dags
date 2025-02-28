@@ -32,9 +32,8 @@ TWILIO_PHONE_NUMBER = Variable.get("TWILIO_PHONE_NUMBER")
 if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
     raise ValueError("Twilio credentials are missing. Set them in Airflow Variables.")
 
-# Storage directory for recordings
-STORAGE_DIR = os.path.join(os.getenv("AIRFLOW_HOME", "/opt/airflow"), "recordings")
-os.makedirs(STORAGE_DIR, exist_ok=True)  # Ensure storage directory exists
+# Define base directory for storing recordings inside the container
+BASE_STORAGE_DIR = "/appz/data"
 
 # Define DAG
 with DAG(
@@ -123,11 +122,19 @@ with DAG(
         # Get the most recent recording URL
         recording_url = f"https://api.twilio.com{recordings[0].uri.replace('.json', '.mp3')}"
 
+        # Generate dynamic file path based on DAG name and execution date
+        execution_date = datetime.now().strftime("%Y-%m-%d")
+        dag_name = "twilio_voice_call_direct"
+        save_directory = os.path.join(BASE_STORAGE_DIR, dag_name, execution_date)
+        os.makedirs(save_directory, exist_ok=True)  # Ensure directory exists
+
+        # Save file inside container
+        file_path = os.path.join(save_directory, f"{call_sid}.mp3")
+
         # Download the MP3 file
         response = requests.get(recording_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
 
         if response.status_code == 200:
-            file_path = os.path.join(STORAGE_DIR, f"{call_sid}.mp3")
             with open(file_path, "wb") as f:
                 f.write(response.content)
 
