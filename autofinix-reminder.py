@@ -50,7 +50,7 @@ with DAG(
                 if customer_response.status_code == 200:
                     customer_data = customer_response.json()
                     phone_number = customer_data.get("phonenumber")
-                    loans[0]["phone"] =   # Add phone number to loan data
+                    loans[0]["phone"] = TEST_PHONE_NUMBER  # Add phone number to loan data
                 else:
                     raise Exception(f"Failed to fetch customer details for ID {customer_id}")
             
