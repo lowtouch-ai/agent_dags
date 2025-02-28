@@ -4,7 +4,7 @@ from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sensors.external_task import ExternalTaskSensor
 from airflow.models import Variable
 from datetime import datetime, timedelta
-from ollama import Client
+# from ollama import Client
 import requests
 import logging
 
