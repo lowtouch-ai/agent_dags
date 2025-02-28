@@ -84,15 +84,17 @@ with DAG(
         ti = kwargs['ti']
         loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
 
-        messages = [
-            {
-                "phone_number": loan["phone"],
-                "message": generate_message_using_agent(loan)
-            }
-            for loan in loans
-        ]
+        if not loans or not isinstance(loans, list):
+            logger.error("No loans found to process")
+            return
 
-        ti.xcom_push(key='voice_messages', value=messages)
+        messages = {
+            "phone_number": loans[0]["phone"],  # Pass only the first loan for now
+            "message": generate_message_using_agent(loans[0]),
+            "need_ack": True
+        }
+
+        ti.xcom_push(key='voice_message_payload', value=messages)
 
     def update_reminder_status(**kwargs):
         """Marks the reminder as scheduled in the Autoloan API."""
@@ -126,7 +128,7 @@ with DAG(
     trigger_send_voice_message = TriggerDagRunOperator(
         task_id="trigger_twilio_voice_call",
         trigger_dag_id="twilio_voice_call_direct",
-        conf="{{ {'phone_number': ti.xcom_pull(task_ids='generate_voice_message', key='voice_messages')[0]['phone_number'], 'message': ti.xcom_pull(task_ids='generate_voice_message', key='voice_messages')[0]['message'], 'need_ack': True} }}",
+        conf="{{ ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload') | tojson }}",
         wait_for_completion=False,
     )
 
