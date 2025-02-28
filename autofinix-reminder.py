@@ -121,7 +121,7 @@ with DAG(
             #     logger.info(f"Updated reminder status for Loan ID: {loan['id']}")
             # else:
             #     logger.error(f"Failed to update reminder status for Loan ID: {loan['id']}")
-            logger.info(f"Updated reminder status for Loan ID: {loan['id']}")
+            logger.info(f"Updated reminder status for Loan ID: {loan['loanid']}")
             return 'status'
 
     def update_call_status(**kwargs):
@@ -139,7 +139,7 @@ with DAG(
         #         logger.info(f"Updated call status for Loan ID: {loan['id']} to {status}")
         #     else:
         #         logger.error(f"Failed to update call status for Loan ID: {loan['id']}")
-        logger.info(f"Updated call status for Loan ID: {loan['id']} to {status}")
+        logger.info(f"Updated call status for Loan ID: {loan['loanid']} to 'status")
         return 'status'
 
     # Tasks
