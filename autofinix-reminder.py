@@ -2,7 +2,7 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sensors.external_task import ExternalTaskSensor
-from airflow.models import Variable
+from airflow.models import Variable, DagRun
 from datetime import datetime, timedelta
 import json
 import requests
@@ -112,6 +112,15 @@ with DAG(
 
         logger.info(f"Updated call status for Loan ID: {loans[0]['loanid']} with recording status: {recording_status}")
 
+    # Custom trigger function to push run_id to XCom
+    def trigger_with_run_id(context, dag_run_obj):
+        """Custom trigger function to push the triggered run_id to XCom."""
+        ti = context['ti']
+        run_id = dag_run_obj.run_id
+        ti.xcom_push(key='triggered_run_id', value=run_id)
+        logger.info(f"Triggered DAG twilio_voice_call_direct with run_id: {run_id}")
+        return dag_run_obj
+
     # Tasks
     fetch_due_loans_task = PythonOperator(
         task_id="fetch_due_loans",
@@ -129,9 +138,9 @@ with DAG(
         task_id="trigger_twilio_voice_call",
         trigger_dag_id="twilio_voice_call_direct",
         conf="{{ ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload') | tojson }}",
-        wait_for_completion=False,
         execution_date="{{ dag_run.start_date }}",  # Pass the execution date explicitly
         reset_dag_run=True,  # Ensure a new run is created
+        python_callable=trigger_with_run_id,  # Use custom function to push run_id
     )
 
     update_reminder_status_task = PythonOperator(
@@ -140,24 +149,25 @@ with DAG(
         provide_context=True,
     )
 
-    # Adjusted execution_date_fn to match Airflow's expectations
+    # Adjusted execution_date_fn to use the triggered run_id
     def get_triggered_execution_date(logical_date, **kwargs):
         """Returns the execution date of the triggered twilio_voice_call_direct DAG."""
-        context = kwargs.get('context', {})  # Safely get context from kwargs
-        ti = context.get('ti')  # Extract task instance from context
+        context = kwargs.get('context', {})
+        ti = context.get('ti')
         if not ti:
             logger.error("TaskInstance (ti) not found in context, falling back to logical_date")
             return logical_date
 
-        trigger_run_id = ti.xcom_pull(task_ids='trigger_twilio_voice_call', key='run_id')
+        trigger_run_id = ti.xcom_pull(task_ids='trigger_twilio_voice_call', key='triggered_run_id')
         if not trigger_run_id:
-            logger.warning("No run_id found from trigger_twilio_voice_call, using logical_date")
+            logger.warning("No triggered_run_id found from trigger_twilio_voice_call, using logical_date")
             return logical_date
 
-        from airflow.models import DagRun
         triggered_dag_run = DagRun.find(dag_id="twilio_voice_call_direct", run_id=trigger_run_id)
         if triggered_dag_run and triggered_dag_run[0]:
-            return triggered_dag_run[0].execution_date
+            execution_date = triggered_dag_run[0].execution_date
+            logger.info(f"Found execution_date {execution_date} for run_id {trigger_run_id}")
+            return execution_date
         logger.warning("No triggered DAG run found, falling back to logical_date")
         return logical_date
 
@@ -165,11 +175,11 @@ with DAG(
         task_id="wait_for_call_completion",
         external_dag_id="twilio_voice_call_direct",
         external_task_id="fetch_and_save_recording",
-        execution_date_fn=get_triggered_execution_date,  # Updated function
+        execution_date_fn=get_triggered_execution_date,
         mode="reschedule",  # More efficient than poke
-        timeout=1800,  # 30 minutes timeout to account for call duration
+        timeout=1800,  # 30 minutes timeout
         poke_interval=60,  # Check every minute
-        check_existence=True,  # Ensure the task exists before waiting
+        check_existence=True,  # Ensure the task exists
     )
 
     update_call_status_task = PythonOperator(
