@@ -1,17 +1,12 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sensors.external_task import ExternalTaskSensor
 from airflow.models import Variable, TaskInstance
 from datetime import datetime, timedelta
 import json
 import requests
 import logging
-
-# Backward-compatible import for triggering DAGs
-try:
-    from airflow.api.client.local_client import Client
-except ImportError:
-    Client = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -56,7 +51,7 @@ class XComExternalTaskSensor(ExternalTaskSensor):
 
         logger.info(f"Checking XCom recording_status for run_id {trigger_run_id}: {external_task_xcom}")
 
-        # Define completion criteria (e.g., any non-None value or specific status)
+        # Define completion criteria (e.g., any non-None value)
         if external_task_xcom is not None:
             logger.info(f"Detected completion with recording_status: {external_task_xcom}")
             return True
@@ -108,28 +103,31 @@ with DAG(
         }
         ti.xcom_push(key='voice_message_payload', value=messages)
 
-    def trigger_twilio_dag(**kwargs):
-        """Manually trigger the twilio_voice_call_direct DAG and push run_id to XCom."""
+    def trigger_twilio_voice_call(**kwargs):
+        """Trigger twilio_voice_call_direct DAG and push run_id to XCom."""
         ti = kwargs['ti']
         conf = ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload')
-        execution_date = kwargs['logical_date']  # Updated to use logical_date due to deprecation warning
+        execution_date = kwargs['logical_date']  # Using logical_date per deprecation warning
         
+        if not conf:
+            logger.warning("No voice message payload found, skipping trigger.")
+            return
+
         # Generate a unique run_id
         run_id = f"triggered__{execution_date.strftime('%Y%m%dT%H%M%S')}"
-        
-        # Trigger the DAG using the local client
-        if Client is not None:
-            client = Client()
-            client.trigger_dag(
-                dag_id="twilio_voice_call_direct",
-                run_id=run_id,
-                conf=conf,
-                execution_date=execution_date,
-            )
-            logger.info(f"Triggered twilio_voice_call_direct with run_id: {run_id}")
-            ti.xcom_push(key='triggered_run_id', value=run_id)
-        else:
-            raise ValueError("Airflow API client not available. Please check Airflow installation.")
+
+        # Trigger the DAG
+        trigger_task = TriggerDagRunOperator(
+            task_id=f"trigger_twilio_{run_id.replace(':', '_')}",  # Unique task_id
+            trigger_dag_id="twilio_voice_call_direct",
+            conf=conf,
+            execution_date=execution_date,
+        )
+
+        # Execute the trigger and push run_id to XCom
+        trigger_task.execute(context=kwargs)
+        ti.xcom_push(key='triggered_run_id', value=run_id)
+        logger.info(f"Triggered twilio_voice_call_direct with run_id: {run_id}")
 
     def update_reminder_status(**kwargs):
         """Marks the reminder as scheduled in the Autoloan API."""
@@ -160,7 +158,7 @@ with DAG(
 
     trigger_send_voice_message = PythonOperator(
         task_id="trigger_twilio_voice_call",
-        python_callable=trigger_twilio_dag,
+        python_callable=trigger_twilio_voice_call,
         provide_context=True,
     )
 
