@@ -174,7 +174,7 @@ with DAG(
         external_task_id="fetch_and_save_recording",
         mode="reschedule",
         timeout=1800,  # 30 minutes timeout
-        poke_interval=60,  # Check every minute
+        poke_interval=30,  # Check every 30 seconds
     )
 
     update_call_status_task = PythonOperator(
