@@ -80,16 +80,24 @@ with DAG(
 
     def trigger_twilio_voice_call(**kwargs):
         """Trigger twilio_voice_call_direct and push outcome to XCom."""
-        context = kwargs['context']
-        ti = context['ti']
+        # Safely retrieve context from kwargs
+        ti = kwargs.get('ti')  # Access TaskInstance directly from kwargs
+        if not ti:
+            logger.error("TaskInstance (ti) not available in kwargs")
+            raise ValueError("TaskInstance (ti) missing in kwargs")
+
+        logger.info(f"Triggering twilio_voice_call_direct with conf: {ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload')}")
+        
         trigger = TriggerDagRunOperator(
-            task_id="trigger_twilio_voice_call_inner",  # Unique inner task_id
+            task_id="trigger_twilio_voice_call_inner",  # Unique task_id for inner operator
             trigger_dag_id="twilio_voice_call_direct",
-            conf=context['ti'].xcom_pull(task_ids='generate_voice_message', key='voice_message_payload'),
+            conf=ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload'),
             wait_for_completion=True,
             poke_interval=60,
         )
-        trigger.execute(context)
+        # Execute trigger directly without context (TriggerDagRunOperator will handle its own context)
+        trigger.execute(kwargs)
+        
         # Since wait_for_completion=True, if we reach here, the triggered DAG succeeded
         logger.info("twilio_voice_call_direct completed successfully")
         ti.xcom_push(key='call_outcome', value="Success")
