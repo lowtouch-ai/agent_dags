@@ -1,12 +1,12 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.sensors.external_task import ExternalTaskSensor
-from airflow.models import Variable, TaskInstance
-from datetime import datetime, timedelta
+from airflow.models import Variable
+from datetime import datetime, timedelta, timezone
 import json
 import requests
 import logging
+import uuid
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -29,35 +29,6 @@ TEST_PHONE_NUMBER = Variable.get("TEST_PHONE_NUMBER")
 # Ensure API URL is set
 if not AUTOLOAN_API_URL:
     raise ValueError("Autoloan API URL is missing. Set it in Airflow Variables.")
-
-# Custom ExternalTaskSensor with XCom-based validation
-class XComExternalTaskSensor(ExternalTaskSensor):
-    def poke(self, context):
-        """Custom poke method to check XCom value instead of execution_date."""
-        ti = context['ti']
-        trigger_run_id = ti.xcom_pull(task_ids='trigger_twilio_voice_call', key='triggered_run_id')
-        
-        if not trigger_run_id:
-            logger.warning("No triggered_run_id found, continuing to wait...")
-            return False
-
-        # Fetch the XCom value from the external task
-        external_task_xcom = ti.xcom_pull(
-            dag_id=self.external_dag_id,
-            task_ids=self.external_task_id,
-            key='recording_status',
-            run_id=trigger_run_id  # Use run_id instead of execution_date
-        )
-
-        logger.info(f"Checking XCom recording_status for run_id {trigger_run_id}: {external_task_xcom}")
-
-        # Define completion criteria (e.g., any non-None value)
-        if external_task_xcom is not None:
-            logger.info(f"Detected completion with recording_status: {external_task_xcom}")
-            return True
-        
-        logger.info(f"Task {self.external_task_id} not yet complete for run_id {trigger_run_id}")
-        return False
 
 # Define DAG
 with DAG(
@@ -96,38 +67,41 @@ with DAG(
         if not loans or not isinstance(loans, list):
             logger.error("No loans found to process")
             return
+        call_id = str(uuid.uuid4())  # Unique identifier for this call
         messages = {
             "phone_number": loans[0]["phone"],
             "message": "Your loan is due, please pay as soon as possible.",
-            "need_ack": True
+            "need_ack": True,
+            "call_id": call_id  # Add unique call_id to conf
         }
         ti.xcom_push(key='voice_message_payload', value=messages)
+        ti.xcom_push(key='call_id', value=call_id)  # Store call_id for later use
 
-    def trigger_twilio_voice_call(**kwargs):
-        """Trigger twilio_voice_call_direct DAG and push run_id to XCom."""
+    def check_call_completion(**kwargs):
+        """Check the recording_status from twilio_voice_call_direct."""
         ti = kwargs['ti']
-        conf = ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload')
-        execution_date = kwargs['logical_date']  # Using logical_date per deprecation warning
+        call_id = ti.xcom_pull(task_ids='generate_voice_message', key='call_id')
         
-        if not conf:
-            logger.warning("No voice message payload found, skipping trigger.")
-            return
-
-        # Generate a unique run_id
-        run_id = f"triggered__{execution_date.strftime('%Y%m%dT%H%M%S')}"
-
-        # Trigger the DAG
-        trigger_task = TriggerDagRunOperator(
-            task_id=f"trigger_twilio_{run_id.replace(':', '_')}",  # Unique task_id
-            trigger_dag_id="twilio_voice_call_direct",
-            conf=conf,
-            execution_date=execution_date,
+        # Pull recording_status and call_id from twilio_voice_call_direct
+        recording_status = ti.xcom_pull(
+            dag_id="twilio_voice_call_direct",
+            task_ids='fetch_and_save_recording',
+            key='recording_status'
+        )
+        returned_call_id = ti.xcom_pull(
+            dag_id="twilio_voice_call_direct",
+            task_ids='fetch_and_save_recording',
+            key='call_id'
         )
 
-        # Execute the trigger and push run_id to XCom
-        trigger_task.execute(context=kwargs)
-        ti.xcom_push(key='triggered_run_id', value=run_id)
-        logger.info(f"Triggered twilio_voice_call_direct with run_id: {run_id}")
+        logger.info(f"Pulled recording_status: {recording_status}, returned_call_id: {returned_call_id}")
+
+        if recording_status is None or returned_call_id != call_id:
+            logger.error(f"Call completion check failed: recording_status={recording_status}, expected call_id={call_id}, got {returned_call_id}")
+            raise ValueError(f"Invalid or missing recording_status for call_id {call_id}")
+        
+        logger.info(f"Recording status for call_id {call_id}: {recording_status}")
+        ti.xcom_push(key='final_recording_status', value=recording_status)
 
     def update_reminder_status(**kwargs):
         """Marks the reminder as scheduled in the Autoloan API."""
@@ -139,7 +113,7 @@ with DAG(
     def update_call_status(**kwargs):
         """Updates the call status in the Autoloan API."""
         ti = kwargs['ti']
-        recording_status = ti.xcom_pull(dag_id="twilio_voice_call_direct", task_ids='fetch_and_save_recording', key='recording_status')
+        recording_status = ti.xcom_pull(task_ids='check_call_completion', key='final_recording_status')
         loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
         logger.info(f"Updated call status for Loan ID: {loans[0]['loanid']} with recording status: {recording_status}")
 
@@ -156,9 +130,17 @@ with DAG(
         provide_context=True,
     )
 
-    trigger_send_voice_message = PythonOperator(
+    trigger_send_voice_message = TriggerDagRunOperator(
         task_id="trigger_twilio_voice_call",
-        python_callable=trigger_twilio_voice_call,
+        trigger_dag_id="twilio_voice_call_direct",
+        conf="{{ ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload') | tojson }}",
+        wait_for_completion=True,  # Blocks until twilio_voice_call_direct finishes
+        poke_interval=60,  # Check every minute
+    )
+
+    check_call_completion_task = PythonOperator(
+        task_id="check_call_completion",
+        python_callable=check_call_completion,
         provide_context=True,
     )
 
@@ -166,15 +148,6 @@ with DAG(
         task_id="update_reminder_status",
         python_callable=update_reminder_status,
         provide_context=True,
-    )
-
-    wait_for_call_completion = XComExternalTaskSensor(
-        task_id="wait_for_call_completion",
-        external_dag_id="twilio_voice_call_direct",
-        external_task_id="fetch_and_save_recording",
-        mode="reschedule",
-        timeout=1800,  # 30 minutes timeout
-        poke_interval=30,  # Check every 30 seconds
     )
 
     update_call_status_task = PythonOperator(
@@ -185,5 +158,6 @@ with DAG(
 
     # Task Dependencies
     fetch_due_loans_task >> generate_voice_message_task
-    generate_voice_message_task >> trigger_send_voice_message >> update_reminder_status_task
-    trigger_send_voice_message >> wait_for_call_completion >> update_call_status_task
+    generate_voice_message_task >> trigger_send_voice_message
+    trigger_send_voice_message >> [check_call_completion_task, update_reminder_status_task]
+    check_call_completion_task >> update_call_status_task
