@@ -2,7 +2,7 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.models import Variable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import json
 import requests
 import logging
@@ -77,11 +77,19 @@ with DAG(
         ti.xcom_push(key='voice_message_payload', value=messages)
         ti.xcom_push(key='call_id', value=call_id)  # Store call_id for later use
 
-    def check_call_completion(**kwargs):
-        """Check the recording_status from twilio_voice_call_direct."""
+    def update_reminder_status(**kwargs):
+        """Marks the reminder as scheduled in the Autoloan API."""
+        ti = kwargs['ti']
+        loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
+        for loan in loans:
+            logger.info(f"Updated reminder status for Loan ID: {loan['loanid']}")
+
+    def update_call_status(**kwargs):
+        """Updates the call status in the Autoloan API with recording_status from twilio_voice_call_direct."""
         ti = kwargs['ti']
         call_id = ti.xcom_pull(task_ids='generate_voice_message', key='call_id')
-        
+        loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
+
         # Pull recording_status and call_id from twilio_voice_call_direct
         recording_status = ti.xcom_pull(
             dag_id="twilio_voice_call_direct",
@@ -99,22 +107,8 @@ with DAG(
         if recording_status is None or returned_call_id != call_id:
             logger.error(f"Call completion check failed: recording_status={recording_status}, expected call_id={call_id}, got {returned_call_id}")
             raise ValueError(f"Invalid or missing recording_status for call_id {call_id}")
-        
+
         logger.info(f"Recording status for call_id {call_id}: {recording_status}")
-        ti.xcom_push(key='final_recording_status', value=recording_status)
-
-    def update_reminder_status(**kwargs):
-        """Marks the reminder as scheduled in the Autoloan API."""
-        ti = kwargs['ti']
-        loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
-        for loan in loans:
-            logger.info(f"Updated reminder status for Loan ID: {loan['loanid']}")
-
-    def update_call_status(**kwargs):
-        """Updates the call status in the Autoloan API."""
-        ti = kwargs['ti']
-        recording_status = ti.xcom_pull(task_ids='check_call_completion', key='final_recording_status')
-        loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
         logger.info(f"Updated call status for Loan ID: {loans[0]['loanid']} with recording status: {recording_status}")
 
     # Tasks
@@ -138,12 +132,6 @@ with DAG(
         poke_interval=60,  # Check every minute
     )
 
-    check_call_completion_task = PythonOperator(
-        task_id="check_call_completion",
-        python_callable=check_call_completion,
-        provide_context=True,
-    )
-
     update_reminder_status_task = PythonOperator(
         task_id="update_reminder_status",
         python_callable=update_reminder_status,
@@ -159,5 +147,4 @@ with DAG(
     # Task Dependencies
     fetch_due_loans_task >> generate_voice_message_task
     generate_voice_message_task >> trigger_send_voice_message
-    trigger_send_voice_message >> [check_call_completion_task, update_reminder_status_task]
-    check_call_completion_task >> update_call_status_task
+    trigger_send_voice_message >> [update_reminder_status_task, update_call_status_task]
