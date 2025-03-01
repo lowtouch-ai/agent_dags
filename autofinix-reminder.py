@@ -78,11 +78,12 @@ with DAG(
         ti.xcom_push(key='call_id', value=call_id)
         logger.info(f"Generated call_id: {call_id}")
 
-    def trigger_twilio_voice_call(context):
+    def trigger_twilio_voice_call(**kwargs):
         """Trigger twilio_voice_call_direct and push outcome to XCom."""
+        context = kwargs['context']
         ti = context['ti']
         trigger = TriggerDagRunOperator(
-            task_id="trigger_twilio_voice_call",
+            task_id="trigger_twilio_voice_call_inner",  # Unique inner task_id
             trigger_dag_id="twilio_voice_call_direct",
             conf=context['ti'].xcom_pull(task_ids='generate_voice_message', key='voice_message_payload'),
             wait_for_completion=True,
