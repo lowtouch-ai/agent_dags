@@ -2,13 +2,12 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.sensors.external_task import ExternalTaskSensor
 from airflow.models import Variable, TaskInstance
-from airflow.utils.trigger_rule import TriggerRule
 from datetime import datetime, timedelta
 import json
 import requests
 import logging
 
-# For backward compatibility with Airflow < 2.2.0
+# Backward-compatible import for triggering DAGs
 try:
     from airflow.api.client.local_client import Client
 except ImportError:
@@ -113,24 +112,24 @@ with DAG(
         """Manually trigger the twilio_voice_call_direct DAG and push run_id to XCom."""
         ti = kwargs['ti']
         conf = ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload')
-        execution_date = kwargs['execution_date']
+        execution_date = kwargs['logical_date']  # Updated to use logical_date due to deprecation warning
         
         # Generate a unique run_id
         run_id = f"triggered__{execution_date.strftime('%Y%m%dT%H%M%S')}"
         
-        # Trigger the DAG using Airflow's local client (compatible with older versions)
+        # Trigger the DAG using the local client
         if Client is not None:
             client = Client()
             client.trigger_dag(
                 dag_id="twilio_voice_call_direct",
                 run_id=run_id,
                 conf=conf,
-                execution_date=execution_date
+                execution_date=execution_date,
             )
             logger.info(f"Triggered twilio_voice_call_direct with run_id: {run_id}")
             ti.xcom_push(key='triggered_run_id', value=run_id)
         else:
-            raise ValueError("Airflow API client not available. Ensure Airflow version supports triggering DAGs.")
+            raise ValueError("Airflow API client not available. Please check Airflow installation.")
 
     def update_reminder_status(**kwargs):
         """Marks the reminder as scheduled in the Autoloan API."""
