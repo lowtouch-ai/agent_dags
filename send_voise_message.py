@@ -102,48 +102,41 @@ with DAG(
         conf = kwargs["params"]
         call_id = conf.get("call_id")  # Get call_id from conf
 
-        logger.info(f"Checking if recording is available for call SID: {call_sid}, call_id: {call_id}")
+        logger.info(f"Fetching recording for call SID: {call_sid}, call_id received: {call_id}")
 
         if not call_id:
-            logger.error("call_id is None, cannot push to XCom with unique key")
-            raise ValueError("call_id is missing in params")
+            logger.error("call_id is None, using default_call_id for XCom key")
+            call_id = "default_call_id"
 
-        # If `need_ack` is False, skip saving the recording
+        logger.info(f"Checking if recording is available for call SID: {call_sid}, call_id: {call_id}")
+
         if not need_ack:
             logger.info("need_ack is False, skipping recording download.")
             ti.xcom_push(key=f"recording_status_{call_id}", value="No Recording Needed")
-            logger.debug(f"Pushed XCom: key=recording_status_{call_id}, value=No Recording Needed")
+            logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=No Recording Needed")
             return {"message": "Recording not needed as acknowledgment is not required."}
 
-        # Only fetch recording if the call was completed
         if call_status != "completed":
             logger.info(f"Recording unavailable. Call status: {call_status}")
             ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Unavailable")
-            logger.debug(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Unavailable")
+            logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Unavailable")
             return {"message": f"Cannot fetch recording. Call status: {call_status}"}
 
-        # Get the recording list for the call
         recordings = client.recordings.list(call_sid=call_sid)
 
         if not recordings:
             logger.info("Recording not found yet. Try again later.")
             ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Not Found")
-            logger.debug(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Not Found")
+            logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Not Found")
             return {"message": "Recording not available yet. Try again later."}
 
-        # Get the most recent recording URL
         recording_url = f"https://api.twilio.com{recordings[0].uri.replace('.json', '.mp3')}"
-
-        # Generate dynamic file path based on DAG name and execution date
         execution_date = datetime.now().strftime("%Y-%m-%d")
         dag_name = "twilio_voice_call_direct"
         save_directory = os.path.join(BASE_STORAGE_DIR, dag_name, execution_date)
         os.makedirs(save_directory, exist_ok=True)
-
-        # Save file inside container
         file_path = os.path.join(save_directory, f"{call_sid}.mp3")
 
-        # Download the MP3 file
         response = requests.get(recording_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
 
         if response.status_code == 200:
@@ -151,12 +144,12 @@ with DAG(
                 f.write(response.content)
             logger.info(f"Recording saved at {file_path}")
             ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Saved")
-            logger.debug(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Saved")
+            logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Saved")
             return {"message": "Recording downloaded successfully", "file_path": file_path}
         else:
             logger.error(f"Failed to download recording, status code: {response.status_code}")
             ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Failed")
-            logger.debug(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Failed")
+            logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Failed")
             return {"message": "Failed to download recording"}
 
     # Define tasks
