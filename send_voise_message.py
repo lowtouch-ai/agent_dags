@@ -145,9 +145,10 @@ with DAG(
             logger.info(f"Recording saved at {file_path}")
             ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Saved")
             return {"message": "Recording downloaded successfully", "file_path": file_path}
-        
-        ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Failed")
-        return {"message": "Failed to download recording"}
+        else:
+            logger.error(f"Failed to download recording, status code: {response.status_code}")
+            ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Failed")
+            return {"message": "Failed to download recording"}
 
     # Define tasks
     initiate_call_task = PythonOperator(
