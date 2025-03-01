@@ -39,26 +39,39 @@ with DAG(
 ) as dag:
 
     def fetch_due_loans(**kwargs):
-        """Fetches loans that are due from the Autoloan API and filters by reminder_status."""
+        """Fetches loans that are due from the Autoloan API and retrieves the associated phone number."""
         try:
             ti = kwargs['ti']
             logger.info(f"Calling API to fetch due loans: {AUTOLOAN_API_URL}loan/overdue")
             response = requests.get(f"{AUTOLOAN_API_URL}loan/overdue")
             if response.status_code == 200:
                 loan_data = response.json()
-                overdue_loans = loan_data.get("overdue_loans", [])
+                overdue_loans = loan_data.get("overdue_loans", [])  # Extract the overdue loans list
+
                 if not overdue_loans:
                     logger.info("No overdue loans found.")
+                    ti.xcom_push(key='eligible_loans', value=[])
                     return
 
-                # Filter loans based on reminder_status
+                # Filter loans based on reminder_status and fetch phone numbers
                 eligible_loans = []
                 for loan in overdue_loans:
                     reminder_status = loan.get("reminder_status", "NotCalled")  # Default if not present
                     if reminder_status == "Completed":
                         logger.info(f"Loan ID {loan['loanid']} already completed, skipping.")
                         continue
-                    eligible_loans.append(loan)
+
+                    customer_id = loan["customerid"]
+                    logger.info(f"Fetching customer details for ID: {customer_id}")
+                    customer_response = requests.get(f"{AUTOLOAN_API_URL}customer/{customer_id}")
+                    if customer_response.status_code == 200:
+                        customer_data = customer_response.json()
+                        loan["phone"] = TEST_PHONE_NUMBER  # Use TEST_PHONE_NUMBER for now
+                        logger.info(f"Updated loan with phone number: {loan}")
+                        eligible_loans.append(loan)
+                    else:
+                        logger.error(f"Failed to fetch customer details for ID {customer_id}")
+                        continue
 
                 if not eligible_loans:
                     logger.info("No eligible loans to process after filtering.")
@@ -71,6 +84,7 @@ with DAG(
                 logger.info(f"Processing first eligible loan: {first_loan}")
                 ti.xcom_push(key='eligible_loans', value=[first_loan])
             else:
+                logger.error(f"Failed to fetch due loans from API: {response.text}")
                 raise Exception("Failed to fetch due loans from API")
         except Exception as e:
             logger.error(f"Failed to fetch due loans: {e}")
@@ -105,7 +119,7 @@ with DAG(
 
         call_id = str(uuid.uuid4())
         messages = {
-            "phone_number": loan["phone"],
+            "phone_number": loan["phone"],  # Use the fetched phone number
             "message": "Your loan is due, please pay as soon as possible.",
             "need_ack": True,
             "call_id": call_id
@@ -152,7 +166,7 @@ with DAG(
         if call_outcome == "Success":
             reminder_status = "Called"
         else:
-            reminder_status = "Failed"  # For now, assuming failure means no-answer; can refine later
+            reminder_status = "Failed"  # Assuming failure means no-answer; can refine later
 
         params = {"reminder_status": reminder_status}
         try:
@@ -181,9 +195,9 @@ with DAG(
         if final_call_outcome == "Called":
             logger.info(f"Call reminder succeeded and status set to Called for Loan ID: {loan_id}")
             # Future API integration: Update DB column to "Call Reminder Success"
-        elif final_call_outcome.startswith("Failed"):
+        elif final_call_outcome == "Failed":
             logger.info(f"Call reminder failed for Loan ID: {loan_id}")
-            # Future API integration: Update DB column to "Call Reminder Failed"
+            # Future API integration: Update DB column to "Call Reminder Failed")
         else:
             logger.info(f"Call reminder status set to {final_call_outcome} for Loan ID: {loan_id}")
 
