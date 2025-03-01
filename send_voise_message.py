@@ -104,16 +104,22 @@ with DAG(
 
         logger.info(f"Checking if recording is available for call SID: {call_sid}, call_id: {call_id}")
 
+        if not call_id:
+            logger.error("call_id is None, cannot push to XCom with unique key")
+            raise ValueError("call_id is missing in params")
+
         # If `need_ack` is False, skip saving the recording
         if not need_ack:
             logger.info("need_ack is False, skipping recording download.")
             ti.xcom_push(key=f"recording_status_{call_id}", value="No Recording Needed")
+            logger.debug(f"Pushed XCom: key=recording_status_{call_id}, value=No Recording Needed")
             return {"message": "Recording not needed as acknowledgment is not required."}
 
         # Only fetch recording if the call was completed
         if call_status != "completed":
             logger.info(f"Recording unavailable. Call status: {call_status}")
             ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Unavailable")
+            logger.debug(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Unavailable")
             return {"message": f"Cannot fetch recording. Call status: {call_status}"}
 
         # Get the recording list for the call
@@ -122,6 +128,7 @@ with DAG(
         if not recordings:
             logger.info("Recording not found yet. Try again later.")
             ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Not Found")
+            logger.debug(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Not Found")
             return {"message": "Recording not available yet. Try again later."}
 
         # Get the most recent recording URL
@@ -144,10 +151,12 @@ with DAG(
                 f.write(response.content)
             logger.info(f"Recording saved at {file_path}")
             ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Saved")
+            logger.debug(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Saved")
             return {"message": "Recording downloaded successfully", "file_path": file_path}
         else:
             logger.error(f"Failed to download recording, status code: {response.status_code}")
             ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Failed")
+            logger.debug(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Failed")
             return {"message": "Failed to download recording"}
 
     # Define tasks

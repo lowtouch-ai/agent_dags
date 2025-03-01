@@ -81,6 +81,12 @@ with DAG(
         """Validates call status and prepares it for reminder update."""
         ti = kwargs['ti']
         call_id = ti.xcom_pull(task_ids='generate_voice_message', key='call_id')
+        logger.info(f"Attempting to pull recording_status for call_id: {call_id}")
+
+        if not call_id:
+            logger.error("call_id is None in update_call_status")
+            ti.xcom_push(key='call_outcome', value="Failed")
+            return
 
         recording_status = ti.xcom_pull(
             dag_id="twilio_voice_call_direct",
