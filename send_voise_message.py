@@ -159,8 +159,8 @@ with DAG(
 
     wait_task = TimeDeltaSensor(
         task_id="wait_for_call_status",
-        delta=timedelta(seconds=5),  # Wait for 5 seconds
-        poke_interval=5,
+        delta=timedelta(seconds=30),  # Wait for 5 seconds
+        poke_interval=10,
         mode="poke"
     )
 
