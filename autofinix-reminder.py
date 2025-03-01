@@ -1,12 +1,18 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sensors.external_task import ExternalTaskSensor
-from airflow.models import Variable, DagRun, TaskInstance
+from airflow.models import Variable, TaskInstance
+from airflow.utils.trigger_rule import TriggerRule
 from datetime import datetime, timedelta
 import json
 import requests
 import logging
+
+# For backward compatibility with Airflow < 2.2.0
+try:
+    from airflow.api.client.local_client import Client
+except ImportError:
+    Client = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -105,29 +111,26 @@ with DAG(
 
     def trigger_twilio_dag(**kwargs):
         """Manually trigger the twilio_voice_call_direct DAG and push run_id to XCom."""
-        from airflow.models import DagRun
         ti = kwargs['ti']
         conf = ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload')
+        execution_date = kwargs['execution_date']
         
         # Generate a unique run_id
-        execution_date = kwargs['execution_date']
         run_id = f"triggered__{execution_date.strftime('%Y%m%dT%H%M%S')}"
         
-        # Trigger the DAG
-        dag_run = DagRun.create_dag_run(
-            dag_id="twilio_voice_call_direct",
-            run_id=run_id,
-            execution_date=execution_date,
-            conf=conf,
-            state="running",
-            external_trigger=True
-        )
-        
-        if dag_run:
-            ti.xcom_push(key='triggered_run_id', value=run_id)
+        # Trigger the DAG using Airflow's local client (compatible with older versions)
+        if Client is not None:
+            client = Client()
+            client.trigger_dag(
+                dag_id="twilio_voice_call_direct",
+                run_id=run_id,
+                conf=conf,
+                execution_date=execution_date
+            )
             logger.info(f"Triggered twilio_voice_call_direct with run_id: {run_id}")
+            ti.xcom_push(key='triggered_run_id', value=run_id)
         else:
-            raise ValueError("Failed to trigger twilio_voice_call_direct DAG")
+            raise ValueError("Airflow API client not available. Ensure Airflow version supports triggering DAGs.")
 
     def update_reminder_status(**kwargs):
         """Marks the reminder as scheduled in the Autoloan API."""
