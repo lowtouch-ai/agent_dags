@@ -67,49 +67,48 @@ with DAG(
         if not loans or not isinstance(loans, list):
             logger.error("No loans found to process")
             return
-        call_id = str(uuid.uuid4())  # Unique identifier for this call
+        call_id = str(uuid.uuid4())
         messages = {
             "phone_number": loans[0]["phone"],
             "message": "Your loan is due, please pay as soon as possible.",
             "need_ack": True,
-            "call_id": call_id  # Add unique call_id to conf
+            "call_id": call_id
         }
         ti.xcom_push(key='voice_message_payload', value=messages)
-        ti.xcom_push(key='call_id', value=call_id)  # Store call_id for later use
-
-    def update_reminder_status(**kwargs):
-        """Marks the reminder as scheduled in the Autoloan API."""
-        ti = kwargs['ti']
-        loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
-        for loan in loans:
-            logger.info(f"Updated reminder status for Loan ID: {loan['loanid']}")
+        ti.xcom_push(key='call_id', value=call_id)
 
     def update_call_status(**kwargs):
-        """Updates the call status in the Autoloan API with recording_status from twilio_voice_call_direct."""
+        """Validates call status and prepares it for reminder update."""
         ti = kwargs['ti']
         call_id = ti.xcom_pull(task_ids='generate_voice_message', key='call_id')
-        loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
 
-        # Pull recording_status and call_id from twilio_voice_call_direct
         recording_status = ti.xcom_pull(
             dag_id="twilio_voice_call_direct",
             task_ids='fetch_and_save_recording',
-            key='recording_status'
-        )
-        returned_call_id = ti.xcom_pull(
-            dag_id="twilio_voice_call_direct",
-            task_ids='fetch_and_save_recording',
-            key='call_id'
+            key=f'recording_status_{call_id}'
         )
 
-        logger.info(f"Pulled recording_status: {recording_status}, returned_call_id: {returned_call_id}")
+        logger.info(f"Pulled recording_status for call_id {call_id}: {recording_status}")
 
-        if recording_status is None or returned_call_id != call_id:
-            logger.error(f"Call completion check failed: recording_status={recording_status}, expected call_id={call_id}, got {returned_call_id}")
-            raise ValueError(f"Invalid or missing recording_status for call_id {call_id}")
+        if recording_status is None:
+            logger.error(f"No recording_status found for call_id {call_id}")
+            ti.xcom_push(key='call_outcome', value="Failed")
+        else:
+            logger.info(f"Call status for call_id {call_id}: {recording_status}")
+            ti.xcom_push(key='call_outcome', value="Success" if recording_status == "Recording Saved" else "Failed")
 
-        logger.info(f"Recording status for call_id {call_id}: {recording_status}")
-        logger.info(f"Updated call status for Loan ID: {loans[0]['loanid']} with recording status: {recording_status}")
+    def update_reminder_status(**kwargs):
+        """Updates the reminder status based on call outcome."""
+        ti = kwargs['ti']
+        call_outcome = ti.xcom_pull(task_ids='update_call_status', key='call_outcome')
+        loans = ti.xcom_pull(task_ids='fetch_due_loans', key='due_loans')
+        
+        if call_outcome == "Success":
+            logger.info(f"Call reminder succeeded for Loan ID: {loans[0]['loanid']}")
+            # Future API integration: Update DB column to "Call Reminder Success"
+        else:
+            logger.info(f"Call reminder failed for Loan ID: {loans[0]['loanid']}")
+            # Future API integration: Update DB column to "Call Reminder Failed")
 
     # Tasks
     fetch_due_loans_task = PythonOperator(
@@ -128,14 +127,8 @@ with DAG(
         task_id="trigger_twilio_voice_call",
         trigger_dag_id="twilio_voice_call_direct",
         conf="{{ ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload') | tojson }}",
-        wait_for_completion=True,  # Blocks until twilio_voice_call_direct finishes
-        poke_interval=60,  # Check every minute
-    )
-
-    update_reminder_status_task = PythonOperator(
-        task_id="update_reminder_status",
-        python_callable=update_reminder_status,
-        provide_context=True,
+        wait_for_completion=True,
+        poke_interval=60,
     )
 
     update_call_status_task = PythonOperator(
@@ -144,7 +137,13 @@ with DAG(
         provide_context=True,
     )
 
+    update_reminder_status_task = PythonOperator(
+        task_id="update_reminder_status",
+        python_callable=update_reminder_status,
+        provide_context=True,
+    )
+
     # Task Dependencies
     fetch_due_loans_task >> generate_voice_message_task
     generate_voice_message_task >> trigger_send_voice_message
-    trigger_send_voice_message >> [update_reminder_status_task, update_call_status_task]
+    trigger_send_voice_message >> update_call_status_task >> update_reminder_status_task

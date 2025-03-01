@@ -99,19 +99,21 @@ with DAG(
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
         call_status = ti.xcom_pull(task_ids="check_call_status")
         need_ack = ti.xcom_pull(task_ids="initiate_call", key="need_ack")
+        conf = kwargs["params"]
+        call_id = conf.get("call_id")  # Get call_id from conf
 
-        logger.info(f"Checking if recording is available for call SID: {call_sid}")
+        logger.info(f"Checking if recording is available for call SID: {call_sid}, call_id: {call_id}")
 
         # If `need_ack` is False, skip saving the recording
         if not need_ack:
             logger.info("need_ack is False, skipping recording download.")
-            ti.xcom_push(key="recording_status", value="No Recording Needed")
+            ti.xcom_push(key=f"recording_status_{call_id}", value="No Recording Needed")
             return {"message": "Recording not needed as acknowledgment is not required."}
 
         # Only fetch recording if the call was completed
         if call_status != "completed":
             logger.info(f"Recording unavailable. Call status: {call_status}")
-            ti.xcom_push(key="recording_status", value="Recording Unavailable")
+            ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Unavailable")
             return {"message": f"Cannot fetch recording. Call status: {call_status}"}
 
         # Get the recording list for the call
@@ -119,7 +121,7 @@ with DAG(
 
         if not recordings:
             logger.info("Recording not found yet. Try again later.")
-            ti.xcom_push(key="recording_status", value="Recording Not Found")
+            ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Not Found")
             return {"message": "Recording not available yet. Try again later."}
 
         # Get the most recent recording URL
@@ -129,7 +131,7 @@ with DAG(
         execution_date = datetime.now().strftime("%Y-%m-%d")
         dag_name = "twilio_voice_call_direct"
         save_directory = os.path.join(BASE_STORAGE_DIR, dag_name, execution_date)
-        os.makedirs(save_directory, exist_ok=True)  # Ensure directory exists
+        os.makedirs(save_directory, exist_ok=True)
 
         # Save file inside container
         file_path = os.path.join(save_directory, f"{call_sid}.mp3")
@@ -141,11 +143,11 @@ with DAG(
             with open(file_path, "wb") as f:
                 f.write(response.content)
             logger.info(f"Recording saved at {file_path}")
-            ti.xcom_push(key="recording_status", value="Recording Saved")
+            ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Saved")
             return {"message": "Recording downloaded successfully", "file_path": file_path}
-        else:
-            ti.xcom_push(key="recording_status", value="Recording Failed")
-            return {"message": "Failed to download recording"}
+        
+        ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Failed")
+        return {"message": "Failed to download recording"}
 
     # Define tasks
     initiate_call_task = PythonOperator(
