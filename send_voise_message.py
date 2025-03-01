@@ -100,13 +100,7 @@ with DAG(
         call_status = ti.xcom_pull(task_ids="check_call_status")
         need_ack = ti.xcom_pull(task_ids="initiate_call", key="need_ack")
         conf = kwargs["params"]
-        call_id = conf.get("call_id")  # Get call_id from conf
-
-        logger.info(f"Fetching recording for call SID: {call_sid}, call_id received: {call_id}")
-
-        if not call_id:
-            logger.error("call_id is None, using default_call_id for XCom key")
-            call_id = "default_call_id"
+        call_id = conf.get("call_id")
 
         logger.info(f"Checking if recording is available for call SID: {call_sid}, call_id: {call_id}")
 
