@@ -94,7 +94,16 @@ with DAG(
 
         response = client.chat(
             model='autofinix:0.3',
-            messages=[{"role": "user", "content": 'Need to generate a loan due message for the loanid:{loan_id}'}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"Generate a professional loan due reminder message for loan ID {loan_id}. "
+                        "If specific details (like borrower name, due date, or amount) are unavailable, "
+                        "use placeholder text or generic terms to complete the message."
+                    )
+                }
+            ],
             stream=False
         )
         agent_response = response['message']['content']
