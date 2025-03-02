@@ -69,7 +69,7 @@ def send_response(**kwargs):
     ai_response_html = re.sub(r"^```(?:html)?\n?|```$", "", ai_response_html.strip(), flags=re.MULTILINE)
 
     msg = MIMEMultipart()
-    msg["From"] = "WebShop via lowtouch.ai <webshop-support-agent-6981@lowtouch.ai>"
+    msg["From"] = f"WebShop via lowtouch.ai <{EMAIL_ACCOUNT}>"
     msg["To"] = sender_email
     msg["Subject"] = subject
     msg.attach(MIMEText(ai_response_html, "html"))
