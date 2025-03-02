@@ -32,7 +32,7 @@ if not AUTOLOAN_API_URL:
 
 # Define DAG
 with DAG(
-    "autoloan_reminder",
+    "autofinix_reminder",
     default_args=default_args,
     schedule_interval="* * * * *",
     catchup=False,
