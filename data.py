@@ -30,8 +30,8 @@ dbt_seed_commands = [
 
 dbt_run_commands = ["order"]
 
-# Convert 5 AM IST to UTC (Airflow uses UTC by default)
-daily_schedule_utc = "30 23 * * *"  # Runs daily at 11:30 PM UTC (5:00 AM IST)
+# Convert 8 AM IST to UTC (Airflow uses UTC by default)
+daily_schedule_utc = "30 2 * * *"  # Runs daily at 2:30 AM UTC (8:00 AM IST)
 
 with DAG(
     'webshop_reset',
