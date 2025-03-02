@@ -64,7 +64,7 @@ with DAG(
             from_=TWILIO_PHONE_NUMBER,
             twiml=f"""
             <Response>
-                <Say>{message}</Say>
+                <Say>{message}, acknowledge this call after beep</Say>
                 <Record maxLength="30" playBeep="true" />
                 <Say>Thank you! Goodbye.</Say>
             </Response>
@@ -99,49 +99,52 @@ with DAG(
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
         call_status = ti.xcom_pull(task_ids="check_call_status")
         need_ack = ti.xcom_pull(task_ids="initiate_call", key="need_ack")
+        conf = kwargs["params"]
+        call_id = conf.get("call_id")
 
-        logger.info(f"Checking if recording is available for call SID: {call_sid}")
+        logger.info(f"Checking if recording is available for call SID: {call_sid}, call_id: {call_id}")
 
-        # If `need_ack` is False, skip saving the recording
         if not need_ack:
             logger.info("need_ack is False, skipping recording download.")
+            ti.xcom_push(key=f"recording_status_{call_id}", value="No Recording Needed")
+            logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=No Recording Needed")
             return {"message": "Recording not needed as acknowledgment is not required."}
 
-        # Only fetch recording if the call was completed
         if call_status != "completed":
             logger.info(f"Recording unavailable. Call status: {call_status}")
+            ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Unavailable")
+            logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Unavailable")
             return {"message": f"Cannot fetch recording. Call status: {call_status}"}
 
-        # Get the recording list for the call
         recordings = client.recordings.list(call_sid=call_sid)
 
         if not recordings:
             logger.info("Recording not found yet. Try again later.")
+            ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Not Found")
+            logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Not Found")
             return {"message": "Recording not available yet. Try again later."}
 
-        # Get the most recent recording URL
         recording_url = f"https://api.twilio.com{recordings[0].uri.replace('.json', '.mp3')}"
-
-        # Generate dynamic file path based on DAG name and execution date
         execution_date = datetime.now().strftime("%Y-%m-%d")
         dag_name = "twilio_voice_call_direct"
         save_directory = os.path.join(BASE_STORAGE_DIR, dag_name, execution_date)
-        os.makedirs(save_directory, exist_ok=True)  # Ensure directory exists
-
-        # Save file inside container
+        os.makedirs(save_directory, exist_ok=True)
         file_path = os.path.join(save_directory, f"{call_sid}.mp3")
 
-        # Download the MP3 file
         response = requests.get(recording_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
 
         if response.status_code == 200:
             with open(file_path, "wb") as f:
                 f.write(response.content)
-
             logger.info(f"Recording saved at {file_path}")
+            ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Saved")
+            logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Saved")
             return {"message": "Recording downloaded successfully", "file_path": file_path}
-
-        return {"message": "Failed to download recording"}
+        else:
+            logger.error(f"Failed to download recording, status code: {response.status_code}")
+            ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Failed")
+            logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Failed")
+            return {"message": "Failed to download recording"}
 
     # Define tasks
     initiate_call_task = PythonOperator(
@@ -152,8 +155,8 @@ with DAG(
 
     wait_task = TimeDeltaSensor(
         task_id="wait_for_call_status",
-        delta=timedelta(seconds=5),  # Wait for 5 seconds
-        poke_interval=5,
+        delta=timedelta(seconds=30),  # Wait for 5 seconds
+        poke_interval=10,
         mode="poke"
     )
 
