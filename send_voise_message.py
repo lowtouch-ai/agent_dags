@@ -37,7 +37,7 @@ BASE_STORAGE_DIR = "/appz/data"
 
 # Define DAG
 with DAG(
-    "trigger_voice_call",
+    "send-voice-message",
     default_args=default_args,
     schedule_interval=None,  # Manually triggered
     catchup=False,

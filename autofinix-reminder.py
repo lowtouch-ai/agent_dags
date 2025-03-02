@@ -7,7 +7,7 @@ import json
 import requests
 import logging
 import uuid
-
+from ollama import Client 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -86,7 +86,20 @@ with DAG(
         except Exception as e:
             logger.error(f"Failed to fetch due loans: {e}")
             raise
+    def generate_voice_message_agent(loan_id):
+        client = Client(
+        host='http://agentomatic:8000',
+        headers={'x-ltai-client': 'autofinix-voice-respond'}
+    )
 
+        response = client.chat(
+            model='autofinix:0.3',
+            messages=[{"role": "user", "content": 'Need to generate a loan due message for the loanid:{loan_id}'}],
+            stream=False
+        )
+        agent_response = response['message']['content']
+        logging.info(f" Agent Response: {agent_response}")
+        return agent_response
     def generate_voice_message(**kwargs):
         """Generates voice message content for each loan."""
         ti = kwargs['ti']
@@ -115,7 +128,7 @@ with DAG(
             call_id = str(uuid.uuid4())
             messages = {
                 "phone_number": loan["phone"],  # Use the fetched phone number
-                "message": "Your loan is due, please pay as soon as possible.",
+                "message": generate_voice_message_agent(loan_id),
                 "need_ack": True,
                 "call_id": call_id
             }
