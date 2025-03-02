@@ -79,7 +79,7 @@ with DAG(
 
                 
                 logger.info(f"Processing first eligible loan: {eligible_loans}")
-                ti.xcom_push(key='eligible_loans', value=[eligible_loans])
+                ti.xcom_push(key='eligible_loans', value=eligible_loans)
             else:
                 logger.error(f"Failed to fetch due loans from API: {response.status_code} - {response.text}")
                 raise Exception("Failed to fetch due loans from API")
