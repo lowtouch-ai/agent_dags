@@ -25,7 +25,7 @@ postgres_password = Variable.get("WEBSHOP_POSTGRES_PASSWORD")
 # Define dbt commands
 dbt_seed_commands = [
     "address", "articles", "colors", "customer", "labels", 
-    "order_positions", "order_seed", "products", "stock"
+    "order_positions", "order_seed", "products", "stock", "sizes"
 ]
 
 dbt_run_commands = ["order"]
