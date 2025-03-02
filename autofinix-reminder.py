@@ -136,7 +136,7 @@ with DAG(
         
         trigger = TriggerDagRunOperator(
             task_id="trigger_twilio_voice_call_inner",
-            trigger_dag_id="twilio_voice_call_direct",
+            trigger_dag_id="send_voice_message",
             conf=ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload'),
             wait_for_completion=True,
             poke_interval=60,
