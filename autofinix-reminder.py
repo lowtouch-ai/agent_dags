@@ -97,7 +97,7 @@ with DAG(
             return
         for loan in loans:
             # Update reminder_status to ReminderSent for each loan
-            loan_id = loan['loanid']
+            loan_id = loan['loan_id']
             update_url = f"{AUTOLOAN_API_URL}loan/{loan_id}/update_reminder"
             params = {"status": "CallIntiated"}  # Matches updated API valid values
             try:
@@ -201,14 +201,14 @@ with DAG(
         if not loans:
             logger.info("No eligible loans processed.")
             return
-
-        loan_id = loans[0]['loanid']
-        if final_call_outcome == "Called":
-            logger.info(f"Call reminder succeeded and status set to Called for Loan ID: {loan_id}")
-        elif final_call_outcome == "Failed":
-            logger.info(f"Call reminder failed for Loan ID: {loan_id}")
-        else:
-            logger.info(f"Call reminder status set to {final_call_outcome} for Loan ID: {loan_id}")
+        for loan in loans:
+            loan_id = loan['loan_id']
+            if final_call_outcome == "Called":
+                logger.info(f"Call reminder succeeded and status set to Called for Loan ID: {loan_id}")
+            elif final_call_outcome == "Failed":
+                logger.info(f"Call reminder failed for Loan ID: {loan_id}")
+            else:
+                logger.info(f"Call reminder status set to {final_call_outcome} for Loan ID: {loan_id}")
 
     # Tasks
     fetch_due_loans_task = PythonOperator(
