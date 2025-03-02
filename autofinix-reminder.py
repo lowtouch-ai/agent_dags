@@ -42,8 +42,8 @@ with DAG(
         """Fetches loans that are due from the Autoloan API and retrieves the associated phone number."""
         try:
             ti = kwargs['ti']
-            logger.info(f"Calling API to fetch due loans: {AUTOLOAN_API_URL}loan/overdue")
-            response = requests.get(f"{AUTOLOAN_API_URL}loan/overdue")
+            logger.info(f"Calling API to fetch due loans: {AUTOLOAN_API_URL}loan/overdue?reminder_status=Reminder")
+            response = requests.get(f"{AUTOLOAN_API_URL}loan/overdue?reminder_status=Reminder")
             if response.status_code == 200:
                 loan_data = response.json()
                 overdue_loans = loan_data.get("overdue_loans", [])  # Extract the overdue loans list
@@ -56,11 +56,6 @@ with DAG(
                 # Filter loans based on reminder_status and fetch phone numbers
                 eligible_loans = []
                 for loan in overdue_loans:
-                    reminder_status = loan.get("reminder_status", "NotCalled")  # Default if not present
-                    if reminder_status == "Completed":
-                        logger.info(f"Loan ID {loan['loanid']} already completed, skipping.")
-                        continue
-
                     customer_id = loan["customerid"]
                     logger.info(f"Fetching customer details for ID: {customer_id}")
                     customer_response = requests.get(f"{AUTOLOAN_API_URL}customer/{customer_id}")
