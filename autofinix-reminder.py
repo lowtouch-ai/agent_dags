@@ -34,8 +34,9 @@ if not AUTOLOAN_API_URL:
 with DAG(
     "autoloan_reminder",
     default_args=default_args,
-    schedule_interval=None,
+    schedule_interval="* * * * *",
     catchup=False,
+    max_active_runs=1,  # Prevent overlapping runs
 ) as dag:
 
     def fetch_due_loans(**kwargs):
