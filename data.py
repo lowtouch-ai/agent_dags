@@ -2,7 +2,9 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.utils.task_group import TaskGroup
 from datetime import datetime, timedelta
+from airflow.models import Variable
 
+# Default arguments
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
@@ -16,6 +18,10 @@ dbt_project_dir = "/appz/home/airflow/dags/agent_dags/dbt/webshop"
 dbt_executable_path = "/dbt_venv/bin/dbt"  # Full path to dbt binary
 dbt_venv_path = "/dbt_venv/bin/activate"  # Path to activate virtual env
 
+# Get Airflow variables for database credentials
+postgres_user = Variable.get("WEBSHOP_POSTGRES_USER")
+postgres_password = Variable.get("WEBSHOP_POSTGRES_PASSWORD")
+
 # Define dbt commands
 dbt_seed_commands = [
     "address", "articles", "colors", "customer", "labels", 
@@ -28,9 +34,9 @@ dbt_run_commands = ["order"]
 daily_schedule_utc = "30 23 * * *"  # Runs daily at 11:30 PM UTC (5:00 AM IST)
 
 with DAG(
-    'dataload_dag',
+    'webshop_reset',
     default_args=default_args,
-    schedule_interval=daily_schedule_utc,  # Runs daily at 5 AM IST
+    schedule_interval=daily_schedule_utc,
     catchup=False
 ) as dag:
 
@@ -39,7 +45,11 @@ with DAG(
         for seed in dbt_seed_commands:
             BashOperator(
                 task_id=f"dbt_seed_{seed}",
-                bash_command=f"source {dbt_venv_path} && cd {dbt_project_dir} && {dbt_executable_path} seed --select {seed}"
+                bash_command=f"source {dbt_venv_path} && cd {dbt_project_dir} && {dbt_executable_path} seed --select {seed}",
+                env={
+                    "WEBSHOP_POSTGRES_USER": postgres_user,
+                    "WEBSHOP_POSTGRES_PASSWORD": postgres_password
+                }
             )
 
     # TaskGroup for dbt run
@@ -47,7 +57,11 @@ with DAG(
         for run in dbt_run_commands:
             BashOperator(
                 task_id=f"dbt_run_{run}",
-                bash_command=f"source {dbt_venv_path} && cd {dbt_project_dir} && {dbt_executable_path} run --select {run}"
+                bash_command=f"source {dbt_venv_path} && cd {dbt_project_dir} && {dbt_executable_path} run --select {run}",
+                env={
+                    "WEBSHOP_POSTGRES_USER": postgres_user,
+                    "WEBSHOP_POSTGRES_PASSWORD": postgres_password
+                }
             )
 
     dbt_seed_group >> dbt_run_group  # Ensure dbt seed runs before dbt run
