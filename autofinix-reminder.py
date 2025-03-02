@@ -99,7 +99,7 @@ with DAG(
             # Update reminder_status to ReminderSent for each loan
             loan_id = loan['loan_id']
             update_url = f"{AUTOLOAN_API_URL}loan/{loan_id}/update_reminder"
-            params = {"status": "CallIntiated"}  # Matches updated API valid values
+            params = {"status": "CallInitiated"}  # Matches updated API valid values
             try:
                 response = requests.put(update_url, params=params)
                 if response.status_code == 200:
