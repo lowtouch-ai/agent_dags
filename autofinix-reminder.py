@@ -47,16 +47,22 @@ with DAG(
             response = requests.get(f"{AUTOLOAN_API_URL}loan/overdue?reminder_status=Reminder")
             if response.status_code == 200:
                 loan_data = response.json()
+                logger.info(f"API response: {loan_data}")
                 overdue_loans = loan_data.get("overdue_loans", [])  # Extract the overdue loans list
 
                 if not overdue_loans:
-                    logger.info("No overdue loans found.")
+                    logger.info("No overdue loans found with reminder_status=Reminder.")
                     ti.xcom_push(key='eligible_loans', value=[])
                     return
 
-                # Filter loans based on reminder_status and fetch phone numbers
+                # Process loans and fetch phone numbers
                 eligible_loans = []
                 for loan in overdue_loans:
+                    reminder_status = loan.get("reminder_status", "NotCalled")
+                    if reminder_status == "Completed":
+                        logger.info(f"Loan ID {loan['loanid']} already completed, skipping.")
+                        continue
+
                     customer_id = loan["customerid"]
                     logger.info(f"Fetching customer details for ID: {customer_id}")
                     customer_response = requests.get(f"{AUTOLOAN_API_URL}customer/{customer_id}")
@@ -80,7 +86,7 @@ with DAG(
                 logger.info(f"Processing first eligible loan: {first_loan}")
                 ti.xcom_push(key='eligible_loans', value=[first_loan])
             else:
-                logger.error(f"Failed to fetch due loans from API: {response.text}")
+                logger.error(f"Failed to fetch due loans from API: {response.status_code} - {response.text}")
                 raise Exception("Failed to fetch due loans from API")
         except Exception as e:
             logger.error(f"Failed to fetch due loans: {e}")
@@ -99,19 +105,18 @@ with DAG(
         loan = loans[0]  # First loan for testing
         loan_id = loan['loanid']
         update_url = f"{AUTOLOAN_API_URL}loan/{loan_id}/update_reminder"
-        params = {"reminder_status": "ReminderSent"}
+        params = {"reminder_status": "ReminderSent"}  # Matches updated API valid values
         try:
             response = requests.put(update_url, params=params)
             if response.status_code == 200:
                 logger.info(f"Updated reminder_status to ReminderSent for loan ID: {loan_id}")
             else:
-                logger.error(f"Failed to update reminder_status to ReminderSent for loan ID: {loan_id}")
-                ti.xcom_push(key='call_outcome', value="Failed")
-                return
+                logger.error(f"Failed to update reminder_status to ReminderSent for loan ID: {loan_id}. Status: {response.status_code}, Response: {response.text}")
+                raise Exception(f"API failure: {response.status_code} - {response.text}")
         except Exception as e:
-            logger.error(f"Failed to update reminder_status to ReminderSent: {e}")
+            logger.error(f"Failed to update reminder_status to ReminderSent: {str(e)}")
             ti.xcom_push(key='call_outcome', value="Failed")
-            return
+            raise  # Fail the task explicitly to stop the DAG run
 
         call_id = str(uuid.uuid4())
         messages = {
@@ -126,33 +131,49 @@ with DAG(
         logger.info(f"Generated call_id: {call_id} for loan_id: {loan_id}")
 
     def trigger_twilio_voice_call(**kwargs):
-        """Trigger twilio_voice_call_direct and push outcome to XCom."""
+        """Trigger send-voice-message and push outcome to XCom."""
         ti = kwargs.get('ti')
         if not ti:
             logger.error("TaskInstance (ti) not available in kwargs")
             raise ValueError("TaskInstance (ti) missing in kwargs")
 
-        logger.info(f"Triggering twilio_voice_call_direct with conf: {ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload')}")
+        call_outcome = ti.xcom_pull(task_ids='generate_voice_message', key='call_outcome')
+        if call_outcome == "Failed":
+            logger.info("Skipping trigger due to failure in generate_voice_message")
+            ti.xcom_push(key='call_outcome', value="Failed")
+            return
+
+        conf = ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload')
+        if not conf:
+            logger.info("No voice message payload available, skipping trigger")
+            ti.xcom_push(key='call_outcome', value="Failed")
+            return
+
+        logger.info(f"Triggering send-voice-message with conf: {conf}")
         
         trigger = TriggerDagRunOperator(
             task_id="trigger_twilio_voice_call_inner",
             trigger_dag_id="send-voice-message",
-            conf=ti.xcom_pull(task_ids='generate_voice_message', key='voice_message_payload'),
+            conf=conf,
             wait_for_completion=True,
-            poke_interval=60,
+            poke_interval=30,
         )
         trigger.execute(kwargs)
         
         # Since wait_for_completion=True, if we reach here, the triggered DAG succeeded
-        logger.info("twilio_voice_call_direct completed successfully")
+        logger.info("send-voice-message completed successfully")
         ti.xcom_push(key='call_outcome', value="Success")
 
     def update_call_status(**kwargs):
         """Update reminder_status based on call outcome."""
         ti = kwargs['ti']
         call_outcome = ti.xcom_pull(task_ids='trigger_twilio_voice_call', key='call_outcome')
-        loan_id = ti.xcom_pull(task_ids='generate_voice_message', key='loan_id')
+        if call_outcome == "Failed":
+            logger.info("Skipping update due to failure in trigger_twilio_voice_call")
+            ti.xcom_push(key='final_call_outcome', value="Failed")
+            return
 
+        loan_id = ti.xcom_pull(task_ids='generate_voice_message', key='loan_id')
         if not loan_id:
             logger.error("loan_id not found in XCom")
             ti.xcom_push(key='final_call_outcome', value="Failed")
@@ -171,7 +192,7 @@ with DAG(
                 logger.info(f"Updated reminder_status to {reminder_status} for loan ID: {loan_id}")
                 ti.xcom_push(key='final_call_outcome', value=reminder_status)
             else:
-                logger.error(f"Failed to update reminder_status to {reminder_status} for loan ID: {loan_id}")
+                logger.error(f"Failed to update reminder_status to {reminder_status} for loan ID: {loan_id}. Status: {response.status_code}, Response: {response.text}")
                 ti.xcom_push(key='final_call_outcome', value="Failed")
         except Exception as e:
             logger.error(f"Failed to update reminder_status: {e}")
@@ -190,10 +211,8 @@ with DAG(
         loan_id = loans[0]['loanid']
         if final_call_outcome == "Called":
             logger.info(f"Call reminder succeeded and status set to Called for Loan ID: {loan_id}")
-            # Future API integration: Update DB column to "Call Reminder Success"
         elif final_call_outcome == "Failed":
             logger.info(f"Call reminder failed for Loan ID: {loan_id}")
-            # Future API integration: Update DB column to "Call Reminder Failed")
         else:
             logger.info(f"Call reminder status set to {final_call_outcome} for Loan ID: {loan_id}")
 

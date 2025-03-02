@@ -52,28 +52,40 @@ with DAG(
     def initiate_call(**kwargs):
         """Initiate the voice call using Twilio API"""
         conf = kwargs["params"]
+        logger.info(f"Received conf: {conf}")
+
+        # Validate required parameters
+        if not conf.get("phone_number") or not conf.get("message"):
+            logger.error("Missing required parameters: phone_number or message")
+            kwargs["ti"].xcom_push(key="call_outcome", value="Failed")
+            raise ValueError("Missing required parameters: phone_number or message")
+
         phone_number = conf["phone_number"]
         message = conf["message"]
-        need_ack = conf["need_ack"]
+        need_ack = conf.get("need_ack", False)
 
         logger.info(f"Initiating call to: {phone_number}, need_ack: {need_ack}")
 
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        call = client.calls.create(
-            to=phone_number,
-            from_=TWILIO_PHONE_NUMBER,
-            twiml=f"""
-            <Response>
-                <Say>{message}, acknowledge this call after beep</Say>
-                <Record maxLength="30" playBeep="true" />
-                <Say>Thank you! Goodbye.</Say>
-            </Response>
-            """
-        )
-        
-        logger.info(f"Call initiated with SID: {call.sid}")
-        kwargs["ti"].xcom_push(key="call_sid", value=call.sid)
-        kwargs["ti"].xcom_push(key="need_ack", value=need_ack)  # Store need_ack for later use
+        try:
+            call = client.calls.create(
+                to=phone_number,
+                from_=TWILIO_PHONE_NUMBER,
+                twiml=f"""
+                <Response>
+                    <Say>{message}, acknowledge this call after beep</Say>
+                    <Record maxLength="30" playBeep="true" />
+                    <Say>Thank you! Goodbye.</Say>
+                </Response>
+                """
+            )
+            logger.info(f"Call initiated with SID: {call.sid}")
+            kwargs["ti"].xcom_push(key="call_sid", value=call.sid)
+            kwargs["ti"].xcom_push(key="need_ack", value=need_ack)
+        except Exception as e:
+            logger.error(f"Failed to initiate call: {str(e)}")
+            kwargs["ti"].xcom_push(key="call_outcome", value="Failed")
+            raise
 
     def check_call_status(**kwargs):
         """Check call status via Twilio API"""
@@ -81,16 +93,24 @@ with DAG(
         ti = kwargs["ti"]
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
 
+        if not call_sid:
+            logger.error("No call_sid found in XCom, cannot check status")
+            ti.xcom_push(key="call_status", value="Failed")
+            raise ValueError("No call_sid found in XCom")
+
         logger.info(f"Checking call status for SID: {call_sid}")
 
-        call = client.calls(call_sid).fetch()
-        logger.info(f"Call status: {call.status}")
-
-        if call.status in ["completed", "no-answer", "busy", "failed"]:
-            ti.xcom_push(key="call_status", value=call.status)
-            return call.status  # Return status instead of raising an error
-
-        raise ValueError(f"Call not yet completed: {status}")
+        try:
+            call = client.calls(call_sid).fetch()
+            logger.info(f"Call status: {call.status}")
+            if call.status in ["completed", "no-answer", "busy", "failed"]:
+                ti.xcom_push(key="call_status", value=call.status)
+                return call.status
+            raise ValueError(f"Call not yet completed: {call.status}")
+        except Exception as e:
+            logger.error(f"Failed to check call status: {str(e)}")
+            ti.xcom_push(key="call_status", value="Failed")
+            raise
 
     def fetch_and_save_recording(**kwargs):
         """Fetch and save the call recording if `need_ack` is True"""
@@ -100,7 +120,7 @@ with DAG(
         call_status = ti.xcom_pull(task_ids="check_call_status")
         need_ack = ti.xcom_pull(task_ids="initiate_call", key="need_ack")
         conf = kwargs["params"]
-        call_id = conf.get("call_id")
+        call_id = conf.get("call_id", "default_call_id")
 
         logger.info(f"Checking if recording is available for call SID: {call_sid}, call_id: {call_id}")
 
@@ -116,35 +136,40 @@ with DAG(
             logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Unavailable")
             return {"message": f"Cannot fetch recording. Call status: {call_status}"}
 
-        recordings = client.recordings.list(call_sid=call_sid)
+        try:
+            recordings = client.recordings.list(call_sid=call_sid)
 
-        if not recordings:
-            logger.info("Recording not found yet. Try again later.")
-            ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Not Found")
-            logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Not Found")
-            return {"message": "Recording not available yet. Try again later."}
+            if not recordings:
+                logger.info("Recording not found yet. Try again later.")
+                ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Not Found")
+                logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Not Found")
+                return {"message": "Recording not available yet. Try again later."}
 
-        recording_url = f"https://api.twilio.com{recordings[0].uri.replace('.json', '.mp3')}"
-        execution_date = datetime.now().strftime("%Y-%m-%d")
-        dag_name = "twilio_voice_call_direct"
-        save_directory = os.path.join(BASE_STORAGE_DIR, dag_name, execution_date)
-        os.makedirs(save_directory, exist_ok=True)
-        file_path = os.path.join(save_directory, f"{call_sid}.mp3")
+            recording_url = f"https://api.twilio.com{recordings[0].uri.replace('.json', '.mp3')}"
+            execution_date = datetime.now().strftime("%Y-%m-%d")
+            dag_name = "send-voice-message"
+            save_directory = os.path.join(BASE_STORAGE_DIR, dag_name, execution_date)
+            os.makedirs(save_directory, exist_ok=True)
+            file_path = os.path.join(save_directory, f"{call_sid}.mp3")
 
-        response = requests.get(recording_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
+            response = requests.get(recording_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
 
-        if response.status_code == 200:
-            with open(file_path, "wb") as f:
-                f.write(response.content)
-            logger.info(f"Recording saved at {file_path}")
-            ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Saved")
-            logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Saved")
-            return {"message": "Recording downloaded successfully", "file_path": file_path}
-        else:
-            logger.error(f"Failed to download recording, status code: {response.status_code}")
-            ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Failed")
-            logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Failed")
-            return {"message": "Failed to download recording"}
+            if response.status_code == 200:
+                with open(file_path, "wb") as f:
+                    f.write(response.content)
+                logger.info(f"Recording saved at {file_path}")
+                ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Saved")
+                logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Saved")
+                return {"message": "Recording downloaded successfully", "file_path": file_path}
+            else:
+                logger.error(f"Failed to download recording, status code: {response.status_code}")
+                ti.xcom_push(key=f"recording_status_{call_id}", value="Recording Failed")
+                logger.info(f"Pushed XCom: key=recording_status_{call_id}, value=Recording Failed")
+                return {"message": "Failed to download recording"}
+        except Exception as e:
+            logger.error(f"Failed to fetch/save recording: {str(e)}")
+            ti.xcom_push(key=f"recording_status_{call_id}", value="Failed")
+            return {"message": f"Failed to fetch/save recording: {str(e)}"}
 
     # Define tasks
     initiate_call_task = PythonOperator(
@@ -155,7 +180,7 @@ with DAG(
 
     wait_task = TimeDeltaSensor(
         task_id="wait_for_call_status",
-        delta=timedelta(seconds=30),  # Wait for 5 seconds
+        delta=timedelta(seconds=30),
         poke_interval=10,
         mode="poke"
     )
@@ -164,7 +189,7 @@ with DAG(
         task_id="check_call_status",
         python_callable=check_call_status,
         provide_context=True,
-        retries=50,  # Keeps checking until status is completed or no-answer
+        retries=50,
         retry_delay=timedelta(seconds=5)
     )
 
@@ -176,4 +201,4 @@ with DAG(
 
     # Set task dependencies
     initiate_call_task >> wait_task >> check_status_task
-    check_status_task >> fetch_recording_task  # Only runs if call is completed
+    check_status_task >> fetch_recording_task
