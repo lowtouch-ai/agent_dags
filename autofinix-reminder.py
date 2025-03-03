@@ -109,7 +109,7 @@ with DAG(
         for loan in loans:
             # Update reminder_status to CallIntiated for each loan
             loan_id = loan['loan_id']
-            call_id = loan['id']  # Assuming 'id' is the CallID from the API response
+            call_id = loan['call_id']  # Assuming 'id' is the CallID from the API response
             update_url = f"{AUTOFINIX_API_URL}loan/{loan_id}/update_reminder"
             params = {"status": "CallInitiated", "call_id": call_id}  # Corrected parameter name
             try:
