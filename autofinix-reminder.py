@@ -259,7 +259,7 @@ with DAG(
         provide_context=True,
     )
 
-    branch_task = BranchPythonOperator(
+    evaluate_due_loans_results = BranchPythonOperator(
         task_id="evaluate_due_loans_result",
         python_callable=evaluate_due_loans_result,
         provide_context=True,
@@ -299,8 +299,8 @@ with DAG(
     )
 
     # Task Dependencies
-    fetch_due_loans_task >> branch_task
-    branch_task >> [generate_voice_message_task, handle_no_due_loans]
+    fetch_due_loans_task >> evaluate_due_loans_results
+    evaluate_due_loans_results >> [generate_voice_message_task, handle_no_due_loans]
     generate_voice_message_task >> trigger_send_voice_message
     trigger_send_voice_message >> update_call_status_task
     update_call_status_task >> update_reminder_status_task
