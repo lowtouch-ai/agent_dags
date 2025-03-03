@@ -95,35 +95,6 @@ with DAG(
         else:
             return "handle_no_due_loans"
 
-    # def generate_voice_message_agent(loan_id):
-    #     """Generates a professional loan due reminder message using the agent."""
-    #     try:
-    #         client = Client(
-    #             host='http://agentomatic:8000',
-    #             headers={'x-ltai-client': 'autofinix-voice-respond'}
-    #         )
-
-    #         response = client.chat(
-    #             model='autofinix:0.3',
-    #             messages=[
-    #                 {
-    #                     "role": "user",
-    #                     "content": (
-    #                         f"Generate a professional loan due reminder message for loan ID {loan_id}. "
-    #                         "If specific details (like borrower name, due date, or amount) are unavailable, "
-    #                         "use placeholder text or generic terms to complete the message."
-    #                     )
-    #                 }
-    #             ],
-    #             stream=False
-    #         )
-    #         agent_response = response['message']['content']
-    #         logging.info(f"Agent Response: {agent_response}")
-    #         return agent_response
-    #     except Exception as e:
-    #         logger.error(f"Failed to generate voice message from agent for loan ID {loan_id}: {str(e)}")
-    #         return "Your loan is due, please pay as soon as possible."  # Fallback message
-
     def generate_voice_message(**kwargs):
         """Generates voice message content for each loan."""
         ti = kwargs['ti']
@@ -138,29 +109,30 @@ with DAG(
         for loan in loans:
             # Update reminder_status to CallIntiated for each loan
             loan_id = loan['loan_id']
-            call_id=loan['call_id']
+            call_id = loan['id']  # Assuming 'id' is the CallID from the API response
             update_url = f"{AUTOFINIX_API_URL}loan/{loan_id}/update_reminder"
-            params = {"status": "CallInitiated","call_id":call_id}  # Matches updated API valid values
+            params = {"status": "CallInitiated", "call_id": call_id}  # Corrected parameter name
             try:
                 response = requests.put(update_url, params=params)
                 if response.status_code == 200:
-                    logger.info(f"Updated reminder_status to CallIntiated for loan ID: {loan_id}")
+                    logger.info(f"Updated reminder_status to CallInitiated for loan ID: {loan_id}, call ID: {call_id}")
                     result = response.json()
-                    call_id = result.get('call_id')  # Get the call_id from the API response
-                    if not call_id:
+                    updated_call_id = result.get('call_id')  # Get the call_id from the API response
+                    if not updated_call_id:
                         logger.error(f"Call ID not returned in API response for loan ID: {loan_id}")
                         raise Exception("Call ID not returned in API response")
+                    call_id = updated_call_id  # Update call_id if API confirms a different one
                 else:
-                    logger.error(f"Failed to update reminder_status to CallIntiated for loan ID: {loan_id}. Status: {response.status_code}, Response: {response.text}")
+                    logger.error(f"Failed to update reminder_status to CallInitiated for loan ID: {loan_id}. Status: {response.status_code}, Response: {response.text}")
                     raise Exception(f"API failure: {response.status_code} - {response.text}")
             except Exception as e:
-                logger.error(f"Failed to update reminder_status to CallIntiated: {str(e)}")
+                logger.error(f"Failed to update reminder_status to CallInitiated: {str(e)}")
                 ti.xcom_push(key='call_outcome', value="Failed")
                 ti.xcom_push(key='call_ids', value=[])
                 raise  # Fail the task explicitly to stop the DAG run
 
-            # Generate voice message using the agent
-            message = f"the loan amount if due for the loan {loan_id}. Please pay as soon as possible."
+            # Generate static voice message
+            message = f"The loan amount is due for the loan {loan_id}. Please pay as soon as possible."
 
             # Use the call_id from the API response
             messages = {
@@ -327,8 +299,8 @@ with DAG(
     )
 
     # Task Dependencies
-    fetch_due_loans_task >> evaluate_due_loans_result
-    evaluate_due_loans_result >> [generate_voice_message_task, handle_no_due_loans]
+    fetch_due_loans_task >> branch_task
+    branch_task >> [generate_voice_message_task, handle_no_due_loans]
     generate_voice_message_task >> trigger_send_voice_message
     trigger_send_voice_message >> update_call_status_task
     update_call_status_task >> update_reminder_status_task
