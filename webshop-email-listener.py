@@ -16,11 +16,11 @@ default_args = {
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 24),
     "retries": 1,
-    "retry_delay": timedelta(minutes=5),
+    "retry_delay": timedelta(seconds=15),
 }
 
 # Configuration variables
-EMAIL_ACCOUNT = Variable.get("EMAIL_ID")  
+WEBSHOP_FROM_ADDRESS = Variable.get("WEBSHOP_FROM_ADDRESS")  
 GMAIL_CREDENTIALS = Variable.get("GMAIL_CREDENTIALS", deserialize_json=True)  
 LAST_PROCESSED_EMAIL_FILE = "/appz/cache/last_processed_email.json"  # Track last responded email timestamp
 
@@ -32,8 +32,8 @@ def authenticate_gmail():
     profile = service.users().getProfile(userId="me").execute()
     logged_in_email = profile.get("emailAddress", "")
 
-    if logged_in_email.lower() != EMAIL_ACCOUNT.lower():
-        raise ValueError(f" Wrong Gmail account! Expected {EMAIL_ACCOUNT}, but got {logged_in_email}")
+    if logged_in_email.lower() != WEBSHOP_FROM_ADDRESS.lower():
+        raise ValueError(f" Wrong Gmail account! Expected {WEBSHOP_FROM_ADDRESS}, but got {logged_in_email}")
 
     logging.info(f" Authenticated Gmail Account: {logged_in_email}")
     return service
