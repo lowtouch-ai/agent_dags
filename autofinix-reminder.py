@@ -86,14 +86,14 @@ with DAG(
             logger.error(f"Failed to fetch due loans: {e}")
             raise
 
-    def branch_func(**kwargs):
+    def evaluate_due_loans_result(**kwargs):
         """Determines which path to take based on whether eligible loans are found."""
         ti = kwargs['ti']
         loans = ti.xcom_pull(task_ids='fetch_due_loans', key='eligible_loans')
         if loans and isinstance(loans, list) and len(loans) > 0:
             return "generate_voice_message"
         else:
-            return "skip_task"
+            return "handle_no_due_loans"
 
     # def generate_voice_message_agent(loan_id):
     #     """Generates a professional loan due reminder message using the agent."""
@@ -288,13 +288,13 @@ with DAG(
     )
 
     branch_task = BranchPythonOperator(
-        task_id="branch_task",
-        python_callable=branch_func,
+        task_id="evaluate_due_loans_result",
+        python_callable=evaluate_due_loans_result,
         provide_context=True,
     )
 
-    skip_task = DummyOperator(
-        task_id="skip_task",
+    handle_no_due_loans = DummyOperator(
+        task_id="handle_no_due_loans",
     )
 
     generate_voice_message_task = PythonOperator(
@@ -327,10 +327,10 @@ with DAG(
     )
 
     # Task Dependencies
-    fetch_due_loans_task >> branch_task
-    branch_task >> [generate_voice_message_task, skip_task]
+    fetch_due_loans_task >> evaluate_due_loans_result
+    evaluate_due_loans_result >> [generate_voice_message_task, handle_no_due_loans]
     generate_voice_message_task >> trigger_send_voice_message
     trigger_send_voice_message >> update_call_status_task
     update_call_status_task >> update_reminder_status_task
     update_reminder_status_task >> end_task
-    skip_task >> end_task
+    handle_no_due_loans >> end_task
