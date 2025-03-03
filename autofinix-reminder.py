@@ -159,7 +159,7 @@ with DAG(
                 raise  # Fail the task explicitly to stop the DAG run
 
             # Generate voice message using the agent
-            message = generate_voice_message_agent(loan_id)
+            message = f"the loan amount if due for the loan {loan_id}. Please pay as soon as possible."
 
             # Use the call_id from the API response
             messages = {
