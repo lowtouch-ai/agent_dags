@@ -138,8 +138,9 @@ with DAG(
         for loan in loans:
             # Update reminder_status to CallIntiated for each loan
             loan_id = loan['loan_id']
+            call_id=loan['call_id']
             update_url = f"{AUTOFINIX_API_URL}loan/{loan_id}/update_reminder"
-            params = {"reminder_status": "CallIntiated"}  # Matches updated API valid values
+            params = {"status": "CallIntiated","call_id":call_id}  # Matches updated API valid values
             try:
                 response = requests.put(update_url, params=params)
                 if response.status_code == 200:
@@ -246,7 +247,7 @@ with DAG(
             update_url = f"{AUTOFINIX_API_URL}loan/{loan_id}/update_reminder"
             reminder_status = "CalledCompleted" if call_outcome == "Success" else "CallFailed"
 
-            params = {"reminder_status": reminder_status, "call_id": call_id}
+            params = {"status": reminder_status, "call_id": call_id}
             try:
                 response = requests.put(update_url, params=params)
                 if response.status_code == 200:
