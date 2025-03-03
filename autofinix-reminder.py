@@ -95,34 +95,34 @@ with DAG(
         else:
             return "skip_task"
 
-    def generate_voice_message_agent(loan_id):
-        """Generates a professional loan due reminder message using the agent."""
-        try:
-            client = Client(
-                host='http://agentomatic:8000',
-                headers={'x-ltai-client': 'autofinix-voice-respond'}
-            )
+    # def generate_voice_message_agent(loan_id):
+    #     """Generates a professional loan due reminder message using the agent."""
+    #     try:
+    #         client = Client(
+    #             host='http://agentomatic:8000',
+    #             headers={'x-ltai-client': 'autofinix-voice-respond'}
+    #         )
 
-            response = client.chat(
-                model='autofinix:0.3',
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Generate a professional loan due reminder message for loan ID {loan_id}. "
-                            "If specific details (like borrower name, due date, or amount) are unavailable, "
-                            "use placeholder text or generic terms to complete the message."
-                        )
-                    }
-                ],
-                stream=False
-            )
-            agent_response = response['message']['content']
-            logging.info(f"Agent Response: {agent_response}")
-            return agent_response
-        except Exception as e:
-            logger.error(f"Failed to generate voice message from agent for loan ID {loan_id}: {str(e)}")
-            return "Your loan is due, please pay as soon as possible."  # Fallback message
+    #         response = client.chat(
+    #             model='autofinix:0.3',
+    #             messages=[
+    #                 {
+    #                     "role": "user",
+    #                     "content": (
+    #                         f"Generate a professional loan due reminder message for loan ID {loan_id}. "
+    #                         "If specific details (like borrower name, due date, or amount) are unavailable, "
+    #                         "use placeholder text or generic terms to complete the message."
+    #                     )
+    #                 }
+    #             ],
+    #             stream=False
+    #         )
+    #         agent_response = response['message']['content']
+    #         logging.info(f"Agent Response: {agent_response}")
+    #         return agent_response
+    #     except Exception as e:
+    #         logger.error(f"Failed to generate voice message from agent for loan ID {loan_id}: {str(e)}")
+    #         return "Your loan is due, please pay as soon as possible."  # Fallback message
 
     def generate_voice_message(**kwargs):
         """Generates voice message content for each loan."""
