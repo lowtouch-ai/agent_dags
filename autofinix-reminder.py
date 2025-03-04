@@ -248,7 +248,7 @@ with DAG(
             if not twilio_status:
                 # If for some reason it doesn't exist, assume "Failed"
                 twilio_status = "failed"
-            
+            logger.info(f"Twilio status for call_id={call_id}: {twilio_status}")
             # Map Twilio status to your custom DB statuses
             if twilio_status == "completed":
                 reminder_status = "CallCompleted"
