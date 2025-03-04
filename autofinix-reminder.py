@@ -94,7 +94,32 @@ with DAG(
             return "generate_voice_message"
         else:
             return "handle_no_due_loans"
+    
+    def generate_voice_message_agent(loan_id):
+        client = Client(
+        host=AGENTOMATIC_API_URL,
+        headers={'x-ltai-client': 'autofinix-voice-respond'}
+    )
 
+        response = client.chat(
+            model='autofinix:0.3',
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"Generate a professional loan due reminder message for loan ID {loan_id}. "
+                        "Fetch the overdue details for this loan, including customerid, loanamount, interestrate, "
+                        "tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. "
+                        "If specific details are unavailable or cannot be retrieved, use placeholder text or generic terms to complete the message."
+                    )
+                }
+            ],
+            stream=False
+        )
+        agent_response = response['message']['content']
+        logging.info(f" Agent Response: {agent_response}")
+        return agent_response
+    
     def generate_voice_message(**kwargs):
         """Generates voice message content for each loan."""
         ti = kwargs['ti']
@@ -137,7 +162,7 @@ with DAG(
             # Use the call_id from the API response
             messages = {
                 "phone_number": loan["phone"],
-                "message": message,
+                "message": generate_voice_message_agent(loan_id),
                 "need_ack": True,
                 "call_id": call_id  # Use API-provided call_id
             }
