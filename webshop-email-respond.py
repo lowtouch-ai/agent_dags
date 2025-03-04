@@ -55,16 +55,12 @@ def get_ai_response(user_query):
         agent_response = response['message']['content']
         logging.info(f"Agent Response: {agent_response[:100]}...")
         return agent_response
-    except ResponseError as e:
+    except e:
         error_detail = e.response.text if e.response else str(e)
         logging.error(f"API call failed with ResponseError: {error_detail} (status code: {e.status_code})")
         # Check if it's a 401 error specifically
-        if e.status_code == 500 and "401" in error_detail:
-            raise ValueError("AI service authentication failed due to an invalid API key.")
-        raise  # Re-raise other ResponseErrors to be handled upstream
-    except Exception as e:
-        logging.error(f"Unexpected error in get_ai_response: {str(e)}")
-        raise
+        return "AI service authentication failed due to an invalid API key."
+
 
 def clean_subject(subject):
     return re.sub(r"^(Re:\s*)+", "Re: ", subject, flags=re.IGNORECASE).strip()
