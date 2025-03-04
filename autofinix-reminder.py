@@ -225,39 +225,33 @@ with DAG(
         ti.xcom_push(key='call_outcome', value=overall_outcome)
 
     def update_call_status(**kwargs):
-        """Update reminder_status based on call outcome using call_id."""
+        """Update the loan reminder status in the database based on the call outcome."""
         ti = kwargs['ti']
-        call_outcome = ti.xcom_pull(task_ids='trigger_twilio_voice_call', key='call_outcome')
-        if call_outcome == "Failed":
-            logger.info("Skipping update due to failure in trigger_twilio_voice_call")
-            ti.xcom_push(key='final_call_outcome', value="Failed")
-            return
+        final_call_outcomes = ti.xcom_pull(task_ids='trigger_twilio_voice_call', key='final_call_outcomes')
 
-        call_ids = ti.xcom_pull(task_ids='generate_voice_message', key='call_ids') or []
-        if not call_ids:
-            logger.error("No call_ids found in XCom")
+        if not final_call_outcomes:
+            logger.error("No final call outcomes found in XCom")
             ti.xcom_push(key='final_call_outcome', value="Failed")
             return
 
         outcomes = []
-        for call_id in call_ids:
+        for call_id, reminder_status in final_call_outcomes.items():
             loan_id = ti.xcom_pull(task_ids='generate_voice_message', key=f'loan_id_{call_id}')
             if not loan_id:
-                logger.error(f"loan_id for call_id {call_id} not found in XCom")
+                logger.error(f"Loan ID not found for call ID {call_id}")
                 outcomes.append("Failed")
                 continue
 
             update_url = f"{AUTOFINIX_API_URL}loan/{loan_id}/update_reminder"
-            reminder_status = "CalledCompleted" if call_outcome == "Success" else "CallFailed"
-
             params = {"status": reminder_status, "call_id": call_id}
+
             try:
                 response = requests.put(update_url, params=params)
                 if response.status_code == 200:
                     logger.info(f"Updated reminder_status to {reminder_status} for call ID: {call_id}, loan ID: {loan_id}")
                     outcomes.append(reminder_status)
                 else:
-                    logger.error(f"Failed to update reminder_status to {reminder_status} for call ID: {call_id}, loan ID: {loan_id}. Status: {response.status_code}, Response: {response.text}")
+                    logger.error(f"Failed to update reminder_status. Call ID: {call_id}, Loan ID: {loan_id}")
                     outcomes.append("Failed")
             except Exception as e:
                 logger.error(f"Failed to update reminder_status: {e}")
@@ -265,7 +259,6 @@ with DAG(
 
         final_outcome = "Success" if all(outcome != "Failed" for outcome in outcomes) else "Failed"
         ti.xcom_push(key='final_call_outcome', value=final_outcome)
-
     def update_reminder_status(**kwargs):
         """Logs the final reminder status based on call outcome."""
         ti = kwargs['ti']

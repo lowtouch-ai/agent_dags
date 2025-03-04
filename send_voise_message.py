@@ -88,7 +88,7 @@ with DAG(
             raise
 
     def check_call_status(**kwargs):
-        """Check call status via Twilio API"""
+        """Check call status via Twilio API and update the final call outcome"""
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         ti = kwargs["ti"]
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
@@ -103,14 +103,16 @@ with DAG(
         try:
             call = client.calls(call_sid).fetch()
             logger.info(f"Call status: {call.status}")
-            if call.status in ["completed", "no-answer", "busy", "failed"]:
-                ti.xcom_push(key="call_status", value=call.status)
-                return call.status
-            raise ValueError(f"Call not yet completed: {call.status}")
+
+            # Push the actual call outcome to XCom
+            ti.xcom_push(key="call_status", value=call.status)
+
+            return call.status
         except Exception as e:
             logger.error(f"Failed to check call status: {str(e)}")
             ti.xcom_push(key="call_status", value="Failed")
             raise
+
 
     def fetch_and_save_recording(**kwargs):
         """Fetch and save the call recording if `need_ack` is True"""
