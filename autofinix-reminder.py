@@ -163,7 +163,7 @@ with DAG(
                 raise  # Fail the task explicitly to stop the DAG run
 
             # Generate static voice message
-            message = f"The loan amount is due for the loan {loan_id}. Please pay as soon as possible."
+            
 
             # Use the call_id from the API response
             messages = {
@@ -216,7 +216,7 @@ with DAG(
             # Trigger `send-voice-message` DAG
             trigger = TriggerDagRunOperator(
                 task_id=f"trigger_twilio_voice_call_inner_{call_id}",
-                trigger_dag_id="send-voice-message",
+                trigger_dag_id="send-voice-message-1",
                 conf=conf,
                 wait_for_completion=True,
                 poke_interval=30,
