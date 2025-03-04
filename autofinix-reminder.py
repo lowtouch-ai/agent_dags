@@ -239,40 +239,40 @@ with DAG(
         ti.xcom_push(key="final_call_outcomes", value=final_outcomes)
 
     def update_call_status(**kwargs):
-        """Update the loan reminder status in the database based on the call outcome."""
         ti = kwargs['ti']
-        final_call_outcomes = ti.xcom_pull(task_ids='trigger_twilio_voice_call', key='final_call_outcomes')
+        call_ids = ti.xcom_pull(task_ids='generate_voice_message', key='call_ids') or []
 
-        if not final_call_outcomes:
-            logger.error("No final call outcomes found in XCom")
-            ti.xcom_push(key='final_call_outcome', value="Failed")
-            return
+        for call_id in call_ids:
+            # Retrieve the Twilio call status from the Variable
+            twilio_status = Variable.get(f"twilio_call_status_{call_id}", default_var=None)
+            if not twilio_status:
+                # If for some reason it doesn't exist, assume "Failed"
+                twilio_status = "failed"
+            
+            # Map Twilio status to your custom DB statuses
+            if twilio_status == "completed":
+                reminder_status = "CallCompleted"
+            elif twilio_status in ["no-answer", "busy", "failed"]:
+                reminder_status = "CallFailed"
+            else:
+                reminder_status = "Unknown"
 
-        outcomes = []
-        for call_id, reminder_status in final_call_outcomes.items():
             loan_id = ti.xcom_pull(task_ids='generate_voice_message', key=f'loan_id_{call_id}')
-            if not loan_id:
-                logger.error(f"Loan ID not found for call ID {call_id}")
-                outcomes.append("Failed")
-                continue
 
+            # Update your loan DB or API
             update_url = f"{AUTOFINIX_API_URL}loan/{loan_id}/update_reminder"
             params = {"status": reminder_status, "call_id": call_id}
+            response = requests.put(update_url, params=params)
+            if response.status_code == 200:
+                logger.info(f"Updated status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
+            else:
+                logger.error(f"Failed to update status. call_id={call_id}, loan_id={loan_id}")
 
-            try:
-                response = requests.put(update_url, params=params)
-                if response.status_code == 200:
-                    logger.info(f"Updated reminder_status to {reminder_status} for call ID: {call_id}, loan ID: {loan_id}")
-                    outcomes.append(reminder_status)
-                else:
-                    logger.error(f"Failed to update reminder_status. Call ID: {call_id}, Loan ID: {loan_id}")
-                    outcomes.append("Failed")
-            except Exception as e:
-                logger.error(f"Failed to update reminder_status: {e}")
-                outcomes.append("Failed")
-
-        final_outcome = "Success" if all(outcome != "Failed" for outcome in outcomes) else "Failed"
-        ti.xcom_push(key='final_call_outcome', value=final_outcome)
+            # OPTIONAL: Delete the Variable now that we have stored its contents
+            Variable.delete(f"twilio_call_status_{call_id}")
+            logger.info(f"Deleted Variable key twilio_call_status_{call_id} to avoid clutter.")
+        
+        
     def update_reminder_status(**kwargs):
         """Logs the final reminder status based on call outcome."""
         ti = kwargs['ti']

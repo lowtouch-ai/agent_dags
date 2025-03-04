@@ -87,32 +87,26 @@ with DAG(
             kwargs["ti"].xcom_push(key="call_outcome", value="Failed")
             raise
 
+    
     def check_call_status(**kwargs):
-        """Check call status via Twilio API and store the result using `call_id`."""
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         ti = kwargs["ti"]
         
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
-        call_id = kwargs["params"].get("call_id")  # Passed from `autofinix_reminder`
+        call_id = kwargs["params"].get("call_id")  # Unique call identifier from your main DAG
 
         if not call_sid or not call_id:
-            logger.error("Missing call_sid or call_id, cannot check status")
             ti.xcom_push(key=f"call_status_{call_id}", value="Failed")
             raise ValueError("Missing call_sid or call_id")
 
-        logger.info(f"Checking call status for Call SID: {call_sid}, Call ID: {call_id}")
+        call = client.calls(call_sid).fetch()
+        call_status = call.status  # e.g., "completed", "no-answer", "busy", "failed"
 
-        try:
-            call = client.calls(call_sid).fetch()
-            logger.info(f"Call ID: {call_id}, Call Status: {call.status}")
+        # Store the Twilio call status in an Airflow Variable keyed by call_id
+        Variable.set(f"twilio_call_status_{call_id}", call_status)
 
-            # Store the call status using `call_id`
-            ti.xcom_push(key=f"call_status_{call_id}", value=call.status)  # ✅ Now using `call_id`
-            return call.status
-        except Exception as e:
-            logger.error(f"Failed to check call status: {str(e)}")
-            ti.xcom_push(key=f"call_status_{call_id}", value="Failed")
-            raise
+        ti.xcom_push(key=f"call_status_{call_id}", value=call_status)
+        return call_status
 
 
 
