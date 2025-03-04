@@ -181,7 +181,7 @@ with DAG(
         ti.xcom_push(key='call_ids', value=call_ids)
 
     def trigger_twilio_voice_call(**kwargs):
-        """Trigger send-voice-message for each reminder and push outcome to XCom."""
+        """Trigger send-voice-message DAG and retrieve final call outcome"""
         ti = kwargs.get('ti')
         if not ti:
             logger.error("TaskInstance (ti) not available in kwargs")
@@ -199,16 +199,18 @@ with DAG(
             ti.xcom_push(key='call_outcome', value="Failed")
             return
 
-        outcomes = []
+        final_outcomes = {}
+
         for call_id in call_ids:
             conf = ti.xcom_pull(task_ids='generate_voice_message', key=f'voice_message_payload_{call_id}')
             if not conf:
                 logger.info(f"No voice message payload available for call_id {call_id}, skipping")
-                outcomes.append("Failed")
+                final_outcomes[call_id] = "Failed"
                 continue
 
             logger.info(f"Triggering send-voice-message with conf: {conf}")
-            
+
+            # Trigger `send-voice-message` DAG
             trigger = TriggerDagRunOperator(
                 task_id=f"trigger_twilio_voice_call_inner_{call_id}",
                 trigger_dag_id="send-voice-message",
@@ -217,12 +219,21 @@ with DAG(
                 poke_interval=30,
             )
             trigger.execute(kwargs)
-            
-            logger.info(f"send-voice-message completed successfully for call_id: {call_id}")
-            outcomes.append("Success")
 
-        overall_outcome = "Success" if all(outcome == "Success" for outcome in outcomes) else "Failed"
-        ti.xcom_push(key='call_outcome', value=overall_outcome)
+            # Retrieve final call status from `send-voice-message` DAG
+            call_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
+            logger.info(f"Call status received from Twilio DAG: {call_status}")
+
+            # Map Twilio status to custom database status
+            if call_status in ["completed"]:
+                final_outcomes[call_id] = "CallCompleted"
+            elif call_status in ["no-answer", "busy", "failed"]:
+                final_outcomes[call_id] = "CallFailed"
+            else:
+                final_outcomes[call_id] = "Unknown"
+
+        # Push all final call outcomes to XCom
+        ti.xcom_push(key='final_call_outcomes', value=final_outcomes)
 
     def update_call_status(**kwargs):
         """Update the loan reminder status in the database based on the call outcome."""
