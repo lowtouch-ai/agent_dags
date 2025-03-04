@@ -13,6 +13,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
@@ -23,6 +26,7 @@ default_args = {
 
 WEBSHOP_FROM_ADDRESS = Variable.get("WEBSHOP_FROM_ADDRESS")  
 GMAIL_CREDENTIALS = Variable.get("GMAIL_CREDENTIALS", deserialize_json=True)  
+OLLAMA_HOST = "http://agentomatic:8000"  # Explicitly define with protocol
 
 def authenticate_gmail():
     creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
@@ -34,24 +38,31 @@ def authenticate_gmail():
     if logged_in_email.lower() != WEBSHOP_FROM_ADDRESS.lower():
         raise ValueError(f"Wrong Gmail account! Expected {WEBSHOP_FROM_ADDRESS}, but got {logged_in_email}")
 
+    logging.info(f"Authenticated Gmail account: {logged_in_email}")
     return service
 
 def get_ai_response(user_query):
-    client = Client(
-        host='http://agentomatic:8000',
-        headers={'x-ltai-client': 'webshop-email-respond'}
-    )
-    response = client.chat(
-        model='webshop-email:0.5',
-        messages=[{"role": "user", "content": user_query}],
-        stream=False
-    )
-    agent_response = response['message']['content']
-    logging.info(f"Agent Response: {agent_response}")
-    return agent_response
+    try:
+        logging.info(f"Attempting to connect to Ollama at: {OLLAMA_HOST}")
+        client = Client(
+            host=OLLAMA_HOST,
+            headers={'x-ltai-client': 'webshop-email-respond'}
+        )
+        logging.info(f"Sending query to Ollama: {user_query[:100]}...")  # Truncate for brevity
+        
+        response = client.chat(
+            model='webshop-email:0.5',
+            messages=[{"role": "user", "content": user_query}],
+            stream=False
+        )
+        agent_response = response['message']['content']
+        logging.info(f"Agent Response: {agent_response[:100]}...")  # Truncate for brevity
+        return agent_response
+    except Exception as e:
+        logging.error(f"Failed to get AI response: {str(e)}")
+        raise
 
 def get_email_thread(service, email_data):
-    """Fetch the full thread of emails based on the threadId."""
     thread_id = email_data.get("threadId")
     if not thread_id:
         logging.warning("No threadId found, treating as a single email.")
@@ -73,7 +84,6 @@ def get_email_thread(service, email_data):
     return thread_content
 
 def clean_subject(subject):
-    """Remove duplicate 'Re:' prefixes and normalize the subject."""
     return re.sub(r"^(Re:\s*)+", "Re: ", subject, flags=re.IGNORECASE).strip()
 
 def send_response(**kwargs):
@@ -103,6 +113,8 @@ def send_response(**kwargs):
     # Handle FAILED_TO_RESPOND
     if "FAILED_TO_RESPOND" in ai_response_html:
         error_message = ai_response_html
+        logging.info(f"Detected FAILED_TO_RESPOND: {error_message}")
+        
         friendly_query = f"The response was '{error_message}'. Provide a friendly email response to ask the user for more details."
         friendly_response = get_ai_response(friendly_query)
         friendly_response = re.sub(r"^```(?:html)?\n?|```$", "", friendly_response.strip(), flags=re.MULTILINE)
