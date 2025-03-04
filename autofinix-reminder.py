@@ -6,6 +6,7 @@ from airflow.models import Variable
 from datetime import datetime, timedelta
 import json
 import requests
+import re
 import logging
 import uuid
 from ollama import Client 
@@ -111,7 +112,7 @@ with DAG(
                         "Fetch the overdue details for this loan, including customerid, loanamount, interestrate, "
                         "tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. "
                         "If specific details are unavailable or cannot be retrieved, use placeholder text or generic terms. "
-                        "The final response must be a concise message, containing only relevant content, suitable for conversion to a voice call."
+                        "The final response must be a concise message which should not exceed 500 charecters, containing only relevant content, suitable for conversion to a voice call."
                     )
                 }
             ],
@@ -120,7 +121,11 @@ with DAG(
         agent_response = response['message']['content']
         logging.info(f" Agent Response: {agent_response}")
         return agent_response
-    
+    def clean_message(message):
+        """
+        Removes newline (\n) and tab (\t) characters from the message.
+        """
+        return re.sub(r'[\n\t]', ' ', message).strip()
     def generate_voice_message(**kwargs):
         """Generates voice message content for each loan."""
         ti = kwargs['ti']
