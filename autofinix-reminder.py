@@ -266,6 +266,8 @@ with DAG(
                 response = requests.put(update_url, params=params)
                 if response.status_code == 200:
                     logger.info(f"Updated status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
+                else:
+                    logger.error(f"Failed to update status. call_id={call_id}, loan_id={loan_id} Status: {response.status_code}, Response: {response.text}")
             except Exception as e:
                 logger.error(f"Failed to update status. call_id={call_id}, loan_id={loan_id} due to the exception: {str(e)}")
             # OPTIONAL: Delete the Variable now that we have stored its contents
