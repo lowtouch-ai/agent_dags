@@ -56,15 +56,14 @@ def get_ai_response(user_query):
         logging.info(f"Agent Response: {agent_response[:100]}...")
         return agent_response
     except ResponseError as e:
-        error_detail = e.response.text if e.response else str(e)
-        logging.error(f"API call failed with ResponseError: {error_detail} (status code: {e.status_code})")
+        error_detail = str(e)
+        logging.error(f"API call failed with ResponseError: {error_detail} (status code: {getattr(e, 'status_code', 'unknown')})")
         return "AI service authentication failed due to an invalid API key."
 
 def clean_subject(subject):
     return re.sub(r"^(Re:\s*)+", "Re: ", subject, flags=re.IGNORECASE).strip()
 
 def get_email_thread(service, email_data):
-    # Implementation from above
     thread_id = email_data.get("threadId")
     message_id = email_data["headers"].get("Message-ID", "")
     
