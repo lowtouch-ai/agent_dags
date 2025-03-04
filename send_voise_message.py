@@ -3,6 +3,7 @@ from airflow.decorators import task
 from airflow.models.param import Param
 from airflow.operators.python import PythonOperator
 from airflow.sensors.time_delta import TimeDeltaSensor
+from airflow.exceptions import AirflowException
 from airflow.models import Variable
 from datetime import datetime, timedelta
 from twilio.rest import Client
@@ -89,24 +90,34 @@ with DAG(
 
     
     def check_call_status(**kwargs):
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        """Poll Twilio for call status, raise exception if still in-progress."""
         ti = kwargs["ti"]
-        
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
-        call_id = kwargs["params"].get("call_id")  # Unique call identifier from your main DAG
+        call_id = kwargs["params"].get("call_id")  # Unique call ID passed in conf
 
         if not call_sid or not call_id:
+            # We mark XCom as 'Failed' for completeness
             ti.xcom_push(key=f"call_status_{call_id}", value="Failed")
             raise ValueError("Missing call_sid or call_id")
 
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         call = client.calls(call_sid).fetch()
-        call_status = call.status  # e.g., "completed", "no-answer", "busy", "failed"
+        current_status = call.status  # e.g., "in-progress", "completed", "no-answer", "busy", "failed"
+        logger.info(f"Call SID={call_sid}, call ID={call_id}, status={current_status}")
 
-        # Store the Twilio call status in an Airflow Variable keyed by call_id
-        Variable.set(f"twilio_call_status_{call_id}", call_status)
+        # If final, store in Variable and XCom
+        if current_status in ["completed", "no-answer", "busy", "failed"]:
+            # 1) Store final status for cross-DAG usage
+            Variable.set(f"twilio_call_status_{call_id}", current_status)
 
-        ti.xcom_push(key=f"call_status_{call_id}", value=call_status)
-        return call_status
+            # 2) Also store in XCom for local usage
+            ti.xcom_push(key=f"call_status_{call_id}", value=current_status)
+
+            # If you'd like to return the status for referencing in the next task
+            return current_status
+        else:
+            # If call is still in-progress, raise an exception to trigger a retry
+            raise AirflowException(f"Call is still {current_status}. Retrying...")
 
 
 
