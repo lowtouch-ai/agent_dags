@@ -109,19 +109,19 @@ with DAG(
         for loan in loans:
             # Update reminder_status to CallIntiated for each loan
             loan_id = loan['loan_id']
-            call_id = loan['call_id']  # Assuming 'id' is the CallID from the API response
+            call_id = loan['id']  # Assuming 'id' is the CallID from the API response
             update_url = f"{AUTOFINIX_API_URL}loan/{loan_id}/update_reminder"
-            params = {"status": "CallInitiated", "call_id": call_id}  # Corrected parameter name
+            params = {"reminder_status": "CallInitiated", "call_id": call_id}
             try:
                 response = requests.put(update_url, params=params)
                 if response.status_code == 200:
                     logger.info(f"Updated reminder_status to CallInitiated for loan ID: {loan_id}, call ID: {call_id}")
                     result = response.json()
-                    updated_call_id = result.get('call_id')  # Get the call_id from the API response
+                    updated_call_id = result.get('call_id')
                     if not updated_call_id:
                         logger.error(f"Call ID not returned in API response for loan ID: {loan_id}")
                         raise Exception("Call ID not returned in API response")
-                    call_id = updated_call_id  # Update call_id if API confirms a different one
+                    call_id = updated_call_id
                 else:
                     logger.error(f"Failed to update reminder_status to CallInitiated for loan ID: {loan_id}. Status: {response.status_code}, Response: {response.text}")
                     raise Exception(f"API failure: {response.status_code} - {response.text}")
@@ -139,7 +139,7 @@ with DAG(
                 "phone_number": loan["phone"],
                 "message": message,
                 "need_ack": True,
-                "call_id": call_id  # Use API-provided call_id
+                "call_id": call_id
             }
             ti.xcom_push(key=f'voice_message_payload_{call_id}', value=messages)
             ti.xcom_push(key=f'call_id_{call_id}', value=call_id)
@@ -150,7 +150,7 @@ with DAG(
         ti.xcom_push(key='call_ids', value=call_ids)
 
     def trigger_twilio_voice_call(**kwargs):
-        """Trigger send-voice-message for each reminder and push outcome to XCom."""
+        """Trigger send-voice-message for each reminder and push outcome to XCom based on call status."""
         ti = kwargs.get('ti')
         if not ti:
             logger.error("TaskInstance (ti) not available in kwargs")
@@ -185,10 +185,22 @@ with DAG(
                 wait_for_completion=True,
                 poke_interval=30,
             )
-            trigger.execute(kwargs)
+            dag_run = trigger.execute(kwargs)  # Returns the triggered DagRun object
             
-            logger.info(f"send-voice-message completed successfully for call_id: {call_id}")
-            outcomes.append("Success")
+            # Retrieve call_status from the triggered DAG run
+            call_status = ti.xcom_pull(dag_id="send-voice-message", task_ids="check_call_status", key=f"call_status_{call_id}", dag_run_id=dag_run.run_id)
+            if not call_status:
+                logger.error(f"Failed to retrieve call_status for call_id {call_id} from send-voice-message")
+                outcomes.append("Failed")
+                continue
+
+            logger.info(f"Retrieved call_status for call_id {call_id}: {call_status}")
+            if call_status == "completed":
+                logger.info(f"send-voice-message completed successfully for call_id: {call_id}")
+                outcomes.append("Success")
+            else:
+                logger.info(f"send-voice-message failed (status: {call_status}) for call_id: {call_id}")
+                outcomes.append("Failed")
 
         overall_outcome = "Success" if all(outcome == "Success" for outcome in outcomes) else "Failed"
         ti.xcom_push(key='call_outcome', value=overall_outcome)
@@ -219,7 +231,7 @@ with DAG(
             update_url = f"{AUTOFINIX_API_URL}loan/{loan_id}/update_reminder"
             reminder_status = "CalledCompleted" if call_outcome == "Success" else "CallFailed"
 
-            params = {"status": reminder_status, "call_id": call_id}
+            params = {"reminder_status": reminder_status, "call_id": call_id}
             try:
                 response = requests.put(update_url, params=params)
                 if response.status_code == 200:

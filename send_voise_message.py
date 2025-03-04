@@ -1,6 +1,4 @@
 from airflow import DAG
-from airflow.decorators import task
-from airflow.models.param import Param
 from airflow.operators.python import PythonOperator
 from airflow.sensors.time_delta import TimeDeltaSensor
 from airflow.models import Variable
@@ -37,16 +35,11 @@ BASE_STORAGE_DIR = "/appz/data"
 
 # Define DAG
 with DAG(
-    "trigger_voice_call",
+    "send-voice-message",
     default_args=default_args,
     schedule_interval=None,  # Manually triggered
     catchup=False,
     render_template_as_native_obj=True,
-    params={
-        "phone_number": Param("+1234567890", type="string", title="Phone Number", description="Recipient's phone number."),
-        "message": Param("Hello, please leave a message after the beep.", type="string", title="Message Before Beep"),
-        "need_ack": Param(False, type="boolean", title="Require Acknowledgment", description="Set to true if you need an acknowledgment."),
-    }
 ) as dag:
 
     def initiate_call(**kwargs):
@@ -63,8 +56,9 @@ with DAG(
         phone_number = conf["phone_number"]
         message = conf["message"]
         need_ack = conf.get("need_ack", False)
+        call_id = conf.get("call_id", "default_call_id")
 
-        logger.info(f"Initiating call to: {phone_number}, need_ack: {need_ack}")
+        logger.info(f"Initiating call to: {phone_number}, need_ack: {need_ack}, call_id: {call_id}")
 
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         try:
@@ -82,6 +76,7 @@ with DAG(
             logger.info(f"Call initiated with SID: {call.sid}")
             kwargs["ti"].xcom_push(key="call_sid", value=call.sid)
             kwargs["ti"].xcom_push(key="need_ack", value=need_ack)
+            kwargs["ti"].xcom_push(key="call_id", value=call_id)  # Push call_id for reference
         except Exception as e:
             logger.error(f"Failed to initiate call: {str(e)}")
             kwargs["ti"].xcom_push(key="call_outcome", value="Failed")
@@ -92,24 +87,26 @@ with DAG(
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         ti = kwargs["ti"]
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
+        call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id")
 
         if not call_sid:
             logger.error("No call_sid found in XCom, cannot check status")
             ti.xcom_push(key="call_status", value="Failed")
             raise ValueError("No call_sid found in XCom")
 
-        logger.info(f"Checking call status for SID: {call_sid}")
+        logger.info(f"Checking call status for SID: {call_sid}, call_id: {call_id}")
 
         try:
             call = client.calls(call_sid).fetch()
             logger.info(f"Call status: {call.status}")
             if call.status in ["completed", "no-answer", "busy", "failed"]:
-                ti.xcom_push(key="call_status", value=call.status)
+                ti.xcom_push(key=f"call_status_{call_id}", value=call.status)  # Push call_status with call_id
+                ti.xcom_push(key="call_status", value=call.status)  # General key for downstream
                 return call.status
             raise ValueError(f"Call not yet completed: {call.status}")
         except Exception as e:
             logger.error(f"Failed to check call status: {str(e)}")
-            ti.xcom_push(key="call_status", value="Failed")
+            ti.xcom_push(key=f"call_status_{call_id}", value="Failed")
             raise
 
     def fetch_and_save_recording(**kwargs):
@@ -117,10 +114,9 @@ with DAG(
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         ti = kwargs["ti"]
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
-        call_status = ti.xcom_pull(task_ids="check_call_status")
+        call_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
         need_ack = ti.xcom_pull(task_ids="initiate_call", key="need_ack")
-        conf = kwargs["params"]
-        call_id = conf.get("call_id", "default_call_id")
+        call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id") or "default_call_id"
 
         logger.info(f"Checking if recording is available for call SID: {call_sid}, call_id: {call_id}")
 
