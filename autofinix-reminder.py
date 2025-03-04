@@ -181,34 +181,37 @@ with DAG(
         ti.xcom_push(key='call_ids', value=call_ids)
 
     def trigger_twilio_voice_call(**kwargs):
-        """Trigger send-voice-message DAG and retrieve final call outcome"""
-        ti = kwargs.get('ti')
+        """Trigger `send-voice-message` DAG and retrieve call status using `call_id`."""
+        ti = kwargs.get("ti")
         if not ti:
             logger.error("TaskInstance (ti) not available in kwargs")
             raise ValueError("TaskInstance (ti) missing in kwargs")
 
-        call_outcome = ti.xcom_pull(task_ids='generate_voice_message', key='call_outcome')
+        call_outcome = ti.xcom_pull(task_ids="generate_voice_message", key="call_outcome")
         if call_outcome == "Failed":
             logger.info("Skipping trigger due to failure in generate_voice_message")
-            ti.xcom_push(key='call_outcome', value="Failed")
+            ti.xcom_push(key="call_outcome", value="Failed")
             return
 
-        call_ids = ti.xcom_pull(task_ids='generate_voice_message', key='call_ids') or []
+        call_ids = ti.xcom_pull(task_ids="generate_voice_message", key="call_ids") or []
         if not call_ids:
             logger.info("No call_ids available, skipping trigger")
-            ti.xcom_push(key='call_outcome', value="Failed")
+            ti.xcom_push(key="call_outcome", value="Failed")
             return
 
         final_outcomes = {}
 
         for call_id in call_ids:
-            conf = ti.xcom_pull(task_ids='generate_voice_message', key=f'voice_message_payload_{call_id}')
+            conf = ti.xcom_pull(task_ids="generate_voice_message", key=f"voice_message_payload_{call_id}")
             if not conf:
                 logger.info(f"No voice message payload available for call_id {call_id}, skipping")
                 final_outcomes[call_id] = "Failed"
                 continue
 
-            logger.info(f"Triggering send-voice-message with conf: {conf}")
+            logger.info(f"Triggering `send-voice-message` with conf: {conf}")
+
+            # Pass `call_id` so it can be used in `send-voice-message`
+            conf["call_id"] = call_id
 
             # Trigger `send-voice-message` DAG
             trigger = TriggerDagRunOperator(
@@ -220,12 +223,12 @@ with DAG(
             )
             trigger.execute(kwargs)
 
-            # Retrieve final call status from `send-voice-message` DAG
-            call_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
-            logger.info(f"Call status received from Twilio DAG: {call_status}")
+            # ✅ Fetch call status using `call_id`
+            call_status = ti.xcom_pull(task_ids="check_call_status", key=f"call_status_{call_id}")
+            logger.info(f"Call ID: {call_id}, Call status received: {call_status}")
 
             # Map Twilio status to custom database status
-            if call_status in ["completed"]:
+            if call_status == "completed":
                 final_outcomes[call_id] = "CallCompleted"
             elif call_status in ["no-answer", "busy", "failed"]:
                 final_outcomes[call_id] = "CallFailed"
@@ -233,7 +236,7 @@ with DAG(
                 final_outcomes[call_id] = "Unknown"
 
         # Push all final call outcomes to XCom
-        ti.xcom_push(key='final_call_outcomes', value=final_outcomes)
+        ti.xcom_push(key="final_call_outcomes", value=final_outcomes)
 
     def update_call_status(**kwargs):
         """Update the loan reminder status in the database based on the call outcome."""
