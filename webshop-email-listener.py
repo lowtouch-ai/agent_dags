@@ -21,7 +21,7 @@ default_args = {
 
 # Configuration variables
 WEBSHOP_FROM_ADDRESS = Variable.get("WEBSHOP_FROM_ADDRESS")  
-GMAIL_CREDENTIALS = Variable.get("GMAIL_CREDENTIALS", deserialize_json=True)  
+GMAIL_CREDENTIALS = Variable.get("WEBSHOP_GMAIL_CREDENTIALS", deserialize_json=True)  
 LAST_PROCESSED_EMAIL_FILE = "/appz/cache/last_processed_email.json"
 
 def authenticate_gmail():
