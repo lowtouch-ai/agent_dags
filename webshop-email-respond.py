@@ -58,7 +58,7 @@ def get_ai_response(user_query):
     except ResponseError as e:
         error_detail = str(e)
         logging.error(f"API call failed with ResponseError: {error_detail} (status code: {getattr(e, 'status_code', 'unknown')})")
-        return "AI service authentication failed due to an invalid API key."
+        return "We are currently experiencing technical difficulties and will get back to you shortly."
 
 def clean_subject(subject):
     return re.sub(r"^(Re:\s*)+", "Re: ", subject, flags=re.IGNORECASE).strip()
