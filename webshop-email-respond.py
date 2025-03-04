@@ -26,7 +26,7 @@ default_args = {
 
 WEBSHOP_FROM_ADDRESS = Variable.get("WEBSHOP_FROM_ADDRESS")  
 GMAIL_CREDENTIALS = Variable.get("GMAIL_CREDENTIALS", deserialize_json=True)  
-OLLAMA_HOST = "http://agentomatic:8000"  # Explicitly define with protocol
+OLLAMA_HOST = Variable.get("OLLAMA_HOST")  # Explicitly define with protocol
 
 def authenticate_gmail():
     creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
@@ -134,7 +134,7 @@ def send_response(**kwargs):
 
     # Send regular response
     msg = MIMEMultipart()
-    msg["From"] = f"WebShop via lowtouch.ai <{WEBSHOP_FROM_ADDRESS}>"
+    msg["From"] = f"WebShop via liji <{WEBSHOP_FROM_ADDRESS}>"
     msg["To"] = sender_email
     msg["Subject"] = subject
     msg["In-Reply-To"] = email_data["headers"].get("Message-ID", "")
