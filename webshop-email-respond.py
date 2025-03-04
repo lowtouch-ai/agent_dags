@@ -26,8 +26,8 @@ default_args = {
 }
 
 WEBSHOP_FROM_ADDRESS = Variable.get("WEBSHOP_FROM_ADDRESS")
-GMAIL_CREDENTIALS = Variable.get("GMAIL_CREDENTIALS", deserialize_json=True)
-OLLAMA_HOST = Variable.get("OLLAMA_HOST")
+GMAIL_CREDENTIALS = Variable.get("WEBSHOP_GMAIL_CREDENTIALS", deserialize_json=True)
+OLLAMA_HOST = Variable.get("WEBSHOP_OLLAMA_HOST")
 
 def authenticate_gmail():
     creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
