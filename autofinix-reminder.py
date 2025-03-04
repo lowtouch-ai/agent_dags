@@ -110,7 +110,8 @@ with DAG(
                         f"Generate a professional loan due reminder message for loan ID {loan_id}. "
                         "Fetch the overdue details for this loan, including customerid, loanamount, interestrate, "
                         "tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. "
-                        "If specific details are unavailable or cannot be retrieved, use placeholder text or generic terms to complete the message."
+                        "If specific details are unavailable or cannot be retrieved, use placeholder text or generic terms. "
+                        "The final response must be a concise message, containing only relevant content, suitable for conversion to a voice call."
                     )
                 }
             ],
