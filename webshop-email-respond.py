@@ -9,7 +9,7 @@ import re
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
-from ollama._types import ResponseError  # Import ResponseError explicitly
+from ollama._types import ResponseError
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
@@ -55,15 +55,53 @@ def get_ai_response(user_query):
         agent_response = response['message']['content']
         logging.info(f"Agent Response: {agent_response[:100]}...")
         return agent_response
-    except e:
+    except ResponseError as e:
         error_detail = e.response.text if e.response else str(e)
         logging.error(f"API call failed with ResponseError: {error_detail} (status code: {e.status_code})")
-        # Check if it's a 401 error specifically
         return "AI service authentication failed due to an invalid API key."
-
 
 def clean_subject(subject):
     return re.sub(r"^(Re:\s*)+", "Re: ", subject, flags=re.IGNORECASE).strip()
+
+def get_email_thread(service, email_data):
+    # Implementation from above
+    thread_id = email_data.get("threadId")
+    message_id = email_data["headers"].get("Message-ID", "")
+    
+    if not thread_id:
+        query_result = service.users().messages().list(userId="me", q=f"rfc822msgid:{message_id}").execute()
+        messages = query_result.get("messages", [])
+        if messages:
+            message = service.users().messages().get(userId="me", id=messages[0]["id"]).execute()
+            thread_id = message.get("threadId")
+    
+    if not thread_id:
+        logging.warning(f"No thread ID found for message ID {message_id}. Treating as a single email.")
+        return [{"headers": email_data["headers"], "content": email_data["content"]}]
+
+    thread = service.users().threads().get(userId="me", id=thread_id).execute()
+    thread_emails = []
+    
+    for msg in thread.get("messages", []):
+        headers = {header["name"]: header["value"] for header in msg.get("payload", {}).get("headers", [])}
+        payload = msg.get("payload", {})
+        content = ""
+        if "parts" in payload:
+            for part in payload["parts"]:
+                if part["mimeType"] in ["text/plain", "text/html"]:
+                    content = base64.urlsafe_b64decode(part["body"].get("data", "").encode("ASCII")).decode("utf-8")
+                    break
+        elif "body" in payload and "data" in payload["body"]:
+            content = base64.urlsafe_b64decode(payload["body"]["data"].encode("ASCII")).decode("utf-8")
+        
+        if "text/html" in payload.get("mimeType", ""):
+            soup = BeautifulSoup(content, "html.parser")
+            content = soup.get_text()
+        
+        thread_emails.append({"headers": headers, "content": content.strip()})
+    
+    logging.info(f"Retrieved {len(thread_emails)} emails in thread {thread_id}")
+    return thread_emails
 
 def send_response(**kwargs):
     email_data = kwargs['dag_run'].conf.get("email_data", {})
@@ -86,7 +124,6 @@ def send_response(**kwargs):
         ai_response_html = get_ai_response(full_query)
         ai_response_html = re.sub(r"^```(?:html)?\n?|```$", "", ai_response_html.strip(), flags=re.MULTILINE)
 
-        # Handle FAILED_TO_RESPOND case
         if "FAILED_TO_RESPOND" in ai_response_html:
             error_message = ai_response_html
             logging.info(f"Detected FAILED_TO_RESPOND: {error_message}")
@@ -104,7 +141,6 @@ def send_response(**kwargs):
             raise ValueError(error_message)
 
     except ValueError as e:
-        # Handle specific errors like invalid API key or FAILED_TO_RESPOND
         logging.error(f"Caught ValueError: {str(e)}")
         friendly_message = """
         <p>Hello,</p>
@@ -119,9 +155,8 @@ def send_response(**kwargs):
         msg["References"] = email_data["headers"].get("References", "") + " " + email_data["headers"].get("Message-ID", "")
         msg.attach(MIMEText(friendly_message, "html"))
         service.users().messages().send(userId="me", body={"raw": base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")}).execute()
-        raise  # Re-raise to fail the task
+        raise
 
-    # Send regular response if no errors
     msg = MIMEMultipart()
     msg["From"] = f"WebShop via lowtouch.ai <{WEBSHOP_FROM_ADDRESS}>"
     msg["To"] = sender_email
