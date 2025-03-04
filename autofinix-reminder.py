@@ -258,16 +258,16 @@ with DAG(
                 reminder_status = "Unknown"
 
             loan_id = ti.xcom_pull(task_ids='generate_voice_message', key=f'loan_id_{call_id}')
-
-            # Update your loan DB or API
-            update_url = f"{AUTOFINIX_API_URL}loan/{loan_id}/update_reminder"
-            params = {"status": reminder_status, "call_id": call_id}
-            response = requests.put(update_url, params=params)
-            if response.status_code == 200:
-                logger.info(f"Updated status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
-            else:
-                logger.error(f"Failed to update status. call_id={call_id}, loan_id={loan_id}")
-
+            logger.info(f"Updating reminder status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
+            try:
+                # Update your loan DB or API
+                update_url = f"{AUTOFINIX_API_URL}loan/{loan_id}/update_reminder"
+                params = {"status": reminder_status, "call_id": call_id}
+                response = requests.put(update_url, params=params)
+                if response.status_code == 200:
+                    logger.info(f"Updated status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
+            except Exception as e:
+                logger.error(f"Failed to update status. call_id={call_id}, loan_id={loan_id} due to the exception: {str(e)}")
             # OPTIONAL: Delete the Variable now that we have stored its contents
             Variable.delete(f"twilio_call_status_{call_id}")
             logger.info(f"Deleted Variable key twilio_call_status_{call_id} to avoid clutter.")
