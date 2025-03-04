@@ -18,10 +18,10 @@ default_args = {
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 18),
     "retries": 1,
-    "retry_delay": timedelta(minutes=5),
+    "retry_delay": timedelta(seconds=15),
 }
 
-EMAIL_ACCOUNT = Variable.get("EMAIL_ID")  
+WEBSHOP_FROM_ADDRESS = Variable.get("WEBSHOP_FROM_ADDRESS")  
 GMAIL_CREDENTIALS = Variable.get("GMAIL_CREDENTIALS", deserialize_json=True)  
 
 def authenticate_gmail():
@@ -31,8 +31,8 @@ def authenticate_gmail():
     profile = service.users().getProfile(userId="me").execute()
     logged_in_email = profile.get("emailAddress", "")
 
-    if logged_in_email.lower() != EMAIL_ACCOUNT.lower():
-        raise ValueError(f" Wrong Gmail account! Expected {EMAIL_ACCOUNT}, but got {logged_in_email}")
+    if logged_in_email.lower() != WEBSHOP_FROM_ADDRESS.lower():
+        raise ValueError(f" Wrong Gmail account! Expected {WEBSHOP_FROM_ADDRESS}, but got {logged_in_email}")
 
     return service
 
@@ -69,7 +69,7 @@ def send_response(**kwargs):
     ai_response_html = re.sub(r"^```(?:html)?\n?|```$", "", ai_response_html.strip(), flags=re.MULTILINE)
 
     msg = MIMEMultipart()
-    msg["From"] = "me"
+    msg["From"] = f"WebShop via lowtouch.ai <{WEBSHOP_FROM_ADDRESS}>"
     msg["To"] = sender_email
     msg["Subject"] = subject
     msg.attach(MIMEText(ai_response_html, "html"))

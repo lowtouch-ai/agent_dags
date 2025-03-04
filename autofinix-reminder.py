@@ -8,7 +8,7 @@ import json
 import requests
 import logging
 import uuid
-
+from ollama import Client 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
