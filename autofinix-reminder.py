@@ -126,6 +126,7 @@ with DAG(
         Removes newline (\n) and tab (\t) characters from the message.
         """
         return re.sub(r'[\n\t]', ' ', message).strip()
+    
     def generate_voice_message(**kwargs):
         """Generates voice message content for each loan."""
         ti = kwargs['ti']
@@ -161,14 +162,13 @@ with DAG(
                 ti.xcom_push(key='call_outcome', value="Failed")
                 ti.xcom_push(key='call_ids', value=[])
                 raise  # Fail the task explicitly to stop the DAG run
-
-            # Generate static voice message
             
-
+            # Generate voice message using Agent-O-Matic and clean the message
+            agent_cleaned_message=clean_message(generate_voice_message_agent(loan_id))
             # Use the call_id from the API response
             messages = {
                 "phone_number": loan["phone"],
-                "message": generate_voice_message_agent(loan_id),
+                "message": agent_cleaned_message,
                 "need_ack": True,
                 "call_id": call_id  # Use API-provided call_id
             }
@@ -216,7 +216,7 @@ with DAG(
             # Trigger `send-voice-message` DAG
             trigger = TriggerDagRunOperator(
                 task_id=f"trigger_twilio_voice_call_inner_{call_id}",
-                trigger_dag_id="send-voice-message-1",
+                trigger_dag_id="send-voice-message",
                 conf=conf,
                 wait_for_completion=True,
                 poke_interval=30,
