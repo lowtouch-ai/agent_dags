@@ -6,6 +6,7 @@ from airflow.models import Variable
 from datetime import datetime, timedelta
 import json
 import requests
+import re
 import logging
 import uuid
 from ollama import Client 
@@ -111,7 +112,7 @@ with DAG(
                         "Fetch the overdue details for this loan, including customerid, loanamount, interestrate, "
                         "tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. "
                         "If specific details are unavailable or cannot be retrieved, use placeholder text or generic terms. "
-                        "The final response must be a concise message, containing only relevant content, suitable for conversion to a voice call."
+                        "The final response must be a concise message which should not exceed 500 charecters, containing only relevant content, suitable for conversion to a voice call."
                     )
                 }
             ],
@@ -120,6 +121,11 @@ with DAG(
         agent_response = response['message']['content']
         logging.info(f" Agent Response: {agent_response}")
         return agent_response
+    def clean_message(message):
+        """
+        Removes newline (\n) and tab (\t) characters from the message.
+        """
+        return re.sub(r'[\n\t]', ' ', message).strip()
     
     def generate_voice_message(**kwargs):
         """Generates voice message content for each loan."""
@@ -156,14 +162,13 @@ with DAG(
                 ti.xcom_push(key='call_outcome', value="Failed")
                 ti.xcom_push(key='call_ids', value=[])
                 raise  # Fail the task explicitly to stop the DAG run
-
-            # Generate static voice message
-            message = f"The loan amount is due for the loan {loan_id}. Please pay as soon as possible."
-
+            
+            # Generate voice message using Agent-O-Matic and clean the message
+            agent_cleaned_message=clean_message(generate_voice_message_agent(loan_id))
             # Use the call_id from the API response
             messages = {
                 "phone_number": loan["phone"],
-                "message": generate_voice_message_agent(loan_id),
+                "message": agent_cleaned_message,
                 "need_ack": True,
                 "call_id": call_id  # Use API-provided call_id
             }
@@ -176,34 +181,39 @@ with DAG(
         ti.xcom_push(key='call_ids', value=call_ids)
 
     def trigger_twilio_voice_call(**kwargs):
-        """Trigger send-voice-message for each reminder and push outcome to XCom."""
-        ti = kwargs.get('ti')
+        """Trigger `send-voice-message` DAG and retrieve call status using `call_id`."""
+        ti = kwargs.get("ti")
         if not ti:
             logger.error("TaskInstance (ti) not available in kwargs")
             raise ValueError("TaskInstance (ti) missing in kwargs")
 
-        call_outcome = ti.xcom_pull(task_ids='generate_voice_message', key='call_outcome')
+        call_outcome = ti.xcom_pull(task_ids="generate_voice_message", key="call_outcome")
         if call_outcome == "Failed":
             logger.info("Skipping trigger due to failure in generate_voice_message")
-            ti.xcom_push(key='call_outcome', value="Failed")
+            ti.xcom_push(key="call_outcome", value="Failed")
             return
 
-        call_ids = ti.xcom_pull(task_ids='generate_voice_message', key='call_ids') or []
+        call_ids = ti.xcom_pull(task_ids="generate_voice_message", key="call_ids") or []
         if not call_ids:
             logger.info("No call_ids available, skipping trigger")
-            ti.xcom_push(key='call_outcome', value="Failed")
+            ti.xcom_push(key="call_outcome", value="Failed")
             return
 
-        outcomes = []
+        final_outcomes = {}
+
         for call_id in call_ids:
-            conf = ti.xcom_pull(task_ids='generate_voice_message', key=f'voice_message_payload_{call_id}')
+            conf = ti.xcom_pull(task_ids="generate_voice_message", key=f"voice_message_payload_{call_id}")
             if not conf:
                 logger.info(f"No voice message payload available for call_id {call_id}, skipping")
-                outcomes.append("Failed")
+                final_outcomes[call_id] = "Failed"
                 continue
 
-            logger.info(f"Triggering send-voice-message with conf: {conf}")
-            
+            logger.info(f"Triggering `send-voice-message` with conf: {conf}")
+
+            # Pass `call_id` so it can be used in `send-voice-message`
+            conf["call_id"] = call_id
+
+            # Trigger `send-voice-message` DAG
             trigger = TriggerDagRunOperator(
                 task_id=f"trigger_twilio_voice_call_inner_{call_id}",
                 trigger_dag_id="send-voice-message",
@@ -212,55 +222,59 @@ with DAG(
                 poke_interval=30,
             )
             trigger.execute(kwargs)
-            
-            logger.info(f"send-voice-message completed successfully for call_id: {call_id}")
-            outcomes.append("Success")
 
-        overall_outcome = "Success" if all(outcome == "Success" for outcome in outcomes) else "Failed"
-        ti.xcom_push(key='call_outcome', value=overall_outcome)
+            # ✅ Fetch call status using `call_id`
+            call_status = ti.xcom_pull(task_ids="check_call_status", key=f"call_status_{call_id}")
+            logger.info(f"Call ID: {call_id}, Call status received: {call_status}")
+
+            # Map Twilio status to custom database status
+            if call_status == "completed":
+                final_outcomes[call_id] = "CallCompleted"
+            elif call_status in ["no-answer", "busy", "failed"]:
+                final_outcomes[call_id] = "CallFailed"
+            else:
+                final_outcomes[call_id] = "Unknown"
+
+        # Push all final call outcomes to XCom
+        ti.xcom_push(key="final_call_outcomes", value=final_outcomes)
 
     def update_call_status(**kwargs):
-        """Update reminder_status based on call outcome using call_id."""
         ti = kwargs['ti']
-        call_outcome = ti.xcom_pull(task_ids='trigger_twilio_voice_call', key='call_outcome')
-        if call_outcome == "Failed":
-            logger.info("Skipping update due to failure in trigger_twilio_voice_call")
-            ti.xcom_push(key='final_call_outcome', value="Failed")
-            return
-
         call_ids = ti.xcom_pull(task_ids='generate_voice_message', key='call_ids') or []
-        if not call_ids:
-            logger.error("No call_ids found in XCom")
-            ti.xcom_push(key='final_call_outcome', value="Failed")
-            return
 
-        outcomes = []
         for call_id in call_ids:
+            # Retrieve the Twilio call status from the Variable
+            twilio_status = Variable.get(f"twilio_call_status_{call_id}", default_var=None)
+            if not twilio_status:
+                # If for some reason it doesn't exist, assume "Failed"
+                twilio_status = "failed"
+            logger.info(f"Twilio status for call_id={call_id}: {twilio_status}")
+            # Map Twilio status to your custom DB statuses
+            if twilio_status == "completed":
+                reminder_status = "CallCompleted"
+            elif twilio_status in ["no-answer", "busy", "failed"]:
+                reminder_status = "CallFailed"
+            else:
+                reminder_status = "Unknown"
+
             loan_id = ti.xcom_pull(task_ids='generate_voice_message', key=f'loan_id_{call_id}')
-            if not loan_id:
-                logger.error(f"loan_id for call_id {call_id} not found in XCom")
-                outcomes.append("Failed")
-                continue
-
-            update_url = f"{AUTOFINIX_API_URL}loan/{loan_id}/update_reminder"
-            reminder_status = "CalledCompleted" if call_outcome == "Success" else "CallFailed"
-
-            params = {"status": reminder_status, "call_id": call_id}
+            logger.info(f"Updating reminder status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
             try:
+                # Update your loan DB or API
+                update_url = f"{AUTOFINIX_API_URL}loan/{loan_id}/update_reminder"
+                params = {"status": reminder_status, "call_id": call_id}
                 response = requests.put(update_url, params=params)
                 if response.status_code == 200:
-                    logger.info(f"Updated reminder_status to {reminder_status} for call ID: {call_id}, loan ID: {loan_id}")
-                    outcomes.append(reminder_status)
+                    logger.info(f"Updated status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
                 else:
-                    logger.error(f"Failed to update reminder_status to {reminder_status} for call ID: {call_id}, loan ID: {loan_id}. Status: {response.status_code}, Response: {response.text}")
-                    outcomes.append("Failed")
+                    logger.error(f"Failed to update status. call_id={call_id}, loan_id={loan_id} Status: {response.status_code}, Response: {response.text}")
             except Exception as e:
-                logger.error(f"Failed to update reminder_status: {e}")
-                outcomes.append("Failed")
-
-        final_outcome = "Success" if all(outcome != "Failed" for outcome in outcomes) else "Failed"
-        ti.xcom_push(key='final_call_outcome', value=final_outcome)
-
+                logger.error(f"Failed to update status. call_id={call_id}, loan_id={loan_id} due to the exception: {str(e)}")
+            # OPTIONAL: Delete the Variable now that we have stored its contents
+            Variable.delete(f"twilio_call_status_{call_id}")
+            logger.info(f"Deleted Variable key twilio_call_status_{call_id} to avoid clutter.")
+        
+        
     def update_reminder_status(**kwargs):
         """Logs the final reminder status based on call outcome."""
         ti = kwargs['ti']
