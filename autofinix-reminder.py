@@ -252,10 +252,10 @@ with DAG(
             # Map Twilio status to your custom DB statuses
             if twilio_status == "completed":
                 reminder_status = "CallCompleted"
-            elif twilio_status in ["no-answer", "busy", "failed"]:
-                reminder_status = "CallFailed"
+            elif twilio_status in "no-answer":
+                reminder_status = "CallNotAnswered"
             else:
-                reminder_status = "Unknown"
+                reminder_status = "CallFailed"
 
             loan_id = ti.xcom_pull(task_ids='generate_voice_message', key=f'loan_id_{call_id}')
             logger.info(f"Updating reminder status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
