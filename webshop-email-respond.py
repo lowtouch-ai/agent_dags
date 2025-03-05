@@ -10,6 +10,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
 from ollama._types import ResponseError
+from email import message_from_bytes
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
@@ -70,7 +71,6 @@ def get_email_thread(service, email_data):
 
 def get_ai_response(user_query):
     try:
-        logging.info(f"Attempting to connect to Ollama at: {OLLAMA_HOST}")
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
         response = client.chat(
             model='webshop-email:0.5',
