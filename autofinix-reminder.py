@@ -112,7 +112,7 @@ with DAG(
                         "Fetch the overdue details for this loan, including customerid, loanamount, interestrate, "
                         "tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. "
                         "If specific details are unavailable or cannot be retrieved, use placeholder text or generic terms. "
-                        "The final response must be a concise message which should not exceed 500 charecters, containing only relevant content, suitable for conversion to a voice call."
+                        "The final response must be a concise message which should not exceed 500 charecters, containing only relevant content, suitable for conversion to a voice call. The final response should only contain the message and avoid any irrelevant message by model"
                     )
                 }
             ],
