@@ -77,7 +77,7 @@ def get_ai_response(user_query):
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
-        return response.get('message', {}).get('content', "AI response unavailable.")
+        return response.get('message', {}).get('content', "We are currently experiencing technical difficulties. Please check back later.")
     except ResponseError as e:
         logging.error(f"Ollama API error: {str(e)} (status: {getattr(e, 'status_code', 'unknown')})")
         return "We are currently experiencing technical difficulties. Please check back later."
