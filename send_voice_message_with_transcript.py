@@ -236,7 +236,7 @@ with DAG(
 
     def fetch_transcription(**kwargs):
         """
-        Fetch transcription and store it if completed.
+        Fetch transcription and store it if completed; retry if pending up to a limit.
         """
         ti = kwargs["ti"]
         conf = kwargs["params"]
@@ -244,17 +244,14 @@ with DAG(
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
         recording_sid = ti.xcom_pull(task_ids="fetch_and_save_recording", key="recording_sid")
         call_id = conf.get("call_id")
-        attempt = ti.xcom_push(task_ids="fetch_transcription", key="attempt") or 1
 
         url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Recordings/{recording_sid}/Transcriptions.json"
         response = make_api_request(url)
         transcriptions = response.json().get("transcriptions", [])
 
         if not transcriptions:
-            logger.info(f"No transcription available yet for call SID={call_sid}, attempt={attempt}")
-            ti.xcom_push(key="transcription_status", value="pending")
-            ti.xcom_push(key="attempt", value=attempt + 1)
-            return "pending"
+            logger.info(f"No transcription available yet for call SID={call_sid}")
+            raise AirflowException("Transcription not yet available; retrying...")
 
         transcription_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Transcriptions/{transcriptions[0]['sid']}.json"
         transcription_response = make_api_request(transcription_url)
@@ -276,29 +273,8 @@ with DAG(
             ti.xcom_push(key="transcription_status", value="failed")
             return {"message": "Transcription failed", "transcription": "Transcription failed"}
         else:
-            logger.info(f"Transcription not completed yet for call SID={call_sid}, attempt={attempt}")
-            ti.xcom_push(key="transcription_status", value="pending")
-            ti.xcom_push(key="attempt", value=attempt + 1)
-            return "pending"
-
-    def branch_transcription_logic(**kwargs):
-        """
-        Branch based on transcription status and attempt count.
-        """
-        ti = kwargs["ti"]
-        transcription_status = ti.xcom_pull(task_ids="fetch_transcription", key="transcription_status")
-        attempt = ti.xcom_pull(task_ids="fetch_transcription", key="attempt") or 1
-        max_attempts = 12  # 60 seconds total (5s * 12)
-
-        logger.info(f"branch_transcription_logic: status={transcription_status}, attempt={attempt}/{max_attempts}")
-
-        if transcription_status in ["completed", "failed"]:
-            return "transcription_done"
-        elif attempt <= max_attempts:
-            return "wait_for_transcription"
-        else:
-            logger.info(f"Transcription timeout after {max_attempts} attempts for call SID={ti.xcom_pull(task_ids='initiate_call', key='call_sid')}")
-            return "transcription_timeout"
+            logger.info(f"Transcription not completed yet for call SID={call_sid}")
+            raise AirflowException("Transcription still pending; retrying...")
 
     # Define Operators
     initiate_call_task = PythonOperator(
@@ -337,24 +313,11 @@ with DAG(
     fetch_transcription_task = PythonOperator(
         task_id="fetch_transcription",
         python_callable=fetch_transcription,
-        provide_context=True
+        provide_context=True,
+        retries=12,  # 60 seconds total (12 retries * 5s retry_delay)
+        retry_delay=timedelta(seconds=5)
     )
 
-    wait_transcription = TimeDeltaSensor(
-        task_id="wait_for_transcription",
-        delta=timedelta(seconds=5),
-        poke_interval=5,
-        mode="poke"
-    )
-
-    branch_transcription_task = BranchPythonOperator(
-        task_id="branch_transcription_logic",
-        python_callable=branch_transcription_logic,
-        provide_context=True
-    )
-
-    transcription_done = DummyOperator(task_id="transcription_done")
-    transcription_timeout = DummyOperator(task_id="transcription_timeout")
     skip_recording = DummyOperator(task_id="skip_recording")
 
     # Task Dependencies
@@ -362,6 +325,3 @@ with DAG(
     check_status_task >> branch_recording_task
     branch_recording_task >> [fetch_recording_task, skip_recording]
     fetch_recording_task >> fetch_transcription_task
-    fetch_transcription_task >> branch_transcription_task
-    branch_transcription_task >> [wait_transcription, transcription_done, transcription_timeout]
-    wait_transcription >> fetch_transcription_task  # Loop back for retry
