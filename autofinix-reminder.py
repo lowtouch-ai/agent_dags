@@ -273,20 +273,42 @@ def update_call_status(api_url, **kwargs):
 def update_reminder_status(**kwargs):
     """Logs the final reminder status based on call outcome."""
     ti = kwargs['ti']
-    final_call_outcome = ti.xcom_pull(task_ids='update_call_status', key='final_call_outcome')
+    final_call_outcomes = ti.xcom_pull(task_ids='trigger_twilio_voice_call', key='final_call_outcomes')
     loans = ti.xcom_pull(task_ids='fetch_due_loans', key='eligible_loans')
 
     if not loans:
         logger.info("No eligible loans processed.")
         return
 
+    if not final_call_outcomes:
+        logger.info("No final call outcomes available.")
+        for loan in loans:
+            loan_id = loan['loan_id']
+            logger.info(f"Call reminder status unknown for Loan ID: {loan_id}")
+        return
+
+    # Create a mapping of call_id to loan_id for easier lookup
+    call_id_to_loan_id = {
+        ti.xcom_pull(task_ids='generate_voice_message', key=f'call_id_{call_id}'): 
+        ti.xcom_pull(task_ids='generate_voice_message', key=f'loan_id_{call_id}')
+        for call_id in final_call_outcomes.keys()
+    }
+
     for loan in loans:
         loan_id = loan['loan_id']
-        if final_call_outcome == "Success":
-            logger.info(f"Call reminder succeeded for Loan ID: {loan_id}")
+        # Find the call_id associated with this loan_id
+        call_id = next((cid for cid, lid in call_id_to_loan_id.items() if lid == loan_id), None)
+        
+        if call_id and call_id in final_call_outcomes:
+            outcome = final_call_outcomes[call_id]
+            if outcome == "CallCompleted":
+                logger.info(f"Call reminder succeeded for Loan ID: {loan_id}")
+            elif outcome == "CallNotAnswered":
+                logger.info(f"Call reminder not answered for Loan ID: {loan_id}")
+            else:  # CallFailed or any other status
+                logger.info(f"Call reminder failed for Loan ID: {loan_id}")
         else:
-            logger.info(f"Call reminder failed for Loan ID: {loan_id}")
-
+            logger.info(f"Call reminder status unknown for Loan ID: {loan_id}")
 with DAG(
     "autofinix_reminder",
     default_args=default_args,
