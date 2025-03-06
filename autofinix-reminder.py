@@ -96,7 +96,47 @@ def fetch_due_loans(api_url, test_phone_number, **kwargs):
         logger.error(f"Failed to fetch due loans: {e}")
         raise
 
-# ... (evaluate_due_loans_result and generate_voice_message_agent remain unchanged)
+def evaluate_due_loans_result(**kwargs):
+    """Determines which path to take based on whether eligible loans are found."""
+    ti = kwargs['ti']
+    loans = ti.xcom_pull(task_ids='fetch_due_loans', key='eligible_loans')
+    if loans and isinstance(loans, list) and len(loans) > 0:
+        return "generate_voice_message"
+    else:
+        return "handle_no_due_loans"
+
+def generate_voice_message_agent(loan_id, agent_url):
+    """Calls the AgentOmatic API to generate a professional loan reminder message."""
+    client = Client(
+        host=agent_url,
+        headers={'x-ltai-client': 'autofinix-voice-respond'}
+    )
+    response = client.chat(
+        model='autofinix:0.3',
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"Generate a professional loan due reminder message for loan ID {loan_id}. "
+                    "Fetch the overdue details for this loan, including customerid, loanamount, interestrate, "
+                    "tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. "
+                    "If specific details are unavailable or cannot be retrieved, use placeholder text or generic terms. "
+                    "The final response must be a concise message which should not exceed 500 charecters, containing only relevant content, "
+                    "suitable for conversion to a voice call."
+                )
+            }
+        ],
+        stream=False
+    )
+    agent_response = response['message']['content']
+    logging.info(f"AgentOmatic Response: {agent_response}")
+    return agent_response
+
+def clean_message(message):
+    """
+    Removes newline (\n) and tab (\t) characters from the message.
+    """
+    return re.sub(r'[\n\t]', ' ', message).strip()
 
 def generate_voice_message(api_url, agent_url, **kwargs):
     """Generates voice message content for each loan."""
@@ -144,6 +184,61 @@ def generate_voice_message(api_url, agent_url, **kwargs):
 
     ti.xcom_push(key='call_ids', value=call_ids)
 
+def trigger_twilio_voice_call(**kwargs):
+    """Trigger `send-voice-message` DAG and retrieve call status using `call_id`."""
+    ti = kwargs.get("ti")
+    if not ti:
+        logger.error("TaskInstance (ti) not available in kwargs")
+        raise ValueError("TaskInstance (ti) missing in kwargs")
+
+    call_outcome = ti.xcom_pull(task_ids="generate_voice_message", key="call_outcome")
+    if call_outcome == "Failed":
+        logger.info("Skipping trigger due to failure in generate_voice_message")
+        ti.xcom_push(key="call_outcome", value="Failed")
+        return
+
+    call_ids = ti.xcom_pull(task_ids="generate_voice_message", key="call_ids") or []
+    if not call_ids:
+        logger.info("No call_ids available, skipping trigger")
+        ti.xcom_push(key="call_outcome", value="Failed")
+        return
+
+    final_outcomes = {}
+
+    for call_id in call_ids:
+        conf = ti.xcom_pull(task_ids="generate_voice_message", key=f"voice_message_payload_{call_id}")
+        if not conf:
+            logger.info(f"No voice message payload available for call_id {call_id}, skipping")
+            final_outcomes[call_id] = "Failed"
+            continue
+
+        logger.info(f"Triggering `send-voice-message` DAG with conf: {conf}")
+        conf["call_id"] = call_id
+
+        # Trigger `send-voice-message` DAG
+        trigger = TriggerDagRunOperator(
+            task_id=f"trigger_twilio_voice_call_inner_{call_id}",
+            trigger_dag_id="send-voice-message-1",
+            conf=conf,
+            wait_for_completion=True,
+            poke_interval=30,
+        )
+        trigger.execute(kwargs)
+
+        # ✅ Fetch call status using `call_id`
+        call_status = ti.xcom_pull(task_ids="check_call_status", key=f"call_status_{call_id}")
+        logger.info(f"Call ID: {call_id}, Call status received: {call_status}")
+
+        # Map Twilio status to custom database status
+        if call_status == "completed":
+            final_outcomes[call_id] = "CallCompleted"
+        elif call_status in ["no-answer", "busy", "failed"]:
+            final_outcomes[call_id] = "CallFailed"
+        else:
+            final_outcomes[call_id] = "Unknown"
+
+    ti.xcom_push(key="final_call_outcomes", value=final_outcomes)
+
 def update_call_status(api_url, **kwargs):
     """Updates call status after Twilio DAG completion."""
     ti = kwargs['ti']
@@ -157,7 +252,7 @@ def update_call_status(api_url, **kwargs):
 
         reminder_status = {
             "completed": "CallCompleted",
-            "no-answer": "CallNotAnswered",
+            "no-answer": "CallFailed",
             "busy": "CallFailed",
             "failed": "CallFailed"
         }.get(twilio_status, "Unknown")
@@ -175,4 +270,84 @@ def update_call_status(api_url, **kwargs):
         except Exception as e:
             logger.error(f"Failed to update status: {str(e)}")
 
-# ... (rest of the DAG definition remains unchanged)
+def update_reminder_status(**kwargs):
+    """Logs the final reminder status based on call outcome."""
+    ti = kwargs['ti']
+    final_call_outcome = ti.xcom_pull(task_ids='update_call_status', key='final_call_outcome')
+    loans = ti.xcom_pull(task_ids='fetch_due_loans', key='eligible_loans')
+
+    if not loans:
+        logger.info("No eligible loans processed.")
+        return
+
+    for loan in loans:
+        loan_id = loan['loan_id']
+        if final_call_outcome == "Success":
+            logger.info(f"Call reminder succeeded for Loan ID: {loan_id}")
+        else:
+            logger.info(f"Call reminder failed for Loan ID: {loan_id}")
+
+with DAG(
+    "autofinix_reminder",
+    default_args=default_args,
+    schedule_interval=timedelta(minutes=1),
+    catchup=False,
+    max_active_runs=1,  # Prevent overlapping runs
+) as dag:
+
+    fetch_due_loans_task = PythonOperator(
+        task_id="fetch_due_loans",
+        python_callable=fetch_due_loans,
+        op_kwargs={
+            "api_url": AUTOFINIX_API_URL,
+            "test_phone_number": AUTOFINIX_TEST_PHONE_NUMBER
+        },
+    )
+
+    evaluate_due_loans_results = BranchPythonOperator(
+        task_id="evaluate_due_loans_result",
+        python_callable=evaluate_due_loans_result,
+    )
+
+    handle_no_due_loans = DummyOperator(
+        task_id="handle_no_due_loans",
+    )
+
+    generate_voice_message_task = PythonOperator(
+        task_id="generate_voice_message",
+        python_callable=generate_voice_message,
+        op_kwargs={
+            "api_url": AUTOFINIX_API_URL,
+            "agent_url": AGENTOMATIC_API_URL,
+        },
+    )
+
+    trigger_send_voice_message = PythonOperator(
+        task_id="trigger_twilio_voice_call",
+        python_callable=trigger_twilio_voice_call,
+    )
+
+    update_call_status_task = PythonOperator(
+        task_id="update_call_status",
+        python_callable=update_call_status,
+        op_kwargs={"api_url": AUTOFINIX_API_URL},
+    )
+
+    update_reminder_status_task = PythonOperator(
+        task_id="update_reminder_status",
+        python_callable=update_reminder_status,
+    )
+
+    end_task = DummyOperator(
+        task_id="end_task",
+        trigger_rule="all_done",  # Runs regardless of upstream status
+    )
+
+    # Task Dependencies
+    fetch_due_loans_task >> evaluate_due_loans_results
+    evaluate_due_loans_results >> [generate_voice_message_task, handle_no_due_loans]
+    generate_voice_message_task >> trigger_send_voice_message
+    trigger_send_voice_message >> update_call_status_task
+    update_call_status_task >> update_reminder_status_task
+    update_reminder_status_task >> end_task
+    handle_no_due_loans >> end_task
