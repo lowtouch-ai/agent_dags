@@ -454,7 +454,7 @@ def update_reminder_status(**kwargs):
             logger.info(f"Call reminder status unknown for Loan ID: {loan_id}")
 
 with DAG(
-    "autofinix_reminder",
+    "send-voice-message-with-transcript",
     default_args=default_args,
     schedule_interval=timedelta(minutes=1),
     catchup=False,
