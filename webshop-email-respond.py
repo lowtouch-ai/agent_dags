@@ -125,11 +125,9 @@ def send_response(**kwargs):
         
         sender_email = email_data["headers"].get("From", "")
         subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
-        user_query = email_data["content"]
-        if user_query:
-            ai_response_html = get_ai_response(user_query)
-        else:
-            ai_response_html = f"We are currently experiencing technical difficulties. Please check back later."
+        user_query = email_data.get("content", "").strip()  # Ensures we handle missing or empty content
+        ai_response_html = get_ai_response(user_query) if user_query else "We are currently experiencing technical difficulties. Please check back later."
+
         send_email(
             service, sender_email, subject, ai_response_html,
             email_data["headers"].get("Message-ID", ""),
