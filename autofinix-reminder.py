@@ -51,6 +51,8 @@ def make_api_request(url, method="GET", params=None, json=None, retries=3):
             response = session.get(url, params=params, timeout=10)
         elif method == "PUT":
             response = session.put(url, json=json, params=params, timeout=10)
+        elif method == "POST":
+            response = session.post(url, json=json, params=params, timeout=10)
         else:
             raise ValueError(f"Unsupported method: {method}")
 
@@ -105,27 +107,30 @@ def evaluate_due_loans_result(**kwargs):
     else:
         return "handle_no_due_loans"
 
-def generate_voice_message_agent(loan_id, agent_url):
-    """Calls the AgentOmatic API to generate a professional loan reminder message."""
+def generate_voice_message_agent(loan_id, agent_url, transcription=None, inserted_date=None):
+    """Calls the AgentOmatic API to generate a message or analyze transcription."""
     client = Client(
         host=agent_url,
         headers={'x-ltai-client': 'autofinix-voice-respond'}
     )
+    if transcription and inserted_date:
+        prompt = (
+            f"Analyze the following transcription: '{transcription}' and come up with a date. "
+            f"If no date is found, set the date one month from the date: {inserted_date}. "
+            "Return only the date in ISO format (e.g., '2025-03-10T12:00:00')."
+        )
+    else:
+        prompt = (
+            f"Generate a professional loan due reminder message for loan ID {loan_id}. "
+            "Fetch the overdue details for this loan, including customerid, loanamount, interestrate, "
+            "tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. "
+            "If specific details are unavailable or cannot be retrieved, use placeholder text or generic terms. "
+            "The final response must be a concise message which should not exceed 500 characters, containing only relevant content, "
+            "suitable for conversion to a voice call."
+        )
     response = client.chat(
         model='autofinix:0.3',
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Generate a professional loan due reminder message for loan ID {loan_id}. "
-                    "Fetch the overdue details for this loan, including customerid, loanamount, interestrate, "
-                    "tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. "
-                    "If specific details are unavailable or cannot be retrieved, use placeholder text or generic terms. "
-                    "The final response must be a concise message which should not exceed 500 characters, containing only relevant content, "
-                    "suitable for conversion to a voice call."
-                )
-            }
-        ],
+        messages=[{"role": "user", "content": prompt}],
         stream=False
     )
     agent_response = response['message']['content']
@@ -215,18 +220,22 @@ def trigger_twilio_voice_call(**kwargs):
         # Trigger `send-voice-message` DAG
         trigger = TriggerDagRunOperator(
             task_id=f"trigger_twilio_voice_call_inner_{call_id}",
-            trigger_dag_id="send-voice-message",
+            trigger_dag_id="send-voice-message-transcript",
             conf=conf,
             wait_for_completion=True,
             poke_interval=30,
         )
         trigger.execute(kwargs)
 
-def update_call_status(api_url, **kwargs):
-    """Updates call status after Twilio DAG completion using Variable, retrieves and deletes transcription."""
+def update_call_status(api_url, agent_url, **kwargs):
+    """Updates call status, analyzes transcription, and sets new reminder."""
     ti = kwargs['ti']
     call_ids = ti.xcom_pull(task_ids='generate_voice_message', key='call_ids') or []
     final_outcomes = {}
+
+    # Fetch reminders to get inserted_timestamp
+    loans = ti.xcom_pull(task_ids='fetch_due_loans', key='eligible_loans')
+    call_id_to_inserted_date = {loan['call_id']: loan['inserted_timestamp'] for loan in loans}
 
     for call_id in call_ids:
         # Get status from Variable set by send-voice-message
@@ -245,7 +254,7 @@ def update_call_status(api_url, **kwargs):
 
         # Map Twilio status to API-compatible status
         reminder_status = {
-            "completed": "CalledCompleted",
+            "completed": "CallCompleted",
             "no-answer": "CallNotAnswered",
             "busy": "CallFailed",
             "failed": "CallFailed"
@@ -266,18 +275,46 @@ def update_call_status(api_url, **kwargs):
             params = {"status": reminder_status, "call_id": call_id}
             make_api_request(update_url, method="PUT", params=params)
             logger.info(f"Updated status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
-            
-            # Delete Variables after retrieval
-            Variable.delete(f"twilio_call_status_{call_id}")
-            Variable.delete(f"twilio_transcription_{call_id}")
-            if recording_file:
-                Variable.delete(f"twilio_recording_file_{call_id}")
-            logger.info(f"Deleted Variables for call_id={call_id}: twilio_call_status, twilio_transcription, twilio_recording_file")
         except Exception as e:
-            logger.error(f"Failed to update status or delete Variables: {str(e)}")
+            logger.error(f"Failed to update status: {str(e)}")
             final_outcomes[call_id] = "CallFailed"
 
-        # Push transcription and recording file to XCom for downstream tasks
+        # Analyze transcription and set new reminder if call completed
+        if twilio_status == "completed" and transcription != "No transcription available":
+            inserted_date = call_id_to_inserted_date.get(call_id)
+            if inserted_date:
+                try:
+                    # Generate date from transcription
+                    remind_on_date = generate_voice_message_agent(
+                        loan_id=loan_id,
+                        agent_url=agent_url,
+                        transcription=transcription,
+                        inserted_date=inserted_date
+                    )
+                    logger.info(f"Generated remind_on_date for call_id={call_id}: {remind_on_date}")
+
+                    # Validate date format (ISO)
+                    datetime.fromisoformat(remind_on_date.replace("Z", "+00:00"))
+
+                    # Set new reminder
+                    set_reminder_url = f"{api_url}loan/{loan_id}/set_reminder"
+                    payload = {"status": "Reminder", "remind_on": remind_on_date}
+                    result = make_api_request(set_reminder_url, method="POST", json=payload)
+                    new_call_id = result.get("call_id")
+                    logger.info(f"Set new reminder for loan_id={loan_id}, call_id={new_call_id}, remind_on={remind_on_date}")
+                except ValueError as ve:
+                    logger.error(f"Invalid date format from AgentOmatic: {remind_on_date}, error: {str(ve)}")
+                except Exception as e:
+                    logger.error(f"Failed to set new reminder: {str(e)}")
+
+        # Delete Variables after processing
+        Variable.delete(f"twilio_call_status_{call_id}")
+        Variable.delete(f"twilio_transcription_{call_id}")
+        if recording_file:
+            Variable.delete(f"twilio_recording_file_{call_id}")
+        logger.info(f"Deleted Variables for call_id={call_id}: twilio_call_status, twilio_transcription, twilio_recording_file")
+
+        # Push transcription and recording file to XCom
         ti.xcom_push(key=f"transcription_{call_id}", value=transcription)
         if recording_file:
             ti.xcom_push(key=f"recording_file_{call_id}", value=recording_file)
@@ -335,7 +372,7 @@ with DAG(
     default_args=default_args,
     schedule_interval=timedelta(minutes=1),
     catchup=False,
-    max_active_runs=1,  # Prevent overlapping runs
+    max_active_runs=1,
 ) as dag:
 
     fetch_due_loans_task = PythonOperator(
@@ -373,7 +410,10 @@ with DAG(
     update_call_status_task = PythonOperator(
         task_id="update_call_status",
         python_callable=update_call_status,
-        op_kwargs={"api_url": AUTOFINIX_API_URL},
+        op_kwargs={
+            "api_url": AUTOFINIX_API_URL,
+            "agent_url": AGENTOMATIC_API_URL,
+        },
     )
 
     update_reminder_status_task = PythonOperator(
@@ -383,7 +423,7 @@ with DAG(
 
     end_task = DummyOperator(
         task_id="end_task",
-        trigger_rule="all_done",  # Runs regardless of upstream status
+        trigger_rule="all_done",
     )
 
     # Task Dependencies
