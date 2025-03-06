@@ -301,6 +301,7 @@ def update_reminder_status(**kwargs):
         
         if call_id and call_id in final_call_outcomes:
             outcome = final_call_outcomes[call_id]
+            logger.info(f"Call reminder status for Loan ID: {loan_id} is {outcome}")
             if outcome == "CallCompleted":
                 logger.info(f"Call reminder succeeded for Loan ID: {loan_id}")
             elif outcome == "CallNotAnswered":
