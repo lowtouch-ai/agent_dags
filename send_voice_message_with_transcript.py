@@ -213,7 +213,7 @@ with DAG(
                     logger.info(f"Transcribed text for call SID={call_sid}: {transcription_text}")
                     if call_id:
                         Variable.set(f"twilio_transcription_{call_id}", transcription_text)
-                        Variable.set(f"twilio_recording_file_{call_id}", file_path)
+                        # Variable.set(f"twilio_recording_file_{call_id}", file_path)
                         logger.info(f"Set Variable twilio_transcription_{call_id} to: {transcription_text}")
                         logger.info(f"Set Variable twilio_recording_file_{call_id} to: {file_path}")
                     ti.xcom_push(key="recording_status", value="Recording Saved")

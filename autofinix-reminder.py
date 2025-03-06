@@ -121,7 +121,7 @@ def generate_voice_message_agent(loan_id, agent_url):
                     "Fetch the overdue details for this loan, including customerid, loanamount, interestrate, "
                     "tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. "
                     "If specific details are unavailable or cannot be retrieved, use placeholder text or generic terms. "
-                    "The final response must be a concise message which should not exceed 500 charecters, containing only relevant content, "
+                    "The final response must be a concise message which should not exceed 500 characters, containing only relevant content, "
                     "suitable for conversion to a voice call."
                 )
             }
@@ -203,13 +203,10 @@ def trigger_twilio_voice_call(**kwargs):
         ti.xcom_push(key="call_outcome", value="Failed")
         return
 
-    final_outcomes = {}
-
     for call_id in call_ids:
         conf = ti.xcom_pull(task_ids="generate_voice_message", key=f"voice_message_payload_{call_id}")
         if not conf:
             logger.info(f"No voice message payload available for call_id {call_id}, skipping")
-            final_outcomes[call_id] = "Failed"
             continue
 
         logger.info(f"Triggering `send-voice-message` DAG with conf: {conf}")
@@ -218,7 +215,7 @@ def trigger_twilio_voice_call(**kwargs):
         # Trigger `send-voice-message` DAG
         trigger = TriggerDagRunOperator(
             task_id=f"trigger_twilio_voice_call_inner_{call_id}",
-            trigger_dag_id="send-voice-message-1",
+            trigger_dag_id="send-voice-message",
             conf=conf,
             wait_for_completion=True,
             poke_interval=30,
@@ -226,17 +223,25 @@ def trigger_twilio_voice_call(**kwargs):
         trigger.execute(kwargs)
 
 def update_call_status(api_url, **kwargs):
-    """Updates call status after Twilio DAG completion using Variable."""
+    """Updates call status after Twilio DAG completion using Variable, retrieves and deletes transcription."""
     ti = kwargs['ti']
     call_ids = ti.xcom_pull(task_ids='generate_voice_message', key='call_ids') or []
     final_outcomes = {}
 
     for call_id in call_ids:
-        # Get status directly from Variable set by send-voice-message-1
+        # Get status from Variable set by send-voice-message
         twilio_status = Variable.get(f"twilio_call_status_{call_id}", default_var=None)
         if not twilio_status:
             twilio_status = "failed"
         logger.info(f"Twilio status for call_id={call_id}: {twilio_status}")
+
+        # Get transcription from Variable
+        transcription = Variable.get(f"twilio_transcription_{call_id}", default_var="No transcription available")
+        logger.info(f"Transcription for call_id={call_id}: {transcription}")
+
+        # Get recording file path from Variable
+        recording_file = Variable.get(f"twilio_recording_file_{call_id}", default_var=None)
+        logger.info(f"Recording file for call_id={call_id}: {recording_file}")
 
         # Map Twilio status to API-compatible status
         reminder_status = {
@@ -261,17 +266,27 @@ def update_call_status(api_url, **kwargs):
             params = {"status": reminder_status, "call_id": call_id}
             make_api_request(update_url, method="PUT", params=params)
             logger.info(f"Updated status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
+            
+            # Delete Variables after retrieval
             Variable.delete(f"twilio_call_status_{call_id}")
-            logger.info(f"Deleted Variable key twilio_call_status_{call_id}")
+            Variable.delete(f"twilio_transcription_{call_id}")
+            if recording_file:
+                Variable.delete(f"twilio_recording_file_{call_id}")
+            logger.info(f"Deleted Variables for call_id={call_id}: twilio_call_status, twilio_transcription, twilio_recording_file")
         except Exception as e:
-            logger.error(f"Failed to update status: {str(e)}")
+            logger.error(f"Failed to update status or delete Variables: {str(e)}")
             final_outcomes[call_id] = "CallFailed"
+
+        # Push transcription and recording file to XCom for downstream tasks
+        ti.xcom_push(key=f"transcription_{call_id}", value=transcription)
+        if recording_file:
+            ti.xcom_push(key=f"recording_file_{call_id}", value=recording_file)
 
     # Push final outcomes for reporting
     ti.xcom_push(key="final_call_outcomes", value=final_outcomes)
 
 def update_reminder_status(**kwargs):
-    """Logs the final reminder status based on call outcome using Variable data."""
+    """Logs the final reminder status based on call outcome and transcription using XCom data."""
     ti = kwargs['ti']
     final_call_outcomes = ti.xcom_pull(task_ids='update_call_status', key='final_call_outcomes')
     loans = ti.xcom_pull(task_ids='fetch_due_loans', key='eligible_loans')
@@ -299,17 +314,22 @@ def update_reminder_status(**kwargs):
         
         if call_id and call_id in final_call_outcomes:
             outcome = final_call_outcomes[call_id]
+            transcription = ti.xcom_pull(task_ids='update_call_status', key=f'transcription_{call_id}')
+            recording_file = ti.xcom_pull(task_ids='update_call_status', key=f'recording_file_{call_id}')
+            
             logger.info(f"Call reminder status for Loan ID: {loan_id} is {outcome}")
             if outcome == "CallCompleted":
                 logger.info(f"Call reminder succeeded for Loan ID: {loan_id}")
+                logger.info(f"Transcription for Loan ID: {loan_id}: {transcription}")
+                if recording_file:
+                    logger.info(f"Recording file for Loan ID: {loan_id}: {recording_file}")
             elif outcome == "CallNotAnswered":
                 logger.info(f"Call reminder not answered for Loan ID: {loan_id}")
             else:  # CallFailed or any other status
                 logger.info(f"Call reminder failed for Loan ID: {loan_id}")
         else:
             logger.info(f"Call reminder status unknown for Loan ID: {loan_id}")
-            
-            
+
 with DAG(
     "autofinix_reminder",
     default_args=default_args,
