@@ -225,37 +225,34 @@ def trigger_twilio_voice_call(**kwargs):
         )
         trigger.execute(kwargs)
 
-        # ✅ Fetch call status using `call_id`
-        call_status = ti.xcom_pull(task_ids="check_call_status", key=f"call_status_{call_id}")
-        logger.info(f"Call ID: {call_id}, Call status received: {call_status}")
-
-        # Map Twilio status to custom database status
-        if call_status == "completed":
-            final_outcomes[call_id] = "CallCompleted"
-        elif call_status == "no-answer":
-            final_outcomes[call_id] = "CallNotAnswered"
-        else:
-            final_outcomes[call_id] = "CallFailed"
-
-    ti.xcom_push(key="final_call_outcomes", value=final_outcomes)
-
 def update_call_status(api_url, **kwargs):
-    """Updates call status after Twilio DAG completion."""
+    """Updates call status after Twilio DAG completion using Variable."""
     ti = kwargs['ti']
     call_ids = ti.xcom_pull(task_ids='generate_voice_message', key='call_ids') or []
+    final_outcomes = {}
 
     for call_id in call_ids:
+        # Get status directly from Variable set by send-voice-message-1
         twilio_status = Variable.get(f"twilio_call_status_{call_id}", default_var=None)
         if not twilio_status:
             twilio_status = "failed"
         logger.info(f"Twilio status for call_id={call_id}: {twilio_status}")
 
+        # Map Twilio status to API-compatible status
         reminder_status = {
-            "completed": "CallCompleted",
-            "no-answer": "CallFailed",
+            "completed": "CalledCompleted",
+            "no-answer": "CallNotAnswered",
             "busy": "CallFailed",
             "failed": "CallFailed"
-        }.get(twilio_status, "Unknown")
+        }.get(twilio_status, "CallFailed")
+
+        # For final_outcomes, use a simplified version for reporting
+        final_outcomes[call_id] = {
+            "completed": "CallCompleted",
+            "no-answer": "CallNotAnswered",
+            "busy": "CallFailed",
+            "failed": "CallFailed"
+        }.get(twilio_status, "CallFailed")
 
         loan_id = ti.xcom_pull(task_ids='generate_voice_message', key=f'loan_id_{call_id}')
         logger.info(f"Updating reminder status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
@@ -264,16 +261,19 @@ def update_call_status(api_url, **kwargs):
             params = {"status": reminder_status, "call_id": call_id}
             make_api_request(update_url, method="PUT", params=params)
             logger.info(f"Updated status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
-            
             Variable.delete(f"twilio_call_status_{call_id}")
             logger.info(f"Deleted Variable key twilio_call_status_{call_id}")
         except Exception as e:
             logger.error(f"Failed to update status: {str(e)}")
+            final_outcomes[call_id] = "CallFailed"
+
+    # Push final outcomes for reporting
+    ti.xcom_push(key="final_call_outcomes", value=final_outcomes)
 
 def update_reminder_status(**kwargs):
-    """Logs the final reminder status based on call outcome."""
+    """Logs the final reminder status based on call outcome using Variable data."""
     ti = kwargs['ti']
-    final_call_outcomes = ti.xcom_pull(task_ids='trigger_twilio_voice_call', key='final_call_outcomes')
+    final_call_outcomes = ti.xcom_pull(task_ids='update_call_status', key='final_call_outcomes')
     loans = ti.xcom_pull(task_ids='fetch_due_loans', key='eligible_loans')
 
     if not loans:
@@ -287,7 +287,6 @@ def update_reminder_status(**kwargs):
             logger.info(f"Call reminder status unknown for Loan ID: {loan_id}")
         return
 
-    # Create a mapping of call_id to loan_id for easier lookup
     call_id_to_loan_id = {
         ti.xcom_pull(task_ids='generate_voice_message', key=f'call_id_{call_id}'): 
         ti.xcom_pull(task_ids='generate_voice_message', key=f'loan_id_{call_id}')
@@ -296,7 +295,6 @@ def update_reminder_status(**kwargs):
 
     for loan in loans:
         loan_id = loan['loan_id']
-        # Find the call_id associated with this loan_id
         call_id = next((cid for cid, lid in call_id_to_loan_id.items() if lid == loan_id), None)
         
         if call_id and call_id in final_call_outcomes:
@@ -310,6 +308,8 @@ def update_reminder_status(**kwargs):
                 logger.info(f"Call reminder failed for Loan ID: {loan_id}")
         else:
             logger.info(f"Call reminder status unknown for Loan ID: {loan_id}")
+            
+            
 with DAG(
     "autofinix_reminder",
     default_args=default_args,
