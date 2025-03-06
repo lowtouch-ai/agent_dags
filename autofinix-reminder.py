@@ -236,7 +236,7 @@ def update_call_status(api_url, agent_url, **kwargs):
     # Fetch reminders to get inserted_timestamp
     loans = ti.xcom_pull(task_ids='fetch_due_loans', key='eligible_loans')
     call_id_to_inserted_date = {loan['call_id']: loan['inserted_timestamp'] for loan in loans}
-
+    logger.info(f"Call ID to inserted_date mapping: {call_id_to_inserted_date}")
     for call_id in call_ids:
         # Get status from Variable set by send-voice-message
         twilio_status = Variable.get(f"twilio_call_status_{call_id}", default_var=None)
@@ -282,6 +282,7 @@ def update_call_status(api_url, agent_url, **kwargs):
         # Analyze transcription and set new reminder if call completed
         if twilio_status == "completed" and transcription != "No transcription available":
             inserted_date = call_id_to_inserted_date.get(call_id)
+            logger.info(f"Inserted date for call_id={call_id}: {inserted_date}")
             if inserted_date:
                 try:
                     # Generate date from transcription
