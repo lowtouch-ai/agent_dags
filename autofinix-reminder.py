@@ -232,10 +232,10 @@ def trigger_twilio_voice_call(**kwargs):
         # Map Twilio status to custom database status
         if call_status == "completed":
             final_outcomes[call_id] = "CallCompleted"
-        elif call_status in ["no-answer", "busy", "failed"]:
-            final_outcomes[call_id] = "CallFailed"
+        elif call_status == "no-answer":
+            final_outcomes[call_id] = "CallNotAnswered"
         else:
-            final_outcomes[call_id] = "Unknown"
+            final_outcomes[call_id] = "CallFailed"
 
     ti.xcom_push(key="final_call_outcomes", value=final_outcomes)
 
