@@ -83,7 +83,7 @@ def get_email_thread(service, email_data):
 def get_ai_response(user_query):
     try:
         logging.error(f"Unexpected error in AI response generation: {str(e)}")
-    return "We are currently experiencing technical difficulties. Please check back later.
+        
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
         response = client.chat(
             model='webshop-email:0.5',
@@ -93,7 +93,8 @@ def get_ai_response(user_query):
         return response.get('message', {}).get('content', "We are currently experiencing technical difficulties. Please check back later.")
     except ResponseError as e:
         logging.error(f"Ollama API error: {str(e)} (status: {getattr(e, 'status_code', 'unknown')})")
-    except Exception as e:"
+    except Exception as e:
+        return "We are currently experiencing technical difficulties. Please check back later.
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
