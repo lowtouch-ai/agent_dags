@@ -151,69 +151,66 @@ with DAG(
             return "skip_recording"
 
     def fetch_and_save_recording(**kwargs):
-        """
-        Fetch and save the recording if need_ack=True and call_status='completed'.
-        If call_id is present, store transcription and file path in Variables.
-        """
-        ti = kwargs["ti"]
-        conf = kwargs["params"]
+    ti = kwargs["ti"]
+    conf = kwargs["params"]
 
-        call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
-        final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
-        need_ack = ti.xcom_pull(task_ids="initiate_call", key="need_ack")
-        call_id = conf.get("call_id")  # Might be None
+    call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
+    final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
+    need_ack = ti.xcom_pull(task_ids="initiate_call", key="need_ack")
+    call_id = conf.get("call_id")
 
-        logger.info(f"fetch_and_save_recording with call_sid={call_sid}, status={final_status}, call_id={call_id}")
+    logger.info(f"fetch_and_save_recording with call_sid={call_sid}, status={final_status}, call_id={call_id}")
 
-        if not need_ack:
-            logger.info("need_ack=False, skipping recording download.")
-            ti.xcom_push(key="recording_status", value="No Recording Needed")
-            return {"message": "Recording not needed."}
+    if not need_ack:
+        logger.info("need_ack=False, skipping recording download.")
+        ti.xcom_push(key="recording_status", value="No Recording Needed")
+        return {"message": "Recording not needed."}
 
-        if final_status != "completed":
-            logger.info(f"Cannot fetch recording because final_status={final_status}")
-            ti.xcom_push(key="recording_status", value="Recording Unavailable")
-            return {"message": f"Status={final_status}, no recording."}
+    if final_status != "completed":
+        logger.info(f"Cannot fetch recording because final_status={final_status}")
+        ti.xcom_push(key="recording_status", value="Recording Unavailable")
+        return {"message": f"Status={final_status}, no recording."}
 
-        # Attempt to fetch recording and transcription
-        try:
-            client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-            recordings = client.recordings.list(call_sid=call_sid)
+    try:
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        recordings = client.recordings.list(call_sid=call_sid)
 
-            if not recordings:
-                logger.info("Recording not found yet.")
-                ti.xcom_push(key="recording_status", value="Recording Not Found")
-                return {"message": "Recording not found yet.", "transcription": "No transcription available"}
+        if not recordings:
+            logger.info("Recording not found yet.")
+            ti.xcom_push(key="recording_status", value="Recording Not Found")
+            return {"message": "Recording not found yet.", "transcription": "No transcription available"}
 
-            recording_sid = recordings[0].sid
-            recording_url = f"https://api.twilio.com{recordings[0].uri.replace('.json', '.mp3')}"
-            execution_date = datetime.now().strftime("%Y-%m-%d")
-            dag_name = "send-voice-message"
-            save_directory = os.path.join(BASE_STORAGE_DIR, dag_name, execution_date)
-            os.makedirs(save_directory, exist_ok=True)
-            file_path = os.path.join(save_directory, f"{call_sid}.mp3")
+        recording_sid = recordings[0].sid
+        recording_url = f"https://api.twilio.com{recordings[0].uri.replace('.json', '.mp3')}"
+        execution_date = datetime.now().strftime("%Y-%m-%d")
+        dag_name = "send-voice-message"
+        save_directory = os.path.join(BASE_STORAGE_DIR, dag_name, execution_date)
+        os.makedirs(save_directory, exist_ok=True)
+        file_path = os.path.join(save_directory, f"{call_sid}.mp3")
 
-            response = requests.get(recording_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
-            if response.status_code == 200:
-                with open(file_path, "wb") as f:
-                    f.write(response.content)
-                logger.info(f"Recording saved at {file_path}")
-            else:
-                logger.error(f"Failed to download recording. status code={response.status_code}")
-                ti.xcom_push(key="recording_status", value="Recording Failed")
-                return {"message": f"Failed to download. code={response.status_code}", "transcription": "No transcription available"}
+        response = requests.get(recording_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
+        if response.status_code == 200:
+            with open(file_path, "wb") as f:
+                f.write(response.content)
+            logger.info(f"Recording saved at {file_path}")
+        else:
+            logger.error(f"Failed to download recording. status code={response.status_code}")
+            ti.xcom_push(key="recording_status", value="Recording Failed")
+            return {"message": f"Failed to download. code={response.status_code}", "transcription": "No transcription available"}
 
-            # Fetch transcription
+        # Poll for transcription with timeout
+        import time
+        max_attempts = 12  # 60 seconds total (5s * 12)
+        for attempt in range(max_attempts):
             transcriptions = client.recordings(recording_sid).transcriptions.list()
             if transcriptions:
-                transcription = transcriptions[0]
-                transcription = client.transcriptions(transcription.sid).fetch()
+                transcription = client.transcriptions(transcriptions[0].sid).fetch()
                 if transcription.status == "completed":
                     transcription_text = transcription.transcription_text
                     logger.info(f"Transcribed text for call SID={call_sid}: {transcription_text}")
                     if call_id:
                         Variable.set(f"twilio_transcription_{call_id}", transcription_text)
-                        # Variable.set(f"twilio_recording_file_{call_id}", file_path)
+                        Variable.set(f"twilio_recording_file_{call_id}", file_path)
                         logger.info(f"Set Variable twilio_transcription_{call_id} to: {transcription_text}")
                         logger.info(f"Set Variable twilio_recording_file_{call_id} to: {file_path}")
                     ti.xcom_push(key="recording_status", value="Recording Saved")
@@ -234,31 +231,24 @@ with DAG(
                         "file_path": file_path,
                         "transcription": "Transcription failed"
                     }
-                else:
-                    logger.info(f"Transcription not completed yet for call SID={call_sid}")
-                    ti.xcom_push(key="recording_status", value="Recording Saved")
-                    if call_id:
-                        ti.xcom_push(key=f"recording_file_{call_id}", value=file_path)
-                    return {
-                        "message": "Recording downloaded but transcription not completed",
-                        "file_path": file_path,
-                        "transcription": "Transcription pending"
-                    }
-            else:
-                logger.info(f"No transcription available yet for call SID={call_sid}")
-                ti.xcom_push(key="recording_status", value="Recording Saved")
-                if call_id:
-                    ti.xcom_push(key=f"recording_file_{call_id}", value=file_path)
-                return {
-                    "message": "Recording downloaded but no transcription available",
-                    "file_path": file_path,
-                    "transcription": "No transcription available"
-                }
+            logger.info(f"Transcription not ready yet for call SID={call_sid}, attempt {attempt + 1}/{max_attempts}")
+            time.sleep(5)  # Wait 5 seconds before retrying
 
-        except Exception as e:
-            logger.error(f"Recording fetch error: {str(e)}")
-            ti.xcom_push(key="recording_status", value="Failed")
-            return {"message": f"Exception: {str(e)}", "transcription": "No transcription available"}
+        # Timeout reached
+        logger.info(f"Transcription timeout after {max_attempts * 5} seconds for call SID={call_sid}")
+        ti.xcom_push(key="recording_status", value="Recording Saved")
+        if call_id:
+            ti.xcom_push(key=f"recording_file_{call_id}", value=file_path)
+        return {
+            "message": "Recording downloaded but transcription not completed within timeout",
+            "file_path": file_path,
+            "transcription": "Transcription pending"
+        }
+
+    except Exception as e:
+        logger.error(f"Recording fetch error: {str(e)}")
+        ti.xcom_push(key="recording_status", value="Failed")
+        return {"message": f"Exception: {str(e)}", "transcription": "No transcription available"}
 
     # ======================
     # Define the Operators
