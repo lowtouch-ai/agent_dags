@@ -251,7 +251,7 @@ def update_call_status(api_url, **kwargs):
         logger.info(f"Twilio status for call_id={call_id}: {twilio_status}")
 
         reminder_status = {
-            "completed": "CallCompleted",
+            "completed": "CalledCompleted",
             "no-answer": "CallFailed",
             "busy": "CallFailed",
             "failed": "CallFailed"
