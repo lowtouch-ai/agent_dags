@@ -94,7 +94,7 @@ def get_ai_response(user_query):
     except ResponseError as e:
         logging.error(f"Ollama API error: {str(e)} (status: {getattr(e, 'status_code', 'unknown')})")
     except Exception as e:
-        return "We are currently experiencing technical difficulties. Please check back later.
+        return "We are currently experiencing technical difficulties. Please check back later."
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
