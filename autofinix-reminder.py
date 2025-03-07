@@ -82,8 +82,10 @@ def fetch_due_loans(api_url, test_phone_number, **kwargs):
             logger.info(f"Fetching customer details for ID: {customer_id}")
             customer_data = make_api_request(f"{api_url}customer/{customer_id}")
             if customer_data:
+                # Rename remind_on to inserted_timestamp for consistency
+                reminder["inserted_timestamp"] = reminder.pop("remind_on")
                 reminder["phone"] = test_phone_number
-                logger.info(f"Updated reminder with phone number: {reminder}")
+                logger.info(f"Updated reminder with phone number and timestamp: {reminder}")
                 eligible_loans.append(reminder)
 
         if not eligible_loans:
@@ -234,8 +236,8 @@ def update_call_status(api_url, agent_url, **kwargs):
     final_outcomes = {}
 
     # Fetch reminders to get inserted_timestamp
-    loans = ti.xcom_pull(task_ids='fetch_due_loans', key='eligible_loans')
-    call_id_to_inserted_date = {str(loan['call_id']): loan['inserted_timestamp'] for loan in loans}
+    loans = ti.xcom_pull(task_ids='fetch_due_loans', key='eligible_loans') or []
+    call_id_to_inserted_date = {str(loan['call_id']): loan.get('inserted_timestamp') for loan in loans}
     logger.info(f"Call ID to inserted_date mapping: {call_id_to_inserted_date}")
 
     for call_id in call_ids:
@@ -280,7 +282,6 @@ def update_call_status(api_url, agent_url, **kwargs):
 
             # Second PUT: Update response_text if transcription exists and is valid
             if transcription and transcription not in ["No transcription available", "Transcription failed", "Transcription unclear; review recording required"]:
-                # Truncate transcription to 500 characters if necessary
                 response_text = transcription[:500] if len(transcription) > 500 else transcription
                 params = {"status": reminder_status, "call_id": call_id, "response_text": response_text}
                 make_api_request(update_url, method="PUT", params=params)
@@ -318,7 +319,7 @@ def update_call_status(api_url, agent_url, **kwargs):
                 except Exception as e:
                     logger.error(f"Failed to set new reminder: {str(e)}")
             else:
-                logger.error(f"No inserted_date found for call_id={call_id}")
+                logger.warning(f"No inserted_date found for call_id={call_id}; skipping transcription analysis")
 
         # Delete Variables after processing
         Variable.delete(f"twilio_call_status_{call_id}")
