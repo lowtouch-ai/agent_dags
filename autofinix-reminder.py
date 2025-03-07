@@ -272,17 +272,25 @@ def update_call_status(api_url, agent_url, **kwargs):
         loan_id = ti.xcom_pull(task_ids='generate_voice_message', key=f'loan_id_{call_id}')
         logger.info(f"Updating reminder status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
         try:
+            # First PUT: Update status
             update_url = f"{api_url}loan/{loan_id}/update_reminder"
             params = {"status": reminder_status, "call_id": call_id}
             make_api_request(update_url, method="PUT", params=params)
             logger.info(f"Updated status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
+
+            # Second PUT: Update response_text if transcription exists and is valid
+            if transcription and transcription not in ["No transcription available", "Transcription failed", "Transcription unclear; review recording required"]:
+                # Truncate transcription to 500 characters if necessary
+                response_text = transcription[:500] if len(transcription) > 500 else transcription
+                params = {"status": reminder_status, "call_id": call_id, "response_text": response_text}
+                make_api_request(update_url, method="PUT", params=params)
+                logger.info(f"Saved response_text for call_id={call_id}, loan_id={loan_id}: {response_text}")
         except Exception as e:
-            logger.error(f"Failed to update status: {str(e)}")
+            logger.error(f"Failed to update status or response_text: {str(e)}")
             final_outcomes[call_id] = "CallFailed"
 
         # Analyze transcription and set new reminder if call completed
-        if twilio_status == "completed" and transcription != "No transcription available":
-            # Ensure call_id is a string to match dictionary keys
+        if twilio_status == "completed" and transcription not in ["No transcription available", "Transcription failed", "Transcription unclear; review recording required"]:
             inserted_date = call_id_to_inserted_date.get(str(call_id))
             logger.info(f"Inserted date for call_id={call_id}: {inserted_date}")
             if inserted_date:
