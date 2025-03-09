@@ -144,7 +144,31 @@ def clean_message(message):
     Removes newline (\n) and tab (\t) characters from the message.
     """
     return re.sub(r'[\n\t]', ' ', message).strip()
+def extract_final_datetime(text):
+    """
+    Extracts the datetime from the text. If multiple dates are present, 
+    returns the date from the last sentence. If no date is found, returns None.
+    Args:
+        text (str): The input text containing one or more datetimes.
+    
+    Returns:
+        str | None: The extracted ISO datetime string or None if no date is found.
+    """
+    # Regular expression for ISO datetime (e.g., 2025-04-09T23:16:00+00:00)
+    date_pattern = r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\+\d{2}:\d{2})?'
+    
+    # Split text into sentences (using period, newline, or other sentence delimiters)
+    sentences = re.split(r'[.\n]+', text.strip())
+    
+    # Reverse iterate through sentences to find the last valid date
+    for sentence in reversed(sentences):
+        dates = re.findall(date_pattern, sentence)
+        if dates:  # If the sentence contains at least one date
+            return dates[-1]  # Return the last date in that sentence
 
+    # If no sentences have dates, check the entire text for a single date
+    dates = re.findall(date_pattern, text)
+    return dates[0] if dates else None
 def generate_voice_message(api_url, agent_url, **kwargs):
     """Generates voice message content for each loan."""
     ti = kwargs['ti']
@@ -304,7 +328,7 @@ def update_call_status(api_url, agent_url, **kwargs):
                         inserted_date=inserted_date
                     )
                     logger.info(f"Generated remind_on_date for call_id={call_id}: {remind_on_date}")
-
+                    remind_on_date=extract_final_datetime(remind_on_date)
                     # Validate date format (ISO)
                     datetime.fromisoformat(remind_on_date.replace("Z", "+00:00"))
 
