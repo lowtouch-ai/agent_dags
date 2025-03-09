@@ -119,7 +119,7 @@ def generate_voice_message_agent(loan_id, agent_url, transcription=None, inserte
         prompt = (
             f"Analyze the following transcription: '{transcription}' and come up with a date. "
             f"If no date is found, set the date one month from the date: {inserted_date}. "
-            "The final response should only contain the date in ISO format (e.g., '2025-03-10T12:00:00')."
+            "The final response should only contain the date in ISO format (e.g., '2025-03-10T12:00:00'). No other text only the date should be given in string format in final response."
         )
     else:
         prompt = (
