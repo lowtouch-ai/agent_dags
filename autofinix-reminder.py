@@ -334,7 +334,7 @@ def update_call_status(api_url, agent_url, **kwargs):
 
                     # Set new reminder
                     set_reminder_url = f"{api_url}loan/{loan_id}/set_reminder"
-                    payload = {"status": "Reminder", "remind_on": remind_on_date}
+                    payload = {"remind_on": remind_on_date}
                     result = make_api_request(set_reminder_url, method="POST", json=payload)
                     new_call_id = result.get("call_id")
                     logger.info(f"Set new reminder for loan_id={loan_id}, call_id={new_call_id}, remind_on={remind_on_date}")
