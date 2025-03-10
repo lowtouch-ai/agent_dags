@@ -66,7 +66,7 @@ def make_api_request(url, method="GET", params=None, json=None, retries=3):
         logger.error(f"API request failed: {str(e)}")
         raise
 
-def fetch_due_loans(api_url, test_phone_number,test_odd_number,test_even_number, **kwargs):
+def fetch_due_loans(api_url, test_phone_number,odd_phone_number,even_phone_number, **kwargs):
     """Fetches loans that are due from the Autoloan API"""
     ti = kwargs['ti']
     try:
@@ -94,9 +94,9 @@ def fetch_due_loans(api_url, test_phone_number,test_odd_number,test_even_number,
                         if int(reminder["loan_id"]) ==550:
                             reminder["phone"] = test_phone_number
                         else:
-                            reminder["phone"] = test_even_number
+                            reminder["phone"] = even_phone_number
                     else:
-                        reminder["phone"] = test_odd_number
+                        reminder["phone"] = odd_phone_number
                 logger.info(f"Updated reminder with phone number and timestamp: {reminder}")
                 eligible_loans.append(reminder)
 
