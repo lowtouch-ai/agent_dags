@@ -118,6 +118,8 @@ with DAG(
                 to=phone_number,
                 from_=TWILIO_PHONE_NUMBER,
                 twiml=twiml,
+                record=True,
+                recording_channel="mono"
             )
             logger.info(f"Call initiated with SID: {call.sid}")
             ti.xcom_push(key="call_sid", value=call.sid)
@@ -205,6 +207,20 @@ with DAG(
                 raise AirflowException("Recording not found yet.")
 
             recording_sid = recordings[0]["sid"]
+            transcriptions = twilio_client.recordings(recording_sid).transcriptions.list()
+            if not transcriptions:
+                twilio_client.recordings(recording_sid).transcriptions.create(
+                    language="en-US",  # Supports U.S. and Indian English
+                    speech_model="phone_call",  # Optimized for telephony
+                    speech_hints=[
+                        "will pay", "next month", "tomorrow", "next week", "overdue",
+                        "payment", "loan", "due date", "promise", "sorry", "delay"
+                    ]  # Overdue loan-specific phrases
+                )
+                logger.info(f"Transcription requested for recording SID={recording_sid}")
+            twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            
+            
             recording_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Recordings/{recording_sid}.mp3"
             execution_date = datetime.now().strftime("%Y-%m-%d")
             dag_name = "send-voice-message"
