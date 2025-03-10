@@ -30,6 +30,10 @@ default_args = {
 AUTOFINIX_API_URL = Variable.get("AUTOFINIX_API_URL")
 AGENTOMATIC_API_URL = Variable.get("AGENTOMATIC_API_URL")
 AUTOFINIX_TEST_PHONE_NUMBER = Variable.get("AUTOFINIX_TEST_PHONE_NUMBER")
+AUTOFINIX_DEMO_PHONE_ODD=Variable.get("AUTOFINIX_DEMO_PHONE_ODD")
+AUTOFINIX_DEMO_PHONE_EVEN=Variable.get("AUTOFINIX_DEMO_PHONE_EVEN")
+
+
 
 if not AUTOFINIX_API_URL:
     raise ValueError("Autoloan API URL is missing. Set it in Airflow Variables.")
@@ -426,7 +430,9 @@ with DAG(
         python_callable=fetch_due_loans,
         op_kwargs={
             "api_url": AUTOFINIX_API_URL,
-            "test_phone_number": AUTOFINIX_TEST_PHONE_NUMBER
+            "test_phone_number": AUTOFINIX_TEST_PHONE_NUMBER,
+            "odd_phone_number":AUTOFINIX_DEMO_PHONE_ODD,
+            "even_phone_number":AUTOFINIX_DEMO_PHONE_EVEN,
         },
     )
 
