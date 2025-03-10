@@ -2,6 +2,8 @@ from airflow import DAG
 from airflow.models.param import Param
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.dummy import DummyOperator
+from airflow.operators.python import PythonOperator, BranchPythonOperator
+from airflow.operators.dummy import DummyOperator
 from airflow.sensors.time_delta import TimeDeltaSensor
 from airflow.exceptions import AirflowException
 from airflow.models import Variable
@@ -34,6 +36,7 @@ if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
     raise ValueError("Twilio credentials are missing. Set them in Airflow Variables.")
 
 # Base directory for storing recordings
+# Base directory for storing recordings
 BASE_STORAGE_DIR = "/appz/data"
 
 def make_api_request(url, method="GET", auth=None, retries=3):
@@ -64,11 +67,13 @@ def make_api_request(url, method="GET", auth=None, retries=3):
 
 with DAG(
     "send-voice-message",
+    "send-voice-message",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
     render_template_as_native_obj=True,
     params={
+        "phone_number": Param("+1234567890", type="string", title="Phone Number"),
         "phone_number": Param("+1234567890", type="string", title="Phone Number"),
         "message": Param("Hello, please leave a message after the beep.", type="string", title="Message Before Beep"),
         "need_ack": Param(False, type="boolean", title="Require Acknowledgment"),
@@ -86,6 +91,7 @@ with DAG(
 
         if not conf.get("phone_number") or not conf.get("message"):
             logger.error("Missing required parameters: phone_number or message")
+            ti.xcom_push(key="call_outcome", value="Failed")
             ti.xcom_push(key="call_outcome", value="Failed")
             raise ValueError("Missing required parameters: phone_number or message")
 
@@ -127,13 +133,17 @@ with DAG(
         except Exception as e:
             logger.error(f"Failed to initiate call: {str(e)}")
             ti.xcom_push(key="call_outcome", value="Failed")
+            ti.xcom_push(key="call_outcome", value="Failed")
             raise
+
 
     def check_call_status(**kwargs):
         """
         Poll Twilio for call status; raise if still in-progress.
         """
         ti = kwargs["ti"]
+        conf = kwargs["params"]
+
         conf = kwargs["params"]
 
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
@@ -169,6 +179,19 @@ with DAG(
             return "fetch_and_save_recording"
         else:
             return "skip_recording"
+    def branch_recording_logic(**kwargs):
+        """
+        If final status is 'completed', proceed to 'fetch_and_save_recording'.
+        Otherwise skip.
+        """
+        ti = kwargs["ti"]
+        final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
+
+        logger.info(f"branch_recording_logic sees final_status={final_status}")
+        if final_status == "completed":
+            return "fetch_and_save_recording"
+        else:
+            return "skip_recording"
 
     def fetch_and_save_recording(**kwargs):
         """
@@ -177,14 +200,21 @@ with DAG(
         ti = kwargs["ti"]
         conf = kwargs["params"]
 
+        conf = kwargs["params"]
+
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
+        final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
         final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
         need_ack = ti.xcom_pull(task_ids="initiate_call", key="need_ack")
         call_id = conf.get("call_id")
 
         logger.info(f"fetch_and_save_recording with call_sid={call_sid}, status={final_status}, call_id={call_id}")
+        logger.info(f"fetch_and_save_recording with call_sid={call_sid}, status={final_status}, call_id={call_id}")
 
         if not need_ack:
+            logger.info("need_ack=False, skipping recording download.")
+            ti.xcom_push(key="recording_status", value="No Recording Needed")
+            return {"message": "Recording not needed."}
             logger.info("need_ack=False, skipping recording download.")
             ti.xcom_push(key="recording_status", value="No Recording Needed")
             return {"message": "Recording not needed."}
@@ -207,7 +237,7 @@ with DAG(
             recording_sid = recordings[0]["sid"]
             recording_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Recordings/{recording_sid}.mp3"
             execution_date = datetime.now().strftime("%Y-%m-%d")
-            dag_name = "send-voice-message"
+            dag_name = "send-voice-message-1"
             save_directory = os.path.join(BASE_STORAGE_DIR, dag_name, execution_date)
             os.makedirs(save_directory, exist_ok=True)
             file_path = os.path.join(save_directory, f"{call_sid}.mp3")
@@ -280,7 +310,7 @@ with DAG(
     initiate_call_task = PythonOperator(
         task_id="initiate_call",
         python_callable=initiate_call,
-        provide_context=True
+        provide_context=True  # In Airflow 2+, better to use op_kwargs if you prefer
     )
 
     wait_call_status = TimeDeltaSensor(
