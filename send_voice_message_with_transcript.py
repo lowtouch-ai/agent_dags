@@ -207,6 +207,8 @@ with DAG(
                 raise AirflowException("Recording not found yet.")
 
             recording_sid = recordings[0]["sid"]
+            twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            
             transcriptions = twilio_client.recordings(recording_sid).transcriptions.list()
             if not transcriptions:
                 twilio_client.recordings(recording_sid).transcriptions.create(
@@ -218,7 +220,7 @@ with DAG(
                     ]  # Overdue loan-specific phrases
                 )
                 logger.info(f"Transcription requested for recording SID={recording_sid}")
-            twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            
             
             
             recording_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Recordings/{recording_sid}.mp3"
