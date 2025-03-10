@@ -119,7 +119,7 @@ with DAG(
                 from_=TWILIO_PHONE_NUMBER,
                 twiml=twiml,
                 record=True,
-                recording_channel="mono"
+                recording_channels="mono"
             )
             logger.info(f"Call initiated with SID: {call.sid}")
             ti.xcom_push(key="call_sid", value=call.sid)
