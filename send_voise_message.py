@@ -215,9 +215,6 @@ with DAG(
             logger.info("need_ack=False, skipping recording download.")
             ti.xcom_push(key="recording_status", value="No Recording Needed")
             return {"message": "Recording not needed."}
-            logger.info("need_ack=False, skipping recording download.")
-            ti.xcom_push(key="recording_status", value="No Recording Needed")
-            return {"message": "Recording not needed."}
 
         if final_status != "completed":
             logger.info(f"Cannot fetch recording because final_status={final_status}")
