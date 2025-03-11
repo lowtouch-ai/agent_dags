@@ -2,6 +2,8 @@ from airflow import DAG
 from airflow.models.param import Param
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.dummy import DummyOperator
+from airflow.operators.python import PythonOperator, BranchPythonOperator
+from airflow.operators.dummy import DummyOperator
 from airflow.sensors.time_delta import TimeDeltaSensor
 from airflow.exceptions import AirflowException
 from airflow.models import Variable
@@ -33,6 +35,7 @@ TWILIO_PHONE_NUMBER = Variable.get("TWILIO_PHONE_NUMBER")
 if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
     raise ValueError("Twilio credentials are missing. Set them in Airflow Variables.")
 
+# Base directory for storing recordings
 # Base directory for storing recordings
 BASE_STORAGE_DIR = "/appz/data"
 
@@ -70,6 +73,7 @@ with DAG(
     render_template_as_native_obj=True,
     params={
         "phone_number": Param("+1234567890", type="string", title="Phone Number"),
+        "phone_number": Param("+1234567890", type="string", title="Phone Number"),
         "message": Param("Hello, please leave a message after the beep.", type="string", title="Message Before Beep"),
         "need_ack": Param(False, type="boolean", title="Require Acknowledgment"),
         "call_id": Param(None, type=["string", "null"], title="Call ID"),
@@ -86,6 +90,7 @@ with DAG(
 
         if not conf.get("phone_number") or not conf.get("message"):
             logger.error("Missing required parameters: phone_number or message")
+            ti.xcom_push(key="call_outcome", value="Failed")
             ti.xcom_push(key="call_outcome", value="Failed")
             raise ValueError("Missing required parameters: phone_number or message")
 
@@ -118,8 +123,6 @@ with DAG(
                 to=phone_number,
                 from_=TWILIO_PHONE_NUMBER,
                 twiml=twiml,
-                record=True,
-                recording_channels="mono"
             )
             logger.info(f"Call initiated with SID: {call.sid}")
             ti.xcom_push(key="call_sid", value=call.sid)
@@ -129,13 +132,17 @@ with DAG(
         except Exception as e:
             logger.error(f"Failed to initiate call: {str(e)}")
             ti.xcom_push(key="call_outcome", value="Failed")
+            ti.xcom_push(key="call_outcome", value="Failed")
             raise
+
 
     def check_call_status(**kwargs):
         """
         Poll Twilio for call status; raise if still in-progress.
         """
         ti = kwargs["ti"]
+        conf = kwargs["params"]
+
         conf = kwargs["params"]
 
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
@@ -171,6 +178,19 @@ with DAG(
             return "fetch_and_save_recording"
         else:
             return "skip_recording"
+    def branch_recording_logic(**kwargs):
+        """
+        If final status is 'completed', proceed to 'fetch_and_save_recording'.
+        Otherwise skip.
+        """
+        ti = kwargs["ti"]
+        final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
+
+        logger.info(f"branch_recording_logic sees final_status={final_status}")
+        if final_status == "completed":
+            return "fetch_and_save_recording"
+        else:
+            return "skip_recording"
 
     def fetch_and_save_recording(**kwargs):
         """
@@ -178,12 +198,13 @@ with DAG(
         """
         ti = kwargs["ti"]
         conf = kwargs["params"]
-
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
+        final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
         final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
         need_ack = ti.xcom_pull(task_ids="initiate_call", key="need_ack")
         call_id = conf.get("call_id")
 
+        logger.info(f"fetch_and_save_recording with call_sid={call_sid}, status={final_status}, call_id={call_id}")
         logger.info(f"fetch_and_save_recording with call_sid={call_sid}, status={final_status}, call_id={call_id}")
 
         if not need_ack:
@@ -207,25 +228,9 @@ with DAG(
                 raise AirflowException("Recording not found yet.")
 
             recording_sid = recordings[0]["sid"]
-            twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-            
-            transcriptions = twilio_client.recordings(recording_sid).transcriptions.list()
-            if not transcriptions:
-                twilio_client.recordings(recording_sid).transcriptions.create(
-                    language="en-US",  # Supports U.S. and Indian English
-                    speech_model="phone_call",  # Optimized for telephony
-                    speech_hints=[
-                        "will pay", "next month", "tomorrow", "next week", "overdue",
-                        "payment", "loan", "due date", "promise", "sorry", "delay"
-                    ]  # Overdue loan-specific phrases
-                )
-                logger.info(f"Transcription requested for recording SID={recording_sid}")
-            
-            
-            
             recording_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Recordings/{recording_sid}.mp3"
             execution_date = datetime.now().strftime("%Y-%m-%d")
-            dag_name = "send-voice-message"
+            dag_name = "send-voice-message-1"
             save_directory = os.path.join(BASE_STORAGE_DIR, dag_name, execution_date)
             os.makedirs(save_directory, exist_ok=True)
             file_path = os.path.join(save_directory, f"{call_sid}.mp3")
@@ -295,10 +300,11 @@ with DAG(
             raise AirflowException("Transcription still pending; retrying...")
 
     # Define Operators
+    # Define Operators
     initiate_call_task = PythonOperator(
         task_id="initiate_call",
         python_callable=initiate_call,
-        provide_context=True
+        op_kwargs={'params': dag.params},  # Explicitly pass params
     )
 
     wait_call_status = TimeDeltaSensor(
@@ -311,7 +317,7 @@ with DAG(
     check_status_task = PythonOperator(
         task_id="check_call_status",
         python_callable=check_call_status,
-        provide_context=True,
+        op_kwargs={'params': dag.params},  # Explicitly pass params
         retries=50,
         retry_delay=timedelta(seconds=5)
     )
@@ -319,19 +325,19 @@ with DAG(
     branch_recording_task = BranchPythonOperator(
         task_id="branch_recording_logic",
         python_callable=branch_recording_logic,
-        provide_context=True
+        op_kwargs={},  # No additional params needed beyond task instance access
     )
 
     fetch_recording_task = PythonOperator(
         task_id="fetch_and_save_recording",
         python_callable=fetch_and_save_recording,
-        provide_context=True
+        op_kwargs={'params': dag.params},  # Explicitly pass params
     )
 
     fetch_transcription_task = PythonOperator(
         task_id="fetch_transcription",
         python_callable=fetch_transcription,
-        provide_context=True,
+        op_kwargs={'params': dag.params},  # Explicitly pass params
         retries=12,  # 60 seconds total (12 retries * 5s retry_delay)
         retry_delay=timedelta(seconds=5)
     )
