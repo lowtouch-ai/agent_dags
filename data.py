@@ -6,7 +6,7 @@ from airflow.models import Variable
 
 # Default arguments
 default_args = {
-    'owner': 'airflow',
+    'owner': 'lowtouch.ai_developers',
     'depends_on_past': False,
     'start_date': datetime(2024, 2, 28),
     'retries': 1,
@@ -37,7 +37,8 @@ with DAG(
     'webshop_reset',
     default_args=default_args,
     schedule_interval=daily_schedule_utc,
-    catchup=False
+    catchup=False,
+    tags=["reset", "webshop"]
 ) as dag:
 
     # TaskGroup for dbt seed
