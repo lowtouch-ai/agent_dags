@@ -73,7 +73,6 @@ with DAG(
     render_template_as_native_obj=True,
     params={
         "phone_number": Param("+1234567890", type="string", title="Phone Number"),
-        "phone_number": Param("+1234567890", type="string", title="Phone Number"),
         "message": Param("Hello, please leave a message after the beep.", type="string", title="Message Before Beep"),
         "need_ack": Param(False, type="boolean", title="Require Acknowledgment"),
         "call_id": Param(None, type=["string", "null"], title="Call ID"),
@@ -107,7 +106,6 @@ with DAG(
                 twiml = f"""
                 <Response>
                     <Say>{message}</Say>
-                    <Say>Please speak your acknowledgment after the beep.</Say>
                     <Record maxLength="30" playBeep="true" trim="trim-silence" transcribe="true"/>
                     <Say>Thank you! Goodbye.</Say>
                 </Response>
