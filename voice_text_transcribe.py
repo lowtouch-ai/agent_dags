@@ -8,7 +8,7 @@ import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-default_args = {s
+default_args = {
     "owner": "airflow",
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 27),
