@@ -106,6 +106,7 @@ with DAG(
                 twiml = f"""
                 <Response>
                     <Say>{message}</Say>
+                    <Say>Please speak your acknowledgment after the beep.</Say>
                     <Record maxLength="30" playBeep="true" trim="trim-silence" transcribe="true"/>
                     <Say>Thank you! Goodbye.</Say>
                 </Response>
@@ -196,6 +197,9 @@ with DAG(
         """
         ti = kwargs["ti"]
         conf = kwargs["params"]
+
+        conf = kwargs["params"]
+
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
         final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
         final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
@@ -298,11 +302,10 @@ with DAG(
             raise AirflowException("Transcription still pending; retrying...")
 
     # Define Operators
-    # Define Operators
     initiate_call_task = PythonOperator(
         task_id="initiate_call",
         python_callable=initiate_call,
-        op_kwargs={'params': dag.params},  # Explicitly pass params
+        provide_context=True  # In Airflow 2+, better to use op_kwargs if you prefer
     )
 
     wait_call_status = TimeDeltaSensor(
@@ -315,7 +318,7 @@ with DAG(
     check_status_task = PythonOperator(
         task_id="check_call_status",
         python_callable=check_call_status,
-        op_kwargs={'params': dag.params},  # Explicitly pass params
+        provide_context=True,
         retries=50,
         retry_delay=timedelta(seconds=5)
     )
@@ -323,19 +326,19 @@ with DAG(
     branch_recording_task = BranchPythonOperator(
         task_id="branch_recording_logic",
         python_callable=branch_recording_logic,
-        op_kwargs={},  # No additional params needed beyond task instance access
+        provide_context=True
     )
 
     fetch_recording_task = PythonOperator(
         task_id="fetch_and_save_recording",
         python_callable=fetch_and_save_recording,
-        op_kwargs={'params': dag.params},  # Explicitly pass params
+        provide_context=True
     )
 
     fetch_transcription_task = PythonOperator(
         task_id="fetch_transcription",
         python_callable=fetch_transcription,
-        op_kwargs={'params': dag.params},  # Explicitly pass params
+        provide_context=True,
         retries=12,  # 60 seconds total (12 retries * 5s retry_delay)
         retry_delay=timedelta(seconds=5)
     )

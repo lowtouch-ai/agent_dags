@@ -34,7 +34,6 @@ AUTOFINIX_DEMO_PHONE_ODD=Variable.get("AUTOFINIX_DEMO_PHONE_ODD")
 AUTOFINIX_DEMO_PHONE_EVEN=Variable.get("AUTOFINIX_DEMO_PHONE_EVEN")
 
 
-
 if not AUTOFINIX_API_URL:
     raise ValueError("Autoloan API URL is missing. Set it in Airflow Variables.")
 
@@ -66,7 +65,7 @@ def make_api_request(url, method="GET", params=None, json=None, retries=3):
         logger.error(f"API request failed: {str(e)}")
         raise
 
-def fetch_due_loans(api_url, test_phone_number,odd_phone_number,even_phone_number, **kwargs):
+def fetch_due_loans(api_url, test_phone_number,even_phone_number,odd_phone_number, **kwargs):
     """Fetches loans that are due from the Autoloan API"""
     ti = kwargs['ti']
     try:
@@ -88,15 +87,14 @@ def fetch_due_loans(api_url, test_phone_number,odd_phone_number,even_phone_numbe
             if customer_data:
                 # Rename remind_on to inserted_timestamp for consistency
                 reminder["inserted_timestamp"] = reminder.pop("remind_on")
-                if int(reminder["loan_id"]) % 2 == 0:
-                    # Add phone number for even loan IDs:
-                    if int(reminder["loan_id"]) % 2 == 0:
-                        if int(reminder["loan_id"]) ==550:
-                            reminder["phone"] = test_phone_number
-                        else:
-                            reminder["phone"] = even_phone_number
+                if int(reminder['loan_id'])%2==0:
+                    if int(reminder['loan_id'])==550:
+                        reminder["phone"] = test_phone_number
                     else:
-                        reminder["phone"] = odd_phone_number
+                        reminder["phone"] = even_phone_number
+                else:
+                    reminder["phone"] = odd_phone_number
+                
                 logger.info(f"Updated reminder with phone number and timestamp: {reminder}")
                 eligible_loans.append(reminder)
 
@@ -135,9 +133,12 @@ def generate_voice_message_agent(loan_id, agent_url, transcription=None, inserte
         )
     else:
         prompt = (
-            f"Generate a professional loan due reminder message for loan ID {loan_id}."
-            "Fetch overdue details including customerid, loanamount, interestrate, tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. If details are unavailable, use placeholders (e.g., 'Customer', 'N days'). Convert the message into this template: 'Dear (Name), this is a gentle reminder of your loan number ({loan_id}) which is overdue by (n) installments. Kindly tell us when you can make the payments, after the beep.'"
-            "The final response must be a concise message which should not exceed 500 characters, containing only relevant content,suitable for conversion to a voice call."
+            f"Generate a professional loan due reminder message for loan ID {loan_id}. "
+            "Fetch the overdue details for this loan, including customerid, loanamount, interestrate, "
+            "tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. "
+            "If specific details are unavailable or cannot be retrieved, use placeholder text or generic terms. "
+            "The final response must be a concise message which should not exceed 500 characters, containing only relevant content, "
+            "suitable for conversion to a voice call."
         )
     response = client.chat(
         model='autofinix:0.3',
@@ -255,7 +256,7 @@ def trigger_twilio_voice_call(**kwargs):
         # Trigger `send-voice-message` DAG
         trigger = TriggerDagRunOperator(
             task_id=f"trigger_twilio_voice_call_inner_{call_id}",
-            trigger_dag_id="send-voice-message-transcript",
+            trigger_dag_id="send-voice-message",
             conf=conf,
             wait_for_completion=True,
             poke_interval=30,
