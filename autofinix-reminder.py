@@ -256,7 +256,7 @@ def trigger_twilio_voice_call(**kwargs):
         # Trigger `send-voice-message` DAG
         trigger = TriggerDagRunOperator(
             task_id=f"trigger_twilio_voice_call_inner_{call_id}",
-            trigger_dag_id="send-voice-message",
+            trigger_dag_id="send-voice-message-transcript",
             conf=conf,
             wait_for_completion=True,
             poke_interval=30,
