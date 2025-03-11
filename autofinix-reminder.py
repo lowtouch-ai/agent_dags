@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Default args for DAG
 default_args = {
-    "owner": "airflow",
+    "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2025, 2, 27),
     "retries": 1,
@@ -39,6 +39,7 @@ with DAG(
     schedule_interval=timedelta(minutes=1),  # Updated to timedelta(minutes=1)
     catchup=False,
     max_active_runs=1,  # Prevent overlapping runs
+    tags=["reminder", "autofinix"])
 ) as dag:
 
     def fetch_due_loans(**kwargs):
