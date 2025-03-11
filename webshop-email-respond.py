@@ -19,7 +19,7 @@ from bs4 import BeautifulSoup
 logging.basicConfig(level=logging.INFO)
 
 default_args = {
-    "owner": "airflow",
+    "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 18),
     "retries": 0,
@@ -137,7 +137,7 @@ def send_response(**kwargs):
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
 
-with DAG("webshop-email-respond", default_args=default_args, schedule_interval=None, catchup=False) as dag:
+with DAG("webshop-email-respond", default_args=default_args, schedule_interval=None, catchup=False, tags=["email", "webshop"])) as dag:
     send_response_task = PythonOperator(
         task_id="send-response",
         python_callable=send_response,
