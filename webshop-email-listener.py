@@ -12,7 +12,7 @@ from googleapiclient.discovery import build
 
 # Default DAG arguments
 default_args = {
-    "owner": "airflow",
+    "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 24),
     "retries": 1,
@@ -111,7 +111,8 @@ def fetch_unread_emails(**kwargs):
 with DAG("webshop-email-listener",
          default_args=default_args,
          schedule_interval=timedelta(minutes=1),
-         catchup=False) as dag:
+         catchup=False),
+         tags=["email", "webshop"])as dag:
 
     fetch_emails_task = PythonOperator(
         task_id="fetch_unread_emails",
