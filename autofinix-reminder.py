@@ -39,7 +39,7 @@ with DAG(
     schedule_interval=timedelta(minutes=1),  # Updated to timedelta(minutes=1)
     catchup=False,
     max_active_runs=1,  # Prevent overlapping runs
-    tags=["reminder", "autofinix"])
+    tags=["reminder", "autofinix"]
 ) as dag:
 
     def fetch_due_loans(**kwargs):
