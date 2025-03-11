@@ -111,7 +111,7 @@ def fetch_unread_emails(**kwargs):
 with DAG("webshop-email-listener",
          default_args=default_args,
          schedule_interval=timedelta(minutes=1),
-         catchup=False),
+         catchup=False,
          tags=["email", "webshop"])as dag:
 
     fetch_emails_task = PythonOperator(
