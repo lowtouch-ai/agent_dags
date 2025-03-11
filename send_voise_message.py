@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 default_args = {
-    "owner": "airflow",
+    "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 27),
     "retries": 1,
@@ -40,6 +40,7 @@ with DAG(
     default_args=default_args,
     schedule_interval=None,  # Manually triggered
     catchup=False,
+    tags=["voice", "autofinix"],
     render_template_as_native_obj=True,
     params={
         "phone_number": Param("+1234567890", type="string", title="Phone Number"),
