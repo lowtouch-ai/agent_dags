@@ -133,7 +133,7 @@ def generate_voice_message_agent(loan_id, agent_url, transcription=None, inserte
         )
     else:
         prompt = (
-            f"""Generate a professional loan due reminder message for loan ID {loan_id}. Fetch overdue details of this loan including customerid, loanamount, interestrate, tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. If details are unavailable, use placeholders (e.g., 'Customer', 'N days'). Convert the message into this template: 'Dear (customer_name), this is a gentle reminder of your loan number ({loan_id}) which is overdue by (n) installments. Kindly tell us when you can make the payments, after the beep'."""
+            f"""Generate a professional loan due reminder message for loan ID {loan_id}. Fetch overdue details of this loan including customerid, loanamount, interestrate, tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. If details are unavailable, use placeholders (e.g., 'Customer', 'N days'). Convert the message into this template: 'Dear (customer_name), this is a gentle reminder of your loan number ({loan_id}) which is overdue by (n) installments. Kindly tell us when you can make the payments, after the beep'.The final response must be a concise message which should not exceed 500 characters, containing only relevant content, suitable for conversion to a voice call."""
         )
     response = client.chat(
         model='autofinix:0.3',
