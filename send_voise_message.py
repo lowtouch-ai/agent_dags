@@ -66,7 +66,7 @@ def make_api_request(url, method="GET", auth=None, retries=3):
         raise
 
 with DAG(
-    "send-voice-message",
+    "send_voice_message",
     "send-voice-message",
     default_args=default_args,
     schedule_interval=None,
