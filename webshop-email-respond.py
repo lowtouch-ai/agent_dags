@@ -137,7 +137,7 @@ def send_response(**kwargs):
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
 
-with DAG("webshop-email-respond", default_args=default_args, schedule_interval=None, catchup=False, tags=["email", "webshop"]) as dag:
+with DAG("webshop_email_respond", default_args=default_args, schedule_interval=None, catchup=False, tags=["email", "webshop"]) as dag:
     send_response_task = PythonOperator(
         task_id="send-response",
         python_callable=send_response,
