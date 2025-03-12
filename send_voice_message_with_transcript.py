@@ -216,7 +216,7 @@ with DAG(
                 logger.info(f"Recording saved at {file_path}")
                 ti.xcom_push(key="recording_status", value="Recording Saved")
                 ti.xcom_push(key="recording_sid", value=recording_sid)
-                ti.xcom_push(key="recording_file_path", value=file_path)  # Push with a consistent key
+                ti.xcom_push(key="recording_file_path", value=file_path)  # Consistent key
                 if call_id:
                     Variable.set(f"twilio_recording_file_{call_id}", file_path)
                     logger.info(f"Set Variable twilio_recording_file_{call_id} to: {file_path}")
@@ -232,13 +232,13 @@ with DAG(
             ti.xcom_push(key="recording_status", value="Failed")
             raise
 
-    def trigger_transcription_dag(**kwargs):
+    def prepare_transcription_trigger(**kwargs):
         """
-        Trigger the voice_text_transcribe DAG with the recording file path and call_id.
+        Prepare the configuration for triggering the voice_text_transcribe DAG.
         """
         ti = kwargs["ti"]
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
-        recording_file_path = ti.xcom_pull(task_ids="fetch_and_save_recording", key="recording_file_path")  # Use consistent key
+        recording_file_path = ti.xcom_pull(task_ids="fetch_and_save_recording", key="recording_file_path")
         call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id")
 
         if not recording_file_path:
@@ -246,21 +246,12 @@ with DAG(
             ti.xcom_push(key="transcription_status", value="failed")
             raise AirflowException("No recording file path available")
 
-        logger.info(f"Triggering transcription for call SID={call_sid}, file={recording_file_path}, call_id={call_id}")
-
-        # Trigger the voice_text_transcribe DAG
-        trigger_dag = TriggerDagRunOperator(
-            task_id="trigger_transcription_dag",
-            trigger_dag_id="voice_text_transcribe",
-            conf={
-                "file_path": {
-                    "value": recording_file_path
-                },
-                "call_id": call_id  # Pass call_id to the target DAG
-            },
-            dag=dag,
-        )
-        trigger_dag.execute(context=kwargs)
+        logger.info(f"Preparing transcription trigger for call SID={call_sid}, file={recording_file_path}, call_id={call_id}")
+        # No need to instantiate TriggerDagRunOperator here; just return or push conf if needed
+        ti.xcom_push(key="trigger_conf", value={
+            "file_path": {"value": recording_file_path},
+            "call_id": call_id
+        })
 
     def fetch_transcription(**kwargs):
         """
@@ -324,10 +315,17 @@ with DAG(
         provide_context=True
     )
 
-    trigger_transcription_task = PythonOperator(
-        task_id="trigger_transcription_dag",
-        python_callable=trigger_transcription_dag,
+    prepare_transcription_task = PythonOperator(
+        task_id="prepare_transcription_trigger",
+        python_callable=prepare_transcription_trigger,
         provide_context=True
+    )
+
+    trigger_transcription_task = TriggerDagRunOperator(
+        task_id="trigger_transcription_dag",
+        trigger_dag_id="voice_text_transcribe",
+        conf="{{ ti.xcom_pull(task_ids='prepare_transcription_trigger', key='trigger_conf') }}",
+        dag=dag,
     )
 
     # Use TimeDeltaSensor to wait before fetching transcription
@@ -352,4 +350,4 @@ with DAG(
     initiate_call_task >> wait_call_status >> check_status_task
     check_status_task >> branch_recording_task
     branch_recording_task >> [fetch_recording_task, skip_recording]
-    fetch_recording_task >> trigger_transcription_task >> wait_for_transcription >> fetch_transcription_task
+    fetch_recording_task >> prepare_transcription_task >> trigger_transcription_task >> wait_for_transcription >> fetch_transcription_task
