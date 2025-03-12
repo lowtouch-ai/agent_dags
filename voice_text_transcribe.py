@@ -25,7 +25,7 @@ def transcribe_with_whisper(file_path, **kwargs):
         WHISPER_MODEL = whisper.load_model("small")
         logger.info("Whisper model loaded")
         result = WHISPER_MODEL.transcribe(
-            file_path,
+            file_path,  # This should now be the string value from the 'value' key
             language="en",
             task="transcribe",
         )
@@ -45,7 +45,13 @@ with DAG(
     schedule_interval=None,
     catchup=False,
     params={
-        "file_path": {"type": "string", "description": "Path to the MP3 file to transcribe"},
+        "file_path": {
+            "type": "object",
+            "properties": {
+                "value": {"type": "string", "description": "Path to the MP3 file to transcribe"}
+            },
+            "required": ["value"]
+        },
         "call_id": {"type": ["string", "null"], "description": "Optional call ID for tracking"}
     }
 ) as dag:
@@ -53,7 +59,7 @@ with DAG(
     transcribe_task = PythonOperator(
         task_id="transcribe_audio",
         python_callable=transcribe_with_whisper,
-        op_kwargs={"file_path": "{{ params.file_path }}"},
+        op_kwargs={"file_path": "{{ params.file_path.value }}"},  # Updated to access the 'value' key
         provide_context=True,
     )
 
