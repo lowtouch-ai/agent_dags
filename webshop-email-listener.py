@@ -138,7 +138,7 @@ with DAG("webshop_email_listener",
 
             trigger_task = TriggerDagRunOperator(
                 task_id=task_id,
-                trigger_dag_id="webshop-email-respond",
+                trigger_dag_id="webshop_email_respond",
                 conf={"email_data": email},
             )
 
