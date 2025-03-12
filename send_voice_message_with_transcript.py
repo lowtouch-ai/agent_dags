@@ -237,9 +237,10 @@ with DAG(
         """
         ti = kwargs["ti"]
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
-        recording_file_path = ti.xcom_pull(task_ids="fetch_and_save_recording", key=f"recording_file_{ti.xcom_pull(task_ids='initiate_call', key='call_id')}")
         call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id")
-
+        logger.info(f"Triggering transcription for call SID={call_sid}, call_id={call_id}")
+        recording_file_path = ti.xcom_pull(task_ids="fetch_and_save_recording", key=f"recording_file_{call_id}")
+        logger.info(f"Recording file path: {recording_file_path}")
         if not recording_file_path:
             logger.error("No recording file path found. Did 'fetch_and_save_recording' fail?")
             ti.xcom_push(key="transcription_status", value="failed")
