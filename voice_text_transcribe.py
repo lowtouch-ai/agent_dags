@@ -3,7 +3,7 @@ from airflow.operators.python import PythonOperator
 from datetime import datetime, timedelta
 import whisper
 import logging
-import time
+from airflow.models import Variable
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -16,23 +16,35 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
-def transcribe_with_whisper(file_path, **kwargs):
-    """Transcribe audio using the Whisper model."""
+def transcribe_audio(file_path, **kwargs):
+    """Load the Whisper model and transcribe the audio in one task."""
     ti = kwargs["ti"]
-    start_time = time.time()
+    conf = kwargs["dag_run"].conf  # Access the conf from the triggered DAG
+    call_id = conf.get("call_id")
     
     try:
+        # Load the model and transcribe in one task
+        logger.info("Loading Whisper model...")
         WHISPER_MODEL = whisper.load_model("small")
-        logger.info("Whisper model loaded")
+        logger.info("Whisper model loaded successfully")
+
+        logger.info("Starting transcription...")
+        start_time = datetime.now()
         result = WHISPER_MODEL.transcribe(
-            file_path,  # This should now be the string value from the 'value' key
+            file_path,
             language="en",
             task="transcribe",
         )
         transcription = result["text"]
         logger.info(f"Whisper transcription: {transcription}")
-        logger.info(f"Transcription time: {time.time() - start_time:.2f} seconds")
-        
+        logger.info(f"Transcription time: {(datetime.now() - start_time).total_seconds():.2f} seconds")
+
+        # Save transcription to Variable only if call_id is provided
+        if call_id:
+            variable_key = f"text_{call_id}"
+            Variable.set(variable_key, transcription)
+            logger.info(f"Saved transcription to Variable {variable_key}")
+
         ti.xcom_push(key="transcription", value=transcription)
         return transcription
     except Exception as e:
@@ -56,11 +68,10 @@ with DAG(
     }
 ) as dag:
 
+    # Single task for loading model and transcribing
     transcribe_task = PythonOperator(
         task_id="transcribe_audio",
-        python_callable=transcribe_with_whisper,
-        op_kwargs={"file_path": "{{ params.file_path.value }}"},  # Updated to access the 'value' key
+        python_callable=transcribe_audio,
+        op_kwargs={"file_path": "{{ params.file_path.value }}"},
         provide_context=True,
     )
-
-    transcribe_task
