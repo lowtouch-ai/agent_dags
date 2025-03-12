@@ -94,8 +94,9 @@ with DAG(
         phone_number = conf["phone_number"]
         message = conf["message"]
         need_ack = conf.get("need_ack", False)
-        call_id = conf.get("call_id", str(uuid.uuid4()))  # Default call_id if not provided
-
+        call_id = conf.get("call_id")  # Default call_id if not provided
+        if call_id is None:  # Explicitly check for None and override
+            call_id = str(uuid.uuid4())
         logger.info(f"Initiating call to: {phone_number}, need_ack: {need_ack}, call_id: {call_id}")
 
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
