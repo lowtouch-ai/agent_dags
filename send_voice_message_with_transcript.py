@@ -216,6 +216,7 @@ with DAG(
                 logger.info(f"Recording saved at {file_path}")
                 ti.xcom_push(key="recording_status", value="Recording Saved")
                 ti.xcom_push(key="recording_sid", value=recording_sid)
+                ti.xcom_push(key="recording_file_path", value=file_path)  # Push with a consistent key
                 if call_id:
                     Variable.set(f"twilio_recording_file_{call_id}", file_path)
                     logger.info(f"Set Variable twilio_recording_file_{call_id} to: {file_path}")
@@ -237,10 +238,9 @@ with DAG(
         """
         ti = kwargs["ti"]
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
+        recording_file_path = ti.xcom_pull(task_ids="fetch_and_save_recording", key="recording_file_path")  # Use consistent key
         call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id")
-        logger.info(f"Triggering transcription for call SID={call_sid}, call_id={call_id}")
-        recording_file_path = ti.xcom_pull(task_ids="fetch_and_save_recording", key=f"recording_file_{call_id}")
-        logger.info(f"Recording file path: {recording_file_path}")
+
         if not recording_file_path:
             logger.error("No recording file path found. Did 'fetch_and_save_recording' fail?")
             ti.xcom_push(key="transcription_status", value="failed")
