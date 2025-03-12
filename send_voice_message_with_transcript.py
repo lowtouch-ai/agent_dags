@@ -263,10 +263,10 @@ with DAG(
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
 
         variable_key = f"text_{call_id}"
-        transcription = Variable.get(variable_key, default=None)
-
-        if transcription is not None:
-            logger.info(f"Transcription retrieved for call SID={call_sid}: {transcription}")
+        logger.info(f"Checking Variable {variable_key} for call SID={call_sid}")
+        try:
+            transcription = Variable.get(variable_key)
+            logger.info(f"Variable {variable_key} value: {transcription}")
             # Delete the Variable after retrieval
             Variable.delete(variable_key)
             logger.info(f"Deleted Variable {variable_key}")
@@ -278,8 +278,8 @@ with DAG(
                 "message": "Transcription fetched successfully",
                 "transcription": transcription
             }
-        else:
-            logger.info(f"Transcription not available yet for call SID={call_sid}")
+        except KeyError:
+            logger.info(f"Variable {variable_key} not found")
             raise AirflowException("Transcription not yet available; retrying...")
 
     # Define Operators
