@@ -105,7 +105,6 @@ with DAG(
                 twiml = f"""
                 <Response>
                     <Say>{message}</Say>
-                    <Say>Please speak your acknowledgment after the beep.</Say>
                     <Record maxLength="30" playBeep="true" trim="trim-silence" transcribe="true"/>
                     <Say>Thank you! Goodbye.</Say>
                 </Response>
