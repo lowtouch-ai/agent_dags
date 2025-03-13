@@ -56,6 +56,7 @@ with DAG(
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
+    tags=["autofinix", "process", "voice"],
     params={
         "file_path": {
             "type": "object",
