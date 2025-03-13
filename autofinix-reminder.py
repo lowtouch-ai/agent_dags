@@ -12,6 +12,7 @@ import uuid
 from ollama import Client
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
