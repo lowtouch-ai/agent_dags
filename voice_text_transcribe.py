@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 default_args = {
-    "owner": "airflow",
+    "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 27),
     "retries": 1,
@@ -52,7 +52,7 @@ def transcribe_audio(file_path, **kwargs):
         raise
 
 with DAG(
-    "voice-text-transcribe",
+    "autofinix_transcribe_message_voice",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
