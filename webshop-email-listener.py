@@ -108,7 +108,7 @@ def fetch_unread_emails(**kwargs):
     kwargs['ti'].xcom_push(key="unread_emails", value=unread_emails)
 
 # Define DAG
-with DAG("webshop_email_listener",
+with DAG("webshop_monitor_mailbox",
          default_args=default_args,
          schedule_interval=timedelta(minutes=1),
          catchup=False,
@@ -138,7 +138,7 @@ with DAG("webshop_email_listener",
 
             trigger_task = TriggerDagRunOperator(
                 task_id=task_id,
-                trigger_dag_id="webshop_email_respond",
+                trigger_dag_id="webshop_send_response_email",
                 conf={"email_data": email},
             )
 
