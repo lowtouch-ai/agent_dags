@@ -34,7 +34,7 @@ dbt_run_commands = ["order"]
 daily_schedule_utc = "30 2 * * *"  # Runs daily at 2:30 AM UTC (8:00 AM IST)
 
 with DAG(
-    'webshop_reset',
+    'webshop_reset_data',
     default_args=default_args,
     schedule_interval=daily_schedule_utc,
     catchup=False,
