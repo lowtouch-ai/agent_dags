@@ -33,6 +33,10 @@ dbt_run_commands = ["order"]
 # Convert 8 AM IST to UTC (Airflow uses UTC by default)
 daily_schedule_utc = "30 2 * * *"  # Runs daily at 2:30 AM UTC (8:00 AM IST)
 
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'webshop.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
+
 with DAG(
     'webshop_reset_data',
     default_args=default_args,
