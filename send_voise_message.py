@@ -64,11 +64,16 @@ def make_api_request(url, method="GET", auth=None, retries=3):
         logger.error(f"API request failed: {str(e)}")
         raise
 
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'voice_message.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
+
 with DAG(
     "shared_send_message_voice",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
+    doc_md=readme_content,
     tags=["voice", "autofinix"],
     render_template_as_native_obj=True,
     params={
