@@ -24,16 +24,3 @@
 2. **DBT Run Tasks**:
    - Models: order
    - Purpose: Executes transformations to build derived tables/views
-
-## Troubleshooting
-- **Common Issues**:
-  - Database connection failures due to invalid credentials
-  - Virtual environment activation failures
-  - Missing DBT dependencies
-- **Logs to Check**:
-  - Individual task logs (e.g., `dbt_seed_address`, `dbt_run_order`)
-  - DBT execution logs in the project directory
-- **Resolution Steps**:
-  1. Verify Airflow variables are set correctly
-  2. Check database connectivity
-  3. Ensure DBT virtual environment is properly configured
