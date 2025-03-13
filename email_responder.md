@@ -24,10 +24,3 @@
      3. Generates an AI response using the Ollama model (`webshop-email:0.5`).
      4. Sends an HTML-formatted reply email, preserving threading with `In-Reply-To` and `References` headers.
    - **Fallback**: If errors occur (e.g., no content or AI failure), sends a default message: "We are currently experiencing technical difficulties. Please check back later."
-
-## Contact
-- **Team**: E-commerce Team
-- **Slack Channel**: #ecommerce-airflow
-- **Maintainers**:
-  - Akshai Surendran (asurendran@ecloudcontrol.com)
-  - Ansu Anna Varghese (aannavarghese@ecloudcontrol.com)
