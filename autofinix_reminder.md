@@ -1,4 +1,4 @@
-# autofinix_reminder_checker
+# autofinix_reminder_check
 
 ## Overview
 - **Purpose**: Monitors the Autofinix API for loan reminders with status "Reminder," generates voice messages using AgentOmatic, triggers voice calls via the `shared_send_message_voice` DAG, and updates reminder statuses based on call outcomes and transcriptions.
