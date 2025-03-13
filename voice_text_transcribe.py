@@ -52,7 +52,7 @@ def transcribe_audio(file_path, **kwargs):
         raise
 
 with DAG(
-    "autofinix_transcribe_message_voice",
+    "shared_transcribe_message_voice",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
