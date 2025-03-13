@@ -3,6 +3,7 @@ from airflow.operators.bash import BashOperator
 from airflow.utils.task_group import TaskGroup
 from datetime import datetime, timedelta
 from airflow.models import Variable
+import os
 
 # Default arguments
 default_args = {
