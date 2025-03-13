@@ -50,12 +50,17 @@ def transcribe_audio(file_path, **kwargs):
     except Exception as e:
         logger.error(f"Whisper transcription failed: {str(e)}")
         raise
-
+        
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'README.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
+    
 with DAG(
     "shared_transcribe_message_voice",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
+    doc_md=readme_content,
     tags=["autofinix", "process", "voice"],
     params={
         "file_path": {
