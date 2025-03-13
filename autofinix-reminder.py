@@ -255,7 +255,7 @@ def trigger_twilio_voice_call(**kwargs):
         # Trigger `send-voice-message` DAG
         trigger = TriggerDagRunOperator(
             task_id=f"trigger_twilio_voice_call_inner_{call_id}",
-            trigger_dag_id="send_voice_message",
+            trigger_dag_id="autofinix_send_reminders_voice",
             conf=conf,
             wait_for_completion=True,
             poke_interval=30,
@@ -415,7 +415,7 @@ def update_reminder_status(**kwargs):
             logger.info(f"Call reminder status unknown for Loan ID: {loan_id}")
 
 with DAG(
-    "autofinix_reminder",
+    "autofinix_check_reminders_due",
     default_args=default_args,
     schedule_interval=timedelta(minutes=1),
     catchup=False,
