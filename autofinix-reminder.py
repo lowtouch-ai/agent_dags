@@ -414,12 +414,17 @@ def update_reminder_status(**kwargs):
         else:
             logger.info(f"Call reminder status unknown for Loan ID: {loan_id}")
 
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'autofinix_reminder.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
+
 with DAG(
     "autofinix_check_reminders_due",
     default_args=default_args,
     schedule_interval=timedelta(minutes=1),
     catchup=False,
     max_active_runs=1,
+    doc_md=readme_content,
     tags=["reminder", "autofinix"]
 ) as dag:
 
