@@ -14,6 +14,7 @@ from email import message_from_bytes
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
