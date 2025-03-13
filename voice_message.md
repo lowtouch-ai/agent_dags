@@ -1,4 +1,4 @@
-# autofinix_voice_messenger
+# autofinix_send_voice_message
 
 ## Overview
 - **Purpose**: Initiates voice calls via Twilio, delivers a pre-defined message, optionally records responses, and triggers the `shared_transcribe_message_voice` DAG for transcription. Stores call outcomes, recordings, and transcriptions for use by triggering DAGs (e.g., `autofinix_check_reminders_due`).
