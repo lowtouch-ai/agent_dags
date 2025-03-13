@@ -52,7 +52,7 @@ def transcribe_audio(file_path, **kwargs):
         logger.error(f"Whisper transcription failed: {str(e)}")
         raise
         
-readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'README.md')
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'voice_transciber.md')
 with open(readme_path, 'r') as file:
     readme_content = file.read()
     
