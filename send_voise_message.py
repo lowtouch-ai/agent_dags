@@ -2,9 +2,8 @@ from airflow import DAG
 from airflow.models.param import Param
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.dummy import DummyOperator
-from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.dummy import DummyOperator
 from airflow.sensors.time_delta import TimeDeltaSensor
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.exceptions import AirflowException
 from airflow.models import Variable
 from datetime import datetime, timedelta
@@ -12,6 +11,7 @@ from twilio.rest import Client
 import requests
 import os
 import logging
+import uuid  # For generating a default call_id
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
@@ -35,7 +35,6 @@ TWILIO_PHONE_NUMBER = Variable.get("TWILIO_PHONE_NUMBER")
 if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
     raise ValueError("Twilio credentials are missing. Set them in Airflow Variables.")
 
-# Base directory for storing recordings
 # Base directory for storing recordings
 BASE_STORAGE_DIR = "/appz/data"
 
@@ -67,14 +66,12 @@ def make_api_request(url, method="GET", auth=None, retries=3):
 
 with DAG(
     "send_voice_message",
-    "send-voice-message",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
     tags=["voice", "autofinix"],
     render_template_as_native_obj=True,
     params={
-        "phone_number": Param("+1234567890", type="string", title="Phone Number"),
         "phone_number": Param("+1234567890", type="string", title="Phone Number"),
         "message": Param("Hello, please leave a message after the beep.", type="string", title="Message Before Beep"),
         "need_ack": Param(False, type="boolean", title="Require Acknowledgment"),
@@ -93,14 +90,14 @@ with DAG(
         if not conf.get("phone_number") or not conf.get("message"):
             logger.error("Missing required parameters: phone_number or message")
             ti.xcom_push(key="call_outcome", value="Failed")
-            ti.xcom_push(key="call_outcome", value="Failed")
             raise ValueError("Missing required parameters: phone_number or message")
 
         phone_number = conf["phone_number"]
         message = conf["message"]
         need_ack = conf.get("need_ack", False)
-        call_id = conf.get("call_id")
-
+        call_id = conf.get("call_id")  # Default call_id if not provided
+        if call_id is None:  # Explicitly check for None and override
+            call_id = str(uuid.uuid4())
         logger.info(f"Initiating call to: {phone_number}, need_ack: {need_ack}, call_id: {call_id}")
 
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
@@ -109,7 +106,6 @@ with DAG(
                 twiml = f"""
                 <Response>
                     <Say>{message}</Say>
-                    <Say>Please speak your acknowledgment after the beep.</Say>
                     <Record maxLength="30" playBeep="true" trim="trim-silence" transcribe="true"/>
                     <Say>Thank you! Goodbye.</Say>
                 </Response>
@@ -129,26 +125,19 @@ with DAG(
             logger.info(f"Call initiated with SID: {call.sid}")
             ti.xcom_push(key="call_sid", value=call.sid)
             ti.xcom_push(key="need_ack", value=need_ack)
-            if call_id:
-                ti.xcom_push(key="call_id", value=call_id)
+            ti.xcom_push(key="call_id", value=call_id)  # Always push call_id
         except Exception as e:
             logger.error(f"Failed to initiate call: {str(e)}")
             ti.xcom_push(key="call_outcome", value="Failed")
-            ti.xcom_push(key="call_outcome", value="Failed")
             raise
-
 
     def check_call_status(**kwargs):
         """
         Poll Twilio for call status; raise if still in-progress.
         """
         ti = kwargs["ti"]
-        conf = kwargs["params"]
-
-        conf = kwargs["params"]
-
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
-        call_id = conf.get("call_id")
+        call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id")
 
         if not call_sid:
             raise ValueError("No call_sid found. Did 'initiate_call' fail?")
@@ -180,42 +169,20 @@ with DAG(
             return "fetch_and_save_recording"
         else:
             return "skip_recording"
-    def branch_recording_logic(**kwargs):
-        """
-        If final status is 'completed', proceed to 'fetch_and_save_recording'.
-        Otherwise skip.
-        """
-        ti = kwargs["ti"]
-        final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
-
-        logger.info(f"branch_recording_logic sees final_status={final_status}")
-        if final_status == "completed":
-            return "fetch_and_save_recording"
-        else:
-            return "skip_recording"
 
     def fetch_and_save_recording(**kwargs):
         """
         Fetch and save the recording if need_ack=True and call_status='completed'.
         """
         ti = kwargs["ti"]
-        conf = kwargs["params"]
-
-        conf = kwargs["params"]
-
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
         final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
-        final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
         need_ack = ti.xcom_pull(task_ids="initiate_call", key="need_ack")
-        call_id = conf.get("call_id")
+        call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id")
 
-        logger.info(f"fetch_and_save_recording with call_sid={call_sid}, status={final_status}, call_id={call_id}")
         logger.info(f"fetch_and_save_recording with call_sid={call_sid}, status={final_status}, call_id={call_id}")
 
         if not need_ack:
-            logger.info("need_ack=False, skipping recording download.")
-            ti.xcom_push(key="recording_status", value="No Recording Needed")
-            return {"message": "Recording not needed."}
             logger.info("need_ack=False, skipping recording download.")
             ti.xcom_push(key="recording_status", value="No Recording Needed")
             return {"message": "Recording not needed."}
@@ -238,7 +205,7 @@ with DAG(
             recording_sid = recordings[0]["sid"]
             recording_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Recordings/{recording_sid}.mp3"
             execution_date = datetime.now().strftime("%Y-%m-%d")
-            dag_name = "send-voice-message-1"
+            dag_name = "send-voice-message"
             save_directory = os.path.join(BASE_STORAGE_DIR, dag_name, execution_date)
             os.makedirs(save_directory, exist_ok=True)
             file_path = os.path.join(save_directory, f"{call_sid}.mp3")
@@ -250,6 +217,7 @@ with DAG(
                 logger.info(f"Recording saved at {file_path}")
                 ti.xcom_push(key="recording_status", value="Recording Saved")
                 ti.xcom_push(key="recording_sid", value=recording_sid)
+                ti.xcom_push(key="recording_file_path", value=file_path)  # Consistent key
                 if call_id:
                     Variable.set(f"twilio_recording_file_{call_id}", file_path)
                     logger.info(f"Set Variable twilio_recording_file_{call_id} to: {file_path}")
@@ -265,53 +233,60 @@ with DAG(
             ti.xcom_push(key="recording_status", value="Failed")
             raise
 
-    def fetch_transcription(**kwargs):
+    def prepare_transcription_trigger(**kwargs):
         """
-        Fetch transcription and store it if completed; retry if pending up to a limit.
+        Prepare the configuration for triggering the voice_text_transcribe DAG.
         """
         ti = kwargs["ti"]
-        conf = kwargs["params"]
-
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
-        recording_sid = ti.xcom_pull(task_ids="fetch_and_save_recording", key="recording_sid")
-        call_id = conf.get("call_id")
+        recording_file_path = ti.xcom_pull(task_ids="fetch_and_save_recording", key="recording_file_path")
+        call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id")
 
-        url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Recordings/{recording_sid}/Transcriptions.json"
-        response = make_api_request(url)
-        transcriptions = response.json().get("transcriptions", [])
+        if not recording_file_path:
+            logger.error("No recording file path found. Did 'fetch_and_save_recording' fail?")
+            ti.xcom_push(key="transcription_status", value="failed")
+            raise AirflowException("No recording file path available")
 
-        if not transcriptions:
-            logger.info(f"No transcription available yet for call SID={call_sid}")
-            raise AirflowException("Transcription not yet available; retrying...")
+        logger.info(f"Preparing transcription trigger for call SID={call_sid}, file={recording_file_path}, call_id={call_id}")
+        # No need to instantiate TriggerDagRunOperator here; just return or push conf if needed
+        ti.xcom_push(key="trigger_conf", value={
+            "file_path": {"value": recording_file_path},
+            "call_id": call_id
+        })
 
-        transcription_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Transcriptions/{transcriptions[0]['sid']}.json"
-        transcription_response = make_api_request(transcription_url)
-        transcription = transcription_response.json()
+    def fetch_transcription(**kwargs):
+        """
+        Fetch the transcription from the Variable text_{call_id} with retry using TimeDeltaSensor.
+        """
+        ti = kwargs["ti"]
+        call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id")
+        call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
 
-        if transcription["status"] == "completed":
-            transcription_text = transcription["transcription_text"]
-            logger.info(f"Transcribed text for call SID={call_sid}: {transcription_text}")
-            if call_id:
-                Variable.set(f"twilio_transcription_{call_id}", transcription_text)
-                logger.info(f"Set Variable twilio_transcription_{call_id} to: {transcription_text}")
+        variable_key = f"text_{call_id}"
+        logger.info(f"Checking Variable {variable_key} for call SID={call_sid}")
+        try:
+            transcription = Variable.get(variable_key)
+            logger.info(f"Variable {variable_key} value: {transcription}")
+            # Delete the Variable after retrieval
+            Variable.delete(variable_key)
+            logger.info(f"Deleted Variable {variable_key}")
+            # Re-save for consistency with original logic
+            Variable.set(f"twilio_transcription_{call_id}", transcription)
+            logger.info(f"Set Variable twilio_transcription_{call_id} to: {transcription}")
             ti.xcom_push(key="transcription_status", value="completed")
             return {
                 "message": "Transcription fetched successfully",
-                "transcription": transcription_text
+                "transcription": transcription
             }
-        elif transcription["status"] == "failed":
-            logger.error(f"Transcription failed for call SID={call_sid}")
-            ti.xcom_push(key="transcription_status", value="failed")
-            return {"message": "Transcription failed", "transcription": "Transcription failed"}
-        else:
-            logger.info(f"Transcription not completed yet for call SID={call_sid}")
-            raise AirflowException("Transcription still pending; retrying...")
+        except KeyError:
+            logger.info(f"Variable {variable_key} not found")
+            raise AirflowException("Transcription not yet available; retrying...")
 
     # Define Operators
     initiate_call_task = PythonOperator(
         task_id="initiate_call",
         python_callable=initiate_call,
-        provide_context=True  # In Airflow 2+, better to use op_kwargs if you prefer
+        provide_context=True
     )
 
     wait_call_status = TimeDeltaSensor(
@@ -341,11 +316,32 @@ with DAG(
         provide_context=True
     )
 
+    prepare_transcription_task = PythonOperator(
+        task_id="prepare_transcription_trigger",
+        python_callable=prepare_transcription_trigger,
+        provide_context=True
+    )
+
+    trigger_transcription_task = TriggerDagRunOperator(
+        task_id="trigger_transcription_dag",
+        trigger_dag_id="voice-text-transcribe",
+        conf="{{ ti.xcom_pull(task_ids='prepare_transcription_trigger', key='trigger_conf') }}",
+        dag=dag,
+    )
+
+    # Use TimeDeltaSensor to wait before fetching transcription
+    wait_for_transcription = TimeDeltaSensor(
+        task_id="wait_for_transcription",
+        delta=timedelta(seconds=5),  # Wait 5 seconds between retries
+        poke_interval=5,
+        mode="poke",
+    )
+
     fetch_transcription_task = PythonOperator(
         task_id="fetch_transcription",
         python_callable=fetch_transcription,
         provide_context=True,
-        retries=12,  # 60 seconds total (12 retries * 5s retry_delay)
+        retries=12,  # 12 retries × 5s = 60s total timeout
         retry_delay=timedelta(seconds=5)
     )
 
@@ -355,4 +351,4 @@ with DAG(
     initiate_call_task >> wait_call_status >> check_status_task
     check_status_task >> branch_recording_task
     branch_recording_task >> [fetch_recording_task, skip_recording]
-    fetch_recording_task >> fetch_transcription_task
+    fetch_recording_task >> prepare_transcription_task >> trigger_transcription_task >> wait_for_transcription >> fetch_transcription_task

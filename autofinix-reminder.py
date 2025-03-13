@@ -30,6 +30,9 @@ default_args = {
 AUTOFINIX_API_URL = Variable.get("AUTOFINIX_API_URL")
 AGENTOMATIC_API_URL = Variable.get("AGENTOMATIC_API_URL")
 AUTOFINIX_TEST_PHONE_NUMBER = Variable.get("AUTOFINIX_TEST_PHONE_NUMBER")
+AUTOFINIX_DEMO_PHONE_ODD=Variable.get("AUTOFINIX_DEMO_PHONE_ODD")
+AUTOFINIX_DEMO_PHONE_EVEN=Variable.get("AUTOFINIX_DEMO_PHONE_EVEN")
+
 
 if not AUTOFINIX_API_URL:
     raise ValueError("Autoloan API URL is missing. Set it in Airflow Variables.")
@@ -62,7 +65,7 @@ def make_api_request(url, method="GET", params=None, json=None, retries=3):
         logger.error(f"API request failed: {str(e)}")
         raise
 
-def fetch_due_loans(api_url, test_phone_number, **kwargs):
+def fetch_due_loans(api_url, test_phone_number,even_phone_number,odd_phone_number, **kwargs):
     """Fetches loans that are due from the Autoloan API"""
     ti = kwargs['ti']
     try:
@@ -84,7 +87,14 @@ def fetch_due_loans(api_url, test_phone_number, **kwargs):
             if customer_data:
                 # Rename remind_on to inserted_timestamp for consistency
                 reminder["inserted_timestamp"] = reminder.pop("remind_on")
-                reminder["phone"] = test_phone_number
+                if int(reminder['loan_id'])%2==0:
+                    if int(reminder['loan_id'])==550:
+                        reminder["phone"] = test_phone_number
+                    else:
+                        reminder["phone"] = even_phone_number
+                else:
+                    reminder["phone"] = odd_phone_number
+                
                 logger.info(f"Updated reminder with phone number and timestamp: {reminder}")
                 eligible_loans.append(reminder)
 
@@ -117,18 +127,17 @@ def generate_voice_message_agent(loan_id, agent_url, transcription=None, inserte
     )
     if transcription and inserted_date:
         prompt = (
-            f"Analyze the following transcription: '{transcription}' and come up with a date. "
-            f"If no date is found, set the date one month from the date: {inserted_date}. "
-            "The final response should only contain the date in ISO format (e.g., '2025-03-10T12:00:00'). No other text only the date should be given in string format in final response."
+            f"Analyze the following transcription: '{transcription}' to extract a date for the next loan reminder. "
+            f"Interpret relative time expressions (e.g., 'next week,' 'tomorrow') based on the current date: {inserted_date}. "
+            f"For 'next week,' use the same weekday as the current date in the following week (e.g., if today is Wednesday, 'next week' is next Wednesday). "
+            f"If a specific date or clear intent to pay is found, calculate that date; if it is more than 2 months (120 days) from {inserted_date}, treat it as unrealistic and set the date one week from {inserted_date}. "
+            f"If the transcription indicates a refusal to pay (e.g., 'won’t pay,' 'can’t pay,' 'refuse,' 'at any cost'), set the date one week from {inserted_date}. "
+            f"If no date is found and no refusal is detected, set the date one month from {inserted_date}. "
+            f"Return only the date in ISO format (e.g., '2025-03-19T12:00:00+00:00') as a string, with no additional text."
         )
     else:
         prompt = (
-            f"Generate a professional loan due reminder message for loan ID {loan_id}. "
-            "Fetch the overdue details for this loan, including customerid, loanamount, interestrate, "
-            "tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. "
-            "If specific details are unavailable or cannot be retrieved, use placeholder text or generic terms. "
-            "The final response must be a concise message which should not exceed 500 characters, containing only relevant content, "
-            "suitable for conversion to a voice call."
+            f"""Generate a professional loan due reminder message for loan ID {loan_id}. Fetch overdue details of this loan including customerid, loanamount, interestrate, tenureinmonths, outstandingamount, overdueamount, lastduedate, lastpaiddate, and daysoverdue. If details are unavailable, use placeholders (e.g., 'Customer', 'N days'). Convert the message into this template: 'Dear (customer_name), this is a gentle reminder of your loan number ({loan_id}) which is overdue by (n) installments. Kindly tell us when you can make the payments, after the beep'.The final response must be a concise message which should not exceed 500 characters, containing only relevant content, suitable for conversion to a voice call."""
         )
     response = client.chat(
         model='autofinix:0.3',
@@ -419,7 +428,9 @@ with DAG(
         python_callable=fetch_due_loans,
         op_kwargs={
             "api_url": AUTOFINIX_API_URL,
-            "test_phone_number": AUTOFINIX_TEST_PHONE_NUMBER
+            "test_phone_number": AUTOFINIX_TEST_PHONE_NUMBER,
+            "odd_phone_number":AUTOFINIX_DEMO_PHONE_ODD,
+            "even_phone_number":AUTOFINIX_DEMO_PHONE_EVEN,
         },
     )
 
