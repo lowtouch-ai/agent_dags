@@ -127,9 +127,13 @@ def generate_voice_message_agent(loan_id, agent_url, transcription=None, inserte
     )
     if transcription and inserted_date:
         prompt = (
-            f"Analyze the following transcription: '{transcription}' and come up with a date. "
-            f"If no date is found, set the date one month from the date: {inserted_date}. "
-            "The final response should only contain the date in ISO format (e.g., '2025-03-10T12:00:00'). No other text only the date should be given in string format in final response."
+            f"Analyze the following transcription: '{transcription}' to extract a date for the next loan reminder. "
+            f"Interpret relative time expressions (e.g., 'next week,' 'tomorrow') based on the current date: {inserted_date}. "
+            f"For 'next week,' use the same weekday as the current date in the following week (e.g., if today is Wednesday, 'next week' is next Wednesday). "
+            f"If a specific date or clear intent to pay is found, calculate that date; if it is more than 2 months (120 days) from {inserted_date}, treat it as unrealistic and set the date one week from {inserted_date}. "
+            f"If the transcription indicates a refusal to pay (e.g., 'won’t pay,' 'can’t pay,' 'refuse,' 'at any cost'), set the date one week from {inserted_date}. "
+            f"If no date is found and no refusal is detected, set the date one month from {inserted_date}. "
+            f"Return only the date in ISO format (e.g., '2025-03-19T12:00:00+00:00') as a string, with no additional text."
         )
     else:
         prompt = (
