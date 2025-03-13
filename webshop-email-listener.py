@@ -138,7 +138,7 @@ with DAG("webshop_monitor_mailbox",
 
             trigger_task = TriggerDagRunOperator(
                 task_id=task_id,
-                trigger_dag_id="webshop_send_response_email",
+                trigger_dag_id="shared_send_message_email",
                 conf={"email_data": email},
             )
 
