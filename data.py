@@ -43,6 +43,7 @@ with DAG(
     default_args=default_args,
     schedule_interval=daily_schedule_utc,
     catchup=False,
+    doc_md=readme_content,
     tags=["reset", "webshop"]
 ) as dag:
 
