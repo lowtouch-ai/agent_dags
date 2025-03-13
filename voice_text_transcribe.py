@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import whisper
 import logging
 from airflow.models import Variable
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
