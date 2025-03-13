@@ -65,7 +65,7 @@ def make_api_request(url, method="GET", auth=None, retries=3):
         raise
 
 with DAG(
-    "send_voice_message",
+    "autofinix_send_reminders_voice",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
@@ -324,7 +324,7 @@ with DAG(
 
     trigger_transcription_task = TriggerDagRunOperator(
         task_id="trigger_transcription_dag",
-        trigger_dag_id="voice-text-transcribe",
+        trigger_dag_id="autofinix_transcribe_message_voice",
         conf="{{ ti.xcom_pull(task_ids='prepare_transcription_trigger', key='trigger_conf') }}",
         dag=dag,
     )
