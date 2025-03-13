@@ -14,6 +14,9 @@ import logging
 import uuid  # For generating a default call_id
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
+from cryptography.fernet import Fernet
+import base64
+
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -171,7 +174,7 @@ with DAG(
 
     def fetch_and_save_recording(**kwargs):
         """
-        Fetch and save the recording if need_ack=True and call_status='completed'.
+        Fetch the recording, encrypt it, and pass the encrypted data instead of saving to file.
         """
         ti = kwargs["ti"]
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
@@ -203,53 +206,56 @@ with DAG(
 
             recording_sid = recordings[0]["sid"]
             recording_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Recordings/{recording_sid}.mp3"
-            execution_date = datetime.now().strftime("%Y-%m-%d")
-            dag_name = "send-voice-message-1"
-            save_directory = os.path.join(BASE_STORAGE_DIR, dag_name, execution_date)
-            os.makedirs(save_directory, exist_ok=True)
-            file_path = os.path.join(save_directory, f"{call_sid}.mp3")
 
+            # Download the recording
             response = make_api_request(recording_url)
             if response.status_code == 200:
-                with open(file_path, "wb") as f:
-                    f.write(response.content)
-                logger.info(f"Recording saved at {file_path}")
-                ti.xcom_push(key="recording_status", value="Recording Saved")
+                audio_data = response.content
+                logger.info(f"Recording downloaded, size: {len(audio_data)} bytes")
+
+                # Encrypt the audio data
+                fernet_key = Variable.get("FERNET_KEY").encode()  # Retrieve key from Airflow Variables
+                fernet = Fernet(fernet_key)
+                encrypted_data = fernet.encrypt(audio_data)
+                # Encode as base64 for JSON compatibility
+                encrypted_data_b64 = base64.b64encode(encrypted_data).decode('utf-8')
+                logger.info(f"Recording encrypted, base64 size: {len(encrypted_data_b64)} characters")
+
+                ti.xcom_push(key="recording_status", value="Recording Encrypted")
                 ti.xcom_push(key="recording_sid", value=recording_sid)
-                ti.xcom_push(key="recording_file_path", value=file_path)  # Consistent key
+                ti.xcom_push(key="encrypted_audio", value=encrypted_data_b64)  # Pass encrypted data
                 if call_id:
-                    Variable.set(f"twilio_recording_file_{call_id}", file_path)
-                    logger.info(f"Set Variable twilio_recording_file_{call_id} to: {file_path}")
-                    ti.xcom_push(key=f"recording_file_{call_id}", value=file_path)
-                return {"message": "Recording downloaded successfully", "file_path": file_path}
+                    Variable.set(f"twilio_encrypted_audio_{call_id}", encrypted_data_b64)
+                    logger.info(f"Set Variable twilio_encrypted_audio_{call_id}")
+                    ti.xcom_push(key=f"encrypted_audio_{call_id}", value=encrypted_data_b64)
+                return {"message": "Recording downloaded and encrypted successfully", "encrypted_audio": encrypted_data_b64}
             else:
                 logger.error(f"Failed to download recording. status code={response.status_code}")
                 ti.xcom_push(key="recording_status", value="Recording Failed")
                 raise AirflowException(f"Failed to download recording: {response.status_code}")
 
         except Exception as e:
-            logger.error(f"Recording fetch error: {str(e)}")
+            logger.error(f"Recording fetch or encryption error: {str(e)}")
             ti.xcom_push(key="recording_status", value="Failed")
             raise
 
     def prepare_transcription_trigger(**kwargs):
         """
-        Prepare the configuration for triggering the voice_text_transcribe DAG.
+        Prepare the configuration for triggering the voice_text_transcribe DAG with encrypted audio.
         """
         ti = kwargs["ti"]
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
-        recording_file_path = ti.xcom_pull(task_ids="fetch_and_save_recording", key="recording_file_path")
+        encrypted_audio = ti.xcom_pull(task_ids="fetch_and_save_recording", key="encrypted_audio")
         call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id")
 
-        if not recording_file_path:
-            logger.error("No recording file path found. Did 'fetch_and_save_recording' fail?")
+        if not encrypted_audio:
+            logger.error("No encrypted audio found. Did 'fetch_and_save_recording' fail?")
             ti.xcom_push(key="transcription_status", value="failed")
-            raise AirflowException("No recording file path available")
+            raise AirflowException("No encrypted audio available")
 
-        logger.info(f"Preparing transcription trigger for call SID={call_sid}, file={recording_file_path}, call_id={call_id}")
-        # No need to instantiate TriggerDagRunOperator here; just return or push conf if needed
+        logger.info(f"Preparing transcription trigger for call SID={call_sid}, call_id={call_id}")
         ti.xcom_push(key="trigger_conf", value={
-            "file_path": {"value": recording_file_path},
+            "encrypted_audio": encrypted_audio,  # Pass encrypted audio directly
             "call_id": call_id
         })
 
