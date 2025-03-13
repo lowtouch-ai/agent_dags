@@ -107,11 +107,16 @@ def fetch_unread_emails(**kwargs):
 
     kwargs['ti'].xcom_push(key="unread_emails", value=unread_emails)
 
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'mailbox_monitor.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
+
 # Define DAG
 with DAG("webshop_monitor_mailbox",
          default_args=default_args,
          schedule_interval=timedelta(minutes=1),
          catchup=False,
+         doc_md=readme_content,
          tags=["email", "webshop"])as dag:
 
     fetch_emails_task = PythonOperator(
