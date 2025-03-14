@@ -63,18 +63,18 @@ def make_api_request(url, method="GET", auth=None, retries=3):
         logger.error(f"API request failed: {str(e)}")
         raise
 
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'autofinix_reminder.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
+
 with DAG(
-    "send-voice-message-transcript",
+    "autofinix_check_reminders_due",
     default_args=default_args,
-    schedule_interval=None,
+    schedule_interval=timedelta(minutes=1),
     catchup=False,
-    render_template_as_native_obj=True,
-    params={
-        "phone_number": Param("+1234567890", type="string", title="Phone Number"),
-        "message": Param("Hello, please leave a message after the beep.", type="string", title="Message Before Beep"),
-        "need_ack": Param(False, type="boolean", title="Require Acknowledgment"),
-        "call_id": Param(None, type=["string", "null"], title="Call ID"),
-    }
+    max_active_runs=1,
+    doc_md=readme_content,
+    tags=["reminder", "autofinix", "check", "due"]
 ) as dag:
 
     def initiate_call(**kwargs):
