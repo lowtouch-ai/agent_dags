@@ -44,7 +44,7 @@ def transcribe_audio(file_path, **kwargs):
         logger.info(f"Transcription time: {(datetime.now() - start_time).total_seconds():.2f} seconds")
 
         # Save transcription to Variable only if call_id is provided
-        if call_id:
+        if call_id and kwargs["dag_run"].conf.get("call_id"):
             variable_key = f"text_{call_id}"
             Variable.set(variable_key, transcription)
             logger.info(f"Saved transcription to Variable {variable_key}")

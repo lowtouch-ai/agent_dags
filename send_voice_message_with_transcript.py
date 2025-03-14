@@ -193,7 +193,7 @@ with DAG(
         if current_status in ["completed", "no-answer", "busy", "failed"]:
             ti.xcom_push(key="call_status", value=current_status)
             ti.xcom_push(key="answered_by", value=answered_by)
-            if call_id:
+            if call_id and kwargs["dag_run"].conf.get("call_id"):
                 logger.info(f"Storing Twilio final status in Variable: twilio_call_status_{call_id}")
                 Variable.set(f"twilio_call_status_{call_id}", current_status)
             return current_status
@@ -253,7 +253,7 @@ with DAG(
             ti.xcom_push(key="recording_status", value="Recording Saved")
             ti.xcom_push(key="recording_sid", value=recording_sid)
             ti.xcom_push(key="recording_file_path", value=file_path)
-            if call_id:
+            if call_id and kwargs["dag_run"].conf.get("call_id"):
                 Variable.set(f"twilio_recording_file_{call_id}", file_path)
                 logger.info(f"Set Variable twilio_recording_file_{call_id} to: {file_path}")
                 ti.xcom_push(key=f"recording_file_{call_id}", value=file_path)
@@ -294,8 +294,9 @@ with DAG(
             logger.info(f"Variable {variable_key} value: {transcription}")
             Variable.delete(variable_key)
             logger.info(f"Deleted Variable {variable_key}")
-            Variable.set(f"twilio_transcription_{call_id}", transcription)
-            logger.info(f"Set Variable twilio_transcription_{call_id} to: {transcription}")
+            if kwargs["dag_run"].conf.get("call_id"):
+                Variable.set(f"twilio_transcription_{call_id}", transcription)
+                logger.info(f"Set Variable twilio_transcription_{call_id} to: {transcription}")
             ti.xcom_push(key="transcription_status", value="completed")
             return {
                 "message": "Transcription fetched successfully",
