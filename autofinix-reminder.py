@@ -426,7 +426,7 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     doc_md=readme_content,
-    tags=["reminder", "autofinix"]
+    tags=["reminder", "autofinix", "check", "due"]
 ) as dag:
 
     fetch_due_loans_task = PythonOperator(
