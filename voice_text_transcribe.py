@@ -62,7 +62,7 @@ with DAG(
     schedule_interval=None,
     catchup=False,
     doc_md=readme_content,
-    tags=["autofinix", "process", "voice"],
+    tags=["shared", "message", "voice", "transcribe"],
     params={
         "file_path": {
             "type": "object",
