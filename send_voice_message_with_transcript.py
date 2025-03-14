@@ -132,7 +132,6 @@ with DAG(
             raise
 
     def adjust_voicemail_message(**kwargs):
-        """Check if voicemail and update TwiML with 15s delay, retry if AMD not ready."""
         ti = kwargs["ti"]
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
         message = kwargs["params"]["message"]
@@ -144,19 +143,26 @@ with DAG(
 
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         call = client.calls(call_sid).fetch()
+        current_status = call.status
         answered_by = call.answered_by if hasattr(call, 'answered_by') else None
-        logger.info(f"Call SID={call_sid}, answered_by={answered_by}")
+        logger.info(f"Call SID={call_sid}, status={current_status}, answered_by={answered_by}")
 
-        # If AMD hasn't determined answered_by yet, raise exception to retry
+        # If call is no longer active, skip AMD check
+        if current_status in ["completed", "no-answer", "busy", "failed"]:
+            logger.info(f"Call already ended with status={current_status}, skipping AMD adjustment")
+            ti.xcom_push(key="voicemail_adjusted", value=False)
+            return
+
+        # If AMD isn't ready, retry unless too late
         if answered_by is None or answered_by == "unknown":
             logger.info(f"AMD detection incomplete for call {call_sid}, retrying...")
             raise AirflowException("AMD detection not complete, retrying...")
 
-        # Voicemail detected, update TwiML with delay
+        # Voicemail detected, update TwiML
         if answered_by in ["machine_start", "machine_end"]:
             twiml = f"""
             <Response>
-                <Pause length="15"/> <!-- 15s delay for voicemail greeting -->
+                <Pause length="15"/>
                 <Say>{message}</Say>
                 <Say>Thank you! Goodbye.</Say>
                 <Hangup/>
@@ -307,11 +313,11 @@ with DAG(
     )
 
     adjust_voicemail_task = PythonOperator(
-        task_id="adjust_voicemail_message",
-        python_callable=adjust_voicemail_message,
-        provide_context=True,
-        retries=3,  # 3 retries × 2s = 6s threshold
-        retry_delay=timedelta(seconds=2)
+    task_id="adjust_voicemail_message",
+    python_callable=adjust_voicemail_message,
+    provide_context=True,
+    retries=5,  # Increase to 5 retries
+    retry_delay=timedelta(seconds=5)  # Increase to 5 seconds
     )
 
     wait_call_status = TimeDeltaSensor(
