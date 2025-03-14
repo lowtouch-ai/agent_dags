@@ -117,7 +117,7 @@ with DAG("webshop_monitor_mailbox",
          schedule_interval=timedelta(minutes=1),
          catchup=False,
          doc_md=readme_content,
-         tags=["email", "webshop"])as dag:
+         tags=["mailbox", "webshop", "monitor"])as dag:
 
     fetch_emails_task = PythonOperator(
         task_id="fetch_unread_emails",
