@@ -64,6 +64,8 @@ with DAG(
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
+    doc_md=readme_content,
+    tags=["shared", "message", "voice", "transcribe"],
     params={
         "file_path": {
             "type": ["object", "null"],
