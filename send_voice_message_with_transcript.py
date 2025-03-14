@@ -132,7 +132,7 @@ with DAG(
             raise
 
     def adjust_voicemail_message(**kwargs):
-        """Check if voicemail and update TwiML with 15s delay."""
+        """Check if voicemail and update TwiML with 15s delay, retry if AMD not ready."""
         ti = kwargs["ti"]
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
         message = kwargs["params"]["message"]
@@ -144,9 +144,15 @@ with DAG(
 
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         call = client.calls(call_sid).fetch()
-        answered_by = call.answered_by if hasattr(call, 'answered_by') else "unknown"
+        answered_by = call.answered_by if hasattr(call, 'answered_by') else None
         logger.info(f"Call SID={call_sid}, answered_by={answered_by}")
 
+        # If AMD hasn't determined answered_by yet, raise exception to retry
+        if answered_by is None or answered_by == "unknown":
+            logger.info(f"AMD detection incomplete for call {call_sid}, retrying...")
+            raise AirflowException("AMD detection not complete, retrying...")
+
+        # Voicemail detected, update TwiML with delay
         if answered_by in ["machine_start", "machine_end"]:
             twiml = f"""
             <Response>
@@ -272,12 +278,8 @@ with DAG(
     def fetch_transcription(**kwargs):
         """Fetch transcription from Variable with retry."""
         ti = kwargs["ti"]
-        call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id")  # Fixed to use call_id, not call_sid
+        call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id")  # Fixed from call_sid
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
-
-        if not call_id:
-            logger.error("No call_id found for transcription fetch")
-            raise AirflowException("Call ID missing")
 
         variable_key = f"text_{call_id}"
         logger.info(f"Checking Variable {variable_key} for call SID={call_sid}")
@@ -304,19 +306,12 @@ with DAG(
         provide_context=True
     )
 
-    wait_for_amd = TimeDeltaSensor(
-        task_id="wait_for_amd",
-        delta=timedelta(seconds=5),  # Wait 5s for AMD to detect machine_start
-        poke_interval=2,
-        mode="poke"
-    )
-
     adjust_voicemail_task = PythonOperator(
         task_id="adjust_voicemail_message",
         python_callable=adjust_voicemail_message,
         provide_context=True,
-        retries=3,
-        retry_delay=timedelta(seconds=5)
+        retries=3,  # 3 retries × 2s = 6s threshold
+        retry_delay=timedelta(seconds=2)
     )
 
     wait_call_status = TimeDeltaSensor(
@@ -365,7 +360,7 @@ with DAG(
         task_id="wait_for_transcription",
         delta=timedelta(seconds=5),
         poke_interval=5,
-        mode="poke",
+        mode="poke"
     )
 
     fetch_transcription_task = PythonOperator(
@@ -379,7 +374,7 @@ with DAG(
     skip_recording = DummyOperator(task_id="skip_recording")
 
     # Task Dependencies
-    initiate_call_task >> wait_for_amd >> adjust_voicemail_task >> wait_call_status >> check_status_task
+    initiate_call_task >> adjust_voicemail_task >> wait_call_status >> check_status_task
     check_status_task >> branch_recording_task
     branch_recording_task >> [fetch_recording_task, skip_recording]
     fetch_recording_task >> prepare_transcription_task >> trigger_transcription_task >> wait_for_transcription >> fetch_transcription_task
