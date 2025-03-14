@@ -13,14 +13,13 @@ from ollama import Client
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 import os
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Default args for DAG
 default_args = {
-    "owner": "lowtouch.ai_developers",
+    "owner": "airflow",
     "depends_on_past": False,
     "start_date": datetime(2025, 2, 27),
     "retries": 1,
@@ -256,7 +255,7 @@ def trigger_twilio_voice_call(**kwargs):
         # Trigger `send-voice-message` DAG
         trigger = TriggerDagRunOperator(
             task_id=f"trigger_twilio_voice_call_inner_{call_id}",
-            trigger_dag_id="shared_send_message_voice",
+            trigger_dag_id="send-voice-message-transcript",
             conf=conf,
             wait_for_completion=True,
             poke_interval=30,
@@ -425,8 +424,6 @@ with DAG(
     schedule_interval=timedelta(minutes=1),
     catchup=False,
     max_active_runs=1,
-    doc_md=readme_content,
-    tags=["reminder", "autofinix", "check", "due"]
 ) as dag:
 
     fetch_due_loans_task = PythonOperator(
