@@ -419,10 +419,12 @@ with open(readme_path, 'r') as file:
     readme_content = file.read()
 
 with DAG(
-    "autofinix_check_reminders_due",
+    "shared_transcribe_message_voice",
     default_args=default_args,
-    schedule_interval=timedelta(minutes=1),
+    schedule_interval=None,
     catchup=False,
+    doc_md=readme_content,
+    tags=["shared", "message", "voice", "transcribe"],
     max_active_runs=1,
 ) as dag:
 
