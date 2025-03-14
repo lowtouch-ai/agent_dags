@@ -175,7 +175,7 @@ with DAG(
             ti.xcom_push(key="voicemail_adjusted", value=False)
 
     def check_call_status(**kwargs):
-        """Poll Twilio for call status; raise if still in-progress."""
+        """Poll Twilio for call status and recording info; raise if still in-progress."""
         ti = kwargs["ti"]
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
         call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id")
@@ -185,31 +185,50 @@ with DAG(
 
         url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls/{call_sid}.json"
         response = make_api_request(url)
-        current_status = response.json()["status"]
-        answered_by = response.json().get("answered_by", "unknown")
-        logger.info(f"Call SID={call_sid}, call_id={call_id}, status={current_status}, answered_by={answered_by}")
+        call_data = response.json()
+        current_status = call_data["status"]
+        answered_by = call_data.get("answered_by", "unknown")
+        duration = int(call_data.get("duration", 0))  # Duration in seconds
+
+        # Check for recordings
+        recording_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Recordings.json?CallSid={call_sid}"
+        recording_response = make_api_request(recording_url)
+        recording_count = len(recording_response.json().get("recordings", []))
+
+        logger.info(f"Call SID={call_sid}, call_id={call_id}, status={current_status}, answered_by={answered_by}, duration={duration}s, recordings={recording_count}")
 
         if current_status in ["completed", "no-answer", "busy", "failed"]:
             ti.xcom_push(key="call_status", value=current_status)
             ti.xcom_push(key="answered_by", value=answered_by)
+            ti.xcom_push(key="duration", value=duration)
+            ti.xcom_push(key="recording_count", value=recording_count)
             if call_id and kwargs["dag_run"].conf.get("call_id"):
                 logger.info(f"Storing Twilio final status in Variable: twilio_call_status_{call_id}")
                 Variable.set(f"twilio_call_status_{call_id}", current_status)
             return current_status
         else:
             raise AirflowException(f"Call is still {current_status}. Retrying...")
-
     def branch_recording_logic(**kwargs):
-        """Branch based on call status and answered_by."""
+        """Branch based on call status, answered_by, and recording availability."""
         ti = kwargs["ti"]
         final_status = ti.xcom_pull(task_ids="check_call_status", key="call_status")
         answered_by = ti.xcom_pull(task_ids="check_call_status", key="answered_by")
         need_ack = ti.xcom_pull(task_ids="initiate_call", key="need_ack")
+        recording_count = ti.xcom_pull(task_ids="check_call_status", key="recording_count")
+        duration = ti.xcom_pull(task_ids="check_call_status", key="duration")
 
-        logger.info(f"branch_recording_logic: final_status={final_status}, answered_by={answered_by}, need_ack={need_ack}")
+        logger.info(f"branch_recording_logic: final_status={final_status}, answered_by={answered_by}, need_ack={need_ack}, recording_count={recording_count}, duration={duration}s")
+
         if final_status == "completed" and answered_by in ["human", "unknown"] and need_ack:
-            return "fetch_and_save_recording"
+            # Check if a recording exists or if the call was long enough to include a response
+            if recording_count > 0 or duration > 15:  # 15 threshold based on ~34s message + buffer
+                logger.info("Call duration sufficient or recording exists; proceeding to fetch recording")
+                return "fetch_and_save_recording"
+            else:
+                logger.info("No recording available or call too short (<40s); skipping recording tasks")
+                return "skip_recording"
         else:
+            logger.info("Skipping recording due to status, answered_by, or need_ack condition")
             return "skip_recording"
 
     def fetch_and_save_recording(**kwargs):
