@@ -44,7 +44,7 @@ with DAG(
     schedule_interval=daily_schedule_utc,
     catchup=False,
     doc_md=readme_content,
-    tags=["reset", "webshop"]
+    tags=["reset", "webshop", "data"]
 ) as dag:
 
     # TaskGroup for dbt seed
