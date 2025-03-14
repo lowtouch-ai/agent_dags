@@ -74,7 +74,7 @@ with DAG(
     schedule_interval=None,
     catchup=False,
     doc_md=readme_content,
-    tags=["voice", "autofinix"],
+    tags=["voice", "shared", "send", "message"],
     render_template_as_native_obj=True,
     params={
         "phone_number": Param("+1234567890", type="string", title="Phone Number"),
