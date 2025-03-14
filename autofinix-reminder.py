@@ -419,13 +419,13 @@ with open(readme_path, 'r') as file:
     readme_content = file.read()
 
 with DAG(
-    "shared_transcribe_message_voice",
+    "autofinix_check_reminders_due",
     default_args=default_args,
-    schedule_interval=None,
+    schedule_interval=timedelta(minutes=1),
     catchup=False,
-    doc_md=readme_content,
-    tags=["shared", "message", "voice", "transcribe"],
     max_active_runs=1,
+    doc_md=readme_content,
+    tags=["reminder", "autofinix", "check", "due"]
 ) as dag:
 
     fetch_due_loans_task = PythonOperator(
