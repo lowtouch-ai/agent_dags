@@ -12,6 +12,7 @@ import uuid
 from ollama import Client
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Default args for DAG
 default_args = {
-    "owner": "airflow",
+    "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2025, 2, 27),
     "retries": 1,
@@ -255,7 +256,7 @@ def trigger_twilio_voice_call(**kwargs):
         # Trigger `send-voice-message` DAG
         trigger = TriggerDagRunOperator(
             task_id=f"trigger_twilio_voice_call_inner_{call_id}",
-            trigger_dag_id="send-voice-message",
+            trigger_dag_id="shared_send_message_voice",
             conf=conf,
             wait_for_completion=True,
             poke_interval=30,
@@ -414,12 +415,18 @@ def update_reminder_status(**kwargs):
         else:
             logger.info(f"Call reminder status unknown for Loan ID: {loan_id}")
 
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'autofinix_reminder.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
+
 with DAG(
-    "autofinix_reminder",
+    "autofinix_check_reminders_due",
     default_args=default_args,
     schedule_interval=timedelta(minutes=1),
     catchup=False,
     max_active_runs=1,
+    doc_md=readme_content,
+    tags=["reminder", "autofinix", "check", "due"]
 ) as dag:
 
     fetch_due_loans_task = PythonOperator(

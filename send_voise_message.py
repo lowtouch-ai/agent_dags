@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 default_args = {
-    "owner": "airflow",
+    "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 27),
     "retries": 1,
@@ -64,11 +64,17 @@ def make_api_request(url, method="GET", auth=None, retries=3):
         logger.error(f"API request failed: {str(e)}")
         raise
 
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'voice_message.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
+
 with DAG(
-    "send-voice-message",
+    "shared_send_message_voice",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
+    doc_md=readme_content,
+    tags=["voice", "shared", "send", "message"],
     render_template_as_native_obj=True,
     params={
         "phone_number": Param("+1234567890", type="string", title="Phone Number"),
@@ -323,7 +329,7 @@ with DAG(
 
     trigger_transcription_task = TriggerDagRunOperator(
         task_id="trigger_transcription_dag",
-        trigger_dag_id="voice-text-transcribe",
+        trigger_dag_id="shared_transcribe_message_voice",
         conf="{{ ti.xcom_pull(task_ids='prepare_transcription_trigger', key='trigger_conf') }}",
         dag=dag,
     )

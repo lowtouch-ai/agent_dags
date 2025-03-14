@@ -4,12 +4,13 @@ from datetime import datetime, timedelta
 import whisper
 import logging
 from airflow.models import Variable
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 default_args = {
-    "owner": "airflow",
+    "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 27),
     "retries": 1,
@@ -50,12 +51,18 @@ def transcribe_audio(file_path, **kwargs):
     except Exception as e:
         logger.error(f"Whisper transcription failed: {str(e)}")
         raise
-
+        
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'voice_transcriber.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
+    
 with DAG(
-    "voice-text-transcribe",
+    "shared_transcribe_message_voice",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
+    doc_md=readme_content,
+    tags=["shared", "message", "voice", "transcribe"],
     params={
         "file_path": {
             "type": "object",

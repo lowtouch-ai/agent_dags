@@ -3,10 +3,11 @@ from airflow.operators.bash import BashOperator
 from airflow.utils.task_group import TaskGroup
 from datetime import datetime, timedelta
 from airflow.models import Variable
+import os
 
 # Default arguments
 default_args = {
-    'owner': 'airflow',
+    'owner': 'lowtouch.ai_developers',
     'depends_on_past': False,
     'start_date': datetime(2024, 2, 28),
     'retries': 1,
@@ -33,11 +34,17 @@ dbt_run_commands = ["order"]
 # Convert 8 AM IST to UTC (Airflow uses UTC by default)
 daily_schedule_utc = "30 2 * * *"  # Runs daily at 2:30 AM UTC (8:00 AM IST)
 
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'webshop.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
+
 with DAG(
-    'webshop_reset',
+    'webshop_reset_data',
     default_args=default_args,
     schedule_interval=daily_schedule_utc,
-    catchup=False
+    catchup=False,
+    doc_md=readme_content,
+    tags=["reset", "webshop", "data"]
 ) as dag:
 
     # TaskGroup for dbt seed

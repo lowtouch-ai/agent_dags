@@ -51,7 +51,7 @@ with DAG(
     tags=["sample-dag"],
     doc_md=readme_content,
     default_args = {
-    "owner": "airflow"
+    "owner": "lowtouch.ai_developers"
     },
     catchup=False,
 ):

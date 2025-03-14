@@ -12,7 +12,7 @@ from googleapiclient.discovery import build
 
 # Default DAG arguments
 default_args = {
-    "owner": "airflow",
+    "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 24),
     "retries": 1,
@@ -107,11 +107,17 @@ def fetch_unread_emails(**kwargs):
 
     kwargs['ti'].xcom_push(key="unread_emails", value=unread_emails)
 
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'mailbox_monitor.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
+
 # Define DAG
-with DAG("webshop-email-listener",
+with DAG("webshop_monitor_mailbox",
          default_args=default_args,
          schedule_interval=timedelta(minutes=1),
-         catchup=False) as dag:
+         catchup=False,
+         doc_md=readme_content,
+         tags=["mailbox", "webshop", "monitor"])as dag:
 
     fetch_emails_task = PythonOperator(
         task_id="fetch_unread_emails",
@@ -137,7 +143,7 @@ with DAG("webshop-email-listener",
 
             trigger_task = TriggerDagRunOperator(
                 task_id=task_id,
-                trigger_dag_id="webshop-email-respond",
+                trigger_dag_id="shared_send_message_email",
                 conf={"email_data": email},
             )
 
