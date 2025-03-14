@@ -228,7 +228,7 @@ with DAG(
         recording_sid = recordings[0]["sid"]
         recording_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Recordings/{recording_sid}.mp3"
         execution_date = datetime.now().strftime("%Y-%m-%d")
-        dag_name = "send-voice-message-transcript"  # Updated to match DAG name
+        dag_name = "send-voice-message-transcript"
         save_directory = os.path.join(BASE_STORAGE_DIR, dag_name, execution_date)
         os.makedirs(save_directory, exist_ok=True)
         file_path = os.path.join(save_directory, f"{call_sid}.mp3")
@@ -272,8 +272,12 @@ with DAG(
     def fetch_transcription(**kwargs):
         """Fetch transcription from Variable with retry."""
         ti = kwargs["ti"]
-        call_id = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
+        call_id = ti.xcom_pull(task_ids="initiate_call", key="call_id")  # Fixed to use call_id, not call_sid
         call_sid = ti.xcom_pull(task_ids="initiate_call", key="call_sid")
+
+        if not call_id:
+            logger.error("No call_id found for transcription fetch")
+            raise AirflowException("Call ID missing")
 
         variable_key = f"text_{call_id}"
         logger.info(f"Checking Variable {variable_key} for call SID={call_sid}")
@@ -298,6 +302,13 @@ with DAG(
         task_id="initiate_call",
         python_callable=initiate_call,
         provide_context=True
+    )
+
+    wait_for_amd = TimeDeltaSensor(
+        task_id="wait_for_amd",
+        delta=timedelta(seconds=5),  # Wait 5s for AMD to detect machine_start
+        poke_interval=2,
+        mode="poke"
     )
 
     adjust_voicemail_task = PythonOperator(
@@ -333,7 +344,7 @@ with DAG(
         task_id="fetch_and_save_recording",
         python_callable=fetch_and_save_recording,
         provide_context=True,
-        retries=10,  # Increased retries for recording fetch
+        retries=10,
         retry_delay=timedelta(seconds=10)
     )
 
@@ -368,7 +379,7 @@ with DAG(
     skip_recording = DummyOperator(task_id="skip_recording")
 
     # Task Dependencies
-    initiate_call_task >> adjust_voicemail_task >> wait_call_status >> check_status_task
+    initiate_call_task >> wait_for_amd >> adjust_voicemail_task >> wait_call_status >> check_status_task
     check_status_task >> branch_recording_task
     branch_recording_task >> [fetch_recording_task, skip_recording]
     fetch_recording_task >> prepare_transcription_task >> trigger_transcription_task >> wait_for_transcription >> fetch_transcription_task
