@@ -101,7 +101,6 @@ with DAG(
                 <Response>
                     <Pause length="3"/> <!-- 3s initial pause for humans -->
                     <Say>{message}</Say>
-                    <Say>Please speak your acknowledgment after the beep.</Say>
                     <Record maxLength="30" playBeep="true" trim="trim-silence"/>
                     <Say>Thank you! Goodbye.</Say>
                 </Response>
@@ -317,7 +316,7 @@ with DAG(
     task_id="adjust_voicemail_message",
     python_callable=adjust_voicemail_message,
     provide_context=True,
-    retries=5,  # Increase to 5 retries
+    retries=10,  # Increase to 5 retries
     retry_delay=timedelta(seconds=5)  # Increase to 5 seconds
     )
 
