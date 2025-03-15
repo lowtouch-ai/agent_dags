@@ -382,7 +382,7 @@ with DAG(
 
     trigger_transcription_task = TriggerDagRunOperator(
         task_id="trigger_transcription_dag",
-        trigger_dag_id="voice_text_transcribe",
+        trigger_dag_id="shared_transcribe_message_voice",
         conf="{{ ti.xcom_pull(task_ids='prepare_transcription_trigger', key='trigger_conf') }}",
         dag=dag,
     )
