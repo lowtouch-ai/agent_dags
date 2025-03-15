@@ -69,7 +69,7 @@ def fetch_due_loans(api_url, test_phone_number,even_phone_number,odd_phone_numbe
     """Fetches loans that are due from the Autoloan API"""
     ti = kwargs['ti']
     try:
-        url = f"{api_url}loan/get_reminder?status=Reminder"
+        url = f"{api_url}loan/get_reminder?reminder_flag=true&status=Reminder"
         logger.info(f"Calling API to fetch due loans: {url}")
         loan_data = make_api_request(url)
         
