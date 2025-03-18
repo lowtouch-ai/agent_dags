@@ -39,13 +39,6 @@ seeds:
           zip: text  # ZIP codes often contain letters, so use TEXT
           created: timestamp
           updated: timestamp
-     stock:
-      +column_types:
-          id: integer
-          articleid: integer
-          count: integer
-          created: timestamp
-          updated: timestamp
     articles:
       +full_refresh: false  # Prevents truncation before inserting new data
       +column_types:
@@ -98,7 +91,13 @@ seeds:
           currentlyactive: boolean  # Assuming "t" and "f" represent true/false
           created: timestamp
           updated: timestamp
-   
+    stock:
+      +column_types:
+          id: integer
+          articleid: integer
+          count: integer
+          created: timestamp
+          updated: timestamp
     colors:
       +column_types:
           id: integer
