@@ -13,8 +13,6 @@ logger = logging.getLogger("airflow.task")
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
-    'email_on_failure': False,
-    'email_on_retry': False,
     'retries': 1,
 }
 
@@ -38,7 +36,7 @@ try:
         'shared_monitor_folder_pdf',
         default_args=default_args,
         description='Monitors a folder for new PDF files and logs detection',
-        schedule_interval='@hourly',
+        schedule_interval='* * * * *',
         start_date=days_ago(1),
         catchup=False,
     ) as dag:
