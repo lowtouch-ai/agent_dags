@@ -20,7 +20,7 @@ seeds:
   ai_lab:
     order_seed:  # Renamed from 'order' to avoid conflict with the model
       +column_types:
-        id: integer
+        id: serial not null
         customerid: integer
         ordertimestamp: timestamp
         shippingaddressid: integer
@@ -30,6 +30,7 @@ seeds:
         updated: timestamp
     address:
       +column_types:
+          id: serial not null
           customerid: integer
           firstname: text
           lastname: text
@@ -42,7 +43,7 @@ seeds:
     articles:
       +full_refresh: false  # Prevents truncation before inserting new data
       +column_types:
-          id: integer
+          id: serial not null
           productid: integer
           ean: text
           colorid: integer
@@ -57,7 +58,7 @@ seeds:
           updated: timestamp
     customer:
       +column_types:
-          id: integer
+          id: serial not null
           firstname: text
           lastname: text
           gender: text
@@ -68,13 +69,13 @@ seeds:
           updated: timestamp
     labels:
       +column_types:
-          id: integer
+          id: serial not null
           name: text
           slugname: text
           icon: text
     order_positions:
       +column_types:
-          id: integer
+          id: serial not null
           orderid: integer
           articleid: integer
           amount: integer
@@ -83,7 +84,7 @@ seeds:
           updated: timestamp
     products:
       +column_types:
-          id: integer
+          id: serial not null
           name: text
           labelid: integer
           category: text
@@ -93,19 +94,19 @@ seeds:
           updated: timestamp
     stock:
       +column_types:
-          id: integer
+          id: serial not null
           articleid: integer
           count: integer
           created: timestamp
           updated: timestamp
     colors:
       +column_types:
-          id: integer
+          id: serial not null
           name: text
           rgb: text  # Storing HEX color codes as text
     sizes:     # Name of the seed, should match the CSV filename (apparel_sizes.csv)
       +column_types:
-          id: integer
+          id: serial not null
           gender: text
           category: text
           size: text
