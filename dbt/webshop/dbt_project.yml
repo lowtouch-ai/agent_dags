@@ -20,7 +20,7 @@ seeds:
   ai_lab:
     order_seed:  # Renamed from 'order' to avoid conflict with the model
       +column_types:
-        id: serial not null
+        id: serial
         customerid: integer
         ordertimestamp: timestamp
         shippingaddressid: integer
@@ -28,9 +28,12 @@ seeds:
         shippingcost: numeric
         created: timestamp
         updated: timestamp
+      +constraints:
+        - type: primary_key
+          columns: [id]
     address:
       +column_types:
-          id: serial not null
+          id: serial 
           customerid: integer
           firstname: text
           lastname: text
@@ -40,10 +43,13 @@ seeds:
           zip: text  # ZIP codes often contain letters, so use TEXT
           created: timestamp
           updated: timestamp
+      +constraints:
+        - type: primary_key
+          columns: [id]    
     articles:
       +full_refresh: false  # Prevents truncation before inserting new data
       +column_types:
-          id: serial not null
+          id: serial
           productid: integer
           ean: text
           colorid: integer
@@ -56,9 +62,12 @@ seeds:
           currentlyactive: boolean  # Assuming "t" and "f" represent true/false
           created: timestamp
           updated: timestamp
+      +constraints:
+        - type: primary_key
+          columns: [id]
     customer:
       +column_types:
-          id: serial not null
+          id: serial
           firstname: text
           lastname: text
           gender: text
@@ -67,24 +76,33 @@ seeds:
           currentaddressid: integer
           created: timestamp
           updated: timestamp
+      +constraints:
+        - type: primary_key
+          columns: [id]
     labels:
       +column_types:
-          id: serial not null
+          id: serial
           name: text
           slugname: text
           icon: text
+      +constraints:
+        - type: primary_key
+          columns: [id]
     order_positions:
       +column_types:
-          id: serial not null
+          id: serial
           orderid: integer
           articleid: integer
           amount: integer
           price: numeric  # Ensure "$" is removed before ingestion
           created: timestamp
           updated: timestamp
+      +constraints:
+        - type: primary_key
+          columns: [id]
     products:
       +column_types:
-          id: serial not null
+          id: serial
           name: text
           labelid: integer
           category: text
@@ -92,24 +110,36 @@ seeds:
           currentlyactive: boolean  # Assuming "t" and "f" represent true/false
           created: timestamp
           updated: timestamp
+      +constraints:
+        - type: primary_key
+          columns: [id]
     stock:
       +column_types:
-          id: serial not null
+          id: serial
           articleid: integer
           count: integer
           created: timestamp
           updated: timestamp
+      +constraints:
+        - type: primary_key
+          columns: [id]
     colors:
       +column_types:
-          id: serial not null
+          id: serial
           name: text
           rgb: text  # Storing HEX color codes as text
+      +constraints:
+        - type: primary_key
+          columns: [id]
     sizes:     # Name of the seed, should match the CSV filename (apparel_sizes.csv)
       +column_types:
-          id: serial not null
+          id: serial
           gender: text
           category: text
           size: text
           size_us: text
           size_uk: text
           size_eu: text
+      +constraints:
+        - type: primary_key
+          columns: [id]
