@@ -43,7 +43,7 @@ try:
 
         # FileSensor to monitor the folder (fs_conn_id removed)
         watch_folder = FileSensor(
-            task_id='watch_for_pdfs',
+            task_id='watch_for_pdfs-2',
             filepath='/appz/data/vector_watch_file_pdf/*/*.pdf',
             poke_interval=60,
             timeout=3600,
@@ -52,7 +52,7 @@ try:
 
         # PythonOperator to log the detection
         log_detection = PythonOperator(
-            task_id='log_pdf_detection',
+            task_id='log_pdf_detection-2',
             python_callable=log_detected_files,
             provide_context=True,
         )
