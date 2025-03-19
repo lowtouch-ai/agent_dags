@@ -1,36 +1,27 @@
 from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.utils.dates import days_ago
-from datetime import datetime, timedelta
+from airflow.operators.bash import BashOperator
+from datetime import datetime
 
-
-# Default arguments for the DAG
+# Define default arguments
 default_args = {
-    "owner": "lowtouch.ai_developers",
-    "depends_on_past": False,
-    "start_date": datetime(2024, 2, 27),
-    "retries": 1,
-    "retry_delay": timedelta(minutes=5),
+    'owner': 'airflow',
+    'start_date': datetime(2024, 1, 1),
+    'retries': 1
 }
 
-# Simple function to print a message
-
-
-# DAG definition
+# Define the DAG
 with DAG(
-    'minute_runner',
+    dag_id='print_date_dag',
     default_args=default_args,
-    description='A simple DAG that runs every minute',
-    schedule_interval='* * * * *',  # Cron expression for every minute
-    catchup=False,
+    schedule_interval='@daily',
+    catchup=False
 ) as dag:
-    def say_hello():
-        print("Hello! This DAG runs every minute.")
-
-    # PythonOperator to run the simple function
-    hello_task = PythonOperator(
-        task_id='say_hello',
-        python_callable=say_hello,
-        provide_context=True,
+    
+    # Task to print the date
+    print_date = BashOperator(
+        task_id='print_date',
+        bash_command='date'
     )
-    hello_task
+
+    print_date
+#testing
