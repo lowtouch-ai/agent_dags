@@ -4,7 +4,6 @@ from airflow.operators.dummy import DummyOperator
 from airflow.utils.dates import days_ago
 import os
 import logging
-from airflow.exceptions import AirflowSkipException
 
 # Set up logging
 logger = logging.getLogger("airflow.task")
@@ -23,21 +22,17 @@ def check_and_log_files(**context):
         # Check if folder exists
         if not os.path.exists(folder_path):
             logger.error(f"Folder {folder_path} does not exist")
-            raise AirflowSkipException(f"Folder {folder_path} not found")
+            raise Exception(f"Folder {folder_path} not found")
         
         # Get list of PDF files
         pdf_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.pdf')]
         
         if not pdf_files:
             logger.info("No PDF files found in the monitored folder")
-            raise AirflowSkipException("No PDF files detected - stopping DAG")
         else:
             logger.info(f"PDF file(s) found: {pdf_files}")
-            raise AirflowSkipException("PDF files detected - stopping DAG")
             
     except Exception as e:
-        if isinstance(e, AirflowSkipException):
-            raise  # Let skip exceptions pass through
         logger.error(f"Error in check_and_log_files: {str(e)}")
         raise
 
