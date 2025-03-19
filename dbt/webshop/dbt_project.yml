@@ -57,7 +57,7 @@ seeds:
           description: text
           originalprice: numeric
           reducedprice: numeric
-          taxrate: integer
+          taxrate: numeric
           discountinpercent: integer
           currentlyactive: boolean  # Assuming "t" and "f" represent true/false
           created: timestamp
