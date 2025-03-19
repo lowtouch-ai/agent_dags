@@ -17,7 +17,6 @@ default_args = {
     'email_on_retry': False,
     'retries': 1,
 }
-
 # Function to log detected files
 def log_detected_files(**context):
     file_path = context['task_instance'].xcom_pull(task_ids='watch_for_pdfs')
