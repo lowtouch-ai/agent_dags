@@ -45,6 +45,7 @@ try:
         watch_folder = FileSensor(
             task_id='watch_for_pdfs',
             filepath='/appz/data/vector_watch_file_pdf/*/*.pdf',
+            fs_conn_id='fs_default',
             poke_interval=60,
             timeout=3600,
             mode='poke',
