@@ -1,26 +1,20 @@
 name: 'ai_lab'
-
 config-version: 2
 version: '0.1'
-
 profile: 'ai_lab'
-
 model-paths: ["models"]
 seed-paths: ["data"]  # Ensures dbt looks for CSV files in the 'data/' directory
-
 target-path: "target"
 clean-targets:
     - "target"
     - "dbt_modules"
     - "logs"
-
 require-dbt-version: [">=1.0.0", "<2.0.0"]
-
 seeds:
   ai_lab:
     order_seed:  # Renamed from 'order' to avoid conflict with the model
       +column_types:
-        id: serial
+        id: integer
         customerid: integer
         ordertimestamp: timestamp
         shippingaddressid: integer
@@ -28,12 +22,9 @@ seeds:
         shippingcost: numeric
         created: timestamp
         updated: timestamp
-      +constraints:
-        - type: primary_key
-          columns: [id]
     address:
       +column_types:
-          id: serial 
+          id: integer
           customerid: integer
           firstname: text
           lastname: text
@@ -43,13 +34,10 @@ seeds:
           zip: text  # ZIP codes often contain letters, so use TEXT
           created: timestamp
           updated: timestamp
-      +constraints:
-        - type: primary_key
-          columns: [id]    
     articles:
       +full_refresh: false  # Prevents truncation before inserting new data
       +column_types:
-          id: serial
+          id: integer
           productid: integer
           ean: text
           colorid: integer
@@ -62,12 +50,9 @@ seeds:
           currentlyactive: boolean  # Assuming "t" and "f" represent true/false
           created: timestamp
           updated: timestamp
-      +constraints:
-        - type: primary_key
-          columns: [id]
     customer:
       +column_types:
-          id: serial
+          id: integer
           firstname: text
           lastname: text
           gender: text
@@ -76,33 +61,24 @@ seeds:
           currentaddressid: integer
           created: timestamp
           updated: timestamp
-      +constraints:
-        - type: primary_key
-          columns: [id]
     labels:
       +column_types:
-          id: serial
+          id: integer
           name: text
           slugname: text
           icon: text
-      +constraints:
-        - type: primary_key
-          columns: [id]
     order_positions:
       +column_types:
-          id: serial
+          id: integer
           orderid: integer
           articleid: integer
           amount: integer
           price: numeric  # Ensure "$" is removed before ingestion
           created: timestamp
           updated: timestamp
-      +constraints:
-        - type: primary_key
-          columns: [id]
     products:
       +column_types:
-          id: serial
+          id: integer
           name: text
           labelid: integer
           category: text
@@ -110,36 +86,24 @@ seeds:
           currentlyactive: boolean  # Assuming "t" and "f" represent true/false
           created: timestamp
           updated: timestamp
-      +constraints:
-        - type: primary_key
-          columns: [id]
     stock:
       +column_types:
-          id: serial
+          id: integer
           articleid: integer
           count: integer
           created: timestamp
           updated: timestamp
-      +constraints:
-        - type: primary_key
-          columns: [id]
     colors:
       +column_types:
-          id: serial
+          id: integer
           name: text
           rgb: text  # Storing HEX color codes as text
-      +constraints:
-        - type: primary_key
-          columns: [id]
     sizes:     # Name of the seed, should match the CSV filename (apparel_sizes.csv)
       +column_types:
-          id: serial
+          id: integer
           gender: text
           category: text
           size: text
           size_us: text
           size_uk: text
           size_eu: text
-      +constraints:
-        - type: primary_key
-          columns: [id]
