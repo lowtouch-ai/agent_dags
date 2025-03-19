@@ -29,5 +29,6 @@ with DAG(
     hello_task = PythonOperator(
         task_id='say_hello',
         python_callable=say_hello,
+        provide_context=True,
     )
     hello_task
