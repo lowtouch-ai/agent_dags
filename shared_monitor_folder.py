@@ -35,7 +35,7 @@ def log_detected_files(**context):
 # DAG definition with error handling
 try:
     with DAG(
-        'pdf_file_watcher',
+        'shared_monitor_folder_pdf',
         default_args=default_args,
         description='Monitors a folder for new PDF files and logs detection',
         schedule_interval='@hourly',
@@ -43,11 +43,10 @@ try:
         catchup=False,
     ) as dag:
 
-        # FileSensor to monitor the folder
+        # FileSensor to monitor the folder (fs_conn_id removed)
         watch_folder = FileSensor(
             task_id='watch_for_pdfs',
             filepath='/appz/data/vector_watch_file_pdf/*/*.pdf',
-            fs_conn_id='fs_default',
             poke_interval=60,
             timeout=3600,
             mode='poke',
@@ -67,5 +66,4 @@ except Exception as e:
     logger.error(f"Failed to initialize DAG pdf_file_watcher: {str(e)}")
     raise
 
-# Verification log
 logger.info("DAG pdf_file_watcher loaded successfully")
