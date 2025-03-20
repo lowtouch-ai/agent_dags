@@ -24,7 +24,6 @@ dag = DAG(
     'shared_process_file_pdf2vector',
     default_args=default_args,
     description='Upload PDFs to vector API with folder-based tags',
-    schedule_interval=timedelta(minutes=30),
     start_date=days_ago(1),
     catchup=False,
 )
