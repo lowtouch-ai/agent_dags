@@ -7,11 +7,9 @@ from pathlib import Path
 import uuid
 from datetime import timedelta
 import logging
-from airflow.exceptions import AirflowSkipException
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("airflow.task")
 
 # Default arguments for the DAG
 default_args = {
@@ -25,81 +23,83 @@ default_args = {
 dag = DAG(
     'shared_process_file_pdf2vector',
     default_args=default_args,
-    description='Upload PDFs to vector API with folder-based UUID',
+    description='Upload PDFs to vector API with folder-based tags',
     schedule_interval=timedelta(minutes=30),
     start_date=days_ago(1),
     catchup=False,
 )
 
-def check_and_upload_pdfs(**kwargs):
+def upload_pdfs(**kwargs):
     """
-    Function to check for PDFs in UUID folders and upload them to the vector API
+    Function to scan directory and upload PDFs with appropriate tags
+    Includes UUID validation and file presence check
     """
     base_path = "/appz/data/vector_watch_file_pdf/"
-    # Update the base API endpoint (without uuid and file_name, as they will be added dynamically)
-    api_base_url = "http://vector:8000/vector/pdf"
+    api_endpoint = "http://vector:8000/vector/pdf"
     
-    # Counter for PDF files found
-    pdf_count = 0
-    has_valid_uuid = False
+    # Get all immediate subdirectories
+    subdirs = [d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))]
     
-    # Walk through the directory structure
-    for root, dirs, files in os.walk(base_path):
-        # Check if the folder contains a valid UUID
-        path_parts = Path(root).relative_to(base_path).parts
-        if not path_parts:
-            continue
-            
-        try:
-            folder_uuid = uuid.UUID(path_parts[0])  # Validate UUID
-            has_valid_uuid = True
-        except ValueError:
-            continue
-            
-        # Filter for PDF files only
-        pdf_files = [f for f in files if f.endswith('.pdf')]
-        pdf_count += len(pdf_files)
+    if not subdirs:
+        logger.info("No subdirectories found in base path")
+        return
+    
+    found_valid_files = False
+    
+    for subdir in subdirs:
+        full_path = os.path.join(base_path, subdir)
         
-        if pdf_files:
-            # Process each PDF file when found
-            for pdf_file in pdf_files:
-                file_path = os.path.join(root, pdf_file)
+        # Validate UUID
+        try:
+            uuid.UUID(subdir)
+        except ValueError:
+            logger.info(f"Skipping directory {subdir} - not a valid UUID")
+            continue
+            
+        # Check for PDF files
+        pdf_files = [f for f in os.listdir(full_path) if f.endswith('.pdf')]
+        
+        if not pdf_files:
+            logger.info(f"No PDF files found in UUID directory: {subdir}")
+            continue
+            
+        found_valid_files = True
+        logger.info(f"PDF files found in UUID directory: {subdir}")
+        
+        # Extract tags from path (if any subdirectories exist)
+        path_parts = Path(full_path).relative_to(base_path).parts
+        tags = list(path_parts[1:]) if len(path_parts) > 1 else []
+        
+        # Process each PDF file
+        for pdf_file in pdf_files:
+            file_path = os.path.join(full_path, pdf_file)
+            
+            # Prepare the upload data
+            files = {'file': (pdf_file, open(file_path, 'rb'), 'application/pdf')}
+            data = {'tags': ','.join(tags)} if tags else {}
+            
+            try:
+                # Make the API call
+                response = requests.post(api_endpoint, files=files, data=data)
+                response.raise_for_status()
                 
-                # Construct the API endpoint with uuid and file_name
-                api_endpoint = f"{api_base_url}/{folder_uuid}/{pdf_file}"
+                logger.info(f"Successfully uploaded {pdf_file} with tags: {tags}")
                 
-                # Prepare the upload data (only the file, no tags)
-                files = {'file': (pdf_file, open(file_path, 'rb'), 'application/pdf')}
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Error uploading {pdf_file}: {str(e)}")
                 
-                try:
-                    # Make the API call
-                    response = requests.post(api_endpoint, files=files)
-                    response.raise_for_status()
-                    
-                    logger.info(f"Successfully uploaded {pdf_file} to {api_endpoint}")
-                    
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"Error uploading {pdf_file} to {api_endpoint}: {str(e)}")
-                    
-                finally:
-                    # Close the file
-                    files['file'][1].close()
-
-    # Check conditions after scanning all folders
-    if not has_valid_uuid:
-        logger.info("No valid UUID folders found in the base path")
-        raise AirflowSkipException("No valid UUID folders found, skipping DAG execution")
+            finally:
+                # Close the file
+                files['file'][1].close()
     
-    if pdf_count == 0:
-        logger.info("No PDF files found in UUID folders")
-        raise AirflowSkipException("No PDF files found, skipping DAG execution")
-    
-    logger.info(f"Found and processed {pdf_count} PDF files")
+    if not found_valid_files:
+        logger.info("No valid PDF files found in any UUID directory - stopping DAG")
+        return
 
 # Define the task
 upload_task = PythonOperator(
-    task_id='check_and_upload_pdfs_to_vector',
-    python_callable=check_and_upload_pdfs,
+    task_id='upload_pdfs_to_vector',
+    python_callable=upload_pdfs,
     dag=dag,
 )
 
