@@ -5,8 +5,9 @@ import os
 import requests
 from pathlib import Path
 import uuid
-from datetime import timedelta
+from datetime import timedelta, datetime
 import logging
+import shutil
 
 # Configure logging
 logger = logging.getLogger("airflow.task")
@@ -27,76 +28,90 @@ dag = DAG(
     schedule_interval=timedelta(minutes=30),
     start_date=days_ago(1),
     catchup=False,
+    params={
+        'uuid': None  # Optional UUID parameter
+    }
 )
 
 def upload_pdfs(**kwargs):
     """
     Function to scan directory and upload PDFs to new endpoint format /pdf/{uuid}/{file_name}
+    with archive functionality
     """
     base_path = "/appz/data/vector_watch_file_pdf/"
     base_api_endpoint = "http://vector:8000/vector/pdf/"
     
-    # Get all immediate subdirectories
-    subdirs = [d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))]
-    
-    if not subdirs:
-        logger.info("No subdirectories found in base path")
+    # Get UUID from params
+    target_uuid = kwargs['params'].get('uuid')
+    if not target_uuid:
+        logger.info("No UUID provided - stopping DAG")
         return
     
-    found_valid_files = False
-    
-    for subdir in subdirs:
-        full_path = os.path.join(base_path, subdir)
-        
-        # Validate UUID
-        try:
-            uuid.UUID(subdir)
-        except ValueError:
-            logger.info(f"Skipping directory {subdir} - not a valid UUID")
+    try:
+        uuid.UUID(target_uuid)  # Validate UUID
+    except ValueError:
+        logger.error(f"Invalid UUID provided: {target_uuid} - stopping DAG")
+        return
+
+    target_path = os.path.join(base_path, target_uuid)
+    if not os.path.exists(target_path):
+        logger.info(f"UUID directory {target_uuid} not found - stopping DAG")
+        return
+
+    # Scan all subdirectories recursively, excluding archive
+    pdf_files_found = []
+    for root, dirs, files in os.walk(target_path):
+        # Skip archive directory
+        if 'archive' in dirs:
+            dirs.remove('archive')
+        if 'archive' in root.lower():
             continue
             
-        # Check for PDF files
-        pdf_files = [f for f in os.listdir(full_path) if f.endswith('.pdf')]
-        
-        if not pdf_files:
-            logger.info(f"No PDF files found in UUID directory: {subdir}")
-            continue
-            
-        found_valid_files = True
-        logger.info(f"PDF files found in UUID directory: {subdir}")
-        
-        # Extract tags from path (if any subdirectories exist)
-        path_parts = Path(full_path).relative_to(base_path).parts
-        tags = list(path_parts[1:]) if len(path_parts) > 1 else []
-        
-        # Process each PDF file
+        pdf_files = [f for f in files if f.lower().endswith('.pdf')]
         for pdf_file in pdf_files:
-            file_path = os.path.join(full_path, pdf_file)
-            
-            # Construct the specific endpoint with UUID and filename
-            api_endpoint = f"{base_api_endpoint}{subdir}/{pdf_file}"
-            
-            # Prepare the upload data
-            files = {'file': (pdf_file, open(file_path, 'rb'), 'application/pdf')}
-            data = {'tags': ','.join(tags)} if tags else {}
-            
-            try:
-                # Make the API call using POST
-                response = requests.post(api_endpoint, files=files, data=data)
-                response.raise_for_status()
-                
-                logger.info(f"Successfully uploaded {pdf_file} to {api_endpoint} with tags: {tags}")
-                
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Error uploading {pdf_file} to {api_endpoint}: {str(e)}")
-                
-            finally:
-                # Close the file
-                files['file'][1].close()
-    
-    if not found_valid_files:
-        logger.info("No valid PDF files found in any UUID directory - stopping DAG")
+            pdf_files_found.append(os.path.join(root, pdf_file))
+
+    if not pdf_files_found:
+        logger.info(f"No PDF files found in UUID directory {target_uuid} - stopping DAG")
         return
+
+    logger.info(f"Found {len(pdf_files_found)} PDF files in UUID directory: {target_uuid}")
+    
+    # Create archive folder with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive_path = os.path.join(target_path, 'archive', timestamp)
+    os.makedirs(archive_path, exist_ok=True)
+
+    for file_path in pdf_files_found:
+        pdf_file = os.path.basename(file_path)
+        api_endpoint = f"{base_api_endpoint}{target_uuid}/{pdf_file}"
+        
+        # Extract tags from path
+        path_parts = Path(file_path).relative_to(target_path).parts
+        tags = list(path_parts[:-1]) if len(path_parts) > 1 else []
+        
+        # Prepare the upload data
+        files = {'file': (pdf_file, open(file_path, 'rb'), 'application/pdf')}
+        data = {'tags': ','.join(tags)} if tags else {}
+        
+        try:
+            # Make the API call using POST
+            response = requests.post(api_endpoint, files=files, data=data)
+            response.raise_for_status()
+            logger.info(f"Successfully uploaded {pdf_file} to {api_endpoint} with tags: {tags}")
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error uploading {pdf_file} to {api_endpoint}: {str(e)}")
+            
+        finally:
+            # Close the file and move to archive
+            files['file'][1].close()
+            archive_destination = os.path.join(archive_path, pdf_file)
+            try:
+                shutil.move(file_path, archive_destination)
+                logger.info(f"Archived {pdf_file} to {archive_destination}")
+            except Exception as e:
+                logger.error(f"Error archiving {pdf_file}: {str(e)}")
 
 # Define the task
 upload_task = PythonOperator(
@@ -105,5 +120,4 @@ upload_task = PythonOperator(
     dag=dag,
 )
 
-# Set task dependencies (if any)
 upload_task
