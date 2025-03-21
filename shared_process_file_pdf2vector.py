@@ -63,7 +63,7 @@ def upload_pdfs(**kwargs):
             continue
         logger.info(f"PDF files found in UUID directory: {pdf_files}")
         found_valid_files = True
-        logger.info(f"PDF files found in UUID directory: {subdir}")
+     
         
         # Extract tags from path (if any subdirectories exist)
         path_parts = Path(full_path).relative_to(base_path).parts
