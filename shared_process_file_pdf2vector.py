@@ -34,7 +34,7 @@ def upload_pdfs(**kwargs):
     Function to scan directory and upload PDFs to new endpoint format /pdf/{uuid}/{file_name}
     """
     base_path = "/appz/data/vector_watch_file_pdf/"
-    base_api_endpoint = "http://vector:8000/pdf/"
+    base_api_endpoint = "http://vector:8000/vector/pdf/"
     
     # Get all immediate subdirectories
     subdirs = [d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))]
