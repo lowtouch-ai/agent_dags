@@ -20,12 +20,12 @@ default_args = {
     'retry_delay': timedelta(minutes=5),
 }
 
-# DAG definition
+# DAG definition - removed schedule_interval
 dag = DAG(
     'shared_process_file_pdf2vector',
     default_args=default_args,
     description='Upload PDFs to vector API with folder-based tags',
-    schedule_interval=timedelta(minutes=30),
+    schedule_interval=None,  # Set to None since we have required params
     start_date=days_ago(1),
     catchup=False,
     params={
