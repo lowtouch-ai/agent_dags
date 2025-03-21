@@ -110,7 +110,6 @@ with DAG(
         task_id='trigger_pdf_processing',
         trigger_dag_id='shared_process_file_pdf2vector',
         conf={"uuid": "{{ ti.xcom_pull(task_ids='check_pdf_folder', key='uuid') }}"},
-        execution_date="{{ ds }}",
         reset_dag_run=True,
         wait_for_completion=True,
     )
