@@ -57,12 +57,12 @@ def check_and_process_files(**context):
         
         if not pdf_found:
             logger.info("No PDF files found in any UUID directories")
-            return None
+            raise Exception("No PDF files found")
             
     except Exception as e:
         logger.error(f"Error in check_and_process_files: {str(e)}")
         raise
-    return None
+    raise Exception("No PDF files found")
 
 # DAG definition
 try:
