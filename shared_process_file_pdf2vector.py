@@ -41,7 +41,7 @@ def upload_pdfs(**kwargs):
     
     if not subdirs:
         logger.info("No subdirectories found in base path")
-        return
+        
     
     found_valid_files = False
     
@@ -61,7 +61,7 @@ def upload_pdfs(**kwargs):
         if not pdf_files:
             logger.info(f"No PDF files found in UUID directory: {subdir}")
             continue
-            
+        logger.info(f"PDF files found in UUID directory: {pdf_files}")
         found_valid_files = True
         logger.info(f"PDF files found in UUID directory: {subdir}")
         
