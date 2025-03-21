@@ -112,7 +112,7 @@ with DAG(
         conf={"uuid": "{{ ti.xcom_pull(task_ids='check_pdf_folder', key='uuid') }}"},
         execution_date="{{ ds }}",
         reset_dag_run=True,
-        wait_for_completion=False,
+        wait_for_completion=True,
     )
 
     end = DummyOperator(
