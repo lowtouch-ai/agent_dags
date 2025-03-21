@@ -33,7 +33,7 @@ def check_and_process_files(**context):
         
         if not uuid_dirs:
             logger.info("No UUID directories found in the monitored folder")
-            return None
+            return False  # No PDFs found, but task succeeds
         
         for uuid_dir in uuid_dirs:
             uuid_path = os.path.join(base_path, uuid_dir)
@@ -53,16 +53,16 @@ def check_and_process_files(**context):
                     uuid_to_process = uuid_dir
                     # Push UUID to XCom
                     context['ti'].xcom_push(key='processed_uuid', value=uuid_dir)
-                    return uuid_dir  # Return after first PDF found
+                    return True  # PDFs found, task succeeds
         
         if not pdf_found:
             logger.info("No PDF files found in any UUID directories")
-            raise Exception("No PDF files found")
+            return False  # No PDFs found, but task succeeds
             
     except Exception as e:
         logger.error(f"Error in check_and_process_files: {str(e)}")
-        raise
-    raise Exception("No PDF files found")
+        raise  # Task fails on exception
+    return False  # Default return (though this line is unreachable due to raise)
 
 # DAG definition
 try:
@@ -95,20 +95,25 @@ try:
             execution_date="{{ ds }}",
             reset_dag_run=True,
             wait_for_completion=False,
-            trigger_rule='all_success',  # Only trigger if check_folder succeeds
-            # Skip if no UUID returned (no PDFs found)
+            trigger_rule='all_done',  # Ensures it runs only if check_folder completes
             do_xcom_push=False,
-            dag=dag,
         )
 
         # End task
         end = DummyOperator(
-            task_id='end'
+            task_id='end',
+            trigger_rule='all_done',  # Ensures it runs regardless of upstream success/failure
         )
 
         # Task dependencies with conditional triggering
         start >> check_folder
-        check_folder >> [trigger_processing, end]  # Branching: trigger_processing only if PDFs found
+        check_folder >> [trigger_processing, end]  # Branching based on condition
+        
+        # Add a condition to skip trigger_processing if no PDFs are found
+        trigger_processing.set_upstream(check_folder)
+        trigger_processing.trigger_rule = 'all_success'  # Default, but explicit
+        trigger_processing.skip_condition = "{{ not ti.xcom_pull(task_ids='check_pdf_folder') }}"  # Skip if False
+        
         trigger_processing >> end
 
 except Exception as e:
