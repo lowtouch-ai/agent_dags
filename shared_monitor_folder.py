@@ -18,6 +18,8 @@ default_args = {
 
 def check_and_process_files(**context):
     base_path = '/appz/data/vector_watch_file_pdf'
+    pdf_found = False
+    uuid_to_process = None
     
     try:
         # Check if base folder exists
@@ -31,9 +33,8 @@ def check_and_process_files(**context):
         
         if not uuid_dirs:
             logger.info("No UUID directories found in the monitored folder")
-            return  # Stop execution if no UUID dirs
+            return None
         
-        pdf_found = False
         for uuid_dir in uuid_dirs:
             uuid_path = os.path.join(base_path, uuid_dir)
             
@@ -49,18 +50,19 @@ def check_and_process_files(**context):
                 if pdf_files:
                     pdf_found = True
                     logger.info(f"PDF files found in {root}: {pdf_files}")
-                    
-                    # Trigger the processing DAG for this UUID
-                    context['ti'].xcom_push(key=f'uuid_{uuid_dir}', value=uuid_dir)
-                    return  # Return after first PDF found to process one at a time
+                    uuid_to_process = uuid_dir
+                    # Push UUID to XCom
+                    context['ti'].xcom_push(key='processed_uuid', value=uuid_dir)
+                    return uuid_dir  # Return after first PDF found
         
         if not pdf_found:
             logger.info("No PDF files found in any UUID directories")
-            return  # Stop execution if no PDFs found
+            return None
             
     except Exception as e:
         logger.error(f"Error in check_and_process_files: {str(e)}")
         raise
+    return None
 
 # DAG definition
 try:
@@ -89,11 +91,14 @@ try:
         trigger_processing = TriggerDagRunOperator(
             task_id='trigger_pdf_processing',
             trigger_dag_id='shared_process_file_pdf2vector',
-            conf={"uuid": "{{ ti.xcom_pull(task_ids='check_pdf_folder', key='uuid_*') }}"},
+            conf={"uuid": "{{ ti.xcom_pull(task_ids='check_pdf_folder', key='processed_uuid') }}"},
             execution_date="{{ ds }}",
             reset_dag_run=True,
             wait_for_completion=False,
-            trigger_rule='all_success'  # Only trigger if check_folder succeeds
+            trigger_rule='all_success',  # Only trigger if check_folder succeeds
+            # Skip if no UUID returned (no PDFs found)
+            do_xcom_push=False,
+            dag=dag,
         )
 
         # End task
@@ -101,8 +106,10 @@ try:
             task_id='end'
         )
 
-        # Task dependencies
-        start >> check_folder >> trigger_processing >> end
+        # Task dependencies with conditional triggering
+        start >> check_folder
+        check_folder >> [trigger_processing, end]  # Branching: trigger_processing only if PDFs found
+        trigger_processing >> end
 
 except Exception as e:
     logger.error(f"Failed to initialize DAG shared_monitor_folder_pdf: {str(e)}")
