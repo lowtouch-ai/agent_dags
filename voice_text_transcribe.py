@@ -85,37 +85,30 @@ with DAG(
 ) as dag:
 
     def transcribe_audio(**kwargs):
-        """Transcribe audio from either a file path or encrypted audio data."""
+        """Decrypt and transcribe encrypted audio data."""
         ti = kwargs["ti"]
-        conf = kwargs["dag_run"].conf  # Access the conf from the triggered DAG
-        file_path = conf.get("file_path", {}).get("value") if conf.get("file_path") else None
+        conf = kwargs["dag_run"].conf
         encrypted_audio = conf.get("encrypted_audio")
         call_id = conf.get("call_id")
 
-        if not file_path and not encrypted_audio:
-            raise ValueError("Either 'file_path' or 'encrypted_audio' must be provided.")
+        if not encrypted_audio:
+            raise ValueError("'encrypted_audio' must be provided in the configuration.")
 
-        # Handle the audio source
-        audio_file_path = None
+        # Decrypt the audio
         temp_file_path = None
         try:
-            if encrypted_audio:
-                # Decrypt the encrypted audio
-                fernet_key = Variable.get("FERNET_KEY").encode()  # Retrieve key from Airflow Variables
-                fernet = Fernet(fernet_key)
-                encrypted_data = base64.b64decode(encrypted_audio.encode('utf-8'))
-                decrypted_data = fernet.decrypt(encrypted_data)
+            fernet_key = Variable.get("FERNET_KEY").encode()  # Retrieve key from Airflow Variables
+            fernet = Fernet(fernet_key)
+            encrypted_data = base64.b64decode(encrypted_audio.encode('utf-8'))
+            decrypted_data = fernet.decrypt(encrypted_data)
 
-                # Write decrypted data to a temporary file
-                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
-                    temp_file_path = temp_file.name
-                    temp_file.write(decrypted_data)
-                    temp_file.flush()
-                audio_file_path = temp_file_path
-                logger.info(f"Decrypted encrypted audio to temporary file: {audio_file_path}")
-            elif file_path:
-                audio_file_path = file_path
-                logger.info(f"Using provided file path: {audio_file_path}")
+            # Write decrypted data to a temporary file
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
+                temp_file_path = temp_file.name
+                temp_file.write(decrypted_data)
+                temp_file.flush()
+            audio_file_path = temp_file_path
+            logger.info(f"Decrypted audio to temporary file: {audio_file_path}")
 
             # Load the model and transcribe
             logger.info("Loading Whisper model...")
@@ -133,12 +126,12 @@ with DAG(
             logger.info(f"Whisper transcription: {transcription}")
             logger.info(f"Transcription time: {(datetime.now() - start_time).total_seconds():.2f} seconds")
 
-            # Clean up the temporary file if it was created
+            # Clean up the temporary file
             if temp_file_path and os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
                 logger.info(f"Deleted temporary decrypted file {temp_file_path}")
 
-            # Save transcription to Variable only if call_id is provided
+            # Save transcription to Variable if call_id is provided
             if call_id:
                 variable_key = f"text_{call_id}"
                 Variable.set(variable_key, transcription)
