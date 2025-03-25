@@ -63,15 +63,18 @@ with DAG(
 
             # Load the model and transcribe
             logger.info("Loading Whisper model...")
-            WHISPER_MODEL = whisper.load_model("small")
+            WHISPER_MODEL = whisper.load_model("medium")
             logger.info("Whisper model loaded successfully")
 
             logger.info("Starting transcription...")
             start_time = datetime.now()
             result = WHISPER_MODEL.transcribe(
                 audio_file_path,
-                language="en",
+                language="en",           # Enforce English
                 task="transcribe",
+                beam_size=5,            # Enable beam search for better accuracy
+                temperature=0.0,        # Low temperature to reduce hallucinations
+                condition_on_previous_text=False  # Avoid context bias
             )
             transcription = result["text"]
             logger.info(f"Whisper transcription: {transcription}")
