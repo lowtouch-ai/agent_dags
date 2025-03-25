@@ -8,7 +8,7 @@ from cryptography.fernet import Fernet
 import os
 import tempfile
 import base64
-
+import librosa  # For audio preprocessing
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -34,9 +34,25 @@ with DAG(
         "call_id": {"type": ["string", "null"], "description": "Optional call ID for tracking"}
     }
 ) as dag:
-
+    
+    def preprocess_audio(audio_file_path):
+        """Preprocess audio to normalize volume and reduce noise."""
+        # Load audio file
+        audio, sr = librosa.load(audio_file_path, sr=16000)  # Whisper expects 16kHz
+        # Normalize audio volume
+        audio = librosa.util.normalize(audio)
+        # Simple noise reduction (optional: use more advanced methods if needed)
+        audio = librosa.effects.preemphasis(audio)
+        # Save preprocessed audio back to file
+        temp_processed_file = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        librosa.output.write_wav(temp_processed_file.name, audio, sr)
+        return temp_processed_file.name
+    
+    
+    
+    
     def transcribe_audio(**kwargs):
-        """Decrypt and transcribe encrypted audio data."""
+        """Decrypt and transcribe encrypted audio data with enhanced Whisper settings."""
         ti = kwargs["ti"]
         conf = kwargs["dag_run"].conf
         encrypted_audio = conf.get("encrypted_audio")
@@ -47,6 +63,7 @@ with DAG(
 
         # Decrypt the audio
         temp_file_path = None
+        preprocessed_file_path = None
         try:
             fernet_key = Variable.get("FERNET_KEY").encode()  # Retrieve key from Airflow Variables
             fernet = Fernet(fernet_key)
@@ -61,29 +78,36 @@ with DAG(
             audio_file_path = temp_file_path
             logger.info(f"Decrypted audio to temporary file: {audio_file_path}")
 
-            # Load the model and transcribe
+            # Preprocess the audio
+            logger.info("Preprocessing audio...")
+            preprocessed_file_path = preprocess_audio(audio_file_path)
+            logger.info(f"Preprocessed audio saved to: {preprocessed_file_path}")
+
+            # Load a larger Whisper model for better accuracy
             logger.info("Loading Whisper model...")
-            WHISPER_MODEL = whisper.load_model("medium")
+            WHISPER_MODEL = whisper.load_model("large")  # Upgrade to 'large' for better accent handling
             logger.info("Whisper model loaded successfully")
 
+            # Transcription with enhanced settings
             logger.info("Starting transcription...")
             start_time = datetime.now()
             result = WHISPER_MODEL.transcribe(
-                audio_file_path,
+                preprocessed_file_path,
                 language="en",           # Enforce English
                 task="transcribe",
                 beam_size=5,            # Enable beam search for better accuracy
                 temperature=0.0,        # Low temperature to reduce hallucinations
                 condition_on_previous_text=False  # Avoid context bias
             )
-            transcription = result["text"]
+            transcription = result["text"].strip()
             logger.info(f"Whisper transcription: {transcription}")
             logger.info(f"Transcription time: {(datetime.now() - start_time).total_seconds():.2f} seconds")
 
-            # Clean up the temporary file
-            if temp_file_path and os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-                logger.info(f"Deleted temporary decrypted file {temp_file_path}")
+            # Clean up temporary files
+            for temp_path in [temp_file_path, preprocessed_file_path]:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+                    logger.info(f"Deleted temporary file {temp_path}")
 
             # Save transcription to Variable if call_id is provided
             if call_id:
@@ -93,12 +117,14 @@ with DAG(
 
             ti.xcom_push(key="transcription", value=transcription)
             return transcription
+
         except Exception as e:
             logger.error(f"Decryption or transcription failed: {str(e)}")
-            # Clean up temporary file if it exists
-            if temp_file_path and os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-                logger.info(f"Deleted temporary file {temp_file_path} due to error")
+            # Clean up temporary files on error
+            for temp_path in [temp_file_path, preprocessed_file_path]:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+                    logger.info(f"Deleted temporary file {temp_path} due to error")
             raise
 
     # Single task for transcribing

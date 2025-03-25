@@ -393,7 +393,6 @@ with DAG(
     conf="{{ ti.xcom_pull(task_ids='prepare_transcription_trigger', key='trigger_conf') }}",
     wait_for_completion=True,  # Wait for the triggered DAG to complete
     poke_interval=10,  # Check every 10 seconds
-    timeout=600,  # Timeout after 10 minutes (adjust as needed)
     dag=dag,
 )
 
