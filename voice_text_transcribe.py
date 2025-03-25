@@ -20,41 +20,6 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
-def transcribe_audio(file_path, **kwargs):
-    """Load the Whisper model and transcribe the audio in one task."""
-    ti = kwargs["ti"]
-    conf = kwargs["dag_run"].conf  # Access the conf from the triggered DAG
-    call_id = conf.get("call_id")
-    
-    try:
-        # Load the model and transcribe in one task
-        logger.info("Loading Whisper model...")
-        WHISPER_MODEL = whisper.load_model("small")
-        logger.info("Whisper model loaded successfully")
-
-        logger.info("Starting transcription...")
-        start_time = datetime.now()
-        result = WHISPER_MODEL.transcribe(
-            file_path,
-            language="en",
-            task="transcribe",
-        )
-        transcription = result["text"]
-        logger.info(f"Whisper transcription: {transcription}")
-        logger.info(f"Transcription time: {(datetime.now() - start_time).total_seconds():.2f} seconds")
-
-        # Save transcription to Variable only if call_id is provided
-        if call_id and kwargs["dag_run"].conf.get("call_id"):
-            variable_key = f"text_{call_id}"
-            Variable.set(variable_key, transcription)
-            logger.info(f"Saved transcription to Variable {variable_key}")
-
-        ti.xcom_push(key="transcription", value=transcription)
-        return transcription
-    except Exception as e:
-        logger.error(f"Whisper transcription failed: {str(e)}")
-        raise
-
 readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'voice_transcriber.md')
 with open(readme_path, 'r') as file:
     readme_content = file.read()
