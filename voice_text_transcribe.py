@@ -9,6 +9,7 @@ import os
 import tempfile
 import base64
 import librosa  # For audio preprocessing
+import soundfile as sf
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -36,16 +37,11 @@ with DAG(
 ) as dag:
     
     def preprocess_audio(audio_file_path):
-        """Preprocess audio to normalize volume and reduce noise."""
-        # Load audio file
-        audio, sr = librosa.load(audio_file_path, sr=16000)  # Whisper expects 16kHz
-        # Normalize audio volume
+        audio, sr = librosa.load(audio_file_path, sr=16000)
         audio = librosa.util.normalize(audio)
-        # Simple noise reduction (optional: use more advanced methods if needed)
         audio = librosa.effects.preemphasis(audio)
-        # Save preprocessed audio back to file
-        temp_processed_file = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-        librosa.output.write_wav(temp_processed_file.name, audio, sr)
+        temp_processed_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        sf.write(temp_processed_file.name, audio, sr, format='wav')
         return temp_processed_file.name
     
     
