@@ -92,11 +92,11 @@ def upload_pdfs(**kwargs):
         
         # Prepare the upload data
         files = {'file': (pdf_file, open(file_path, 'rb'), 'application/pdf')}
-        data = {'tags': ','.join(tags)} if tags else {}
+        params = {'tags': ','.join(tags)} if tags else {}
         
         try:
             # Make the API call using POST
-            response = requests.post(api_endpoint, files=files, data=data)
+            response = requests.post(api_endpoint, files=files, params=params)
             response.raise_for_status()
             logger.info(f"Successfully uploaded {pdf_file} to {api_endpoint} with tags: {tags}")
             
