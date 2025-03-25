@@ -391,28 +391,23 @@ with DAG(
     task_id="trigger_transcription_dag",
     trigger_dag_id="voice_text_transcribe",
     conf="{{ ti.xcom_pull(task_ids='prepare_transcription_trigger', key='trigger_conf') }}",
+    wait_for_completion=True,  # Wait for the triggered DAG to complete
+    poke_interval=10,  # Check every 10 seconds
+    timeout=600,  # Timeout after 10 minutes (adjust as needed)
     dag=dag,
 )
-
-    wait_for_transcription = TimeDeltaSensor(
-        task_id="wait_for_transcription",
-        delta=timedelta(seconds=5),
-        poke_interval=5,
-        mode="poke"
-    )
 
     fetch_transcription_task = PythonOperator(
         task_id="fetch_transcription",
         python_callable=fetch_transcription,
         provide_context=True,
-        retries=12,
-        retry_delay=timedelta(seconds=5)
     )
 
     skip_recording = DummyOperator(task_id="skip_recording")
 
     # Task Dependencies
+# Task Dependencies
     initiate_call_task >> adjust_voicemail_task >> wait_call_status >> check_status_task
     check_status_task >> branch_recording_task
     branch_recording_task >> [fetch_recording_task, skip_recording]
-    fetch_recording_task >> prepare_transcription_task >> trigger_transcription_task >> wait_for_transcription >> fetch_transcription_task
+    fetch_recording_task >> prepare_transcription_task >> trigger_transcription_task >> fetch_transcription_task
