@@ -7,6 +7,7 @@ from airflow.utils.dates import days_ago
 import os
 import logging
 import re
+from datetime import timedelta
 
 # Set up logging
 logger = logging.getLogger("airflow.task")
