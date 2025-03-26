@@ -99,7 +99,7 @@ with DAG(
     # File sensor to monitor folder changes
     monitor_folder = FileSensor(
         task_id='monitor_folder_changes',
-        filepath='/appz/data/vector_watch_file_pdf/*/*/*.pdf',  # Monitor subdirectories
+        filepath='/appz/data/vector_watch_file_pdf/*.pdf',  # Monitor subdirectories
         recursive=True,
         poke_interval=60,  # Check every minute
         timeout=3600,      # Timeout after 1 hour
