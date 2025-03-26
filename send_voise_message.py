@@ -279,7 +279,7 @@ with DAG(
                 logger.info(f"Recording saved at {file_path}")
 
                 # Encrypt the audio file
-                fernet_key = Variable.get("FERNET_KEY").encode()  # Ensure FERNET_KEY is set in Airflow Variables
+                fernet_key = Variable.get("FERNET_SECRET_KEY").encode()  # Ensure FERNET_KEY is set in Airflow Variables
                 fernet = Fernet(fernet_key)
                 with open(file_path, "rb") as f:
                     audio_data = f.read()
@@ -394,7 +394,7 @@ with DAG(
 
         trigger_transcription_task = TriggerDagRunOperator(
         task_id="trigger_transcription_dag",
-        trigger_dag_id="voice_text_transcribe",
+        trigger_dag_id="shared_transcribe_message_voice",
         conf="{{ ti.xcom_pull(task_ids='prepare_transcription_trigger', key='trigger_conf') }}",
         wait_for_completion=True,  # Wait for the triggered DAG to complete
         poke_interval=10,  # Check every 10 seconds
