@@ -4,10 +4,10 @@ from airflow.operators.dummy import DummyOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sensors.filesystem import FileSensor
 from airflow.utils.dates import days_ago
+from datetime import timedelta
 import os
 import logging
 import re
-from datetime import timedelta
 
 # Set up logging
 logger = logging.getLogger("airflow.task")
@@ -24,7 +24,6 @@ default_args = {
 UUID_PATTERN = re.compile(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 )
-
 def check_and_process_folder(**context):
     folder_path = '/appz/data/vector_watch_file_pdf'
     
@@ -36,11 +35,12 @@ def check_and_process_folder(**context):
         # Get triggered file path from sensor via XCom
         triggered_path = context['ti'].xcom_pull(task_ids='monitor_folder_changes')
         
-        # Find UUID directory from triggered path
+        # Extract UUID from path
         uuid_dir = None
-        for dir_name in os.listdir(folder_path):
-            if UUID_PATTERN.match(dir_name) and dir_name in triggered_path:
-                uuid_dir = dir_name
+        path_parts = triggered_path.split(os.sep)
+        for part in path_parts:
+            if UUID_PATTERN.match(part):
+                uuid_dir = part
                 break
         
         if not uuid_dir:
@@ -85,24 +85,23 @@ def branch_func(**context):
 with DAG(
     'shared_monitor_folder_pdf',
     default_args=default_args,
-    description='Monitors UUID folders for PDF files and triggers processing',
-    schedule_interval=None,  # Changed from cron to event-based
+    description='Monitors vector folder and UUID subfolders for PDF files',
+    schedule_interval=None,
     start_date=days_ago(1),
     catchup=False,
-    max_active_runs=1,  # Prevent concurrent runs
+    max_active_runs=1,
 ) as dag:
 
     start = DummyOperator(
         task_id='start'
     )
 
-    # File sensor to monitor folder changes
     monitor_folder = FileSensor(
         task_id='monitor_folder_changes',
-        filepath='/appz/data/vector_watch_file_pdf/*.pdf',  # Monitor subdirectories
+        filepath='/appz/data/vector_watch_file_pdf',  # Monitor entire folder
         recursive=True,
-        poke_interval=60,  # Check every minute
-        timeout=3600,      # Timeout after 1 hour
+        poke_interval=60,
+        timeout=3600,
         mode='poke',
         soft_fail=False,
     )
@@ -128,7 +127,7 @@ with DAG(
         trigger_dag_id='shared_process_file_pdf2vector',
         conf={"uuid": "{{ ti.xcom_pull(task_ids='check_pdf_folder', key='uuid') }}"},
         reset_dag_run=True,
-        wait_for_completion=False,  # Changed to not block the DAG
+        wait_for_completion=False,
     )
 
     end = DummyOperator(
