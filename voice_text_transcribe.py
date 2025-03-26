@@ -81,7 +81,7 @@ with DAG(
 
             # Load a larger Whisper model for better accuracy
             logger.info("Loading Whisper model...")
-            WHISPER_MODEL = whisper.load_model("large")  # Upgrade to 'large' for better accent handling
+            WHISPER_MODEL = whisper.load_model("medium")  # Upgrade to 'medium' for better accent handling
             logger.info("Whisper model loaded successfully")
 
             # Transcription with enhanced settings
