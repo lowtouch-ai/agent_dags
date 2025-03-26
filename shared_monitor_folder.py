@@ -12,7 +12,8 @@ logger = logging.getLogger("airflow.task")
 
 # Default arguments for the DAG
 default_args = {
-    'owner': 'airflow',
+    'owner': 'lowtouch.ai_developers	
+',
     'depends_on_past': False,
     'retries': 1,
 }
