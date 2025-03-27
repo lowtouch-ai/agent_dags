@@ -14,7 +14,7 @@ logger = logging.getLogger("airflow.task")
 
 # Default arguments for the DAG
 default_args = {
-    'owner': 'airflow',
+    'owner': 'lowtouch.ai_developers',
     'depends_on_past': False,
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
@@ -28,6 +28,7 @@ dag = DAG(
     schedule_interval=None,  # Set to None since we have required params
     start_date=days_ago(1),
     catchup=False,
+    tags=["shared", "folder", "process", "pdf","vector","rag"],
     params={
         'uuid': None  # Optional UUID parameter
     }

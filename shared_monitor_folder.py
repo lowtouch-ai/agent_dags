@@ -1,3 +1,4 @@
+from datetime import timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.dummy import DummyOperator
@@ -15,6 +16,7 @@ default_args = {
     'owner': 'lowtouch.ai_developers',
     'depends_on_past': False,
     'retries': 1,
+    "retry_delay": timedelta(seconds=15),
 }
 
 # UUID regex pattern (matches standard UUID format: 8-4-4-4-12)
@@ -84,6 +86,7 @@ with DAG(
     schedule_interval='* * * * *',
     start_date=days_ago(1),
     catchup=False,
+    tags=["shared", "folder", "monitor", "pdf","rag"]
 ) as dag:
 
     start = DummyOperator(
