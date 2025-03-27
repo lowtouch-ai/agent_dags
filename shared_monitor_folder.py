@@ -112,7 +112,7 @@ with DAG(
     )
 
     check_folder = PythonOperator(
-        task_id='check found',
+        task_id='check_pdf_folder',  # Fixed the task_id (removed space)
         python_callable=check_and_process_folder,
         provide_context=True,
     )
