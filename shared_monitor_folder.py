@@ -19,12 +19,12 @@ default_args = {
     "retry_delay": timedelta(seconds=15),
 }
 
-# UUID regex pattern
+# UUID regex pattern (matches standard UUID format: 8-4-4-4-12)
 UUID_PATTERN = re.compile(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 )
 
-def check_and_process_folder(**context):
+def check_and_process_folders(**context):
     folder_path = '/appz/data/vector_watch_file_pdf'
     
     try:
@@ -32,42 +32,86 @@ def check_and_process_folder(**context):
             logger.error(f"Base folder {folder_path} does not exist")
             raise Exception(f"Folder {folder_path} not found")
         
-        pdf_files_info = []
-        for dir_name in os.listdir(folder_path):
-            if UUID_PATTERN.match(dir_name):
-                full_path = os.path.join(folder_path, dir_name)
-                if os.path.isdir(full_path):
-                    for root, dirs, files in os.walk(full_path):
-                        if 'archive' in dirs:
-                            dirs.remove('archive')
-                        if 'archive' in root.lower():
-                            continue
-                            
-                        for file in files:
-                            if file.lower().endswith('.pdf'):
-                                pdf_files_info.append({
-                                    'uuid': dir_name,
-                                    'file_path': os.path.join(root, file)
-                                })
+        # Find UUID directories
+        uuid_dirs = [
+            dir_name for dir_name in os.listdir(folder_path)
+            if UUID_PATTERN.match(dir_name) and 
+            os.path.isdir(os.path.join(folder_path, dir_name))
+        ]
         
-        if not pdf_files_info:
-            logger.info("No PDF files found in any UUID directories")
-            return 'no_files_found'
+        if not uuid_dirs:
+            logger.info("No UUID directories found in the monitored folder")
+            return []
+
+        # Collect PDF files across all UUID directories
+        pdf_files_by_uuid = {}
+        for uuid_dir in uuid_dirs:
+            uuid_path = os.path.join(folder_path, uuid_dir)
+            pdf_files = []
             
-        # Push list of PDF files info to XCom
-        context['ti'].xcom_push(key='pdf_files_info', value=pdf_files_info)
-        return 'process_files'
+            for root, dirs, files in os.walk(uuid_path):
+                # Skip archive folder
+                if 'archive' in dirs:
+                    dirs.remove('archive')
+                if 'archive' in root.lower():
+                    continue
+                    
+                pdf_files.extend(
+                    os.path.join(root, f) 
+                    for f in files 
+                    if f.lower().endswith('.pdf')
+                )
+            
+            if pdf_files:
+                pdf_files_by_uuid[uuid_dir] = pdf_files
         
+        if not pdf_files_by_uuid:
+            logger.info("No PDF files found in any UUID directories")
+            return []
+        
+        # Log findings and prepare for processing
+        for uuid, files in pdf_files_by_uuid.items():
+            logger.info(f"Found {len(files)} PDF files in UUID {uuid}")
+        
+        return pdf_files_by_uuid
+
     except Exception as e:
-        logger.error(f"Error in check_and_process_folder: {str(e)}")
+        logger.error(f"Error in check_and_process_folders: {str(e)}")
         raise
+
+def process_pdf_files(**context):
+    """
+    Process PDF files for each UUID directory
+    """
+    pdf_files_by_uuid = context['ti'].xcom_pull(task_ids='check_pdf_folder')
+    
+    if not pdf_files_by_uuid:
+        logger.info("No PDF files to process")
+        return
+    
+    # Trigger dag for each PDF file found
+    for uuid, files in pdf_files_by_uuid.items():
+        for pdf_file in files:
+            context['ti'].xcom_push(key='uuid', value=uuid)
+            context['ti'].xcom_push(key='pdf_file', value=pdf_file)
+            yield uuid
+
+def branch_func(**context):
+    """
+    Determine whether to trigger processing or mark no files found
+    """
+    pdf_files_by_uuid = context['ti'].xcom_pull(task_ids='check_pdf_folder')
+    
+    if pdf_files_by_uuid:
+        return 'trigger_pdf_processing'
+    return 'no_files_found'
 
 # DAG definition
 with DAG(
     'shared_monitor_folder_pdf',
     default_args=default_args,
-    description='Monitors UUID folders for PDF files and triggers processing per file',
-    schedule_interval='* * * * *',  # Runs every minute
+    description='Monitors UUID folders for PDF files and triggers processing',
+    schedule_interval='* * * * *',  # Run every minute
     start_date=days_ago(1),
     catchup=False,
     tags=["shared", "folder", "monitor", "pdf", "rag"]
@@ -79,13 +123,13 @@ with DAG(
 
     check_folder = PythonOperator(
         task_id='check_pdf_folder',
-        python_callable=check_and_process_folder,
+        python_callable=check_and_process_folders,
         provide_context=True,
     )
 
     branch_task = BranchPythonOperator(
         task_id='branch_task',
-        python_callable=lambda **context: context['ti'].xcom_pull(task_ids='check_pdf_folder'),
+        python_callable=branch_func,
         provide_context=True,
     )
 
@@ -93,38 +137,33 @@ with DAG(
         task_id='no_files_found'
     )
 
-    # Create a fixed number of trigger tasks (adjust MAX_FILES as needed)
-    MAX_FILES = 10  # Adjust based on your expected maximum number of files
-    trigger_tasks = []
-    for i in range(MAX_FILES):
-        trigger_task = TriggerDagRunOperator(
-            task_id=f'trigger_pdf_processing_{i}',
-            trigger_dag_id='shared_process_file_pdf2vector',
-            conf={
-                'uuid': "{{ ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')["
-                        f"{i}]['uuid'] if ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info') and "
-                        f"len(ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')) > {i} else None }}",
-                'file_path': "{{ ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')["
-                            f"{i}]['file_path'] if ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info') and "
-                            f"len(ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')) > {i} else None }}"
-            },
-            reset_dag_run=True,
-            wait_for_completion=True,
-            trigger_rule='all_success',  # Only run if previous tasks succeed
-            dag=dag
-        )
-        trigger_tasks.append(trigger_task)
+    # Use PythonOperator to handle multiple file processing
+    process_files = PythonOperator(
+        task_id='process_pdf_files',
+        python_callable=process_pdf_files,
+        provide_context=True,
+    )
+
+    trigger_processing = TriggerDagRunOperator(
+        task_id='trigger_pdf_processing',
+        trigger_dag_id='shared_process_file_pdf2vector',
+        conf={
+            "uuid": "{{ ti.xcom_pull(task_ids='process_pdf_files', key='uuid') }}",
+            "pdf_file": "{{ ti.xcom_pull(task_ids='process_pdf_files', key='pdf_file') }}"
+        },
+        reset_dag_run=True,
+        wait_for_completion=True,
+        poke_interval=10,
+    )
 
     end = DummyOperator(
         task_id='end',
         trigger_rule='none_failed'
     )
 
-    # Set dependencies
+    # Updated task dependencies
     start >> check_folder >> branch_task
-    branch_task >> no_files
-    branch_task >> trigger_tasks
-    trigger_tasks >> end
-    no_files >> end
+    branch_task >> [no_files, process_files]
+    process_files >> trigger_processing >> end
 
 logger.info("DAG shared_monitor_folder_pdf loaded successfully")
