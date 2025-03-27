@@ -59,7 +59,7 @@ def check_and_process_folder(**context):
         if not pdf_files_info:
             logger.info("No PDF files found in any UUID directories")
         
-        # Push PDF files info to XCom for downstream tasks
+        # Push PDF files info to XCom
         context['ti'].xcom_push(key='pdf_files_info', value=pdf_files_info)
         
     except Exception as e:
@@ -69,9 +69,30 @@ def check_and_process_folder(**context):
 def branch_func(**context):
     pdf_files_info = context['ti'].xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')
     if pdf_files_info:
-        # Return a list of trigger task IDs based on number of files
-        return [f'trigger_pdf_processing_{i}' for i in range(len(pdf_files_info))]
+        return 'trigger_processing'
     return 'skip_processing'
+
+def trigger_processing(**context):
+    """Trigger DAG runs for each PDF file found"""
+    pdf_files_info = context['ti'].xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')
+    
+    if not pdf_files_info:
+        return
+    
+    # Create and execute triggers for actual number of files
+    for pdf_info in pdf_files_info:
+        trigger = TriggerDagRunOperator(
+            task_id=f'trigger_pdf_processing_{id(pdf_info)}',  # Unique task_id
+            trigger_dag_id='shared_process_file_pdf2vector',
+            conf={
+                'uuid': pdf_info['uuid'],
+                'file_path': pdf_info['file_path']
+            },
+            reset_dag_run=True,
+            wait_for_completion=False,
+            execution_timeout=timedelta(minutes=30),
+        )
+        trigger.execute(context)
 
 # DAG definition
 with DAG(
@@ -101,6 +122,12 @@ with DAG(
         provide_context=True,
     )
 
+    trigger_processing_task = PythonOperator(
+        task_id='trigger_processing',
+        python_callable=trigger_processing,
+        provide_context=True,
+    )
+
     skip_processing = DummyOperator(
         task_id='skip_processing'
     )
@@ -110,36 +137,9 @@ with DAG(
         trigger_rule='none_failed'
     )
 
-    # Create trigger tasks dynamically
-    MAX_PDF_FILES = 100  # Set a reasonable upper limit
-    trigger_tasks = []
-    for i in range(MAX_PDF_FILES):
-        trigger_task = TriggerDagRunOperator(
-            task_id=f'trigger_pdf_processing_{i}',
-            trigger_dag_id='shared_process_file_pdf2vector',
-            conf={
-                'uuid': "{{ ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')["
-                        f"{i}"
-                        "]['uuid'] }}",
-                'file_path': "{{ ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')["
-                            f"{i}"
-                            "]['file_path'] }}"
-            },
-            reset_dag_run=True,
-            wait_for_completion=False,
-            execution_timeout=timedelta(minutes=30),
-            do_xcom_push=False,
-        )
-        trigger_tasks.append(trigger_task)
-
     # Set up dependencies
     start >> check_folder >> branch_task
     branch_task >> skip_processing >> end
-    
-    # Connect branch to all trigger tasks and trigger tasks to end
-    if trigger_tasks:
-        branch_task >> trigger_tasks
-        for task in trigger_tasks:
-            task >> end
+    branch_task >> trigger_processing_task >> end
 
 logger.info("DAG shared_monitor_folder_pdf loaded successfully")
