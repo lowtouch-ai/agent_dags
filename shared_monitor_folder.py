@@ -1,6 +1,6 @@
 from datetime import timedelta
 from airflow import DAG
-from airflow.operators.python import PythonOperator, BranchPythonOperator
+from airflow.operators.python import PythonOperator
 from airflow.operators.dummy import DummyOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.dates import days_ago
@@ -58,42 +58,36 @@ def check_and_process_folder(**context):
         
         if not pdf_files_info:
             logger.info("No PDF files found in any UUID directories")
-            return 'no_files_found'
-            
+            return
+        
         # Push PDF files info to XCom for downstream tasks
         context['ti'].xcom_push(key='pdf_files_info', value=pdf_files_info)
-        return 'trigger_pdf_processing'
         
     except Exception as e:
         logger.error(f"Error in check_and_process_folder: {str(e)}")
         raise
 
-def create_trigger_tasks(**context):
-    """Dynamically create trigger tasks for each PDF file"""
+def trigger_pdf_processing(**context):
+    """Create and execute trigger tasks for each PDF file"""
     pdf_files_info = context['ti'].xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')
     
     if not pdf_files_info:
-        return 'no_files_found'
-        
-    # Store trigger task IDs for downstream dependency
-    trigger_task_ids = []
+        return
+    
     for i, pdf_info in enumerate(pdf_files_info):
-        task_id = f'trigger_pdf_processing_{i}'
         trigger_task = TriggerDagRunOperator(
-            task_id=task_id,
+            task_id=f'trigger_pdf_processing_{i}',
             trigger_dag_id='shared_process_file_pdf2vector',
             conf={
                 'uuid': pdf_info['uuid'],
                 'file_path': pdf_info['file_path']
             },
             reset_dag_run=True,
-            wait_for_completion=False,  # Allow parallel processing
+            wait_for_completion=False,
             dag=dag
         )
-        trigger_task_ids.append(task_id)
-        
-    context['ti'].xcom_push(key='trigger_task_ids', value=trigger_task_ids)
-    return 'trigger_pdf_processing'
+        # Execute the trigger task immediately
+        trigger_task.execute(context)
 
 # DAG definition
 with DAG(
@@ -104,7 +98,7 @@ with DAG(
     start_date=days_ago(1),
     catchup=False,
     tags=["shared", "folder", "monitor", "pdf", "rag"],
-    max_active_runs=1  # Prevent overlapping runs
+    max_active_runs=1
 ) as dag:
 
     start = DummyOperator(
@@ -112,19 +106,15 @@ with DAG(
     )
 
     check_folder = PythonOperator(
-        task_id='check_pdf_folder',  # Fixed the task_id (removed space)
+        task_id='check_pdf_folder',
         python_callable=check_and_process_folder,
         provide_context=True,
     )
 
-    branch_task = BranchPythonOperator(
-        task_id='branch_task',
-        python_callable=create_trigger_tasks,
+    process_files = PythonOperator(
+        task_id='process_files',
+        python_callable=trigger_pdf_processing,
         provide_context=True,
-    )
-
-    no_files = DummyOperator(
-        task_id='no_files_found'
     )
 
     end = DummyOperator(
@@ -132,8 +122,7 @@ with DAG(
         trigger_rule='none_failed'
     )
 
-    # Base task dependencies
-    start >> check_folder >> branch_task
-    branch_task >> [no_files, end]
+    # Task dependencies
+    start >> check_folder >> process_files >> end
 
 logger.info("DAG shared_monitor_folder_pdf loaded successfully")
