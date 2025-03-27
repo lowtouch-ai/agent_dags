@@ -57,7 +57,7 @@ def check_and_process_folder(**context):
                         })
         
         if not pdf_files_info:
-            logger.info("No PDF files found in any UUID directories")
+            logger.info("  No PDF files found in any UUID directories")
         
         # Push PDF files info to XCom
         context['ti'].xcom_push(key='pdf_files_info', value=pdf_files_info)
@@ -73,25 +73,30 @@ def branch_func(**context):
     return 'skip_processing'
 
 def trigger_processing(**context):
-    """Trigger DAG runs for each PDF file found"""
+    """Trigger DAG runs for each PDF file found and wait for completion"""
     pdf_files_info = context['ti'].xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')
     
     if not pdf_files_info:
         return
     
-    # Create and execute triggers for actual number of files
-    for pdf_info in pdf_files_info:
+    # Create triggers for actual number of files
+    triggers = []
+    for i, pdf_info in enumerate(pdf_files_info):
         trigger = TriggerDagRunOperator(
-            task_id=f'trigger_pdf_processing_{id(pdf_info)}',  # Unique task_id
+            task_id=f'trigger_pdf_processing_{i}',
             trigger_dag_id='shared_process_file_pdf2vector',
             conf={
                 'uuid': pdf_info['uuid'],
                 'file_path': pdf_info['file_path']
             },
             reset_dag_run=True,
-            wait_for_completion=False,
+            wait_for_completion=True,  # Wait for each triggered DAG to complete
             execution_timeout=timedelta(minutes=30),
         )
+        triggers.append(trigger)
+    
+    # Execute all triggers in parallel
+    for trigger in triggers:
         trigger.execute(context)
 
 # DAG definition
