@@ -2,9 +2,7 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.dummy import DummyOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.sensors.filesystem import FileSensor
 from airflow.utils.dates import days_ago
-from datetime import timedelta
 import os
 import logging
 import re
@@ -14,16 +12,16 @@ logger = logging.getLogger("airflow.task")
 
 # Default arguments for the DAG
 default_args = {
-    'owner': 'airflow',
+    'owner': 'lowtouch.ai_developers',
     'depends_on_past': False,
     'retries': 1,
-    'retry_delay': timedelta(minutes=5),
 }
 
-# UUID regex pattern
+# UUID regex pattern (matches standard UUID format: 8-4-4-4-12)
 UUID_PATTERN = re.compile(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 )
+
 def check_and_process_folder(**context):
     folder_path = '/appz/data/vector_watch_file_pdf'
     
@@ -32,43 +30,40 @@ def check_and_process_folder(**context):
             logger.error(f"Base folder {folder_path} does not exist")
             raise Exception(f"Folder {folder_path} not found")
         
-        # Get triggered file path from sensor via XCom
-        triggered_path = context['ti'].xcom_pull(task_ids='monitor_folder_changes')
+        uuid_dirs = []
+        for dir_name in os.listdir(folder_path):
+            if UUID_PATTERN.match(dir_name):
+                full_path = os.path.join(folder_path, dir_name)
+                if os.path.isdir(full_path):
+                    uuid_dirs.append(dir_name)
         
-        # Extract UUID from path
-        uuid_dir = None
-        path_parts = triggered_path.split(os.sep)
-        for part in path_parts:
-            if UUID_PATTERN.match(part):
-                uuid_dir = part
-                break
-        
-        if not uuid_dir:
-            logger.info("No valid UUID directory found in triggered path")
+        if not uuid_dirs:
+            logger.info("No UUID directories found in the monitored folder")
             return None
 
-        uuid_path = os.path.join(folder_path, uuid_dir)
-        pdf_files = []
+        for uuid_dir in uuid_dirs:
+            uuid_path = os.path.join(folder_path, uuid_dir)
+            pdf_files = []
+            
+            for root, dirs, files in os.walk(uuid_path):
+                if 'archive' in dirs:
+                    dirs.remove('archive')
+                if 'archive' in root.lower():
+                    continue
+                    
+                pdf_files.extend(
+                    os.path.join(root, f) 
+                    for f in files 
+                    if f.lower().endswith('.pdf')
+                )
+            
+            if pdf_files:
+                logger.info(f"Found {len(pdf_files)} PDF files in UUID {uuid_dir}")
+                # Push UUID to XCom
+                context['ti'].xcom_push(key='uuid', value=uuid_dir)
+                return uuid_dir
         
-        # Walk through UUID directory, excluding archive
-        for root, dirs, files in os.walk(uuid_path):
-            if 'archive' in dirs:
-                dirs.remove('archive')
-            if 'archive' in root.lower():
-                continue
-                
-            pdf_files.extend(
-                os.path.join(root, f) 
-                for f in files 
-                if f.lower().endswith('.pdf')
-            )
-        
-        if pdf_files:
-            logger.info(f"Found {len(pdf_files)} PDF files in UUID {uuid_dir}")
-            context['ti'].xcom_push(key='uuid', value=uuid_dir)
-            return uuid_dir
-        
-        logger.info(f"No PDF files found in UUID directory {uuid_dir}")
+        logger.info("No PDF files found in any UUID directories")
         return None
 
     except Exception as e:
@@ -85,25 +80,14 @@ def branch_func(**context):
 with DAG(
     'shared_monitor_folder_pdf',
     default_args=default_args,
-    description='Monitors vector folder and UUID subfolders for PDF files',
-    schedule_interval=None,
+    description='Monitors UUID folders for PDF files and triggers processing',
+    schedule_interval='* * * * *',
     start_date=days_ago(1),
     catchup=False,
-    max_active_runs=1,
 ) as dag:
 
     start = DummyOperator(
         task_id='start'
-    )
-
-    monitor_folder = FileSensor(
-        task_id='monitor_folder_changes',
-        filepath='/appz/data/vector_watch_file_pdf',  # Monitor entire folder
-        recursive=True,
-        poke_interval=60,
-        timeout=3600,
-        mode='poke',
-        soft_fail=False,
     )
 
     check_folder = PythonOperator(
@@ -127,7 +111,7 @@ with DAG(
         trigger_dag_id='shared_process_file_pdf2vector',
         conf={"uuid": "{{ ti.xcom_pull(task_ids='check_pdf_folder', key='uuid') }}"},
         reset_dag_run=True,
-        wait_for_completion=False,
+        wait_for_completion=True,
     )
 
     end = DummyOperator(
@@ -135,8 +119,8 @@ with DAG(
         trigger_rule='none_failed'
     )
 
-    # Task dependencies
-    start >> monitor_folder >> check_folder >> branch_task
+    # Updated task dependencies
+    start >> check_folder >> branch_task
     branch_task >> [no_files, trigger_processing] >> end
 
 logger.info("DAG shared_monitor_folder_pdf loaded successfully")
