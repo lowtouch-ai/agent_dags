@@ -1,9 +1,9 @@
 from datetime import timedelta
 from airflow import DAG
-from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.dummy import DummyOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.dates import days_ago
+from airflow.decorators import task
 import os
 import logging
 import re
@@ -24,7 +24,9 @@ UUID_PATTERN = re.compile(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 )
 
-def check_and_process_folder(**context):
+# Task to check the folder and return PDF info
+@task
+def check_pdf_folder():
     folder_path = '/appz/data/vector_watch_file_pdf'
     pdf_files_info = []
     
@@ -59,45 +61,11 @@ def check_and_process_folder(**context):
         if not pdf_files_info:
             logger.info("  No PDF files found in any UUID directories")
         
-        # Push PDF files info to XCom
-        context['ti'].xcom_push(key='pdf_files_info', value=pdf_files_info)
+        return pdf_files_info
         
     except Exception as e:
-        logger.error(f"Error in check_and_process_folder: {str(e)}")
+        logger.error(f"Error in check_pdf_folder: {str(e)}")
         raise
-
-def branch_func(**context):
-    pdf_files_info = context['ti'].xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')
-    if pdf_files_info:
-        return 'trigger_processing'
-    return 'skip_processing'
-
-def trigger_processing(**context):
-    """Trigger DAG runs for each PDF file found and wait for completion"""
-    pdf_files_info = context['ti'].xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')
-    
-    if not pdf_files_info:
-        return
-    
-    # Create triggers for actual number of files
-    triggers = []
-    for i, pdf_info in enumerate(pdf_files_info):
-        trigger = TriggerDagRunOperator(
-            task_id=f'trigger_pdf_processing_{i}',
-            trigger_dag_id='shared_process_file_pdf2vector',
-            conf={
-                'uuid': pdf_info['uuid'],
-                'file_path': pdf_info['file_path']
-            },
-            reset_dag_run=True,
-            wait_for_completion=True,  # Wait for each triggered DAG to complete
-            execution_timeout=timedelta(minutes=30),
-        )
-        triggers.append(trigger)
-    
-    # Execute all triggers in parallel
-    for trigger in triggers:
-        trigger.execute(context)
 
 # DAG definition
 with DAG(
@@ -111,40 +79,27 @@ with DAG(
     max_active_runs=1
 ) as dag:
 
-    start = DummyOperator(
-        task_id='start'
+    # Start task
+    start = DummyOperator(task_id='start')
+    
+    # Check folder task
+    check_folder_task = check_pdf_folder()
+    
+    # Dynamically mapped trigger tasks
+    trigger_tasks = TriggerDagRunOperator.partial(
+        task_id='trigger_pdf_processing',
+        trigger_dag_id='shared_process_file_pdf2vector',
+        wait_for_completion=True,
+        reset_dag_run=True,
+        execution_timeout=timedelta(minutes=30),
+    ).expand(
+        conf=check_folder_task,
     )
-
-    check_folder = PythonOperator(
-        task_id='check_pdf_folder',
-        python_callable=check_and_process_folder,
-        provide_context=True,
-    )
-
-    branch_task = BranchPythonOperator(
-        task_id='branch_task',
-        python_callable=branch_func,
-        provide_context=True,
-    )
-
-    trigger_processing_task = PythonOperator(
-        task_id='trigger_processing',
-        python_callable=trigger_processing,
-        provide_context=True,
-    )
-
-    skip_processing = DummyOperator(
-        task_id='skip_processing'
-    )
-
-    end = DummyOperator(
-        task_id='end',
-        trigger_rule='none_failed'
-    )
-
-    # Set up dependencies
-    start >> check_folder >> branch_task
-    branch_task >> skip_processing >> end
-    branch_task >> trigger_processing_task >> end
+    
+    # End task
+    end = DummyOperator(task_id='end', trigger_rule='none_failed')
+    
+    # Set dependencies
+    start >> check_folder_task >> trigger_tasks >> end
 
 logger.info("DAG shared_monitor_folder_pdf loaded successfully")
