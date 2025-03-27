@@ -46,11 +46,11 @@ def process_single_pdf(**kwargs):
         uuid.UUID(target_uuid)  # Validate UUID
     except ValueError:
         logger.error(f"Invalid UUID provided: {target_uuid}")
-        return
+        raise ValueError(f"Invalid UUID: {target_uuid}")
 
     if not os.path.exists(file_path):
         logger.error(f"File not found: {file_path}")
-        return
+        raise FileNotFoundError(f"File not found: {file_path}")
 
     pdf_file = os.path.basename(file_path)
     api_endpoint = f"{base_api_endpoint}{target_uuid}/{pdf_file}"
@@ -81,8 +81,10 @@ def process_single_pdf(**kwargs):
         
     except requests.exceptions.RequestException as e:
         logger.error(f"Error uploading {pdf_file}: {str(e)}")
+        raise
     except Exception as e:
         logger.error(f"Error processing {pdf_file}: {str(e)}")
+        raise
     finally:
         files['file'][1].close()
 

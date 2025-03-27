@@ -88,7 +88,7 @@ def trigger_pdf_processing(**context):
                 'file_path': pdf_info['file_path']
             },
             reset_dag_run=True,
-            wait_for_completion=False,
+            wait_for_completion=True,
             dag=dag
         )
         # Execute the trigger task immediately
