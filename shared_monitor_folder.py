@@ -8,10 +8,8 @@ import os
 import logging
 import re
 
-# Set up logging
 logger = logging.getLogger("airflow.task")
 
-# Default arguments for the DAG
 default_args = {
     'owner': 'lowtouch.ai_developers',
     'depends_on_past': False,
@@ -19,7 +17,6 @@ default_args = {
     "retry_delay": timedelta(seconds=15),
 }
 
-# UUID regex pattern
 UUID_PATTERN = re.compile(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 )
@@ -33,7 +30,6 @@ def check_and_process_folder(**context):
             logger.error(f"Base folder {folder_path} does not exist")
             raise Exception(f"Folder {folder_path} not found")
         
-        # Find all UUID directories
         for dir_name in os.listdir(folder_path):
             if not UUID_PATTERN.match(dir_name):
                 continue
@@ -42,14 +38,12 @@ def check_and_process_folder(**context):
             if not os.path.isdir(uuid_path):
                 continue
                 
-            # Walk through UUID directory, excluding archive
             for root, dirs, files in os.walk(uuid_path):
                 if 'archive' in dirs:
                     dirs.remove('archive')
                 if 'archive' in root.lower():
                     continue
                     
-                # Collect PDF files with their full paths and UUID
                 for file in files:
                     if file.lower().endswith('.pdf'):
                         full_path = os.path.join(root, file)
@@ -63,10 +57,9 @@ def check_and_process_folder(**context):
             logger.info("No PDF files found in any UUID directories")
             return 'no_files_found'
             
-        # Push list of found files to XCom
         context['ti'].xcom_push(key='pdf_files', value=pdf_files_found)
         logger.info(f"Found {len(pdf_files_found)} PDF files across UUID directories")
-        return 'process_files'
+        return 'create_dynamic_tasks'
         
     except Exception as e:
         logger.error(f"Error in check_and_process_folder: {str(e)}")
@@ -88,16 +81,15 @@ def create_trigger_task(pdf_file_info, idx):
         wait_for_completion=True,
     )
 
-# DAG definition
 with DAG(
     'shared_monitor_folder_pdf',
     default_args=default_args,
     description='Monitors UUID folders for PDF files and triggers processing for each file',
-    schedule_interval='* * * * *',  # Runs every minute
+    schedule_interval='* * * * *',
     start_date=days_ago(1),
     catchup=False,
     tags=["shared", "folder", "monitor", "pdf", "rag"],
-    max_active_runs=1  # Prevents overlapping runs
+    max_active_runs=1
 ) as dag:
 
     start = DummyOperator(task_id='start')
@@ -116,12 +108,6 @@ with DAG(
 
     no_files = DummyOperator(task_id='no_files_found')
 
-    end = DummyOperator(
-        task_id='end',
-        trigger_rule='none_failed'
-    )
-
-    # Dynamic task creation will happen at runtime
     def create_dynamic_tasks(**context):
         pdf_files = context['ti'].xcom_pull(task_ids='check_pdf_folder', key='pdf_files')
         if not pdf_files:
@@ -132,22 +118,23 @@ with DAG(
             for idx, pdf_file in enumerate(pdf_files)
         ]
         
-        # Set dependencies for trigger tasks
         for trigger_task in trigger_tasks:
-            branch_task >> trigger_task >> end
+            trigger_task.set_upstream(branch_task)
+            trigger_task.set_downstream(end)
 
-    # Set initial dependencies
-    start >> check_folder >> branch_task
-    branch_task >> no_files >> end
-
-    # Add dynamic task creation
-    from airflow.operators.python import PythonOperator
     dynamic_task_creation = PythonOperator(
         task_id='create_dynamic_tasks',
         python_callable=create_dynamic_tasks,
         provide_context=True,
         trigger_rule='all_success'
     )
-    branch_task >> dynamic_task_creation >> end
+
+    end = DummyOperator(
+        task_id='end',
+        trigger_rule='none_failed'
+    )
+
+    start >> check_folder >> branch_task
+    branch_task >> [no_files, dynamic_task_creation] >> end
 
 logger.info("DAG shared_monitor_folder_pdf loaded successfully")
