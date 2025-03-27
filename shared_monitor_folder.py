@@ -62,31 +62,6 @@ def check_and_process_folder(**context):
         logger.error(f"Error in check_and_process_folder: {str(e)}")
         raise
 
-def create_trigger_tasks(**context):
-    pdf_files_info = context['ti'].xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')
-    if not pdf_files_info:
-        return 'no_files_found'
-        
-    # Create dynamic trigger tasks
-    trigger_tasks = []
-    for idx, file_info in enumerate(pdf_files_info):
-        task_id = f'trigger_pdf_processing_{idx}'
-        trigger_task = TriggerDagRunOperator(
-            task_id=task_id,
-            trigger_dag_id='shared_process_file_pdf2vector',
-            conf={
-                'uuid': file_info['uuid'],
-                'file_path': file_info['file_path']
-            },
-            reset_dag_run=True,
-            wait_for_completion=True,
-            dag=dag
-        )
-        trigger_tasks.append(task_id)
-    
-    context['ti'].xcom_push(key='trigger_task_ids', value=trigger_tasks)
-    return trigger_tasks
-
 # DAG definition
 with DAG(
     'shared_monitor_folder_pdf',
@@ -110,7 +85,7 @@ with DAG(
 
     branch_task = BranchPythonOperator(
         task_id='branch_task',
-        python_callable=create_trigger_tasks,
+        python_callable=lambda **context: context['ti'].xcom_pull(task_ids='check_pdf_folder'),
         provide_context=True,
     )
 
@@ -118,13 +93,38 @@ with DAG(
         task_id='no_files_found'
     )
 
+    # Create a fixed number of trigger tasks (adjust MAX_FILES as needed)
+    MAX_FILES = 10  # Adjust based on your expected maximum number of files
+    trigger_tasks = []
+    for i in range(MAX_FILES):
+        trigger_task = TriggerDagRunOperator(
+            task_id=f'trigger_pdf_processing_{i}',
+            trigger_dag_id='shared_process_file_pdf2vector',
+            conf={
+                'uuid': "{{ ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')["
+                        f"{i}]['uuid'] if ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info') and "
+                        f"len(ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')) > {i} else None }}",
+                'file_path': "{{ ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')["
+                            f"{i}]['file_path'] if ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info') and "
+                            f"len(ti.xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')) > {i} else None }}"
+            },
+            reset_dag_run=True,
+            wait_for_completion=True,
+            trigger_rule='all_success',  # Only run if previous tasks succeed
+            dag=dag
+        )
+        trigger_tasks.append(trigger_task)
+
     end = DummyOperator(
         task_id='end',
         trigger_rule='none_failed'
     )
 
-    # Base dependencies
+    # Set dependencies
     start >> check_folder >> branch_task
-    branch_task >> no_files >> end
+    branch_task >> no_files
+    branch_task >> trigger_tasks
+    trigger_tasks >> end
+    no_files >> end
 
 logger.info("DAG shared_monitor_folder_pdf loaded successfully")
