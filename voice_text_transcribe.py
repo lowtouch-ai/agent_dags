@@ -54,7 +54,6 @@ with DAG(
     def preprocess_audio(audio_file_path):
         audio, sr = librosa.load(audio_file_path, sr=16000)
         audio = librosa.util.normalize(audio)
-        audio = librosa.effects.preemphasis(audio)
         temp_processed_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         sf.write(temp_processed_file.name, audio, sr, format='wav')
         return temp_processed_file.name
