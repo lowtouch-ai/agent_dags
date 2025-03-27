@@ -1,6 +1,6 @@
 from datetime import timedelta
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.dummy import DummyOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.dates import days_ago
@@ -58,14 +58,19 @@ def check_and_process_folder(**context):
         
         if not pdf_files_info:
             logger.info("No PDF files found in any UUID directories")
-            return
         
-        # Push PDF files info to XCom for downstream tasks
+        # Push PDF files info to XCom for downstream tasks (even if empty)
         context['ti'].xcom_push(key='pdf_files_info', value=pdf_files_info)
         
     except Exception as e:
         logger.error(f"Error in check_and_process_folder: {str(e)}")
         raise
+
+def branch_func(**context):
+    pdf_files_info = context['ti'].xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')
+    if pdf_files_info:
+        return 'process_files'
+    return 'skip_processing'
 
 def trigger_pdf_processing(**context):
     """Create and execute trigger tasks for each PDF file"""
@@ -111,10 +116,20 @@ with DAG(
         provide_context=True,
     )
 
+    branch_task = BranchPythonOperator(
+        task_id='branch_task',
+        python_callable=branch_func,
+        provide_context=True,
+    )
+
     process_files = PythonOperator(
         task_id='process_files',
         python_callable=trigger_pdf_processing,
         provide_context=True,
+    )
+
+    skip_processing = DummyOperator(
+        task_id='skip_processing'
     )
 
     end = DummyOperator(
@@ -123,6 +138,7 @@ with DAG(
     )
 
     # Task dependencies
-    start >> check_folder >> process_files >> end
+    start >> check_folder >> branch_task
+    branch_task >> [process_files, skip_processing] >> end
 
 logger.info("DAG shared_monitor_folder_pdf loaded successfully")
