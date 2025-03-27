@@ -8,8 +8,10 @@ import os
 import logging
 import re
 
+# Set up logging
 logger = logging.getLogger("airflow.task")
 
+# Default arguments for the DAG
 default_args = {
     'owner': 'lowtouch.ai_developers',
     'depends_on_past': False,
@@ -17,82 +19,88 @@ default_args = {
     "retry_delay": timedelta(seconds=15),
 }
 
+# UUID regex pattern
 UUID_PATTERN = re.compile(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 )
 
 def check_and_process_folder(**context):
     folder_path = '/appz/data/vector_watch_file_pdf'
-    pdf_files_found = []
     
     try:
         if not os.path.exists(folder_path):
             logger.error(f"Base folder {folder_path} does not exist")
             raise Exception(f"Folder {folder_path} not found")
         
+        pdf_files_info = []
         for dir_name in os.listdir(folder_path):
-            if not UUID_PATTERN.match(dir_name):
-                continue
-                
-            uuid_path = os.path.join(folder_path, dir_name)
-            if not os.path.isdir(uuid_path):
-                continue
-                
-            for root, dirs, files in os.walk(uuid_path):
-                if 'archive' in dirs:
-                    dirs.remove('archive')
-                if 'archive' in root.lower():
-                    continue
-                    
-                for file in files:
-                    if file.lower().endswith('.pdf'):
-                        full_path = os.path.join(root, file)
-                        pdf_files_found.append({
-                            'uuid': dir_name,
-                            'file_path': full_path,
-                            'file_name': file
-                        })
+            if UUID_PATTERN.match(dir_name):
+                full_path = os.path.join(folder_path, dir_name)
+                if os.path.isdir(full_path):
+                    for root, dirs, files in os.walk(full_path):
+                        if 'archive' in dirs:
+                            dirs.remove('archive')
+                        if 'archive' in root.lower():
+                            continue
+                            
+                        for file in files:
+                            if file.lower().endswith('.pdf'):
+                                pdf_files_info.append({
+                                    'uuid': dir_name,
+                                    'file_path': os.path.join(root, file)
+                                })
         
-        if not pdf_files_found:
+        if not pdf_files_info:
             logger.info("No PDF files found in any UUID directories")
             return 'no_files_found'
             
-        context['ti'].xcom_push(key='pdf_files', value=pdf_files_found)
-        logger.info(f"Found {len(pdf_files_found)} PDF files across UUID directories")
-        return 'create_dynamic_tasks'
+        # Push list of PDF files info to XCom
+        context['ti'].xcom_push(key='pdf_files_info', value=pdf_files_info)
+        return 'process_files'
         
     except Exception as e:
         logger.error(f"Error in check_and_process_folder: {str(e)}")
         raise
 
-def branch_func(**context):
-    return context['ti'].xcom_pull(task_ids='check_pdf_folder')
+def create_trigger_tasks(**context):
+    pdf_files_info = context['ti'].xcom_pull(task_ids='check_pdf_folder', key='pdf_files_info')
+    if not pdf_files_info:
+        return 'no_files_found'
+        
+    # Create dynamic trigger tasks
+    trigger_tasks = []
+    for idx, file_info in enumerate(pdf_files_info):
+        task_id = f'trigger_pdf_processing_{idx}'
+        trigger_task = TriggerDagRunOperator(
+            task_id=task_id,
+            trigger_dag_id='shared_process_file_pdf2vector',
+            conf={
+                'uuid': file_info['uuid'],
+                'file_path': file_info['file_path']
+            },
+            reset_dag_run=True,
+            wait_for_completion=True,
+            dag=dag
+        )
+        trigger_tasks.append(task_id)
+    
+    context['ti'].xcom_push(key='trigger_task_ids', value=trigger_tasks)
+    return trigger_tasks
 
-def create_trigger_task(pdf_file_info, idx):
-    return TriggerDagRunOperator(
-        task_id=f'trigger_pdf_processing_{idx}',
-        trigger_dag_id='shared_process_file_pdf2vector',
-        conf={
-            'uuid': pdf_file_info['uuid'],
-            'file_path': pdf_file_info['file_path'],
-            'file_name': pdf_file_info['file_name']
-        },
-        reset_dag_run=True,
-        wait_for_completion=True,
-    )
-
+# DAG definition
 with DAG(
     'shared_monitor_folder_pdf',
     default_args=default_args,
-    description='Monitors UUID folders for PDF files and triggers processing for each file',
-    schedule_interval='* * * * *',
+    description='Monitors UUID folders for PDF files and triggers processing per file',
+    schedule_interval='* * * * *',  # Runs every minute
     start_date=days_ago(1),
     catchup=False,
-    tags=["shared", "folder", "monitor", "pdf", "rag"],
-    max_active_runs=1
+    tags=["shared", "folder", "monitor", "pdf", "rag"]
 ) as dag:
 
-    start = DummyOperator(task_id='start')
+    start = DummyOperator(
+        task_id='start'
+    )
 
     check_folder = PythonOperator(
         task_id='check_pdf_folder',
@@ -102,31 +110,12 @@ with DAG(
 
     branch_task = BranchPythonOperator(
         task_id='branch_task',
-        python_callable=branch_func,
+        python_callable=create_trigger_tasks,
         provide_context=True,
     )
 
-    no_files = DummyOperator(task_id='no_files_found')
-
-    def create_dynamic_tasks(**context):
-        pdf_files = context['ti'].xcom_pull(task_ids='check_pdf_folder', key='pdf_files')
-        if not pdf_files:
-            return
-        
-        trigger_tasks = [
-            create_trigger_task(pdf_file, idx)
-            for idx, pdf_file in enumerate(pdf_files)
-        ]
-        
-        for trigger_task in trigger_tasks:
-            trigger_task.set_upstream(branch_task)
-            trigger_task.set_downstream(end)
-
-    dynamic_task_creation = PythonOperator(
-        task_id='create_dynamic_tasks',
-        python_callable=create_dynamic_tasks,
-        provide_context=True,
-        trigger_rule='all_success'
+    no_files = DummyOperator(
+        task_id='no_files_found'
     )
 
     end = DummyOperator(
@@ -134,7 +123,8 @@ with DAG(
         trigger_rule='none_failed'
     )
 
+    # Base dependencies
     start >> check_folder >> branch_task
-    branch_task >> [no_files, dynamic_task_creation] >> end
+    branch_task >> no_files >> end
 
 logger.info("DAG shared_monitor_folder_pdf loaded successfully")
