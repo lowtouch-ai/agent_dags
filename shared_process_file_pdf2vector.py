@@ -29,17 +29,12 @@ def process_pdf_file(**kwargs):
     pdf_file = os.path.basename(file_path)
     api_endpoint = f"{base_api_endpoint}{target_uuid}/{pdf_file}"
     
-    # Base path stops at the UUID folder, excluding processing_pdf
-    base_path = os.path.join("/appz/data/vector_watch_file_pdf/", target_uuid)
-    # Calculate relative path from the UUID folder
+    base_path = os.path.join("/appz/data/vector_watch_file_pdf/", target_uuid,"processing_pdf")
     path_parts = Path(file_path).relative_to(base_path).parts
+    tags = list(path_parts[:-1]) if len(path_parts) > 1 else []
     
-    # Exclude 'processing_pdf' from tags and take only subfolders (if any) before the filename
-    tags = [part for part in path_parts[:-1] if part != 'processing_pdf'] if len(path_parts) > 1 else []
-    
-    # Archive path is still under processing_pdf
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    archive_path = os.path.join(base_path, 'processing_pdf', 'archive', timestamp)
+    archive_path = os.path.join(base_path, 'archive', timestamp)
     os.makedirs(archive_path, exist_ok=True)
     
     files = {'file': (pdf_file, open(file_path, 'rb'), 'application/pdf')}
