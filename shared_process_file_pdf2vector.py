@@ -54,28 +54,15 @@ def process_pdf_file(file_path, target_uuid):
     finally:
         files['file'][1].close()
 
-def create_process_task(conf, dag):
-    if not conf or 'uuid' not in conf or 'file_path' not in conf:
-        logger.error("Invalid configuration provided")
-        return None
-        
-    target_uuid = conf['uuid']
-    file_path = conf['file_path']
-    
-    return PythonOperator(
-        task_id=f'process_pdf_{os.path.basename(file_path).replace(".", "_")}',
-        python_callable=process_pdf_file,
-        op_kwargs={'file_path': file_path, 'target_uuid': target_uuid},
-        dag=dag,
-    )
-
 with DAG(
     'shared_process_file_pdf2vector',
     default_args=default_args,
     description='Process PDF files to vector API in parallel',
-    schedule_interval=None,
+    schedule_interval=None,  # Triggered DAG
     start_date=days_ago(1),
     catchup=False,
+    max_active_runs=50,  # Allow up to 50 simultaneous DAG runs
+    concurrency=50,      # Allow up to 50 tasks to run concurrently
     params={
         'uuid': None,
         'file_path': None
@@ -93,7 +80,7 @@ with DAG(
     process_task = PythonOperator(
         task_id='process_pdf',
         python_callable=process_pdf_wrapper,
-        dag=dag,
+        execution_timeout=timedelta(minutes=30),  # Optional: timeout for each task
     )
 
     process_task
