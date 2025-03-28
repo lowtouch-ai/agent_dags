@@ -27,11 +27,12 @@ UUID_PATTERN = re.compile(
 )
 
 @task
-def filter_new_pdf_files(file_path):
+def check_new_pdf_files():
     """
-    Filter out already processed files and return new ones.
-    Uses a simple text file to track processed files (could be replaced with XCom or a database).
+    Check for new PDF files in the directory and its UUID subdirectories.
+    Tracks processed files in a log to avoid duplicate triggers.
     """
+    folder_path = '/appz/data/vector_watch_file_pdf'
     processed_log = '/appz/data/processed_files.log'  # File to track processed files
     new_files_info = []
     
@@ -42,31 +43,47 @@ def filter_new_pdf_files(file_path):
             with open(processed_log, 'r') as f:
                 processed_files = set(line.strip() for line in f)
         
-        # Check if the file is new
-        if file_path and file_path.lower().endswith('.pdf') and file_path not in processed_files:
-            # Extract UUID from the path
-            parts = Path(file_path).parts
-            for part in parts:
-                if UUID_PATTERN.match(part):
-                    uuid = part
-                    break
-            else:
-                logger.warning(f"No UUID found in path: {file_path}")
-                return []
-                
-            new_files_info.append({
-                'uuid': uuid,
-                'file_path': file_path
-            })
-            
-            # Mark file as processed
-            with open(processed_log, 'a') as f:
-                f.write(f"{file_path}\n")
+        if not os.path.exists(folder_path):
+            logger.error(f"Base folder {folder_path} does not exist")
+            raise Exception(f"Folder {folder_path} not found")
         
-        return new_files_info if new_files_info else []
+        # Scan for UUID directories
+        for dir_name in os.listdir(folder_path):
+            if not UUID_PATTERN.match(dir_name):
+                continue
+                
+            full_path = os.path.join(folder_path, dir_name)
+            if not os.path.isdir(full_path):
+                continue
+                
+            # Walk through UUID directory, excluding archive
+            for root, dirs, files in os.walk(full_path):
+                if 'archive' in dirs:
+                    dirs.remove('archive')
+                if 'archive' in root.lower():
+                    continue
+                    
+                for file in files:
+                    if file.lower().endswith('.pdf'):
+                        file_path = os.path.join(root, file)
+                        if file_path not in processed_files:
+                            new_files_info.append({
+                                'uuid': dir_name,
+                                'file_path': file_path
+                            })
+                            # Mark file as processed
+                            with open(processed_log, 'a') as f:
+                                f.write(f"{file_path}\n")
+        
+        if not new_files_info:
+            logger.info("No new PDF files found in any UUID directories")
+            return []
+        
+        logger.info(f"Found {len(new_files_info)} new PDF files")
+        return new_files_info
         
     except Exception as e:
-        logger.error(f"Error in filter_new_pdf_files: {str(e)}")
+        logger.error(f"Error in check_new_pdf_files: {str(e)}")
         raise
 
 # DAG definition
@@ -85,21 +102,19 @@ with DAG(
     # Start task
     start = DummyOperator(task_id='start')
     
-    # FileSensor to monitor the folder
+    # FileSensor to monitor the directory for any changes
     monitor_folder = FileSensor(
         task_id='monitor_pdf_folder',
-        filepath='/appz/data/vector_watch_file_pdf',  # Base directory
-        recursive=True,  # Check subdirectories
+        filepath='/appz/data/vector_watch_file_pdf',  # Monitor the base directory
         fs_conn_id='fs_default',  # Default filesystem connection
-        poke_interval=60,  # Check every 60 seconds (aligned with schedule)
-        timeout=300,  # Timeout after 5 minutes if no new files
-        mode='poke',  # Keep checking until a file is found
-        filter_pattern=r'.*\.pdf$',  # Match PDF files only
-        excluded_paths=['*/archive/*'],  # Exclude archive directories
+        poke_interval=60,  # Check every 60 seconds
+        timeout=300,  # Timeout after 5 minutes if no changes
+        mode='poke',  # Keep checking until a change is detected
+        recursive=True,  # Look into subdirectories (available in Airflow 2.7.1)
     )
     
-    # Filter new files task
-    filter_new_files_task = filter_new_pdf_files(monitor_folder.output)
+    # Check for new PDF files
+    check_new_files_task = check_new_pdf_files()
     
     # No files found task
     no_files_found = DummyOperator(
@@ -115,7 +130,7 @@ with DAG(
         reset_dag_run=True,
         execution_timeout=timedelta(minutes=30),
     ).expand(
-        conf=filter_new_files_task.map(
+        conf=check_new_files_task.map(
             lambda x: {'uuid': x['uuid'], 'file_path': x['file_path']} if x else {}
         )
     )
@@ -127,8 +142,8 @@ with DAG(
     )
     
     # Set dependencies
-    start >> monitor_folder >> filter_new_files_task
-    filter_new_files_task >> [trigger_processing, no_files_found]
+    start >> monitor_folder >> check_new_files_task
+    check_new_files_task >> [trigger_processing, no_files_found]
     trigger_processing >> end
     no_files_found >> end
 
