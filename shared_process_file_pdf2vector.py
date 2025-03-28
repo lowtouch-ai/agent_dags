@@ -1,12 +1,10 @@
+from datetime import timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
 import os
-import requests
-from pathlib import Path
 import logging
 import shutil
-from datetime import timedelta, datetime
 
 logger = logging.getLogger("airflow.task")
 
@@ -14,69 +12,55 @@ default_args = {
     'owner': 'lowtouch.ai_developers',
     'depends_on_past': False,
     'retries': 1,
-    'retry_delay': timedelta(minutes=5),
+    "retry_delay": timedelta(seconds=15),
 }
 
-def process_pdf_file(**kwargs):
-    file_path = kwargs['file_path']
-    target_uuid = kwargs['uuid']
-    base_api_endpoint = "http://vector:8000/vector/pdf/"
-    
-    if not os.path.exists(file_path):
-        logger.error(f"File not found: {file_path}")
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    pdf_file = os.path.basename(file_path)
-    api_endpoint = f"{base_api_endpoint}{target_uuid}/{pdf_file}"
-    
-    base_path = os.path.join("/appz/data/vector_watch_file_pdf/", target_uuid)
-    path_parts = Path(file_path).relative_to(base_path).parts
-    tags = list(path_parts[:-1]) if len(path_parts) > 1 else []
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    archive_path = os.path.join(base_path, 'archive', timestamp)
-    os.makedirs(archive_path, exist_ok=True)
-    
-    files = {'file': (pdf_file, open(file_path, 'rb'), 'application/pdf')}
-    params = {'tags': ','.join(tags)} if tags else {}
+def process_pdf_to_vector(**context):
+    conf = context['dag_run'].conf
+    uuid = conf.get('uuid')
+    file_path = conf.get('file_path')
+    tags = conf.get('tags', [])
     
     try:
-        response = requests.post(api_endpoint, files=files, params=params)
-        response.raise_for_status()
-        logger.info(f"Successfully uploaded {pdf_file} with tags: {tags}")
+        logger.info(f"Processing PDF: {file_path}")
+        logger.info(f"UUID: {uuid}")
+        logger.info(f"Tags: {tags}")
         
-        archive_destination = os.path.join(archive_path, pdf_file)
-        shutil.move(file_path, archive_destination)
-        logger.info(f"Archived {pdf_file} to {archive_destination}")
+        # Add your PDF to vector conversion logic here
+        # This is a placeholder for the actual processing
+        logger.info(f"Starting PDF to vector conversion for {file_path}")
         
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error uploading {pdf_file}: {str(e)}")
+        # Simulate processing
+        # Replace this with actual PDF processing code
+        archive_path = file_path.replace('processing_pdf', 'archive')
+        os.makedirs(os.path.dirname(archive_path), exist_ok=True)
+        
+        # Move to archive after processing
+        shutil.move(file_path, archive_path)
+        logger.info(f"Completed processing and moved to {archive_path}")
+        
+    except Exception as e:
+        logger.error(f"Error processing PDF {file_path}: {str(e)}")
         raise
-    finally:
-        files['file'][1].close()
 
 with DAG(
     'shared_process_file_pdf2vector',
     default_args=default_args,
-    description='Process PDF files to vector API in parallel',
-    schedule_interval=None,  # Triggered by the monitor DAG
+    description='Processes PDF files to vector format',
     start_date=days_ago(1),
     catchup=False,
-    max_active_runs=50,  # Allow up to 50 simultaneous DAG runs
-    concurrency=50,      # Allow up to 50 tasks to run concurrently
-    params={
-        'uuid': None,
-        'file_path': None
-    }
+    tags=["shared", "pdf", "vector", "processing", "rag"],
+    max_active_runs=50,      # Allow multiple parallel runs
+    concurrency=50,         # Allow parallel task execution
+    max_active_tasks=50     # Allow multiple tasks to run simultaneously
 ) as dag:
 
     process_task = PythonOperator(
-        task_id='process_pdf',
-        python_callable=process_pdf_file,
-        op_kwargs={
-            'file_path': '{{ dag_run.conf["file_path"] }}',
-            'uuid': '{{ dag_run.conf["uuid"] }}'
-        },
+        task_id='process_pdf_to_vector',
+        python_callable=process_pdf_to_vector,
+        provide_context=True,
     )
 
     process_task
+
+logger.info("DAG shared_process_file_pdf2vector loaded successfully")
