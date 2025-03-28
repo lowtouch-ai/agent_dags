@@ -25,17 +25,13 @@ UUID_PATTERN = re.compile(
 @task
 def check_and_move_pdf_folder():
     base_path = '/appz/data/vector_watch_file_pdf'
-    processing_path = '/appz/data/vector_watch_file_pdf/processing_pdf'  # Updated path
     pdf_files_info = []
-    
-    os.makedirs(processing_path, exist_ok=True)
     
     try:
         if not os.path.exists(base_path):
             logger.error(f"Base folder {base_path} does not exist")
             raise Exception(f"Folder {base_path} not found")
         
-        # Scan for PDF files
         for dir_name in os.listdir(base_path):
             if not UUID_PATTERN.match(dir_name):
                 continue
@@ -44,17 +40,17 @@ def check_and_move_pdf_folder():
             if not os.path.isdir(full_path):
                 continue
                 
+            processing_path = os.path.join(full_path, 'processsing_pdf')
+            os.makedirs(processing_path, exist_ok=True)
+            
             for root, dirs, files in os.walk(full_path):
-                if 'archive' in root.lower() or 'processing_pdf' in root.lower():
+                if 'archive' in root.lower() or 'processsing_pdf' in root.lower():
                     continue
                     
                 for file in files:
                     if file.lower().endswith('.pdf'):
                         original_path = os.path.join(root, file)
-                        relative_path = os.path.relpath(root, base_path)
-                        new_dir = os.path.join(processing_path, dir_name, relative_path)
-                        os.makedirs(new_dir, exist_ok=True)
-                        new_path = os.path.join(new_dir, file)
+                        new_path = os.path.join(processing_path, file)
                         
                         if not os.path.exists(new_path):
                             shutil.move(original_path, new_path)
@@ -62,7 +58,7 @@ def check_and_move_pdf_folder():
                             pdf_files_info.append({
                                 'uuid': dir_name,
                                 'file_path': new_path,
-                                'tags': relative_path.split(os.sep) if relative_path != '.' else []
+                                'tags': os.path.relpath(root, full_path).split(os.sep)
                             })
         
         # Cleanup empty subfolders
@@ -70,17 +66,12 @@ def check_and_move_pdf_folder():
             if UUID_PATTERN.match(dir_name):
                 full_path = os.path.join(base_path, dir_name)
                 for root, dirs, files in os.walk(full_path, topdown=False):
-                    if 'archive' not in root.lower() and 'processing_pdf' not in root.lower():
+                    if 'archive' not in root.lower() and 'processsing_pdf' not in root.lower():
                         if not os.listdir(root):
                             shutil.rmtree(root)
                             logger.info(f"Removed empty folder: {root}")
         
-        if not pdf_files_info:
-            logger.info("No new PDF files found in any UUID directories")
-            return []
-        
-        logger.info(f"Found and moved {len(pdf_files_info)} PDF files for parallel processing")
-        return pdf_files_info
+        return pdf_files_info if pdf_files_info else None
         
     except Exception as e:
         logger.error(f"Error in check_and_move_pdf_folder: {str(e)}")
@@ -101,7 +92,7 @@ with DAG(
 
     start = DummyOperator(task_id='start')
     check_folder_task = check_and_move_pdf_folder()
-    no_files_found = DummyOperator(task_id='no_files_found', trigger_rule='one_success')
+    no_files_found = DummyOperator(task_id='no_files_found')
     
     trigger_processing = TriggerDagRunOperator.partial(
         task_id='trigger_pdf_processing',
@@ -112,7 +103,7 @@ with DAG(
         execution_timeout=timedelta(minutes=30),
     ).expand(
         conf=check_folder_task.map(
-            lambda x: {'uuid': x['uuid'], 'file_path': x['file_path'], 'tags': x['tags']} if x else {}
+            lambda x: {'uuid': x['uuid'], 'file_path': x['file_path'], 'tags': x['tags']}
         )
     )
     
@@ -122,5 +113,3 @@ with DAG(
     check_folder_task >> [trigger_processing, no_files_found]
     trigger_processing >> end
     no_files_found >> end
-
-logger.info("DAG shared_monitor_folder_pdf loaded successfully")
