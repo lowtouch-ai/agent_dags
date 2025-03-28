@@ -1,121 +1,94 @@
-from datetime import timedelta
-from airflow import DAG
-from airflow.operators.dummy import DummyOperator
+from airflow.decorators import dag, task
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.operators.dummy import DummyOperator
 from airflow.utils.dates import days_ago
-from airflow.decorators import task
+from airflow.utils.trigger_rule import TriggerRule
 import os
-import logging
 import re
+import logging
 
-# Set up logging
 logger = logging.getLogger("airflow.task")
 
-# Default arguments for the DAG
 default_args = {
     'owner': 'lowtouch.ai_developers',
     'depends_on_past': False,
     'retries': 1,
-    "retry_delay": timedelta(seconds=15),
 }
 
-# UUID regex pattern
 UUID_PATTERN = re.compile(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 )
 
-@task
-def check_pdf_folder():
-    folder_path = '/appz/data/vector_watch_file_pdf'
-    pdf_files_info = []
-    
-    try:
+@dag(
+    dag_id='shared_monitor_folder_pdf',
+    default_args=default_args,
+    description='Monitors UUID folders for PDF files and triggers processing per file',
+    schedule_interval='* * * * *',  # Every minute polling
+    start_date=days_ago(1),
+    catchup=False,
+)
+def monitor_folder_dag():
+    @task
+    def check_pdf_folder():
+        """Scan for all PDF files across UUID directories, excluding 'archive'."""
+        folder_path = '/appz/data/vector_watch_file_pdf'
         if not os.path.exists(folder_path):
             logger.error(f"Base folder {folder_path} does not exist")
             raise Exception(f"Folder {folder_path} not found")
-        
-        # Scan for UUID directories
+
+        pdf_files_info = []  # List of dicts: {'uuid': uuid, 'file_path': path}
         for dir_name in os.listdir(folder_path):
-            if not UUID_PATTERN.match(dir_name):
-                continue
-                
-            full_path = os.path.join(folder_path, dir_name)
-            if not os.path.isdir(full_path):
-                continue
-                
-            # Walk through UUID directory, excluding archive
-            for root, dirs, files in os.walk(full_path):
-                if 'archive' in dirs:
-                    dirs.remove('archive')
-                if 'archive' in root.lower():
-                    continue
-                    
-                for file in files:
-                    if file.lower().endswith('.pdf'):
-                        pdf_files_info.append({
-                            'uuid': dir_name,
-                            'file_path': os.path.join(root, file)
-                        })
-        
-        if not pdf_files_info:
+            if UUID_PATTERN.match(dir_name):
+                full_path = os.path.join(folder_path, dir_name)
+                if os.path.isdir(full_path):
+                    for root, dirs, files in os.walk(full_path):
+                        if 'archive' in dirs:
+                            dirs.remove('archive')
+                        if 'archive' in root.lower():
+                            continue
+                        for f in files:
+                            if f.lower().endswith('.pdf'):
+                                pdf_files_info.append({
+                                    'uuid': dir_name,
+                                    'file_path': os.path.join(root, f)
+                                })
+        if pdf_files_info:
+            logger.info(f"Found {len(pdf_files_info)} PDF files across UUID directories")
+        else:
             logger.info("No PDF files found in any UUID directories")
-            return []  # Return empty list instead of None
-        
-        logger.info(f"Found {len(pdf_files_info)} PDF files")
         return pdf_files_info
-        
-    except Exception as e:
-        logger.error(f"Error in check_pdf_folder: {str(e)}")
-        raise
 
-# DAG definition
-with DAG(
-    'shared_monitor_folder_pdf',
-    default_args=default_args,
-    description='Monitors UUID folders for PDF files and triggers processing',
-    schedule_interval='* * * * *',  # Runs every minute
-    start_date=days_ago(1),
-    catchup=False,
-    tags=["shared", "folder", "monitor", "pdf", "rag"],
-    max_active_runs=1,
-    concurrency=50,  # Allow multiple parallel triggers
-) as dag:
+    @task.branch
+    def branch_func(pdf_files_info):
+        """Branch based on whether PDF files are found."""
+        if pdf_files_info:
+            return 'trigger_pdf_processing'
+        return 'no_files_found'
 
-    # Start task
+    @task
+    def no_files_found():
+        logger.info("No PDF files found in any UUID directories - stopping DAG")
+
     start = DummyOperator(task_id='start')
-    
-    # Check folder task
-    check_folder_task = check_pdf_folder()
-    
-    # No files found task
-    no_files_found = DummyOperator(
-        task_id='no_files_found',
-        trigger_rule='one_success'
-    )
-    
-    # Trigger processing for each PDF file
-    trigger_processing = TriggerDagRunOperator.partial(
+    end = DummyOperator(task_id='end', trigger_rule=TriggerRule.NONE_FAILED)
+
+    pdf_files_info = check_pdf_folder()
+    branch = branch_func(pdf_files_info)
+
+    trigger_tasks = TriggerDagRunOperator.partial(
         task_id='trigger_pdf_processing',
         trigger_dag_id='shared_process_file_pdf2vector',
-        wait_for_completion=False,  # Allow parallel execution
         reset_dag_run=True,
-        execution_timeout=timedelta(minutes=30),
+        wait_for_completion=False,  # Enable parallel execution
     ).expand(
-        conf=check_folder_task.map(
-            lambda x: {'uuid': x['uuid'], 'file_path': x['file_path']} if x else {}
-        )
+        conf=[{'uuid': info['uuid'], 'file_path': info['file_path']} for info in pdf_files_info]
     )
-    
-    # End task
-    end = DummyOperator(
-        task_id='end',
-        trigger_rule='all_done'
-    )
-    
-    # Set dependencies
-    start >> check_folder_task
-    check_folder_task >> [trigger_processing, no_files_found]
-    trigger_processing >> end
-    no_files_found >> end
 
-logger.info("DAG shared_monitor_folder_pdf loaded successfully")
+    no_files = no_files_found()
+
+    # Dependencies
+    start >> pdf_files_info >> branch
+    branch >> trigger_tasks >> end
+    branch >> no_files >> end
+
+dag = monitor_folder_dag()

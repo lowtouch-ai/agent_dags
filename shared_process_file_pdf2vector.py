@@ -1,11 +1,9 @@
-from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.decorators import dag, task
 from airflow.utils.dates import days_ago
+from datetime import timedelta, datetime
 import os
 import requests
 from pathlib import Path
-import uuid
-from datetime import timedelta, datetime
 import logging
 import shutil
 
@@ -18,82 +16,66 @@ default_args = {
     'retry_delay': timedelta(minutes=5),
 }
 
-def process_pdf_file(file_path, target_uuid):
-    base_api_endpoint = "http://vector:8000/vector/pdf/"
-    
-    if not os.path.exists(file_path):
-        logger.error(f"File not found: {file_path}")
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    pdf_file = os.path.basename(file_path)
-    api_endpoint = f"{base_api_endpoint}{target_uuid}/{pdf_file}"
-    
-    base_path = os.path.join("/appz/data/vector_watch_file_pdf/", target_uuid)
-    path_parts = Path(file_path).relative_to(base_path).parts
-    tags = list(path_parts[:-1]) if len(path_parts) > 1 else []
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    archive_path = os.path.join(base_path, 'archive', timestamp)
-    os.makedirs(archive_path, exist_ok=True)
-    
-    files = {'file': (pdf_file, open(file_path, 'rb'), 'application/pdf')}
-    params = {'tags': ','.join(tags)} if tags else {}
-    
-    try:
-        response = requests.post(api_endpoint, files=files, params=params)
-        response.raise_for_status()
-        logger.info(f"Successfully uploaded {pdf_file} with tags: {tags}")
-        
-        archive_destination = os.path.join(archive_path, pdf_file)
-        shutil.move(file_path, archive_destination)
-        logger.info(f"Archived {pdf_file} to {archive_destination}")
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error uploading {pdf_file}: {str(e)}")
-        raise
-    finally:
-        files['file'][1].close()
-
-def create_process_task(conf, dag):
-    if not conf or 'uuid' not in conf or 'file_path' not in conf:
-        logger.error("Invalid configuration provided")
-        return None
-        
-    target_uuid = conf['uuid']
-    file_path = conf['file_path']
-    
-    return PythonOperator(
-        task_id=f'process_pdf_{os.path.basename(file_path).replace(".", "_")}',
-        python_callable=process_pdf_file,
-        op_kwargs={'file_path': file_path, 'target_uuid': target_uuid},
-        dag=dag,
-    )
-
-with DAG(
-    'shared_process_file_pdf2vector',
+@dag(
+    dag_id='shared_process_file_pdf2vector',
     default_args=default_args,
-    description='Process PDF files to vector API in parallel',
+    description='Process a single PDF file to vector API and archive it',
     schedule_interval=None,
     start_date=days_ago(1),
     catchup=False,
-    params={
-        'uuid': None,
-        'file_path': None
-    }
-) as dag:
+    params={'uuid': None, 'file_path': None}
+)
+def process_pdf_dag():
+    @task
+    def process_file(uuid, file_path):
+        """Upload a single PDF file to the API and archive it."""
+        if not uuid or not file_path:
+            logger.error("UUID or file_path not provided - stopping DAG")
+            return
 
-    def process_pdf_wrapper(**kwargs):
+        base_api_endpoint = "http://vector:8000/vector/pdf/"
+        pdf_file = os.path.basename(file_path)
+        api_endpoint = f"{base_api_endpoint}{uuid}/{pdf_file}"
+        target_path = f"/appz/data/vector_watch_file_pdf/{uuid}"
+
+        if not os.path.exists(file_path):
+            logger.error(f"File {file_path} not found - stopping DAG")
+            return
+
+        # Extract tags from path
+        path_parts = Path(file_path).relative_to(target_path).parts
+        tags = list(path_parts[:-1]) if len(path_parts) > 1 else []
+
+        # Prepare upload data
+        files = {'file': (pdf_file, open(file_path, 'rb'), 'application/pdf')}
+        params = {'tags': ','.join(tags)} if tags else {}
+
+        try:
+            response = requests.post(api_endpoint, files=files, params=params)
+            response.raise_for_status()
+            logger.info(f"Uploaded {pdf_file} to {api_endpoint} with tags: {tags}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error uploading {pdf_file}: {str(e)}")
+        finally:
+            files['file'][1].close()
+            # Archive the file
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_path = os.path.join(target_path, 'archive', timestamp)
+            os.makedirs(archive_path, exist_ok=True)
+            archive_destination = os.path.join(archive_path, pdf_file)
+            try:
+                shutil.move(file_path, archive_destination)
+                logger.info(f"Archived {pdf_file} to {archive_destination}")
+            except Exception as e:
+                logger.error(f"Error archiving {pdf_file}: {str(e)}")
+
+    @task
+    def extract_params(**kwargs):
+        """Extract UUID and file_path from dag_run.conf."""
         conf = kwargs['dag_run'].conf
-        if not conf or 'uuid' not in conf or 'file_path' not in conf:
-            logger.error("Invalid configuration provided")
-            raise ValueError("Missing required configuration")
-        
-        process_pdf_file(conf['file_path'], conf['uuid'])
+        return {'uuid': conf.get('uuid'), 'file_path': conf.get('file_path')}
 
-    process_task = PythonOperator(
-        task_id='process_pdf',
-        python_callable=process_pdf_wrapper,
-        dag=dag,
-    )
+    params = extract_params()
+    process_file(params['uuid'], params['file_path'])
 
-    process_task
+dag = process_pdf_dag()
