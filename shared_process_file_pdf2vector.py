@@ -1,7 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
-from airflow.decorators import task
 import os
 import requests
 from pathlib import Path
@@ -55,6 +54,21 @@ def process_pdf_file(file_path, target_uuid):
     finally:
         files['file'][1].close()
 
+def create_process_task(conf, dag):
+    if not conf or 'uuid' not in conf or 'file_path' not in conf:
+        logger.error("Invalid configuration provided")
+        return None
+        
+    target_uuid = conf['uuid']
+    file_path = conf['file_path']
+    
+    return PythonOperator(
+        task_id=f'process_pdf_{os.path.basename(file_path).replace(".", "_")}',
+        python_callable=process_pdf_file,
+        op_kwargs={'file_path': file_path, 'target_uuid': target_uuid},
+        dag=dag,
+    )
+
 with DAG(
     'shared_process_file_pdf2vector',
     default_args=default_args,
@@ -68,23 +82,18 @@ with DAG(
     }
 ) as dag:
 
-    @task.dynamic
-    def process_pdf_dynamic(conf):
+    def process_pdf_wrapper(**kwargs):
+        conf = kwargs['dag_run'].conf
         if not conf or 'uuid' not in conf or 'file_path' not in conf:
             logger.error("Invalid configuration provided")
-            return
+            raise ValueError("Missing required configuration")
         
-        target_uuid = conf['uuid']
-        file_path = conf['file_path']
-        
-        try:
-            uuid.UUID(target_uuid)  # Validate UUID
-            process_pdf_file(file_path, target_uuid)
-        except ValueError:
-            logger.error(f"Invalid UUID provided: {target_uuid}")
-            raise
-        except Exception as e:
-            logger.error(f"Error processing file {file_path}: {str(e)}")
-            raise
+        process_pdf_file(conf['file_path'], conf['uuid'])
 
-    process_task = process_pdf_dynamic.expand(conf="{{ ti.xcom_pull(task_ids='trigger_pdf_processing') }}")
+    process_task = PythonOperator(
+        task_id='process_pdf',
+        python_callable=process_pdf_wrapper,
+        dag=dag,
+    )
+
+    process_task
