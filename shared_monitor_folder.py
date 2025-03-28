@@ -71,7 +71,12 @@ def check_and_move_pdf_folder():
                             shutil.rmtree(root)
                             logger.info(f"Removed empty folder: {root}")
         
-        return pdf_files_info if pdf_files_info else None
+        if not pdf_files_info:
+            logger.info("No PDF files found to process")
+            return []  # Return empty list instead of None
+        
+        logger.info(f"Found {len(pdf_files_info)} PDF files to process")
+        return pdf_files_info
         
     except Exception as e:
         logger.error(f"Error in check_and_move_pdf_folder: {str(e)}")
@@ -104,6 +109,7 @@ with DAG(
     ).expand(
         conf=check_folder_task.map(
             lambda x: {'uuid': x['uuid'], 'file_path': x['file_path'], 'tags': x['tags']}
+            if x else {}  # Handle empty case
         )
     )
     
