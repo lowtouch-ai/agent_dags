@@ -28,7 +28,6 @@ def check_and_move_pdf_folder():
     processing_path = '/appz/data/vector_watch_file_pdf/processing_pdf'
     pdf_files_info = []
     
-    # Create processing folder if it doesn't exist
     os.makedirs(processing_path, exist_ok=True)
     
     try:
@@ -53,26 +52,35 @@ def check_and_move_pdf_folder():
                 for file in files:
                     if file.lower().endswith('.pdf'):
                         original_path = os.path.join(root, file)
-                        # Create new path in processing_pdf folder maintaining UUID structure
                         relative_path = os.path.relpath(root, base_path)
                         new_dir = os.path.join(processing_path, relative_path)
                         os.makedirs(new_dir, exist_ok=True)
                         new_path = os.path.join(new_dir, file)
                         
-                        # Move file to processing folder
-                        shutil.move(original_path, new_path)
-                        logger.info(f"Moved {original_path} to {new_path}")
-                        
-                        pdf_files_info.append({
-                            'uuid': dir_name,
-                            'file_path': new_path  # Pass the new path
-                        })
+                        # Only move if not already in processing_path
+                        if not os.path.exists(new_path):
+                            shutil.move(original_path, new_path)
+                            logger.info(f"Moved {original_path} to {new_path}")
+                            pdf_files_info.append({
+                                'uuid': dir_name,
+                                'file_path': new_path
+                            })
+        
+        # Cleanup empty subfolders
+        for dir_name in os.listdir(base_path):
+            if UUID_PATTERN.match(dir_name):
+                full_path = os.path.join(base_path, dir_name)
+                for root, dirs, files in os.walk(full_path, topdown=False):
+                    if 'archive' not in root.lower() and 'processing_pdf' not in root.lower():
+                        if not os.listdir(root):  # If directory is empty
+                            shutil.rmtree(root)
+                            logger.info(f"Removed empty folder: {root}")
         
         if not pdf_files_info:
-            logger.info("No PDF files found in any UUID directories")
+            logger.info("No new PDF files found in any UUID directories")
             return []
         
-        logger.info(f"Found and moved {len(pdf_files_info)} PDF files")
+        logger.info(f"Found and moved {len(pdf_files_info)} new PDF files")
         return pdf_files_info
         
     except Exception as e:
