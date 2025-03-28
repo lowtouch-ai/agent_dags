@@ -2,13 +2,11 @@ from datetime import timedelta
 from airflow import DAG
 from airflow.operators.dummy import DummyOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.sensors.filesystem import FileSensor
 from airflow.utils.dates import days_ago
 from airflow.decorators import task
 import os
 import logging
 import re
-from pathlib import Path
 
 # Set up logging
 logger = logging.getLogger("airflow.task")
@@ -27,22 +25,11 @@ UUID_PATTERN = re.compile(
 )
 
 @task
-def check_new_pdf_files():
-    """
-    Check for new PDF files in the directory and its UUID subdirectories.
-    Tracks processed files in a log to avoid duplicate triggers.
-    """
+def check_pdf_folder():
     folder_path = '/appz/data/vector_watch_file_pdf'
-    processed_log = '/appz/data/processed_files.log'  # File to track processed files
-    new_files_info = []
+    pdf_files_info = []
     
     try:
-        # Load previously processed files
-        processed_files = set()
-        if os.path.exists(processed_log):
-            with open(processed_log, 'r') as f:
-                processed_files = set(line.strip() for line in f)
-        
         if not os.path.exists(folder_path):
             logger.error(f"Base folder {folder_path} does not exist")
             raise Exception(f"Folder {folder_path} not found")
@@ -65,56 +52,40 @@ def check_new_pdf_files():
                     
                 for file in files:
                     if file.lower().endswith('.pdf'):
-                        file_path = os.path.join(root, file)
-                        if file_path not in processed_files:
-                            new_files_info.append({
-                                'uuid': dir_name,
-                                'file_path': file_path
-                            })
-                            # Mark file as processed
-                            with open(processed_log, 'a') as f:
-                                f.write(f"{file_path}\n")
+                        pdf_files_info.append({
+                            'uuid': dir_name,
+                            'file_path': os.path.join(root, file)
+                        })
         
-        if not new_files_info:
-            logger.info("No new PDF files found in any UUID directories")
-            return []
+        if not pdf_files_info:
+            logger.info("No PDF files found in any UUID directories")
+            return []  # Return empty list instead of None
         
-        logger.info(f"Found {len(new_files_info)} new PDF files")
-        return new_files_info
+        logger.info(f"Found {len(pdf_files_info)} PDF files")
+        return pdf_files_info
         
     except Exception as e:
-        logger.error(f"Error in check_new_pdf_files: {str(e)}")
+        logger.error(f"Error in check_pdf_folder: {str(e)}")
         raise
 
 # DAG definition
 with DAG(
     'shared_monitor_folder_pdf',
     default_args=default_args,
-    description='Monitors UUID folders for new PDF files and triggers processing',
+    description='Monitors UUID folders for PDF files and triggers processing',
     schedule_interval='* * * * *',  # Runs every minute
     start_date=days_ago(1),
     catchup=False,
     tags=["shared", "folder", "monitor", "pdf", "rag"],
     max_active_runs=1,
-    concurrency=50,
+    concurrency=50,  # Allow multiple parallel triggers
 ) as dag:
 
     # Start task
     start = DummyOperator(task_id='start')
     
-    # FileSensor to monitor the directory for any changes
-    monitor_folder = FileSensor(
-        task_id='monitor_pdf_folder',
-        filepath='/appz/data/vector_watch_file_pdf',  # Monitor the base directory
-        fs_conn_id='fs_default',  # Default filesystem connection
-        poke_interval=60,  # Check every 60 seconds
-        timeout=300,  # Timeout after 5 minutes if no changes
-        mode='poke',  # Keep checking until a change is detected
-        recursive=True,  # Look into subdirectories (available in Airflow 2.7.1)
-    )
-    
-    # Check for new PDF files
-    check_new_files_task = check_new_pdf_files()
+    # Check folder task
+    check_folder_task = check_pdf_folder()
     
     # No files found task
     no_files_found = DummyOperator(
@@ -122,15 +93,15 @@ with DAG(
         trigger_rule='one_success'
     )
     
-    # Trigger processing for each new PDF file
+    # Trigger processing for each PDF file
     trigger_processing = TriggerDagRunOperator.partial(
         task_id='trigger_pdf_processing',
         trigger_dag_id='shared_process_file_pdf2vector',
-        wait_for_completion=False,
+        wait_for_completion=False,  # Allow parallel execution
         reset_dag_run=True,
         execution_timeout=timedelta(minutes=30),
     ).expand(
-        conf=check_new_files_task.map(
+        conf=check_folder_task.map(
             lambda x: {'uuid': x['uuid'], 'file_path': x['file_path']} if x else {}
         )
     )
@@ -142,8 +113,8 @@ with DAG(
     )
     
     # Set dependencies
-    start >> monitor_folder >> check_new_files_task
-    check_new_files_task >> [trigger_processing, no_files_found]
+    start >> check_folder_task
+    check_folder_task >> [trigger_processing, no_files_found]
     trigger_processing >> end
     no_files_found >> end
 
