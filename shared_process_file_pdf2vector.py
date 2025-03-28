@@ -23,12 +23,13 @@ default_args = {
     schedule_interval=None,
     start_date=days_ago(1),
     catchup=False,
+    max_active_runs=32,  # Increase concurrency
     params={'uuid': None, 'file_path': None}
 )
 def process_pdf_dag():
     @task
     def process_file(uuid, file_path):
-        """Upload a single PDF file to the API and archive it."""
+        logger.info(f"Processing file: uuid={uuid}, file_path={file_path}")
         if not uuid or not file_path:
             logger.error("UUID or file_path not provided - stopping DAG")
             return
@@ -42,12 +43,9 @@ def process_pdf_dag():
             logger.error(f"File {file_path} not found - stopping DAG")
             return
 
-        # Extract tags from path
+        files = {'file': (pdf_file, open(file_path, 'rb'), 'application/pdf')}
         path_parts = Path(file_path).relative_to(target_path).parts
         tags = list(path_parts[:-1]) if len(path_parts) > 1 else []
-
-        # Prepare upload data
-        files = {'file': (pdf_file, open(file_path, 'rb'), 'application/pdf')}
         params = {'tags': ','.join(tags)} if tags else {}
 
         try:
@@ -58,7 +56,6 @@ def process_pdf_dag():
             logger.error(f"Error uploading {pdf_file}: {str(e)}")
         finally:
             files['file'][1].close()
-            # Archive the file
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             archive_path = os.path.join(target_path, 'archive', timestamp)
             os.makedirs(archive_path, exist_ok=True)
@@ -71,8 +68,8 @@ def process_pdf_dag():
 
     @task
     def extract_params(**kwargs):
-        """Extract UUID and file_path from dag_run.conf."""
         conf = kwargs['dag_run'].conf
+        logger.info(f"Extracted conf: {conf}")
         return {'uuid': conf.get('uuid'), 'file_path': conf.get('file_path')}
 
     params = extract_params()
