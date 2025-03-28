@@ -8,10 +8,8 @@ import os
 import logging
 import re
 
-# Set up logging
 logger = logging.getLogger("airflow.task")
 
-# Default arguments for the DAG
 default_args = {
     'owner': 'lowtouch.ai_developers',
     'depends_on_past': False,
@@ -19,7 +17,6 @@ default_args = {
     "retry_delay": timedelta(seconds=15),
 }
 
-# UUID regex pattern
 UUID_PATTERN = re.compile(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 )
@@ -34,7 +31,6 @@ def check_pdf_folder():
             logger.error(f"Base folder {folder_path} does not exist")
             raise Exception(f"Folder {folder_path} not found")
         
-        # Scan for UUID directories
         for dir_name in os.listdir(folder_path):
             if not UUID_PATTERN.match(dir_name):
                 continue
@@ -43,7 +39,6 @@ def check_pdf_folder():
             if not os.path.isdir(full_path):
                 continue
                 
-            # Walk through UUID directory, excluding archive
             for root, dirs, files in os.walk(full_path):
                 if 'archive' in dirs:
                     dirs.remove('archive')
@@ -59,7 +54,7 @@ def check_pdf_folder():
         
         if not pdf_files_info:
             logger.info("No PDF files found in any UUID directories")
-            return []  # Return empty list instead of None
+            return []
         
         logger.info(f"Found {len(pdf_files_info)} PDF files")
         return pdf_files_info
@@ -68,37 +63,29 @@ def check_pdf_folder():
         logger.error(f"Error in check_pdf_folder: {str(e)}")
         raise
 
-# DAG definition
 with DAG(
     'shared_monitor_folder_pdf',
     default_args=default_args,
     description='Monitors UUID folders for PDF files and triggers processing',
-    schedule_interval='* * * * *',  # Runs every minute
+    schedule_interval='* * * * *',
     start_date=days_ago(1),
     catchup=False,
     tags=["shared", "folder", "monitor", "pdf", "rag"],
     max_active_runs=1,
-    concurrency=50,  # Allow multiple parallel triggers
+    concurrency=50,
+    max_active_tasks=50  # Allow more concurrent tasks
 ) as dag:
 
-    # Start task
     start = DummyOperator(task_id='start')
-    
-    # Check folder task
     check_folder_task = check_pdf_folder()
+    no_files_found = DummyOperator(task_id='no_files_found', trigger_rule='one_success')
     
-    # No files found task
-    no_files_found = DummyOperator(
-        task_id='no_files_found',
-        trigger_rule='one_success'
-    )
-    
-    # Trigger processing for each PDF file
     trigger_processing = TriggerDagRunOperator.partial(
         task_id='trigger_pdf_processing',
         trigger_dag_id='shared_process_file_pdf2vector',
-        wait_for_completion=False,  # Allow parallel execution
+        wait_for_completion=False,
         reset_dag_run=True,
+        poke_interval=10,  # Check status more frequently
         execution_timeout=timedelta(minutes=30),
     ).expand(
         conf=check_folder_task.map(
@@ -106,13 +93,8 @@ with DAG(
         )
     )
     
-    # End task
-    end = DummyOperator(
-        task_id='end',
-        trigger_rule='all_done'
-    )
+    end = DummyOperator(task_id='end', trigger_rule='all_done')
     
-    # Set dependencies
     start >> check_folder_task
     check_folder_task >> [trigger_processing, no_files_found]
     trigger_processing >> end

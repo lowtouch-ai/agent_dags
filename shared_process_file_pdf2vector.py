@@ -4,10 +4,9 @@ from airflow.utils.dates import days_ago
 import os
 import requests
 from pathlib import Path
-import uuid
-from datetime import timedelta, datetime
 import logging
 import shutil
+from datetime import timedelta, datetime
 
 logger = logging.getLogger("airflow.task")
 
@@ -18,7 +17,9 @@ default_args = {
     'retry_delay': timedelta(minutes=5),
 }
 
-def process_pdf_file(file_path, target_uuid):
+def process_pdf_file(**kwargs):
+    file_path = kwargs['file_path']
+    target_uuid = kwargs['uuid']
     base_api_endpoint = "http://vector:8000/vector/pdf/"
     
     if not os.path.exists(file_path):
@@ -58,29 +59,24 @@ with DAG(
     'shared_process_file_pdf2vector',
     default_args=default_args,
     description='Process PDF files to vector API in parallel',
-    schedule_interval=None,  # Triggered DAG
+    schedule_interval=None,
     start_date=days_ago(1),
     catchup=False,
-    max_active_runs=50,  # Allow up to 50 simultaneous DAG runs
-    concurrency=50,      # Allow up to 50 tasks to run concurrently
+    max_active_runs=50,  # Allow multiple simultaneous runs
+    concurrency=50,      # Allow multiple tasks to run concurrently
     params={
         'uuid': None,
         'file_path': None
     }
 ) as dag:
 
-    def process_pdf_wrapper(**kwargs):
-        conf = kwargs['dag_run'].conf
-        if not conf or 'uuid' not in conf or 'file_path' not in conf:
-            logger.error("Invalid configuration provided")
-            raise ValueError("Missing required configuration")
-        
-        process_pdf_file(conf['file_path'], conf['uuid'])
-
     process_task = PythonOperator(
         task_id='process_pdf',
-        python_callable=process_pdf_wrapper,
-        execution_timeout=timedelta(minutes=5),  # Optional: timeout for each task
+        python_callable=process_pdf_file,
+        op_kwargs={
+            'file_path': '{{ dag_run.conf["file_path"] }}',
+            'uuid': '{{ dag_run.conf["uuid"] }}'
+        },
     )
 
     process_task
