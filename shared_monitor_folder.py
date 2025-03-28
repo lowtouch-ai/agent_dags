@@ -57,9 +57,9 @@ with DAG(
         task_id='monitor_pdf_folder',
         filepath='/appz/data/vector_watch_file_pdf/*/*.pdf',  # Wildcard pattern for UUID folders
         recursive=True,
-        poke_interval=60,  # Check every 60 seconds
-        timeout=3600,  # Timeout after 1 hour
-        mode='reschedule',  # More efficient than poke
+        poke_interval=60, 
+        timeout=3600,  
+        mode='reschedule',  
         fs_conn_id='fs_default' 
     )
     
