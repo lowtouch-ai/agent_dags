@@ -21,7 +21,6 @@ default_args = {
 UUID_PATTERN = re.compile(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 )
-
 @task
 def check_and_move_pdf_folder():
     base_path = '/appz/data/vector_watch_file_pdf'
@@ -49,19 +48,37 @@ def check_and_move_pdf_folder():
                 if 'archive' in root.lower() or 'processing_pdf' in root.lower():
                     continue
                     
-                for file in files:
-                    if file.lower().endswith('.pdf'):
-                        original_path = os.path.join(root, file)
-                        new_path = os.path.join(processing_path, file)
-                        
-                        # Move file immediately to prevent re-triggering
-                        if not os.path.exists(new_path):
-                            shutil.move(original_path, new_path)
-                            logger.info(f"Moved {original_path} to {new_path}")
-                            pdf_files_info.append({
-                                'uuid': dir_name,
-                                'file_path': new_path
-                            })
+                # Check if any PDF files exist in this folder
+                pdf_files = [f for f in files if f.lower().endswith('.pdf')]
+                if pdf_files:
+                    # Get the subfolder name relative to the UUID folder
+                    relative_subfolder = os.path.relpath(root, full_path)
+                    if relative_subfolder == '.':
+                        # If PDFs are directly in the UUID folder, move them individually
+                        for file in pdf_files:
+                            original_path = os.path.join(root, file)
+                            new_path = os.path.join(processing_path, file)
+                            if not os.path.exists(new_path):
+                                shutil.move(original_path, new_path)
+                                logger.info(f"Moved {original_path} to {new_path}")
+                                pdf_files_info.append({
+                                    'uuid': dir_name,
+                                    'file_path': new_path
+                                })
+                    else:
+                        # Move the entire subfolder to processing_path
+                        subfolder_name = os.path.basename(root)
+                        new_subfolder_path = os.path.join(processing_path, subfolder_name)
+                        if not os.path.exists(new_subfolder_path):
+                            shutil.move(root, new_subfolder_path)
+                            logger.info(f"Moved subfolder {root} to {new_subfolder_path}")
+                            # Add all PDFs in the moved subfolder to pdf_files_info
+                            for file in pdf_files:
+                                new_pdf_path = os.path.join(new_subfolder_path, file)
+                                pdf_files_info.append({
+                                    'uuid': dir_name,
+                                    'file_path': new_pdf_path
+                                })
         
         # Cleanup empty subfolders
         for dir_name in os.listdir(base_path):
@@ -83,7 +100,6 @@ def check_and_move_pdf_folder():
     except Exception as e:
         logger.error(f"Error in check_and_move_pdf_folder: {str(e)}")
         raise
-
 with DAG(
     'shared_monitor_folder_pdf',
     default_args=default_args,

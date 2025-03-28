@@ -29,7 +29,7 @@ def process_pdf_file(**kwargs):
     pdf_file = os.path.basename(file_path)
     api_endpoint = f"{base_api_endpoint}{target_uuid}/{pdf_file}"
     
-    base_path = os.path.join("/appz/data/vector_watch_file_pdf/", target_uuid)
+    base_path = os.path.join("/appz/data/vector_watch_file_pdf/", target_uuid,"processing_pdf")
     path_parts = Path(file_path).relative_to(base_path).parts
     tags = list(path_parts[:-1]) if len(path_parts) > 1 else []
     
