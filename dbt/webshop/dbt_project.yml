@@ -1,26 +1,20 @@
 name: 'ai_lab'
-
 config-version: 2
 version: '0.1'
-
 profile: 'ai_lab'
-
 model-paths: ["models"]
 seed-paths: ["data"]  # Ensures dbt looks for CSV files in the 'data/' directory
-
 target-path: "target"
 clean-targets:
     - "target"
     - "dbt_modules"
     - "logs"
-
 require-dbt-version: [">=1.0.0", "<2.0.0"]
-
 seeds:
   ai_lab:
     order_seed:  # Renamed from 'order' to avoid conflict with the model
       +column_types:
-        id: serial not null
+        id: integer
         customerid: integer
         ordertimestamp: timestamp
         shippingaddressid: integer
@@ -30,7 +24,7 @@ seeds:
         updated: timestamp
     address:
       +column_types:
-          id: serial not null
+          id: integer
           customerid: integer
           firstname: text
           lastname: text
@@ -43,7 +37,7 @@ seeds:
     articles:
       +full_refresh: false  # Prevents truncation before inserting new data
       +column_types:
-          id: serial not null
+          id: integer
           productid: integer
           ean: text
           colorid: integer
@@ -58,7 +52,7 @@ seeds:
           updated: timestamp
     customer:
       +column_types:
-          id: serial not null
+          id: integer
           firstname: text
           lastname: text
           gender: text
@@ -69,13 +63,13 @@ seeds:
           updated: timestamp
     labels:
       +column_types:
-          id: serial not null
+          id: integer
           name: text
           slugname: text
           icon: text
     order_positions:
       +column_types:
-          id: serial not null
+          id: integer
           orderid: integer
           articleid: integer
           amount: integer
@@ -84,7 +78,7 @@ seeds:
           updated: timestamp
     products:
       +column_types:
-          id: serial not null
+          id: integer
           name: text
           labelid: integer
           category: text
@@ -94,19 +88,19 @@ seeds:
           updated: timestamp
     stock:
       +column_types:
-          id: serial not null
+          id: integer
           articleid: integer
           count: integer
           created: timestamp
           updated: timestamp
     colors:
       +column_types:
-          id: serial not null
+          id: integer
           name: text
           rgb: text  # Storing HEX color codes as text
     sizes:     # Name of the seed, should match the CSV filename (apparel_sizes.csv)
       +column_types:
-          id: serial not null
+          id: integer
           gender: text
           category: text
           size: text

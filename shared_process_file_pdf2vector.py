@@ -10,6 +10,7 @@ logger = logging.getLogger("airflow.task")
 
 default_args = {
     'owner': 'lowtouch.ai_developers',
+    'owner': 'lowtouch.ai_developers',
     'depends_on_past': False,
     'retries': 1,
     "retry_delay": timedelta(seconds=15),
