@@ -9,8 +9,10 @@ import os
 import logging
 import re
 
+# Set up logging
 logger = logging.getLogger("airflow.task")
 
+# Default arguments for the DAG
 default_args = {
     'owner': 'lowtouch.ai_developers',
     'depends_on_past': False,
@@ -18,27 +20,35 @@ default_args = {
     "retry_delay": timedelta(seconds=15),
 }
 
+# UUID regex pattern
 UUID_PATTERN = re.compile(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 )
 
 @task
-def process_found_file(file_path):
-    """Process the file path and return config for trigger"""
-    folder_path = '/appz/data/vector_watch_file_pdf'
-    relative_path = file_path.replace(folder_path + '/', '')
-    uuid = relative_path.split('/')[0]
+def extract_file_info(file_path):
+    """Extract UUID and file path from the detected file."""
+    if not file_path or not os.path.exists(file_path):
+        logger.error(f"File {file_path} does not exist")
+        return None
     
-    return {
-        'uuid': uuid,
-        'file_path': file_path
-    }
+    # Extract UUID from the directory structure
+    relative_path = file_path.replace('/appz/data/vector_watch_file_pdf/', '')
+    parts = relative_path.split(os.sep)
+    uuid = next((part for part in parts if UUID_PATTERN.match(part)), None)
+    
+    if not uuid:
+        logger.error(f"No valid UUID found in path: {file_path}")
+        return None
+    
+    return {'uuid': uuid, 'file_path': file_path}
 
+# DAG definition
 with DAG(
     'shared_monitor_folder_pdf',
     default_args=default_args,
     description='Monitors UUID folders for new PDF files and triggers processing',
-    schedule_interval=None,  # We'll use sensor instead of schedule
+    schedule_interval=None,  # FileSensor will drive execution
     start_date=days_ago(1),
     catchup=False,
     tags=["shared", "folder", "monitor", "pdf", "rag"],
@@ -46,42 +56,37 @@ with DAG(
     concurrency=50,
 ) as dag:
 
+    # Start task
     start = DummyOperator(task_id='start')
 
-    # FileSensor to monitor for new PDF files
+    # FileSensor to detect new PDF files
     monitor_folder = FileSensor(
-        task_id='monitor_new_pdfs',
-        filepath='/appz/data/vector_watch_file_pdf/*/*.pdf',  # Pattern to match UUID subfolders
-        recursive=True,
-        poke_interval=60,  # Check every minute
-        timeout=24*60*60,  # Timeout after 24 hours
-        mode='poke',  # Keep checking until file appears
-        soft_fail=False,  # Fail if timeout reached
-        filter_by_pattern=True,  # Use the pattern matching
-        fs_conn_id='fs_default'  # Default filesystem connection
+        task_id='monitor_pdf_files',
+        filepath='/appz/data/vector_watch_file_pdf/*/*.pdf',  # Adjust pattern as needed
+        recursive=True,  # Scan subdirectories
+        poke_interval=60,  # Check every 60 seconds
+        timeout=3600,  # Timeout after 1 hour if no new files
+        mode='poke',  # Keep checking until a file is found
+        filter_by_pattern=True,  # Use the filepath pattern
     )
 
-    # Process the found file
-    process_file = process_found_file(
-        monitor_folder.output
-    )
+    # Extract file info from the detected file
+    extract_info = extract_file_info(monitor_folder.output)
 
     # Trigger the processing DAG
     trigger_processing = TriggerDagRunOperator(
         task_id='trigger_pdf_processing',
         trigger_dag_id='shared_process_file_pdf2vector',
-        conf=process_file,
+        conf={'uuid': extract_info['uuid'], 'file_path': extract_info['file_path']},
         wait_for_completion=False,
         reset_dag_run=True,
         execution_timeout=timedelta(minutes=30),
     )
 
-    end = DummyOperator(
-        task_id='end',
-        trigger_rule='all_done'
-    )
+    # End task
+    end = DummyOperator(task_id='end', trigger_rule='all_done')
 
-    # Dependencies
-    start >> monitor_folder >> process_file >> trigger_processing >> end
+    # Set dependencies
+    start >> monitor_folder >> extract_info >> trigger_processing >> end
 
 logger.info("DAG shared_monitor_folder_pdf loaded successfully")
