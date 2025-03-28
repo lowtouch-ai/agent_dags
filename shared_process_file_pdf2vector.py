@@ -49,12 +49,6 @@ def process_pdf_file(**kwargs):
         shutil.move(file_path, archive_destination)
         logger.info(f"Archived {pdf_file} to {archive_destination}")
         
-        # Clean up empty parent directory if applicable
-        parent_dir = os.path.dirname(file_path)
-        if os.path.exists(parent_dir) and not os.listdir(parent_dir):
-            shutil.rmtree(parent_dir)
-            logger.info(f"Removed empty parent directory: {parent_dir}")
-        
     except requests.exceptions.RequestException as e:
         logger.error(f"Error uploading {pdf_file}: {str(e)}")
         raise
@@ -65,10 +59,10 @@ with DAG(
     'shared_process_file_pdf2vector',
     default_args=default_args,
     description='Process PDF files to vector API in parallel',
-    schedule_interval=None,
+    schedule_interval=None,  # Triggered by the monitor DAG
     start_date=days_ago(1),
     catchup=False,
-    max_active_runs=50,  # Allow up to 50 simultaneous runs
+    max_active_runs=50,  # Allow up to 50 simultaneous DAG runs
     concurrency=50,      # Allow up to 50 tasks to run concurrently
     params={
         'uuid': None,

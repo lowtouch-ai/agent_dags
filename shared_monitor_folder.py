@@ -25,10 +25,7 @@ UUID_PATTERN = re.compile(
 @task
 def check_and_move_pdf_folder():
     base_path = '/appz/data/vector_watch_file_pdf'
-    processing_path = '/appz/data/vector_watch_file_pdf/processing_pdf'
     pdf_files_info = []
-    
-    os.makedirs(processing_path, exist_ok=True)
     
     try:
         if not os.path.exists(base_path):
@@ -43,6 +40,9 @@ def check_and_move_pdf_folder():
             if not os.path.isdir(full_path):
                 continue
                 
+            processing_path = os.path.join(full_path, 'processing_pdf')
+            os.makedirs(processing_path, exist_ok=True)
+            
             for root, dirs, files in os.walk(full_path):
                 if 'archive' in dirs:
                     dirs.remove('archive')
@@ -52,12 +52,9 @@ def check_and_move_pdf_folder():
                 for file in files:
                     if file.lower().endswith('.pdf'):
                         original_path = os.path.join(root, file)
-                        relative_path = os.path.relpath(root, base_path)
-                        new_dir = os.path.join(processing_path, relative_path)
-                        os.makedirs(new_dir, exist_ok=True)
-                        new_path = os.path.join(new_dir, file)
+                        new_path = os.path.join(processing_path, file)
                         
-                        # Only move if not already in processing_path
+                        # Move file immediately to prevent re-triggering
                         if not os.path.exists(new_path):
                             shutil.move(original_path, new_path)
                             logger.info(f"Moved {original_path} to {new_path}")
@@ -91,12 +88,12 @@ with DAG(
     'shared_monitor_folder_pdf',
     default_args=default_args,
     description='Monitors UUID folders for PDF files and triggers processing',
-    schedule_interval='* * * * *',
+    schedule_interval='* * * * *',  # Runs every minute
     start_date=days_ago(1),
     catchup=False,
     tags=["shared", "folder", "monitor", "pdf", "rag"],
-    max_active_runs=1,
-    concurrency=50,
+    max_active_runs=1,  # Only one instance of this DAG at a time
+    concurrency=50,     # Allow up to 50 tasks
     max_active_tasks=50
 ) as dag:
 
@@ -107,7 +104,7 @@ with DAG(
     trigger_processing = TriggerDagRunOperator.partial(
         task_id='trigger_pdf_processing',
         trigger_dag_id='shared_process_file_pdf2vector',
-        wait_for_completion=False,
+        wait_for_completion=False,  # Don't wait, allow parallel execution
         reset_dag_run=True,
         poke_interval=10,
         execution_timeout=timedelta(minutes=30),
