@@ -80,7 +80,7 @@ with DAG(
     process_task = PythonOperator(
         task_id='process_pdf',
         python_callable=process_pdf_wrapper,
-        execution_timeout=timedelta(minutes=30),  # Optional: timeout for each task
+        execution_timeout=timedelta(minutes=5),  # Optional: timeout for each task
     )
 
     process_task
