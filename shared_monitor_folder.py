@@ -60,8 +60,7 @@ with DAG(
         poke_interval=60,  # Check every 60 seconds
         timeout=3600,  # Timeout after 1 hour
         mode='reschedule',  # More efficient than poke
-        filter_by_pattern=True,
-        fs_conn_id='fs_default'  # Ensure this connection is configured in Airflow
+        fs_conn_id='fs_default' 
     )
     
     # Process the found file
