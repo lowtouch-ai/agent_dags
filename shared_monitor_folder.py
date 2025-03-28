@@ -78,7 +78,7 @@ with DAG(
     trigger_tasks = TriggerDagRunOperator.partial(
         task_id='trigger_pdf_processing',
         trigger_dag_id='shared_process_file_pdf2vector',
-        wait_for_completion=True,
+        wait_for_completion=False,
         reset_dag_run=True,
         execution_timeout=timedelta(minutes=30),
     ).expand(
