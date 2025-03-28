@@ -62,8 +62,13 @@ def monitor_folder_dag():
     def branch_func(pdf_files_info):
         """Branch based on whether PDF files are found."""
         if pdf_files_info:
-            return 'trigger_pdf_processing'
+            return 'prepare_trigger_configs'
         return 'no_files_found'
+
+    @task
+    def prepare_trigger_configs(pdf_files_info):
+        """Prepare the list of conf dictionaries for triggering."""
+        return [{'uuid': info['uuid'], 'file_path': info['file_path']} for info in pdf_files_info]
 
     @task
     def no_files_found():
@@ -72,23 +77,26 @@ def monitor_folder_dag():
     start = DummyOperator(task_id='start')
     end = DummyOperator(task_id='end', trigger_rule=TriggerRule.NONE_FAILED)
 
+    # Task flow
     pdf_files_info = check_pdf_folder()
     branch = branch_func(pdf_files_info)
 
+    # Prepare the trigger configurations
+    trigger_configs = prepare_trigger_configs(pdf_files_info)
+
+    # Dynamic triggering with expand
     trigger_tasks = TriggerDagRunOperator.partial(
         task_id='trigger_pdf_processing',
         trigger_dag_id='shared_process_file_pdf2vector',
         reset_dag_run=True,
         wait_for_completion=False,  # Enable parallel execution
-    ).expand(
-        conf=[{'uuid': info['uuid'], 'file_path': info['file_path']} for info in pdf_files_info]
-    )
+    ).expand(conf=trigger_configs)
 
     no_files = no_files_found()
 
     # Dependencies
     start >> pdf_files_info >> branch
-    branch >> trigger_tasks >> end
+    branch >> trigger_configs >> trigger_tasks >> end
     branch >> no_files >> end
 
 dag = monitor_folder_dag()
