@@ -24,7 +24,6 @@ UUID_PATTERN = re.compile(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 )
 
-# Task to check the folder and return PDF info
 @task
 def check_pdf_folder():
     folder_path = '/appz/data/vector_watch_file_pdf'
@@ -59,8 +58,10 @@ def check_pdf_folder():
                         })
         
         if not pdf_files_info:
-            logger.info("  No PDF files found in any UUID directories")
+            logger.info("No PDF files found in any UUID directories")
+            return []  # Return empty list instead of None
         
+        logger.info(f"Found {len(pdf_files_info)} PDF files")
         return pdf_files_info
         
     except Exception as e:
@@ -76,7 +77,8 @@ with DAG(
     start_date=days_ago(1),
     catchup=False,
     tags=["shared", "folder", "monitor", "pdf", "rag"],
-    max_active_runs=1
+    max_active_runs=1,
+    concurrency=50,  # Allow multiple parallel triggers
 ) as dag:
 
     # Start task
@@ -85,21 +87,35 @@ with DAG(
     # Check folder task
     check_folder_task = check_pdf_folder()
     
-    # Dynamically mapped trigger tasks
-    trigger_tasks = TriggerDagRunOperator.partial(
+    # No files found task
+    no_files_found = DummyOperator(
+        task_id='no_files_found',
+        trigger_rule='one_success'
+    )
+    
+    # Trigger processing for each PDF file
+    trigger_processing = TriggerDagRunOperator.partial(
         task_id='trigger_pdf_processing',
         trigger_dag_id='shared_process_file_pdf2vector',
-        wait_for_completion=False,
+        wait_for_completion=False,  # Allow parallel execution
         reset_dag_run=True,
         execution_timeout=timedelta(minutes=30),
     ).expand(
-        conf=check_folder_task,
+        conf=check_folder_task.map(
+            lambda x: {'uuid': x['uuid'], 'file_path': x['file_path']} if x else {}
+        )
     )
     
     # End task
-    end = DummyOperator(task_id='end', trigger_rule='none_failed')
+    end = DummyOperator(
+        task_id='end',
+        trigger_rule='all_done'
+    )
     
     # Set dependencies
-    start >> check_folder_task >> trigger_tasks >> end
+    start >> check_folder_task
+    check_folder_task >> [trigger_processing, no_files_found]
+    trigger_processing >> end
+    no_files_found >> end
 
 logger.info("DAG shared_monitor_folder_pdf loaded successfully")
