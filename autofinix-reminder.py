@@ -3,7 +3,8 @@ from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.operators.dummy import DummyOperator
 from airflow.models import Variable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta,time
+import pytz
 import json
 import requests
 import re
@@ -338,9 +339,32 @@ def update_call_status(api_url, agent_url, **kwargs):
                     )
                     logger.info(f"Generated remind_on_date for call_id={call_id}: {remind_on_date}")
                     remind_on_date=extract_final_datetime(remind_on_date)
-                    # Validate date format (ISO)
+                    # Parse the remind_on_date into a datetime object
                     datetime.fromisoformat(remind_on_date.replace("Z", "+00:00"))
+                    utc_tz = pytz.timezone("UTC")
+                    remind_dt = utc_tz.localize(remind_dt)
+                    target_tz= pytz.timezone("Asia/Kolkata") if loan_id%2==0 else pytz.timezone("America/New_York")
+                    start_time,end_time = time(9, 0), time(17, 0)
+                    # Convert to target timezone
+                    local_dt = remind_dt.astimezone(target_tz)
+                    local_date = local_dt.date()
+                    local_time = local_dt.time()
+                    # Adjust time to fall within office hours
+                    if local_time < start_time or local_time > end_time:
+                        # Set to 9 AM if before office hours, or next day 9 AM if after
+                        if local_time < start_time:
+                            adjusted_local_dt = target_tz.localize(datetime.combine(local_date, start_time))
+                        else:
+                            next_day = local_date + timedelta(days=1)
+                            adjusted_local_dt = target_tz.localize(datetime.combine(next_day, start_time))
+                        # Convert back to UTC
+                        remind_dt = adjusted_local_dt.astimezone(utc_tz)
+                    else:
+                        remind_dt = local_dt.astimezone(utc_tz)  # Already in office hours, just keep it in UTC
 
+                    # Format back to ISO string
+                    remind_on_date = remind_dt.isoformat().replace("+00:00", "Z")
+                    logger.info(f"Adjusted remind_on_date to office hours for call_id={call_id}: {remind_on_date}")
                     # Set new reminder
                     set_reminder_url = f"{api_url}loan/{loan_id}/set_reminder"
                     payload = {"remind_on": remind_on_date}
