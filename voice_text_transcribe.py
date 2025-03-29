@@ -61,7 +61,7 @@ with DAG(
         temp_file_path = None
         preprocessed_file_path = None
         try:
-            fernet_key = Variable.get("FERNET_KEY").encode()  # Retrieve key from Airflow Variables
+            fernet_key = Variable.get("FERNET_SECRET_KEY").encode()  # Retrieve key from Airflow Variables
             fernet = Fernet(fernet_key)
             encrypted_data = base64.b64decode(encrypted_audio.encode('utf-8'))
             decrypted_data = fernet.decrypt(encrypted_data)

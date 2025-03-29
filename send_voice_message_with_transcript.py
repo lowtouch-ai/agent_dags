@@ -274,7 +274,7 @@ with DAG(
             logger.info(f"Recording saved at {file_path}")
 
             # Encrypt the audio file
-            fernet_key = Variable.get("FERNET_KEY").encode()  # Ensure FERNET_KEY is set in Airflow Variables
+            fernet_key = Variable.get("FERNET_SECRET_KEY").encode()  # Ensure FERNET_KEY is set in Airflow Variables
             fernet = Fernet(fernet_key)
             with open(file_path, "rb") as f:
                 audio_data = f.read()
