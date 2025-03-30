@@ -128,7 +128,7 @@ def generate_voice_message_agent(loan_id, agent_url, transcription=None, inserte
     )
     if transcription and inserted_date:
         prompt = (
-            f"Analyze the following transcription: '{transcription}' to extract a date for the next loan reminder. "
+            f"Analyze the following transcription: '{transcription}' to extract a date for the next loan reminder. Do not use any tools since the result only need a data from the transcription. "
             f"Interpret relative time expressions (e.g., 'next week,' 'tomorrow') based on the current date: {inserted_date}. "
             f"For 'next week,' use the same weekday as the current date in the following week (e.g., if today is Wednesday, 'next week' is next Wednesday). "
             f"If a specific date or clear intent to pay is found, calculate that date; if it is more than 2 months (120 days) from {inserted_date}, treat it as unrealistic and set the date one week from {inserted_date}. "
