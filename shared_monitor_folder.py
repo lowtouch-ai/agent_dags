@@ -43,29 +43,38 @@ def check_and_move_pdf_folder():
             processing_path = os.path.join(full_path, 'processsing_pdf')
             os.makedirs(processing_path, exist_ok=True)
             
-            for root, dirs, files in os.walk(full_path):
-                if 'archive' in root.lower() or 'processsing_pdf' in root.lower():
+            for root, _, files in os.walk(full_path):
+                # Skip directories with "archive" or "processing_pdf" in their names
+                if any(skip_dir in root.lower() for skip_dir in ['archive', 'processsing_pdf']):
                     continue
                     
-                for file in files:
-                    if file.lower().endswith('.pdf'):
-                        original_path = os.path.join(root, file)
-                        new_path = os.path.join(processing_path, file)
+                # Filter PDF files using list comprehension
+                pdf_files = [file for file in files if file.lower().endswith('.pdf')]
+                
+                for file in pdf_files:
+                    original_path = os.path.join(root, file)
+                    new_path = os.path.join(processing_path, file)
+                    
+                    # Check if the file already exists in the destination
+                    if not os.path.exists(new_path):
+                        shutil.move(original_path, new_path)
+                        logger.info(f"Moved {original_path} to {new_path}")
                         
-                        if not os.path.exists(new_path):
-                            shutil.move(original_path, new_path)
-                            logger.info(f"Moved {original_path} to {new_path}")
-                            pdf_files_info.append({
-                                'uuid': dir_name,
-                                'file_path': new_path,
-                                'tags': os.path.relpath(root, full_path).split(os.sep)
-                            })
-        
+                        # Extract relative path tags
+                        relative_path = os.path.relpath(root, full_path)
+                        tags = relative_path.split(os.sep)
+                        
+                        # Add file information to the tracking list
+                        pdf_files_info.append({
+                            'uuid': dir_name,
+                            'file_path': new_path,
+                            'tags': tags
+                        })
         # Cleanup empty subfolders
         for dir_name in os.listdir(base_path):
             if UUID_PATTERN.match(dir_name):
                 full_path = os.path.join(base_path, dir_name)
-                for root, dirs, files in os.walk(full_path, topdown=False):
+                for root, files in os.walk(full_path, topdown=False):
                     if 'archive' not in root.lower() and 'processsing_pdf' not in root.lower():
                         if not os.listdir(root):
                             shutil.rmtree(root)
