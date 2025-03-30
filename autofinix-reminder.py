@@ -338,17 +338,22 @@ def update_call_status(api_url, agent_url, **kwargs):
                         inserted_date=inserted_date
                     )
                     logger.info(f"Generated remind_on_date for call_id={call_id}: {remind_on_date}")
-                    remind_on_date=extract_final_datetime(remind_on_date)
-                    # Parse the remind_on_date into a datetime object
+                    remind_on_date = extract_final_datetime(remind_on_date)
+
+                    # Parse the remind_on_date into a datetime object (already UTC-aware)
                     remind_dt = datetime.fromisoformat(remind_on_date.replace("Z", "+00:00"))
                     utc_tz = pytz.timezone("UTC")
-                    remind_dt = utc_tz.localize(remind_dt)
-                    target_tz= pytz.timezone("Asia/Kolkata") if loan_id%2==0 else pytz.timezone("America/New_York")
-                    start_time,end_time = time(9, 0), time(17, 0)
+                    # No need to localize again since it's already UTC-aware
+
+                    # Determine target timezone based on loan_id parity
+                    target_tz = pytz.timezone("Asia/Kolkata") if int(loan_id) % 2 == 0 else pytz.timezone("America/New_York")
+                    start_time, end_time = time(9, 0), time(17, 0)  # 9 AM - 5 PM
+
                     # Convert to target timezone
                     local_dt = remind_dt.astimezone(target_tz)
                     local_date = local_dt.date()
                     local_time = local_dt.time()
+
                     # Adjust time to fall within office hours
                     if local_time < start_time or local_time > end_time:
                         # Set to 9 AM if before office hours, or next day 9 AM if after
@@ -365,6 +370,7 @@ def update_call_status(api_url, agent_url, **kwargs):
                     # Format back to ISO string
                     remind_on_date = remind_dt.isoformat().replace("+00:00", "Z")
                     logger.info(f"Adjusted remind_on_date to office hours for call_id={call_id}: {remind_on_date}")
+
                     # Set new reminder
                     set_reminder_url = f"{api_url}loan/{loan_id}/set_reminder"
                     payload = {"remind_on": remind_on_date}
