@@ -340,7 +340,7 @@ def update_call_status(api_url, agent_url, **kwargs):
                     logger.info(f"Generated remind_on_date for call_id={call_id}: {remind_on_date}")
                     remind_on_date=extract_final_datetime(remind_on_date)
                     # Parse the remind_on_date into a datetime object
-                    datetime.fromisoformat(remind_on_date.replace("Z", "+00:00"))
+                    remind_dt = datetime.fromisoformat(remind_on_date.replace("Z", "+00:00"))
                     utc_tz = pytz.timezone("UTC")
                     remind_dt = utc_tz.localize(remind_dt)
                     target_tz= pytz.timezone("Asia/Kolkata") if loan_id%2==0 else pytz.timezone("America/New_York")
