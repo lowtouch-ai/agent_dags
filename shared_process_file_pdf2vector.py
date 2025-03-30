@@ -8,7 +8,6 @@ import logging
 import shutil
 from datetime import timedelta, datetime
 
-
 logger = logging.getLogger("airflow.task")
 
 default_args = {
@@ -19,15 +18,12 @@ default_args = {
     "retry_delay": timedelta(seconds=15),
 }
 
-def process_pdf_file(**kwargs):
-    file_path = kwargs['file_path']
-    target_uuid = kwargs['uuid']
+def process_pdf_file(**context):
+    conf = context['dag_run'].conf
+    file_path = conf.get('file_path')
+    target_uuid = conf.get('uuid')
     base_api_endpoint = "http://vector:8000/vector/pdf/"
-    
-    if not os.path.exists(file_path):
-        logger.error(f"File not found: {file_path}")
-        raise FileNotFoundError(f"File not found: {file_path}")
-
+    tags = conf.get('tags', [])
     pdf_file = os.path.basename(file_path)
     api_endpoint = f"{base_api_endpoint}{target_uuid}/{pdf_file}"
     
@@ -56,7 +52,6 @@ def process_pdf_file(**kwargs):
         raise
     finally:
         files['file'][1].close()
-
 
 with DAG(
     'shared_process_file_pdf2vector',
