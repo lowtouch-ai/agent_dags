@@ -1,10 +1,12 @@
-from datetime import timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
 import os
+import requests
+from pathlib import Path
 import logging
 import shutil
+from datetime import timedelta, datetime
 
 logger = logging.getLogger("airflow.task")
 
@@ -19,29 +21,37 @@ default_args = {
 def process_pdf_file(**context):
     conf = context['dag_run'].conf
     file_path = conf.get('file_path')
-    uuid = conf.get('uuid')
+    target_uuid = conf.get('uuid')
+    base_api_endpoint = "http://vector:8000/vector/pdf/"
     tags = conf.get('tags', [])
+    pdf_file = os.path.basename(file_path)
+    api_endpoint = f"{base_api_endpoint}{target_uuid}/{pdf_file}"
+    
+    base_path = os.path.join("/appz/data/vector_watch_file_pdf/", target_uuid)
+    path_parts = Path(file_path).relative_to(base_path).parts
+    tags = list(path_parts[:-1]) if len(path_parts) > 1 else []
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive_path = os.path.join(base_path, 'archive', timestamp)
+    os.makedirs(archive_path, exist_ok=True)
+    
+    files = {'file': (pdf_file, open(file_path, 'rb'), 'application/pdf')}
+    params = {'tags': ','.join(tags)} if tags else {}
     
     try:
-        # Simulate PDF to vector processing
-        logger.info(f"Processing PDF: {file_path} with tags: {tags}")
+        response = requests.post(api_endpoint, files=files, params=params)
+        response.raise_for_status()
+        logger.info(f"Successfully uploaded {pdf_file} with tags: {tags}")
         
-        # After processing, move to archive
-        archive_path = os.path.join(
-            '/appz/data/vector_watch_file_pdf', 
-            uuid, 
-            'archive'
-        )
-        os.makedirs(archive_path, exist_ok=True)
+        archive_destination = os.path.join(archive_path, pdf_file)
+        shutil.move(file_path, archive_destination)
+        logger.info(f"Archived {pdf_file} to {archive_destination}")
         
-        file_name = os.path.basename(file_path)
-        archive_file_path = os.path.join(archive_path, file_name)
-        shutil.move(file_path, archive_file_path)
-        logger.info(f"Moved processed file to: {archive_file_path}")
-        
-    except Exception as e:
-        logger.error(f"Error processing file {file_path}: {str(e)}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error uploading {pdf_file}: {str(e)}")
         raise
+    finally:
+        files['file'][1].close()
 
 with DAG(
     'shared_process_file_pdf2vector',

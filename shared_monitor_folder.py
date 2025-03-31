@@ -91,8 +91,7 @@ with DAG(
     catchup=False,
     tags=["shared", "folder", "monitor", "pdf", "rag"],
     max_active_runs=1,
-    concurrency=50,
-    max_active_tasks=50
+   
 ) as dag:
 
     start = DummyOperator(task_id='start')
