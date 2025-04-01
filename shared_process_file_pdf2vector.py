@@ -60,9 +60,7 @@ with DAG(
     start_date=days_ago(1),
     catchup=False,
     tags=["shared", "process", "pdf", "vector"],
-    max_active_runs=50,      # Allow multiple parallel runs
-    concurrency=50,         # Allow parallel task execution
-    max_active_tasks=50     # Allow multiple files to process simultaneously
+    max_active_runs=50
 ) as dag:
 
     process_task = PythonOperator(
