@@ -28,8 +28,6 @@ def process_pdf_file(**context):
     api_endpoint = f"{base_api_endpoint}{target_uuid}/{pdf_file}"
     
     base_path = os.path.join("/appz/data/vector_watch_file_pdf/", target_uuid)
-    path_parts = Path(file_path).relative_to(base_path).parts
-    tags = list(path_parts[:-1]) if len(path_parts) > 1 else []
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     archive_path = os.path.join(base_path, 'archive', timestamp)
