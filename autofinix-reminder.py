@@ -31,6 +31,7 @@ default_args = {
 AUTOFINIX_API_URL = Variable.get("AUTOFINIX_API_URL")
 AGENTOMATIC_API_URL = Variable.get("AGENTOMATIC_API_URL")
 AUTOFINIX_TEST_PHONE_NUMBER = Variable.get("AUTOFINIX_TEST_PHONE_NUMBER")
+AUTOFINIX_TEST_PHONE_NUMBER_QA=Variable.get("AUTOFINIX_TEST_PHONE_NUMBER_QA")
 AUTOFINIX_DEMO_PHONE_ODD=Variable.get("AUTOFINIX_DEMO_PHONE_ODD")
 AUTOFINIX_DEMO_PHONE_EVEN=Variable.get("AUTOFINIX_DEMO_PHONE_EVEN")
 
@@ -66,7 +67,7 @@ def make_api_request(url, method="GET", params=None, json=None, retries=3):
         logger.error(f"API request failed: {str(e)}")
         raise
 
-def fetch_due_loans(api_url, test_phone_number,even_phone_number,odd_phone_number, **kwargs):
+def fetch_due_loans(api_url, test_phone_number,test_phone_number_qa, even_phone_number,odd_phone_number, **kwargs):
     """Fetches loans that are due from the Autoloan API"""
     ti = kwargs['ti']
     try:
@@ -91,6 +92,8 @@ def fetch_due_loans(api_url, test_phone_number,even_phone_number,odd_phone_numbe
                 if int(reminder['loan_id'])%2==0:
                     if int(reminder['loan_id'])==550:
                         reminder["phone"] = test_phone_number
+                    elif int(reminder['loan_id'])==540:
+                        reminder["phone"] = test_phone_number_qa
                     else:
                         reminder["phone"] = even_phone_number
                 else:
@@ -464,6 +467,7 @@ with DAG(
         op_kwargs={
             "api_url": AUTOFINIX_API_URL,
             "test_phone_number": AUTOFINIX_TEST_PHONE_NUMBER,
+            "test_phone_number_qa": AUTOFINIX_TEST_PHONE_NUMBER_QA,
             "odd_phone_number":AUTOFINIX_DEMO_PHONE_ODD,
             "even_phone_number":AUTOFINIX_DEMO_PHONE_EVEN,
         },
