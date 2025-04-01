@@ -53,12 +53,13 @@ def check_and_move_pdf_folder():
                         new_path = os.path.join(processing_path, file)
                         
                         if not os.path.exists(new_path):
+                            tags = os.path.relpath(root, full_path).split(os.sep)
                             shutil.move(original_path, new_path)
                             logger.info(f"Moved {original_path} to {new_path}")
                             pdf_files_info.append({
                                 'uuid': dir_name,
                                 'file_path': new_path,
-                                'tags': os.path.relpath(root, full_path).split(os.sep)
+                                'tags': tags
                             })
         
         # Cleanup empty subfolders
