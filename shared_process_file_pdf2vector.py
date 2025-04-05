@@ -58,7 +58,7 @@ with DAG(
     start_date=days_ago(1),
     catchup=False,
     tags=["shared", "process", "pdf", "vector"],
-    max_active_runs=50
+    max_active_runs=6
 ) as dag:
 
     process_task = PythonOperator(
