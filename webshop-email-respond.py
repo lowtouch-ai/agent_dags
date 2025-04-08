@@ -92,7 +92,8 @@ def get_ai_response(user_query):
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
-        logging.debug(f"Full API response: {json.dumps(response, indent=2)}")
+        # Log the full response fetched from the agent
+        logging.info(f"Full response fetched from agent: {json.dumps(response, indent=2)}")
 
         # Check if response contains the expected structure
         if 'message' not in response or 'content' not in response['message']:
@@ -100,14 +101,15 @@ def get_ai_response(user_query):
             return "<html><body>Invalid response from server. Please try again later.</body></html>"
 
         ai_content = response['message']['content']
-        logging.debug(f"Extracted AI content (first 200 chars): {ai_content[:200]}...")
+        # Log the specific content being extracted
+        logging.info(f"Content extracted from agent response: {ai_content[:500]}...")  # Limiting to 500 chars to avoid log flooding
 
         if not ai_content.strip():
             logging.warning("AI returned empty content")
             return "<html><body>No response generated. Please try again later.</body></html>"
 
         # Verify it's HTML (basic check)
-        if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html'):
+        if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content STRUCTUREDstartsWith('<html'):
             logging.warning("Response doesn't appear to be proper HTML, wrapping it")
             ai_content = f"<html><body>{ai_content}</body></html>"
 
