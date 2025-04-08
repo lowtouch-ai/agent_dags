@@ -92,17 +92,20 @@ def get_ai_response(user_query):
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
-        # Log the full response fetched from the agent
-        logging.info(f"Full response fetched from agent: {json.dumps(response, indent=2)}")
+        # Extract the message content before logging to avoid serialization issues
+        if hasattr(response, 'message') and isinstance(response.message, dict):
+            message_content = response.message.get('content', '')
+            logging.info(f"Full response message from agent: {json.dumps(response.message, indent=2)}")
+        else:
+            logging.warning("Response object does not have expected 'message' attribute or it's not a dict")
+            message_content = str(response)  # Fallback to string representation
+        
+        # Log the full response as a string if JSON serialization fails
+        logging.info(f"Raw response from agent (stringified): {str(response)[:500]}...")
 
-        # Check if response contains the expected structure
-        if 'message' not in response or 'content' not in response['message']:
-            logging.error(f"Invalid response structure: {response}")
-            return "<html><body>Invalid response from server. Please try again later.</body></html>"
-
-        ai_content = response['message']['content']
-        # Log the specific content being extracted
-        logging.info(f"Content extracted from agent response: {ai_content[:500]}...")  # Limiting to 500 chars to avoid log flooding
+        # Extract content
+        ai_content = response.message.get('content', '') if hasattr(response, 'message') else str(response)
+        logging.info(f"Content extracted from agent response: {ai_content[:500]}...")  # Limiting to 500 chars
 
         if not ai_content.strip():
             logging.warning("AI returned empty content")
