@@ -16,8 +16,8 @@ from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import os
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging with more detail
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 default_args = {
     "owner": "lowtouch.ai_developers",
@@ -83,17 +83,25 @@ def get_email_thread(service, email_data):
 
 def get_ai_response(user_query):
     try:
+        logging.debug(f"Attempting to get AI response for query: {user_query}")
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
+        logging.debug(f"Client initialized with host: {OLLAMA_HOST}")
+        
         response = client.chat(
             model='webshop-invoice:0.5',
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
+        logging.debug(f"Raw AI response: {response}")
+        
         ai_content = response.get('message', {}).get('content', '')
-        # Ensure the response is properly formatted as HTML
-        if not ai_content.strip().startswith('<'):
-            ai_content = f"<html><body>{ai_content}</body></html>"
-        return ai_content
+        if not ai_content:
+            logging.warning("AI returned empty content")
+            return "<html><body>No response generated. Please try again later.</body></html>"
+        
+        logging.debug(f"AI content extracted: {ai_content[:100]}...")  # Log first 100 chars
+        return ai_content  # Assuming this is already HTML as per your statement
+        
     except ResponseError as e:
         logging.error(f"Ollama API error: {str(e)} (status: {getattr(e, 'status_code', 'unknown')})")
         return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
@@ -103,6 +111,7 @@ def get_ai_response(user_query):
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
+        logging.debug(f"Sending email to {recipient} with subject: {subject}")
         msg = MIMEMultipart()
         msg["From"] = f"WebShop via lowtouch.ai <{WEBSHOP_FROM_ADDRESS}>"
         msg["To"] = recipient
@@ -111,7 +120,9 @@ def send_email(service, recipient, subject, body, in_reply_to, references):
         msg["References"] = references
         msg.attach(MIMEText(body, "html"))
         raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
-        return service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
+        result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
+        logging.info(f"Email sent successfully: {result}")
+        return result
     except Exception as e:
         logging.error(f"Failed to send email: {str(e)}")
         return None
@@ -132,8 +143,11 @@ def send_response(**kwargs):
         sender_email = email_data["headers"].get("From", "")
         subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
         user_query = email_data.get("content", "").strip()
+        logging.debug(f"Processing query: {user_query}")
+        
         ai_response_html = get_ai_response(user_query) if user_query else "<html><body>No content provided in the email.</body></html>"
-
+        logging.debug(f"AI response to send: {ai_response_html[:100]}...")  # Log first 100 chars
+        
         send_email(
             service, sender_email, subject, ai_response_html,
             email_data["headers"].get("Message-ID", ""),
