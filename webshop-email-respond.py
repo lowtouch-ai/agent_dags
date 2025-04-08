@@ -16,8 +16,8 @@ from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import os
 
-# Configure detailed logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
 default_args = {
     "owner": "lowtouch.ai_developers",
@@ -83,49 +83,26 @@ def get_email_thread(service, email_data):
 
 def get_ai_response(user_query):
     try:
-        logging.debug(f"Query received: {user_query}")
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
-        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop-invoice:0.5'")
-
         response = client.chat(
             model='webshop-invoice:0.5',
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
-        logging.debug(f"Full API response: {json.dumps(response, indent=2)}")
-
-        # Check if response contains the expected structure
-        if 'message' not in response or 'content' not in response['message']:
-            logging.error(f"Invalid response structure: {response}")
-            return "<html><body>Invalid response from server. Please try again later.</body></html>"
-
-        ai_content = response['message']['content']
-        logging.debug(f"Extracted AI content (first 200 chars): {ai_content[:200]}...")
-
-        if not ai_content.strip():
-            logging.warning("AI returned empty content")
-            return "<html><body>No response generated. Please try again later.</body></html>"
-
-        # Verify it's HTML (basic check)
-        if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html'):
-            logging.warning("Response doesn't appear to be proper HTML, wrapping it")
+        ai_content = response.get('message', {}).get('content', '')
+        # Ensure the response is properly formatted as HTML
+        if not ai_content.strip().startswith('<'):
             ai_content = f"<html><body>{ai_content}</body></html>"
-
         return ai_content
-
     except ResponseError as e:
-        logging.error(f"Ollama API error - Status: {getattr(e, 'status_code', 'unknown')}, Message: {str(e)}")
+        logging.error(f"Ollama API error: {str(e)} (status: {getattr(e, 'status_code', 'unknown')})")
         return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
-    except ValueError as e:
-        logging.error(f"Value error in AI response generation: {str(e)}")
-        return "<html><body>Invalid data received. Please check your request.</body></html>"
     except Exception as e:
         logging.error(f"Unexpected error in AI response generation: {str(e)}")
         return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
-        logging.debug(f"Preparing email to {recipient} with subject: {subject}")
         msg = MIMEMultipart()
         msg["From"] = f"WebShop via lowtouch.ai <{WEBSHOP_FROM_ADDRESS}>"
         msg["To"] = recipient
@@ -134,9 +111,7 @@ def send_email(service, recipient, subject, body, in_reply_to, references):
         msg["References"] = references
         msg.attach(MIMEText(body, "html"))
         raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
-        result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
-        logging.info(f"Email sent successfully: {result}")
-        return result
+        return service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
     except Exception as e:
         logging.error(f"Failed to send email: {str(e)}")
         return None
@@ -157,10 +132,7 @@ def send_response(**kwargs):
         sender_email = email_data["headers"].get("From", "")
         subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
         user_query = email_data.get("content", "").strip()
-        logging.debug(f"Sending query to AI: {user_query}")
-        
         ai_response_html = get_ai_response(user_query) if user_query else "<html><body>No content provided in the email.</body></html>"
-        logging.debug(f"AI response received (first 200 chars): {ai_response_html[:200]}...")
 
         send_email(
             service, sender_email, subject, ai_response_html,
