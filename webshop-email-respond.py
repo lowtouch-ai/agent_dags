@@ -83,23 +83,19 @@ def get_email_thread(service, email_data):
 
 def get_ai_response(user_query):
     try:
+        logging.error(f"Unexpected error in AI response generation: {str(e)}")
+        
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
         response = client.chat(
             model='webshop-invoice:0.5',
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
-        ai_content = response.get('message', {}).get('content', '')
-        # Ensure the response is properly formatted as HTML
-        if not ai_content.strip().startswith('<'):
-            ai_content = f"<html><body>{ai_content}</body></html>"
-        return ai_content
+        return response.get('message', {}).get('content', "We are currently experiencing technical difficulties. Please check back later.")
     except ResponseError as e:
         logging.error(f"Ollama API error: {str(e)} (status: {getattr(e, 'status_code', 'unknown')})")
-        return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
     except Exception as e:
-        logging.error(f"Unexpected error in AI response generation: {str(e)}")
-        return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
+        return "We are currently experiencing technical difficulties. Please check back later."
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
@@ -131,8 +127,8 @@ def send_response(**kwargs):
         
         sender_email = email_data["headers"].get("From", "")
         subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
-        user_query = email_data.get("content", "").strip()
-        ai_response_html = get_ai_response(user_query) if user_query else "<html><body>No content provided in the email.</body></html>"
+        user_query = email_data.get("content", "").strip()  # Ensures we handle missing or empty content
+        ai_response_html = get_ai_response(user_query) if user_query else "We are currently experiencing technical difficulties. Please check back later."
 
         send_email(
             service, sender_email, subject, ai_response_html,
