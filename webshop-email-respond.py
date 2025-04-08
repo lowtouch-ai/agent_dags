@@ -92,26 +92,26 @@ def get_ai_response(user_query):
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
-        # Extract the message content before logging to avoid serialization issues
-        if hasattr(response, 'message') and isinstance(response.message, dict):
-            message_content = response.message.get('content', '')
-            logging.info(f"Full response message from agent: {json.dumps(response.message, indent=2)}")
-        else:
-            logging.warning("Response object does not have expected 'message' attribute or it's not a dict")
-            message_content = str(response)  # Fallback to string representation
-        
-        # Log the full response as a string if JSON serialization fails
-        logging.info(f"Raw response from agent (stringified): {str(response)[:500]}...")
+        # Log the raw response as a string
+        logging.info(f"Raw response from agent: {str(response)[:500]}...")
 
-        # Extract content
-        ai_content = response.message.get('content', '') if hasattr(response, 'message') else str(response)
-        logging.info(f"Content extracted from agent response: {ai_content[:500]}...")  # Limiting to 500 chars
+        # Extract content from the Message object
+        if hasattr(response, 'message') and hasattr(response.message, 'content'):
+            ai_content = response.message.content
+            logging.info(f"Full message content from agent: {ai_content[:500]}...")
+        else:
+            logging.warning("Response lacks expected 'message.content' structure")
+            ai_content = str(response)
+
+        # Clean up any markdown markers (e.g., ```html)
+        ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
+        logging.info(f"Cleaned content extracted from agent response: {ai_content[:500]}...")
 
         if not ai_content.strip():
             logging.warning("AI returned empty content")
             return "<html><body>No response generated. Please try again later.</body></html>"
 
-        # Verify it's HTML (basic check)
+        # Verify it's HTML (check after cleaning)
         if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html'):
             logging.warning("Response doesn't appear to be proper HTML, wrapping it")
             ai_content = f"<html><body>{ai_content}</body></html>"
