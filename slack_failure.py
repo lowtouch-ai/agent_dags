@@ -1,23 +1,17 @@
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from default_dag_args import default_args
+from airflow.operators.bash import BashOperator
 from datetime import datetime
 
-default_args = {
-    'owner': 'lowtouch.ai_developers',
-    'start_date': datetime(2025, 4, 4),
-    'retries': 0,  # Ensure no retries mask the failure
-}
-
 with DAG(
-    dag_id='test_slack_alert',
+    'slack_alert',
     default_args=default_args,
-    schedule_interval=None,
+    description='A simple DAG with Slack alerts',
+    schedule_interval='@daily',
+    start_date=datetime(2025, 4, 1),
     catchup=False,
 ) as dag:
-    def fail_task():
-        raise ValueError("Intentional failure for testing!")
-
-    task1 = PythonOperator(
+    task = BashOperator(
         task_id='fail_task',
-        python_callable=fail_task,
+        bash_command='exit 1',  # This will fail and trigger the alert
     )
