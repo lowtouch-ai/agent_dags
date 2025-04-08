@@ -109,7 +109,7 @@ def get_ai_response(user_query):
             return "<html><body>No response generated. Please try again later.</body></html>"
 
         # Verify it's HTML (basic check)
-        if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content STRUCTUREDstartsWith('<html'):
+        if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html'):
             logging.warning("Response doesn't appear to be proper HTML, wrapping it")
             ai_content = f"<html><body>{ai_content}</body></html>"
 
