@@ -87,7 +87,7 @@ def get_ai_response(user_query):
         
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
         response = client.chat(
-            model='webshop-email:0.5',
+            model='webshop-invoice:0.5',
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
