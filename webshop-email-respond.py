@@ -16,7 +16,7 @@ from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import os
 
-#changes
+#changes1
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -123,9 +123,9 @@ def get_ai_response(user_query):
 
         return ai_content
 
-    except ResponseError as e:
-        logging.error(f"Ollama API error - Status: {getattr(e, 'status_code', 'unknown')}, Message: {str(e)}")
-        return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
+    #except ResponseError as e:
+        #logging.error(f"Ollama API error - Status: {getattr(e, 'status_code', 'unknown')}, Message: {str(e)}")
+        #return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
     except Exception as e:
         logging.error(f"Unexpected error in AI response generation: {str(e)}")
         return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
