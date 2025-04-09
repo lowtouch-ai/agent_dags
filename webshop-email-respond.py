@@ -103,7 +103,7 @@ def get_ai_response(user_query):
             logging.error("Response lacks expected 'message.content' structure")
             return "<html><body>Invalid response format from AI. Please try again later.</body></html>"
 
-        # Check if the response contains an error message unintentionally
+        # Check for unexpected error messages in content
         if "technical difficulties" in ai_content.lower():
             logging.warning("AI response contains unexpected error message")
             return "<html><body>Unexpected response received. Please contact support.</body></html>"
@@ -150,10 +150,21 @@ def send_email(service, recipient, subject, body, in_reply_to, references):
 
 def send_response(**kwargs):
     try:
+        run_id = kwargs['dag_run'].run_id  # Log the run ID for tracking
+        logging.info(f"Starting send_response for run_id: {run_id}")
+        
         email_data = kwargs['dag_run'].conf.get("email_data", {})
         logging.info(f"Received email data: {email_data}")
         if not email_data:
             logging.warning("No email data received! This DAG was likely triggered manually.")
+            return
+        
+        # Check for duplicate processing using Message-ID
+        message_id = email_data["headers"].get("Message-ID", "")
+        processed_messages = Variable.get("processed_message_ids", default_var=[], deserialize_json=True)
+        
+        if message_id in processed_messages:
+            logging.info(f"Email with Message-ID {message_id} already processed, skipping.")
             return
         
         service = authenticate_gmail()
@@ -171,9 +182,14 @@ def send_response(**kwargs):
 
         send_email(
             service, sender_email, subject, ai_response_html,
-            email_data["headers"].get("Message-ID", ""),
-            email_data["headers"].get("References", "")
+            message_id, email_data["headers"].get("References", "")
         )
+        
+        # Mark email as processed
+        processed_messages.append(message_id)
+        Variable.set("processed_message_ids", processed_messages, serialize_json=True)
+        logging.info(f"Marked Message-ID {message_id} as processed.")
+        
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
 
