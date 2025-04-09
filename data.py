@@ -9,15 +9,6 @@ import logging
 import os
 
 logger = logging.getLogger(__name__)
-# Default arguments
-default_args = {
-    'owner': 'lowtouch.ai_developers',
-    'depends_on_past': False,
-    'start_date': datetime(2024, 2, 28),
-    'retries': 1,
-    'retry_delay': timedelta(minutes=5),
-    'on_failure_callback': slack_failure_alert,
-}
 
 def slack_failure_alert(context):
     """Send a Slack alert when a DAG fails, including details of the failed task."""
@@ -42,6 +33,16 @@ def slack_failure_alert(context):
         logger.info("Slack alert sent successfully for DAG %s, Task %s", dag_id, task_id)
     except Exception as e:
         logger.error("Failed to send Slack alert: %s", str(e))
+
+# Default arguments
+default_args = {
+    'owner': 'lowtouch.ai_developers',
+    'depends_on_past': False,
+    'start_date': datetime(2024, 2, 28),
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+    'on_failure_callback': slack_failure_alert,
+}
 # Define DBT project path and executable
 dbt_project_dir = "/appz/home/airflow/dags/agent_dags/dbt/webshop"
 dbt_executable_path = "/dbt_venv/bin/dbt"  # Full path to dbt binary
