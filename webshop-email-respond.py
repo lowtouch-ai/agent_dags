@@ -1,6 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.models import Variable
+from airflow.models import Variable, TaskInstance
 from datetime import datetime, timedelta
 import base64
 import json
@@ -15,6 +15,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import os
+from uuid import uuid4
 
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,7 +26,7 @@ default_args = {
     "start_date": datetime(2024, 2, 18),
     "retries": 0,
     "retry_delay": timedelta(seconds=15),
-    "max_active_runs": 1,  # Ensure only one run at a time
+    "max_active_runs": 1,
 }
 
 WEBSHOP_FROM_ADDRESS = Variable.get("WEBSHOP_FROM_ADDRESS")
@@ -88,21 +89,29 @@ def get_ai_response(user_query):
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop-invoice:0.5'")
 
+        # First attempt
         response = client.chat(
             model='webshop-invoice:0.5',
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
-        # Log the raw response as a string
-        logging.info(f"Raw response from agent: {str(response)[:500]}...")
+        logging.info(f"Raw response from agent (first attempt): {str(response)[:500]}...")
 
-        # Extract content from the Message object
         if hasattr(response, 'message') and hasattr(response.message, 'content'):
             ai_content = response.message.content
-            logging.info(f"Full message content from agent: {ai_content[:500]}...")
         else:
-            logging.warning("Response lacks expected 'message.content' structure")
-            ai_content = str(response)
+            logging.warning("First attempt failed, retrying once...")
+            # Retry once if the first attempt fails
+            response = client.chat(
+                model='webshop-invoice:0.5',
+                messages=[{"role": "user", "content": user_query}],
+                stream=False
+            )
+            logging.info(f"Raw response from agent (retry): {str(response)[:500]}...")
+            if hasattr(response, 'message') and hasattr(response.message, 'content'):
+                ai_content = response.message.content
+            else:
+                raise Exception("Failed to get valid response after retry")
 
         # Clean up any markdown markers (e.g., ```html)
         ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
@@ -129,13 +138,13 @@ def get_ai_response(user_query):
         logging.error(f"Unexpected error in AI response generation: {str(e)}")
         return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
 
-def send_email(service, recipient, subject, body, in_reply_to, references, is_error=False):
+def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
-        logging.debug(f"Preparing email to {recipient} with subject: {subject}, is_error: {is_error}")
+        logging.debug(f"Preparing email to {recipient} with subject: {subject}")
         msg = MIMEMultipart()
         msg["From"] = f"WebShop via lowtouch.ai <{WEBSHOP_FROM_ADDRESS}>"
         msg["To"] = recipient
-        msg["Subject"] = subject if not is_error else f"Error - {subject}"
+        msg["Subject"] = subject
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = references
         msg.attach(MIMEText(body, "html"))
@@ -149,8 +158,10 @@ def send_email(service, recipient, subject, body, in_reply_to, references, is_er
 
 def send_response(**kwargs):
     try:
+        ti = kwargs['ti']
+        dag_run_id = kwargs['dag_run'].run_id
         email_data = kwargs['dag_run'].conf.get("email_data", {})
-        logging.info(f"Received email data: {email_data}")
+        logging.info(f"Received email data for DAG run {dag_run_id}: {email_data}")
         if not email_data:
             logging.warning("No email data received! This DAG was likely triggered manually.")
             return
@@ -164,35 +175,29 @@ def send_response(**kwargs):
         subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
         user_query = email_data.get("content", "").strip()
         message_id = email_data["headers"].get("Message-ID", "")
-        logging.debug(f"Sending query to AI: {user_query}")
+        logging.debug(f"Sending query to AI for message ID {message_id}: {user_query}")
 
-        # Only process if this message hasn't been handled
-        if 'processed_message_ids' not in kwargs or message_id not in kwargs['processed_message_ids']:
+        # Unique task execution ID
+        task_exec_id = f"{dag_run_id}_{message_id}_{str(uuid4())[:8]}"
+        logging.info(f"Task execution ID: {task_exec_id}")
+
+        # Check if this message has been processed in this run
+        if not hasattr(ti, 'processed_message_ids'):
+            ti.processed_message_ids = set()
+        if message_id not in ti.processed_message_ids:
             ai_response_html = get_ai_response(user_query) if user_query else "<html><body>No content provided in the email.</body></html>"
             logging.debug(f"AI response received (first 200 chars): {ai_response_html[:200]}...")
             
-            # Send only the correct response, avoid sending error if content is valid
             if "technical difficulties" not in ai_response_html.lower():
                 send_email(
                     service, sender_email, subject, ai_response_html,
                     message_id,
                     email_data["headers"].get("References", "")
                 )
-            else:
-                logging.warning("Sending error response due to technical difficulties")
-                send_email(
-                    service, sender_email, subject, ai_response_html,
-                    message_id,
-                    email_data["headers"].get("References", ""),
-                    is_error=True
-                )
-            
-            # Mark this message as processed (store in context if supported)
-            if 'processed_message_ids' not in kwargs:
-                kwargs['processed_message_ids'] = set()
-            kwargs['processed_message_ids'].add(message_id)
+            ti.processed_message_ids.add(message_id)
         else:
-            logging.info(f"Message ID {message_id} already processed, skipping.")
+            logging.info(f"Message ID {message_id} already processed in this run, skipping.")
+
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
 
