@@ -5,17 +5,13 @@ from datetime import datetime, timedelta
 from airflow.models import Variable
 import os
 
-# Import the slack_failure_alert callback (assuming it's in plugins)
-from slack_alerts import slack_failure_alert
-
-# Default arguments with failover and Slack alert
+# Default arguments
 default_args = {
     'owner': 'lowtouch.ai_developers',
     'depends_on_past': False,
     'start_date': datetime(2024, 2, 28),
-    'retries': 1,  # Number of retry attempts
-    'retry_delay': timedelta(minutes=5),  # Delay between retries
-    'on_failure_callback': slack_failure_alert,  # Slack alert on failure
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
 }
 
 # Define DBT project path and executable
@@ -29,7 +25,7 @@ postgres_password = Variable.get("WEBSHOP_POSTGRES_PASSWORD")
 
 # Define dbt commands
 dbt_seed_commands = [
-    "address", "articles", "colors", "customer", "labels",
+    "address", "articles", "colors", "customer", "labels", 
     "order_positions", "order_seed", "products", "stock", "sizes"
 ]
 
@@ -75,13 +71,4 @@ with DAG(
                 }
             )
 
-    # Optional Failover Task (e.g., cleanup or notification)
-    failover_task = BashOperator(
-        task_id='failover_cleanup',
-        bash_command='echo "Failover triggered: Cleaning up or notifying team" > /tmp/failover.log',
-        trigger_rule='all_failed'  # Runs only if all upstream tasks fail
-    )
-
-    # Define task dependencies
-    dbt_seed_group >> dbt_run_group
-    [dbt_seed_group, dbt_run_group] >> failover_task  # Failover runs if any task fails
+    dbt_seed_group >> dbt_run_group  # Ensure dbt seed runs before dbt run
