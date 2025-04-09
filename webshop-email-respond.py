@@ -85,6 +85,11 @@ def get_email_thread(service, email_data):
 def get_ai_response(user_query):
     try:
         logging.debug(f"Query received: {user_query}")
+        
+        # Validate input
+        if not user_query or not isinstance(user_query, str):
+            return "<html><body>Invalid input provided. Please enter a valid query.</body></html>"
+
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop-invoice:0.5'")
 
@@ -95,23 +100,24 @@ def get_ai_response(user_query):
         )
         logging.info(f"Raw response from agent: {str(response)[:500]}...")
 
-        # Extract content safely
-        if hasattr(response, 'message') and hasattr(response.message, 'content'):
-            ai_content = response.message.content
-            logging.info(f"Full message content from agent: {ai_content[:500]}...")
-        else:
+        # Extract content
+        if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
             logging.error("Response lacks expected 'message.content' structure")
             return "<html><body>Invalid response format from AI. Please try again later.</body></html>"
+        
+        ai_content = response.message.content
+        logging.info(f"Full message content from agent: {ai_content[:500]}...")
 
-        # Check if the response contains an error message unintentionally
-        if "technical difficulties" in ai_content.lower():
-            logging.warning("AI response contains unexpected error message")
+        # Check for error messages
+        if "technical difficulties" in ai_content.lower() or "error" in ai_content.lower():
+            logging.warning("AI response contains potential error message")
             return "<html><body>Unexpected response received. Please contact support.</body></html>"
 
         # Clean up markdown markers
         ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
         logging.info(f"Cleaned content extracted from agent response: {ai_content[:500]}...")
 
+        # Validate content
         if not ai_content.strip():
             logging.warning("AI returned empty content")
             return "<html><body>No response generated. Please try again later.</body></html>"
@@ -123,12 +129,57 @@ def get_ai_response(user_query):
 
         return ai_content
 
-    #except ResponseError as e:
-        #logging.error(f"Ollama API error - Status: {getattr(e, 'status_code', 'unknown')}, Message: {str(e)}")
-        #return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
     except Exception as e:
-        logging.error(f"Unexpected error in AI response generation: {str(e)}")
-        return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
+        logging.error(f"Error in get_ai_response: {str(e)}")
+        return "<html><body>An error occurred while processing your request. Please try again later or contact support.</body></html>"
+
+# def get_ai_response(user_query):
+#     try:
+#         logging.debug(f"Query received: {user_query}")
+#         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
+#         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop-invoice:0.5'")
+
+#         response = client.chat(
+#             model='webshop-invoice:0.5',
+#             messages=[{"role": "user", "content": user_query}],
+#             stream=False
+#         )
+#         logging.info(f"Raw response from agent: {str(response)[:500]}...")
+
+#         # Extract content safely
+#         if hasattr(response, 'message') and hasattr(response.message, 'content'):
+#             ai_content = response.message.content
+#             logging.info(f"Full message content from agent: {ai_content[:500]}...")
+#         else:
+#             logging.error("Response lacks expected 'message.content' structure")
+#             return "<html><body>Invalid response format from AI. Please try again later.</body></html>"
+
+#         # Check if the response contains an error message unintentionally
+#         if "technical difficulties" in ai_content.lower():
+#             logging.warning("AI response contains unexpected error message")
+#             return "<html><body>Unexpected response received. Please contact support.</body></html>"
+
+#         # Clean up markdown markers
+#         ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
+#         logging.info(f"Cleaned content extracted from agent response: {ai_content[:500]}...")
+
+#         if not ai_content.strip():
+#             logging.warning("AI returned empty content")
+#             return "<html><body>No response generated. Please try again later.</body></html>"
+
+#         # Ensure proper HTML structure
+#         if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html'):
+#             logging.warning("Response doesn't appear to be proper HTML, wrapping it")
+#             ai_content = f"<html><body>{ai_content}</body></html>"
+
+#         return ai_content
+
+#     #except ResponseError as e:
+#         #logging.error(f"Ollama API error - Status: {getattr(e, 'status_code', 'unknown')}, Message: {str(e)}")
+#         #return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
+#     except Exception as e:
+#         logging.error(f"Unexpected error in AI response generation: {str(e)}")
+#         return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
