@@ -1,6 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.models import Variable, TaskInstance
+from airflow.models import Variable, TaskInstance, XCom
 from datetime import datetime, timedelta
 import base64
 import json
@@ -15,7 +15,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import os
-from uuid import uuid4
+import time
 
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -27,11 +27,13 @@ default_args = {
     "retries": 0,
     "retry_delay": timedelta(seconds=15),
     "max_active_runs": 1,
+    "concurrency": 1,  # Limit concurrent task executions
 }
 
 WEBSHOP_FROM_ADDRESS = Variable.get("WEBSHOP_FROM_ADDRESS")
 GMAIL_CREDENTIALS = Variable.get("WEBSHOP_GMAIL_CREDENTIALS", deserialize_json=True)
 OLLAMA_HOST = Variable.get("WEBSHOP_OLLAMA_HOST")
+PROCESSED_MESSAGE_IDS_KEY = "webshop_processed_message_ids"
 
 def authenticate_gmail():
     try:
@@ -89,29 +91,18 @@ def get_ai_response(user_query):
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop-invoice:0.5'")
 
-        # First attempt
+        # Single attempt (no retry)
         response = client.chat(
             model='webshop-invoice:0.5',
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
-        logging.info(f"Raw response from agent (first attempt): {str(response)[:500]}...")
+        logging.info(f"Raw response from agent: {str(response)[:500]}...")
 
         if hasattr(response, 'message') and hasattr(response.message, 'content'):
             ai_content = response.message.content
         else:
-            logging.warning("First attempt failed, retrying once...")
-            # Retry once if the first attempt fails
-            response = client.chat(
-                model='webshop-invoice:0.5',
-                messages=[{"role": "user", "content": user_query}],
-                stream=False
-            )
-            logging.info(f"Raw response from agent (retry): {str(response)[:500]}...")
-            if hasattr(response, 'message') and hasattr(response.message, 'content'):
-                ai_content = response.message.content
-            else:
-                raise Exception("Failed to get valid response after retry")
+            raise Exception("Response lacks expected 'message.content' structure")
 
         # Clean up any markdown markers (e.g., ```html)
         ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
@@ -161,7 +152,7 @@ def send_response(**kwargs):
         ti = kwargs['ti']
         dag_run_id = kwargs['dag_run'].run_id
         email_data = kwargs['dag_run'].conf.get("email_data", {})
-        logging.info(f"Received email data for DAG run {dag_run_id}: {email_data}")
+        logging.info(f"Processing email data for DAG run {dag_run_id}: {email_data}")
         if not email_data:
             logging.warning("No email data received! This DAG was likely triggered manually.")
             return
@@ -177,14 +168,12 @@ def send_response(**kwargs):
         message_id = email_data["headers"].get("Message-ID", "")
         logging.debug(f"Sending query to AI for message ID {message_id}: {user_query}")
 
-        # Unique task execution ID
-        task_exec_id = f"{dag_run_id}_{message_id}_{str(uuid4())[:8]}"
-        logging.info(f"Task execution ID: {task_exec_id}")
+        # Load processed message IDs from XCom or initialize
+        processed_ids = XCom.get_value(key=PROCESSED_MESSAGE_IDS_KEY, dag_id="shared_send_message_email", task_id="send-response") or set()
+        logging.info(f"Current processed message IDs: {processed_ids}")
 
-        # Check if this message has been processed in this run
-        if not hasattr(ti, 'processed_message_ids'):
-            ti.processed_message_ids = set()
-        if message_id not in ti.processed_message_ids:
+        # Check if this message has been processed
+        if message_id not in processed_ids:
             ai_response_html = get_ai_response(user_query) if user_query else "<html><body>No content provided in the email.</body></html>"
             logging.debug(f"AI response received (first 200 chars): {ai_response_html[:200]}...")
             
@@ -194,9 +183,13 @@ def send_response(**kwargs):
                     message_id,
                     email_data["headers"].get("References", "")
                 )
-            ti.processed_message_ids.add(message_id)
+                # Update processed IDs
+                processed_ids.add(message_id)
+                XCom.set_value(key=PROCESSED_MESSAGE_IDS_KEY, value=processed_ids, dag_id="shared_send_message_email", task_id="send-response")
+            else:
+                logging.warning("Skipping send due to technical difficulties in response")
         else:
-            logging.info(f"Message ID {message_id} already processed in this run, skipping.")
+            logging.info(f"Message ID {message_id} already processed, skipping.")
 
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
