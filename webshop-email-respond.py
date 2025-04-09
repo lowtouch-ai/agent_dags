@@ -16,7 +16,7 @@ from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import os
 
-#changes
+#changes1
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
