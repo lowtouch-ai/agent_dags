@@ -2,6 +2,7 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from datetime import datetime
 from agent_dags.slack_utils import slack_failure_alert
+import logging
 
 logger = logging.getLogger(__name__)
 
