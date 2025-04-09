@@ -16,7 +16,7 @@ from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import os
 
-#changes1
+#changes
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -93,18 +93,22 @@ def get_ai_response(user_query):
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
-        # Log the raw response as a string
         logging.info(f"Raw response from agent: {str(response)[:500]}...")
 
-        # Extract content from the Message object
+        # Extract content safely
         if hasattr(response, 'message') and hasattr(response.message, 'content'):
             ai_content = response.message.content
             logging.info(f"Full message content from agent: {ai_content[:500]}...")
         else:
-            logging.warning("Response lacks expected 'message.content' structure")
-            ai_content = str(response)
+            logging.error("Response lacks expected 'message.content' structure")
+            return "<html><body>Invalid response format from AI. Please try again later.</body></html>"
 
-        # Clean up any markdown markers (e.g., ```html)
+        # Check if the response contains an error message unintentionally
+        if "technical difficulties" in ai_content.lower():
+            logging.warning("AI response contains unexpected error message")
+            return "<html><body>Unexpected response received. Please contact support.</body></html>"
+
+        # Clean up markdown markers
         ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
         logging.info(f"Cleaned content extracted from agent response: {ai_content[:500]}...")
 
@@ -112,7 +116,7 @@ def get_ai_response(user_query):
             logging.warning("AI returned empty content")
             return "<html><body>No response generated. Please try again later.</body></html>"
 
-        # Verify it's HTML (check after cleaning)
+        # Ensure proper HTML structure
         if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html'):
             logging.warning("Response doesn't appear to be proper HTML, wrapping it")
             ai_content = f"<html><body>{ai_content}</body></html>"
@@ -122,9 +126,6 @@ def get_ai_response(user_query):
     except ResponseError as e:
         logging.error(f"Ollama API error - Status: {getattr(e, 'status_code', 'unknown')}, Message: {str(e)}")
         return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
-    except ValueError as e:
-        logging.error(f"Value error in AI response generation: {str(e)}")
-        return "<html><body>Invalid data received. Please check your request.</body></html>"
     except Exception as e:
         logging.error(f"Unexpected error in AI response generation: {str(e)}")
         return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
