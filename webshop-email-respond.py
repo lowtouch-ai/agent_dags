@@ -25,6 +25,7 @@ default_args = {
     "start_date": datetime(2024, 2, 18),
     "retries": 0,
     "retry_delay": timedelta(seconds=15),
+    "max_active_runs": 1,  # Ensure only one run at a time
 }
 
 WEBSHOP_FROM_ADDRESS = Variable.get("WEBSHOP_FROM_ADDRESS")
@@ -128,13 +129,13 @@ def get_ai_response(user_query):
         logging.error(f"Unexpected error in AI response generation: {str(e)}")
         return "<html><body>We are currently experiencing technical difficulties. Please check back later.</body></html>"
 
-def send_email(service, recipient, subject, body, in_reply_to, references):
+def send_email(service, recipient, subject, body, in_reply_to, references, is_error=False):
     try:
-        logging.debug(f"Preparing email to {recipient} with subject: {subject}")
+        logging.debug(f"Preparing email to {recipient} with subject: {subject}, is_error: {is_error}")
         msg = MIMEMultipart()
         msg["From"] = f"WebShop via lowtouch.ai <{WEBSHOP_FROM_ADDRESS}>"
         msg["To"] = recipient
-        msg["Subject"] = subject
+        msg["Subject"] = subject if not is_error else f"Error - {subject}"
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = references
         msg.attach(MIMEText(body, "html"))
@@ -162,16 +163,36 @@ def send_response(**kwargs):
         sender_email = email_data["headers"].get("From", "")
         subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
         user_query = email_data.get("content", "").strip()
+        message_id = email_data["headers"].get("Message-ID", "")
         logging.debug(f"Sending query to AI: {user_query}")
-        
-        ai_response_html = get_ai_response(user_query) if user_query else "<html><body>No content provided in the email.</body></html>"
-        logging.debug(f"AI response received (first 200 chars): {ai_response_html[:200]}...")
 
-        send_email(
-            service, sender_email, subject, ai_response_html,
-            email_data["headers"].get("Message-ID", ""),
-            email_data["headers"].get("References", "")
-        )
+        # Only process if this message hasn't been handled
+        if 'processed_message_ids' not in kwargs or message_id not in kwargs['processed_message_ids']:
+            ai_response_html = get_ai_response(user_query) if user_query else "<html><body>No content provided in the email.</body></html>"
+            logging.debug(f"AI response received (first 200 chars): {ai_response_html[:200]}...")
+            
+            # Send only the correct response, avoid sending error if content is valid
+            if "technical difficulties" not in ai_response_html.lower():
+                send_email(
+                    service, sender_email, subject, ai_response_html,
+                    message_id,
+                    email_data["headers"].get("References", "")
+                )
+            else:
+                logging.warning("Sending error response due to technical difficulties")
+                send_email(
+                    service, sender_email, subject, ai_response_html,
+                    message_id,
+                    email_data["headers"].get("References", ""),
+                    is_error=True
+                )
+            
+            # Mark this message as processed (store in context if supported)
+            if 'processed_message_ids' not in kwargs:
+                kwargs['processed_message_ids'] = set()
+            kwargs['processed_message_ids'].add(message_id)
+        else:
+            logging.info(f"Message ID {message_id} already processed, skipping.")
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
 
