@@ -21,6 +21,6 @@
    - **Steps**:
      1. Authenticates with Gmail API using `WEBSHOP_GMAIL_CREDENTIALS`.
      2. Extracts sender, subject, and content from the email data.
-     3. Generates an AI response using the Ollama model (`webshop-invoice:0.5`).
+     3. Generates an AI response using the Ollama model (`webshop-email:0.5`).
      4. Sends an HTML-formatted reply email, preserving threading with `In-Reply-To` and `References` headers.
    - **Fallback**: If errors occur (e.g., no content or AI failure), sends a default message: "We are currently experiencing technical difficulties. Please check back later."
