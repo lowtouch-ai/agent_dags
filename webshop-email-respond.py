@@ -91,10 +91,10 @@ def get_ai_response(user_query):
             return "<html><body>Invalid input provided. Please enter a valid query.</body></html>"
 
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
-        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop-invoice:0.5'")
+        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop-email:0.5'")
 
         response = client.chat(
-            model='webshop-invoice:0.5',
+            model='webshop-email:0.5',
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
@@ -137,10 +137,10 @@ def get_ai_response(user_query):
 #     try:
 #         logging.debug(f"Query received: {user_query}")
 #         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
-#         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop-invoice:0.5'")
+#         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop-email:0.5'")
 
 #         response = client.chat(
-#             model='webshop-invoice:0.5',
+#             model='webshop-email:0.5',
 #             messages=[{"role": "user", "content": user_query}],
 #             stream=False
 #         )
