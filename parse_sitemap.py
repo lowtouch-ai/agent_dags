@@ -91,7 +91,7 @@ with DAG(
     def upload_html_to_agentvector(**context):
         try:
             conf = context['dag_run'].conf
-            url -                    url = conf.get('url')
+            url = conf.get('url')
             uuid = conf.get('uuid')
             
             if not url or not uuid:
