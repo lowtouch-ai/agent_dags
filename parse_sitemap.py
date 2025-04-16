@@ -1,10 +1,12 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-from datetime import datetime
+from airflow.utils.trigger_rule import TriggerRule
+from airflow.utils.dates import days_ago
+from airflow.api.common.experimental import trigger_dag
 import requests
 import xml.etree.ElementTree as ET
 import logging
+from datetime import datetime
 
 # Parent DAG
 default_args = {
@@ -54,7 +56,7 @@ with DAG(
                 if loc.endswith('.html') or loc.endswith('/'):
                     all_urls.append(loc)
         
-        # Return URLs and UUID for downstream tasks
+        logging.info(f"Found {len(all_urls)} URLs to process")
         return {'urls': all_urls, 'uuid': uuid}
 
     parse_task = PythonOperator(
@@ -62,21 +64,32 @@ with DAG(
         python_callable=parse_sitemap,
     )
 
-    # Define trigger tasks statically
-    MAX_TRIGGERS = 100  # Limit to avoid excessive task creation
-    for i in range(MAX_TRIGGERS):
-        trigger_task = TriggerDagRunOperator(
-            task_id=f'trigger_html_processing_{i}',
-            trigger_dag_id='process_lowtouch_html',
-            conf={
-                'url': "{{ ti.xcom_pull(task_ids='parse_sitemap')['urls'][%d] }}" % i,
-                'uuid': "{{ ti.xcom_pull(task_ids='parse_sitemap')['uuid'] }}"
-            },
-            run_id='triggered__{{ dag_run.run_id }}_{%d}' % i,  # Unique run_id for each trigger
-            dag=parent_dag,
-            do_xcom_push=False,
-        )
-        parse_task >> trigger_task
+    def trigger_child_dags(ti):
+        data = ti.xcom_pull(task_ids='parse_sitemap')
+        urls = data['urls']
+        uuid = data['uuid']
+        parent_run_id = ti.dag_run.run_id
+        
+        for i, url in enumerate(urls):
+            # Generate unique run_id for each child DAG run
+            child_run_id = f"triggered__{parent_run_id}_{i}"
+            logging.info(f"Triggering process_lowtouch_html for URL: {url} with run_id: {child_run_id}")
+            
+            # Trigger the child DAG
+            trigger_dag(
+                dag_id='process_lowtouch_html',
+                run_id=child_run_id,
+                conf={'url': url, 'uuid': uuid},
+                replace_microseconds=False,
+            )
+
+    trigger_task = PythonOperator(
+        task_id='trigger_child_dags',
+        python_callable=trigger_child_dags,
+        trigger_rule=TriggerRule.ALL_SUCCESS,
+    )
+
+    parse_task >> trigger_task
 
 # Child DAG
 with DAG(
@@ -86,6 +99,8 @@ with DAG(
     schedule_interval=None,  # Triggered by parent DAG
     start_date=datetime(2025, 4, 16),
     catchup=False,
+    max_active_runs=10,  # Limit concurrent runs
+    concurrency=10,      # Limit concurrent tasks
 ) as child_dag:
 
     def upload_html_to_agentvector(**context):
@@ -103,10 +118,10 @@ with DAG(
             # Call agentvector API to process HTML
             response = requests.post(agentvector_url, headers=headers)
             response.raise_for_status()
-            logging.info(f"Successfully uploaded {url} to agentvector")
+            logging.info(f"Successfully uploaded {url} to agentvector. Response: {response.text}")
         
         except Exception as e:
-            logging.error(f"Failed to process HTML: {e}")
+            logging.error(f"Failed to process HTML {url}: {e}")
             raise
 
     upload_task = PythonOperator(
