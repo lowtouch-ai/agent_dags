@@ -4,7 +4,6 @@ from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from datetime import datetime
 import requests
 import xml.etree.ElementTree as ET
-from urllib.parse import urljoin
 import logging
 
 # Parent DAG
@@ -63,28 +62,26 @@ with DAG(
         python_callable=parse_sitemap,
     )
 
-    def create_trigger_tasks(ti):
-        # Pull URLs and UUID from parse_task
+    # Create trigger tasks statically
+    def get_urls(ti):
         data = ti.xcom_pull(task_ids='parse_sitemap')
-        urls = data['urls']
-        uuid = data['uuid']
-        
-        # Create a trigger task for each URL
-        for i, url in enumerate(urls):
-            trigger_task = TriggerDagRunOperator(
-                task_id=f'trigger_html_processing_{i}',
-                trigger_dag_id='process_lowtouch_html',
-                conf={'url': url, 'uuid': uuid},
-                execution_date='{{ execution_date }}',
-            )
-            parse_task >> trigger_task
+        return data['urls'], data['uuid']
 
-    trigger_tasks = PythonOperator(
-        task_id='create_trigger_tasks',
-        python_callable=create_trigger_tasks,
-    )
-
-    parse_task >> trigger_tasks
+    # Define a reasonable number of trigger tasks (adjust based on needs)
+    MAX_TRIGGERS = 100  # Limit to avoid excessive task creation
+    for i in range(MAX_TRIGGERS):
+        trigger_task = TriggerDagRunOperator(
+            task_id=f'trigger_html_processing_{i}',
+            trigger_dag_id='process_lowtouch_html',
+            conf={
+                'url': "{{ ti.xcom_pull(task_ids='parse_sitemap')['urls'][%d] }}" % i,
+                'uuid': "{{ ti.xcom_pull(task_ids='parse_sitemap')['uuid'] }}"
+            },
+            execution_date='{{ execution_date }}',
+            dag=parent_dag,
+            do_xcom_push=False,
+        )
+        parse_task >> trigger_task
 
 # Child DAG
 with DAG(
@@ -97,15 +94,25 @@ with DAG(
 ) as child_dag:
 
     def upload_html_to_agentvector(**context):
-        url = context['dag_run'].conf['url']
-        uuid = context['dag_run'].conf['uuid']
-        agentvector_url = f'http://localhost:8082/vector/html/{uuid}/{url}'
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        try:
+            conf = context['dag_run'].conf
+            url = conf.get('url')
+            uuid = conf.get('uuid')
+            
+            if not url or not uuid:
+                raise ValueError("Missing 'url' or 'uuid' in DAG run configuration")
+                
+            agentvector_url = f'http://localhost:8082/vector/html/{uuid}/{url}'
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            
+            # Call agentvector API to process HTML
+            response = requests.post(agentvector_url, headers=headers)
+            response.raise_for_status()
+            logging.info(f"Successfully uploaded {url} to agentvector")
         
-        # Call agentvector API to process HTML
-        response = requests.post(agentvector_url, headers=headers)
-        response.raise_for_status()
-        logging.info(f"Successfully uploaded {url} to agentvector")
+        except Exception as e:
+            logging.error(f"Failed to process HTML: {e}")
+            raise
 
     upload_task = PythonOperator(
         task_id='upload_html',
