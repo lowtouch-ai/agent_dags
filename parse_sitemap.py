@@ -1,12 +1,11 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.utils.trigger_rule import TriggerRule
-from airflow.utils.dates import days_ago
-from airflow.api.common.experimental import trigger_dag
+from datetime import datetime
 import requests
 import xml.etree.ElementTree as ET
 import logging
-from datetime import datetime
+from airflow.api.common.trigger_dag import trigger_dag as trigger_dag_func
 
 # Parent DAG
 default_args = {
@@ -31,33 +30,38 @@ with DAG(
         uuid = 'febe553a-e665-4000-9cf4-b6ab84b0560f'
         headers = {'User-Agent': 'Mozilla/5.0'}
         
-        # Fetch parent sitemap
-        response = requests.get(sitemap_url, headers=headers)
-        response.raise_for_status()
-        root = ET.fromstring(response.content)
-        
-        # Namespace for sitemap XML
-        ns = {'sitemap': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
-        
-        # Collect all URLs from child sitemaps
-        all_urls = []
-        for sitemap in root.findall('sitemap:sitemap', ns):
-            child_sitemap_url = sitemap.find('sitemap:loc', ns).text
-            logging.info(f"Processing child sitemap: {child_sitemap_url}")
+        try:
+            # Fetch parent sitemap
+            response = requests.get(sitemap_url, headers=headers)
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
             
-            # Fetch child sitemap
-            child_response = requests.get(child_sitemap_url, headers=headers)
-            child_response.raise_for_status()
-            child_root = ET.fromstring(child_response.content)
+            # Namespace for sitemap XML
+            ns = {'sitemap': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
             
-            # Extract URLs from child sitemap
-            for url in child_root.findall('sitemap:url', ns):
-                loc = url.find('sitemap:loc', ns).text
-                if loc.endswith('.html') or loc.endswith('/'):
-                    all_urls.append(loc)
+            # Collect all URLs from child sitemaps
+            all_urls = []
+            for sitemap in root.findall('sitemap:sitemap', ns):
+                child_sitemap_url = sitemap.find('sitemap:loc', ns).text
+                logging.info(f"Processing child sitemap: {child_sitemap_url}")
+                
+                # Fetch child sitemap
+                child_response = requests.get(child_sitemap_url, headers=headers)
+                child_response.raise_for_status()
+                child_root = ET.fromstring(child_response.content)
+                
+                # Extract URLs from child sitemap
+                for url in child_root.findall('sitemap:url', ns):
+                    loc = url.find('sitemap:loc', ns).text
+                    if loc.endswith('.html') or loc.endswith('/'):
+                        all_urls.append(loc)
+            
+            logging.info(f"Found {len(all_urls)} URLs to process")
+            return {'urls': all_urls, 'uuid': uuid}
         
-        logging.info(f"Found {len(all_urls)} URLs to process")
-        return {'urls': all_urls, 'uuid': uuid}
+        except Exception as e:
+            logging.error(f"Failed to parse sitemap: {e}")
+            raise
 
     parse_task = PythonOperator(
         task_id='parse_sitemap',
@@ -76,7 +80,7 @@ with DAG(
             logging.info(f"Triggering process_lowtouch_html for URL: {url} with run_id: {child_run_id}")
             
             # Trigger the child DAG
-            trigger_dag(
+            trigger_dag_func(
                 dag_id='process_lowtouch_html',
                 run_id=child_run_id,
                 conf={'url': url, 'uuid': uuid},
