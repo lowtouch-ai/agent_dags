@@ -62,12 +62,7 @@ with DAG(
         python_callable=parse_sitemap,
     )
 
-    # Create trigger tasks statically
-    def get_urls(ti):
-        data = ti.xcom_pull(task_ids='parse_sitemap')
-        return data['urls'], data['uuid']
-
-    # Define a reasonable number of trigger tasks (adjust based on needs)
+    # Define trigger tasks statically
     MAX_TRIGGERS = 100  # Limit to avoid excessive task creation
     for i in range(MAX_TRIGGERS):
         trigger_task = TriggerDagRunOperator(
@@ -77,7 +72,7 @@ with DAG(
                 'url': "{{ ti.xcom_pull(task_ids='parse_sitemap')['urls'][%d] }}" % i,
                 'uuid': "{{ ti.xcom_pull(task_ids='parse_sitemap')['uuid'] }}"
             },
-            execution_date='{{ execution_date }}',
+            run_id='triggered__{{ dag_run.run_id }}_{%d}' % i,  # Unique run_id for each trigger
             dag=parent_dag,
             do_xcom_push=False,
         )
@@ -96,7 +91,7 @@ with DAG(
     def upload_html_to_agentvector(**context):
         try:
             conf = context['dag_run'].conf
-            url = conf.get('url')
+            url -                    url = conf.get('url')
             uuid = conf.get('uuid')
             
             if not url or not uuid:
