@@ -116,7 +116,7 @@ with DAG(
             if not url or not uuid:
                 raise ValueError("Missing 'url' or 'uuid' in DAG run configuration")
                 
-            agentvector_url = f'http://connector:8000/vector/html/{uuid}/{url}'
+            agentvector_url = f'http://vector:8000/vector/html/{uuid}/{url}'
             headers = {'User-Agent': 'Mozilla/5.0'}
             
             # Call agentvector API to process HTML
