@@ -17,7 +17,7 @@ default_args = {
 }
 
 with DAG(
-    'parse_lowtouch_sitemap',
+    'shared_parse_website_sitemap',
     default_args=default_args,
     description='Parse lowtouch.ai sitemap and trigger HTML processing',
     schedule_interval='0 23 * * *',  # Daily at 11 PM UTC
@@ -97,7 +97,7 @@ with DAG(
 
 # Child DAG
 with DAG(
-    'process_lowtouch_html',
+    'shared_process_website_html',
     default_args=default_args,
     description='Process individual lowtouch.ai HTML page',
     schedule_interval=None,  # Triggered by parent DAG
