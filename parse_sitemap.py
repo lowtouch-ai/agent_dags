@@ -77,11 +77,11 @@ with DAG(
         for i, url in enumerate(urls):
             # Generate unique run_id for each child DAG run
             child_run_id = f"triggered__{parent_run_id}_{i}"
-            logging.info(f"Triggering process_lowtouch_html for URL: {url} with run_id: {child_run_id}")
+            logging.info(f"Triggering shared_process_website_html for URL: {url} with run_id: {child_run_id}")
             
             # Trigger the child DAG
             trigger_dag_func(
-                dag_id='process_lowtouch_html',
+                dag_id='shared_process_website_html',
                 run_id=child_run_id,
                 conf={'url': url, 'uuid': uuid},
                 replace_microseconds=False,
