@@ -64,7 +64,11 @@ with DAG(
             logging.info(f"Found {len(child_sitemaps)} child sitemaps")
             
             for sitemap in child_sitemaps:
-                child_sitemap_url = (sitemap.find('{http://www.sitemaps.org/schemas/sitemap/0.9}loc') or sitemap.find('loc')).text
+                loc_element = sitemap.find('{http://www.sitemaps.org/schemas/sitemap/0.9}loc') or sitemap.find('loc')
+                if loc_element is None or loc_element.text is None:
+                    logging.warning(f"Skipping sitemap entry with missing or invalid 'loc' element: {ET.tostring(sitemap, encoding='unicode')}")
+                    continue
+                child_sitemap_url = loc_element.text
                 logging.info(f"Processing child sitemap: {child_sitemap_url}")
                 
                 try:
@@ -77,16 +81,22 @@ with DAG(
                     # Extract URLs
                     urls = child_root.findall('.//{http://www.sitemaps.org/schemas/sitemap/0.9}url') or child_root.findall('.//url')
                     for url in urls:
-                        loc = (url.find('{http://www.sitemaps.org/schemas/sitemap/0.9}loc') or url.find('loc')).text
-                        if loc.endswith('.html') or loc.endswith('/'):
-                            all_urls.append(loc)
-                            logging.debug(f"Added URL: {loc}")
+                        loc = url.find('{http://www.sitemaps.org/schemas/sitemap/0.9}loc') or url.find('loc')
+                        if loc is None or loc.text is None:
+                            logging.warning(f"Skipping URL entry with missing or invalid 'loc': {ET.tostring(url, encoding='unicode')}")
+                            continue
+                        loc_text = loc.text
+                        if loc_text.endswith('.html') or loc_text.endswith('/'):
+                            all_urls.append(loc_text)
+                            logging.debug(f"Added URL: {loc_text}")
                 
                 except Exception as e:
                     logging.error(f"Failed to process child sitemap {child_sitemap_url}: {e}")
                     continue
             
             logging.info(f"Total URLs found: {len(all_urls)}")
+            if not all_urls:
+                logging.warning("No valid URLs found in sitemap")
             return {'urls': all_urls, 'uuid': UUID}
         
         except Exception as e:
