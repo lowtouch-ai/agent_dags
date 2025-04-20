@@ -26,6 +26,8 @@ USER_AGENT = Variable.get("user_agent", default_var="Mozilla/5.0 (compatible; Ai
 CHILD_DAG_CONCURRENCY = int(Variable.get("child_dag_concurrency", default_var=10))
 RATE_LIMIT_DELAY = float(Variable.get("rate_limit_delay", default_var=0.5))  # Seconds between requests
 
+logging.info(f"Using sitemap URL: {SITEMAP_URL}, UUID: {UUID}, AgentVector URL: {AGENTVECTOR_BASE_URL}, User-Agent: {USER_AGENT}, Child DAG Concurrency: {CHILD_DAG_CONCURRENCY}, Rate Limit Delay: {RATE_LIMIT_DELAY}")
+
 # Parent DAG
 default_args = {
     'owner': 'airflow',
@@ -56,15 +58,15 @@ with DAG(
             response.raise_for_status()
             root = ET.fromstring(response.content)
             
-            # Handle namespaces dynamically
-            ns = {'sitemap': 'http://www.sitemaps.org/schemas/sitemap/0.9'} if 'sitemap' in root.tag else {}
+            # Use fixed namespace as in original code
+            ns = {'sitemap': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
             
             # Process child sitemaps
-            child_sitemaps = root.findall('.//{http://www.sitemaps.org/schemas/sitemap/0.9}sitemap') or root.findall('.//sitemap')
+            child_sitemaps = root.findall('sitemap:sitemap', ns)
             logging.info(f"Found {len(child_sitemaps)} child sitemaps")
             
             for sitemap in child_sitemaps:
-                loc_element = sitemap.find('{http://www.sitemaps.org/schemas/sitemap/0.9}loc') or sitemap.find('loc')
+                loc_element = sitemap.find('sitemap:loc', ns)
                 if loc_element is None or loc_element.text is None:
                     logging.warning(f"Skipping sitemap entry with missing or invalid 'loc' element: {ET.tostring(sitemap, encoding='unicode')}")
                     continue
@@ -79,9 +81,9 @@ with DAG(
                     child_root = ET.fromstring(child_response.content)
                     
                     # Extract URLs
-                    urls = child_root.findall('.//{http://www.sitemaps.org/schemas/sitemap/0.9}url') or child_root.findall('.//url')
+                    urls = child_root.findall('sitemap:url', ns)
                     for url in urls:
-                        loc = url.find('{http://www.sitemaps.org/schemas/sitemap/0.9}loc') or url.find('loc')
+                        loc = url.find('sitemap:loc', ns)
                         if loc is None or loc.text is None:
                             logging.warning(f"Skipping URL entry with missing or invalid 'loc': {ET.tostring(url, encoding='unicode')}")
                             continue
@@ -113,6 +115,10 @@ with DAG(
         urls = data['urls']
         uuid = data['uuid']
         parent_run_id = ti.dag_run.run_id
+        
+        if not urls:
+            logging.info("No URLs to process; skipping child DAG triggers")
+            return
         
         for i, url in enumerate(urls):
             # Rate limit child DAG triggers
@@ -149,12 +155,13 @@ with DAG(
 
     def upload_html_to_agentvector(**context):
         try:
-            conf = context['dag_run'].conf
+            conf = context.get('dag_run', {}).conf or {}
             url = conf.get('url')
-            uuid = conf.get('uuid')
+            uuid = conf.get('uuid', UUID)  # Fallback to Airflow Variable
             
-            if not url or not uuid:
-                raise ValueError("Missing 'url' or 'uuid' in DAG run configuration")
+            if not url:
+                logging.error("No 'url' provided in DAG run configuration")
+                raise ValueError("Missing 'url' in DAG run configuration")
                 
             # Fetch HTML content
             headers = {'User-Agent': USER_AGENT}
@@ -174,7 +181,7 @@ with DAG(
             logging.info(f"Successfully uploaded {url} to agentvector. Response: {api_response.text}")
         
         except Exception as e:
-            logging.error(f"Failed to process HTML {url}: {e}")
+            logging.error(f"Failed to process HTML {url or 'unknown'}: {e}")
             raise
 
     upload_task = PythonOperator(
