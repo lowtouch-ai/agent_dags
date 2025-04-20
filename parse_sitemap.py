@@ -1,11 +1,30 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.utils.trigger_rule import TriggerRule
-from datetime import datetime
+from airflow.models import Variable
+from datetime import datetime, timedelta
 import requests
 import xml.etree.ElementTree as ET
 import logging
 from airflow.api.common.trigger_dag import trigger_dag as trigger_dag_func
+import urllib.parse
+import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Initialize session with retries and connection pooling
+session = requests.Session()
+retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+session.mount('http://', HTTPAdapter(max_retries=retries))
+session.mount('https://', HTTPAdapter(max_retries=retries))
+
+# Airflow Variables
+SITEMAP_URL = Variable.get("lowtouch_sitemap_url", default_var="https://www.lowtouch.ai/sitemap_index.xml")
+UUID = Variable.get("lowtouch_uuid", default_var="febe553a-e665-4000-9cf4-b6ab84b0560f")
+AGENTVECTOR_BASE_URL = Variable.get("agentvector_base_url", default_var="http://vector:8000/vector/html")
+USER_AGENT = Variable.get("user_agent", default_var="Mozilla/5.0 (compatible; AirflowBot/1.0)")
+CHILD_DAG_CONCURRENCY = int(Variable.get("child_dag_concurrency", default_var=10))
+RATE_LIMIT_DELAY = float(Variable.get("rate_limit_delay", default_var=0.5))  # Seconds between requests
 
 # Parent DAG
 default_args = {
@@ -14,6 +33,7 @@ default_args = {
     'email_on_failure': False,
     'email_on_retry': False,
     'retries': 1,
+    'retry_delay': timedelta(minutes=5),
 }
 
 with DAG(
@@ -26,41 +46,51 @@ with DAG(
 ) as parent_dag:
 
     def parse_sitemap():
-        sitemap_url = 'https://www.lowtouch.ai/sitemap_index.xml'
-        uuid = 'febe553a-e665-4000-9cf4-b6ab84b0560f'
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': USER_AGENT}
+        all_urls = []
         
         try:
             # Fetch parent sitemap
-            response = requests.get(sitemap_url, headers=headers)
+            logging.info(f"Fetching parent sitemap: {SITEMAP_URL}")
+            response = session.get(SITEMAP_URL, headers=headers, timeout=10)
             response.raise_for_status()
             root = ET.fromstring(response.content)
             
-            # Namespace for sitemap XML
-            ns = {'sitemap': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+            # Handle namespaces dynamically
+            ns = {'sitemap': 'http://www.sitemaps.org/schemas/sitemap/0.9'} if 'sitemap' in root.tag else {}
             
-            # Collect all URLs from child sitemaps
-            all_urls = []
-            for sitemap in root.findall('sitemap:sitemap', ns):
-                child_sitemap_url = sitemap.find('sitemap:loc', ns).text
+            # Process child sitemaps
+            child_sitemaps = root.findall('.//{http://www.sitemaps.org/schemas/sitemap/0.9}sitemap') or root.findall('.//sitemap')
+            logging.info(f"Found {len(child_sitemaps)} child sitemaps")
+            
+            for sitemap in child_sitemaps:
+                child_sitemap_url = (sitemap.find('{http://www.sitemaps.org/schemas/sitemap/0.9}loc') or sitemap.find('loc')).text
                 logging.info(f"Processing child sitemap: {child_sitemap_url}")
                 
-                # Fetch child sitemap
-                child_response = requests.get(child_sitemap_url, headers=headers)
-                child_response.raise_for_status()
-                child_root = ET.fromstring(child_response.content)
+                try:
+                    # Fetch child sitemap with rate limiting
+                    time.sleep(RATE_LIMIT_DELAY)
+                    child_response = session.get(child_sitemap_url, headers=headers, timeout=10)
+                    child_response.raise_for_status()
+                    child_root = ET.fromstring(child_response.content)
+                    
+                    # Extract URLs
+                    urls = child_root.findall('.//{http://www.sitemaps.org/schemas/sitemap/0.9}url') or child_root.findall('.//url')
+                    for url in urls:
+                        loc = (url.find('{http://www.sitemaps.org/schemas/sitemap/0.9}loc') or url.find('loc')).text
+                        if loc.endswith('.html') or loc.endswith('/'):
+                            all_urls.append(loc)
+                            logging.debug(f"Added URL: {loc}")
                 
-                # Extract URLs from child sitemap
-                for url in child_root.findall('sitemap:url', ns):
-                    loc = url.find('sitemap:loc', ns).text
-                    if loc.endswith('.html') or loc.endswith('/'):
-                        all_urls.append(loc)
+                except Exception as e:
+                    logging.error(f"Failed to process child sitemap {child_sitemap_url}: {e}")
+                    continue
             
-            logging.info(f"Found {len(all_urls)} URLs to process")
-            return {'urls': all_urls, 'uuid': uuid}
+            logging.info(f"Total URLs found: {len(all_urls)}")
+            return {'urls': all_urls, 'uuid': UUID}
         
         except Exception as e:
-            logging.error(f"Failed to parse sitemap: {e}")
+            logging.error(f"Failed to parse parent sitemap: {e}")
             raise
 
     parse_task = PythonOperator(
@@ -75,11 +105,11 @@ with DAG(
         parent_run_id = ti.dag_run.run_id
         
         for i, url in enumerate(urls):
-            # Generate unique run_id for each child DAG run
+            # Rate limit child DAG triggers
+            time.sleep(RATE_LIMIT_DELAY)
             child_run_id = f"triggered__{parent_run_id}_{i}"
             logging.info(f"Triggering shared_process_website_html for URL: {url} with run_id: {child_run_id}")
             
-            # Trigger the child DAG
             trigger_dag_func(
                 dag_id='shared_process_website_html',
                 run_id=child_run_id,
@@ -100,11 +130,11 @@ with DAG(
     'shared_process_website_html',
     default_args=default_args,
     description='Process individual lowtouch.ai HTML page',
-    schedule_interval=None,  # Triggered by parent DAG
+    schedule_interval=None,
     start_date=datetime(2025, 4, 16),
     catchup=False,
-    max_active_runs=10,  # Limit concurrent runs
-    concurrency=10,      # Limit concurrent tasks
+    max_active_runs=CHILD_DAG_CONCURRENCY,
+    concurrency=CHILD_DAG_CONCURRENCY,
 ) as child_dag:
 
     def upload_html_to_agentvector(**context):
@@ -116,13 +146,22 @@ with DAG(
             if not url or not uuid:
                 raise ValueError("Missing 'url' or 'uuid' in DAG run configuration")
                 
-            agentvector_url = f'http://vector:8000/vector/html/{uuid}/{url}'
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            
-            # Call agentvector API to process HTML
-            response = requests.post(agentvector_url, headers=headers)
+            # Fetch HTML content
+            headers = {'User-Agent': USER_AGENT}
+            logging.info(f"Fetching HTML content from: {url}")
+            response = session.get(url, headers=headers, timeout=10)
             response.raise_for_status()
-            logging.info(f"Successfully uploaded {url} to agentvector. Response: {response.text}")
+            html_content = response.text
+            
+            # Prepare agentvector API call
+            encoded_url = urllib.parse.quote(url, safe='')
+            agentvector_url = f"{AGENTVECTOR_BASE_URL}/{uuid}/{encoded_url}"
+            logging.info(f"Uploading to agentvector: {agentvector_url}")
+            
+            # Send HTML content to agentvector
+            api_response = session.post(agentvector_url, headers=headers, data=html_content, timeout=10)
+            api_response.raise_for_status()
+            logging.info(f"Successfully uploaded {url} to agentvector. Response: {api_response.text}")
         
         except Exception as e:
             logging.error(f"Failed to process HTML {url}: {e}")
