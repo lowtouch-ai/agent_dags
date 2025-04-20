@@ -26,8 +26,6 @@ USER_AGENT = Variable.get("user_agent", default_var="Mozilla/5.0 (compatible; Ai
 CHILD_DAG_CONCURRENCY = int(Variable.get("child_dag_concurrency", default_var=10))
 RATE_LIMIT_DELAY = float(Variable.get("rate_limit_delay", default_var=0.5))  # Seconds between requests
 
-logging.info(f"Using sitemap URL: {SITEMAP_URL}, UUID: {UUID}, AgentVector URL: {AGENTVECTOR_BASE_URL}, User-Agent: {USER_AGENT}, Child DAG Concurrency: {CHILD_DAG_CONCURRENCY}, Rate Limit Delay: {RATE_LIMIT_DELAY}")
-
 # Parent DAG
 default_args = {
     'owner': 'airflow',
@@ -163,20 +161,14 @@ with DAG(
                 logging.error("No 'url' provided in DAG run configuration")
                 raise ValueError("Missing 'url' in DAG run configuration")
                 
-            # Fetch HTML content
-            headers = {'User-Agent': USER_AGENT}
-            logging.info(f"Fetching HTML content from: {url}")
-            response = session.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            html_content = response.text
-            
             # Prepare agentvector API call
             encoded_url = urllib.parse.quote(url, safe='')
             agentvector_url = f"{AGENTVECTOR_BASE_URL}/{uuid}/{encoded_url}"
+            headers = {'User-Agent': USER_AGENT}
             logging.info(f"Uploading to agentvector: {agentvector_url}")
             
-            # Send HTML content to agentvector
-            api_response = session.post(agentvector_url, headers=headers, data=html_content, timeout=10)
+            # Send POST request to agentvector (no body, as API fetches HTML)
+            api_response = session.post(agentvector_url, headers=headers, timeout=10)
             api_response.raise_for_status()
             logging.info(f"Successfully uploaded {url} to agentvector. Response: {api_response.text}")
         
