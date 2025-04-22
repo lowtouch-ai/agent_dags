@@ -167,8 +167,25 @@ def send_response(**kwargs):
         
         sender_email = email_data["headers"].get("From", "")
         subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
-        user_query = email_data.get("content", "").strip()
-        logging.debug(f"Sending query to AI: {user_query}")
+        
+        # Fetch the entire email thread
+        email_thread = get_email_thread(service, email_data)
+        if not email_thread:
+            logging.warning("No thread data retrieved, using only the latest email content.")
+            user_query = email_data.get("content", "").strip()
+        else:
+            # Construct a query with the thread's context
+            thread_context = ""
+            for idx, msg in enumerate(email_thread):
+                msg_content = msg.get("content", "").strip()
+                msg_sender = msg["headers"].get("From", "Unknown")
+                msg_date = msg["headers"].get("Date", "Unknown")
+                thread_context += f"Message {idx + 1} (From: {msg_sender}, Date: {msg_date}):\n{msg_content}\n\n"
+            
+            # Use the latest email's content as the primary query, with thread context prepended
+            user_query = f"Thread Context:\n{thread_context}\nLatest Email:\n{email_data.get('content', '').strip()}"
+        
+        logging.debug(f"Sending query to AI: {user_query[:500]}...")
         
         ai_response_html = get_ai_response(user_query) if user_query else "<html><body>No content provided in the email.</body></html>"
         logging.debug(f"AI response received (first 200 chars): {ai_response_html[:200]}...")
