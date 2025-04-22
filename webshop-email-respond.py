@@ -84,54 +84,46 @@ def get_email_thread(service, email_data):
 
 def get_ai_response(user_query):
     try:
-        logging.debug(f"Query received: {user_query}")
-        
-        # Validate input
         if not user_query or not isinstance(user_query, str):
+            logging.warning("Invalid input provided for AI query.")
             return "<html><body>Invalid input provided. Please enter a valid query.</body></html>"
-
+        
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop-email:0.5'")
-
+        
         response = client.chat(
             model='webshop-email:0.5',
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
-        logging.info(f"Raw response from agent: {str(response)[:500]}...")
-
-        # Extract content
-        if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
-            logging.error("Response lacks expected 'message.content' structure")
-            return "<html><body>Invalid response format from AI. Please try again later.</body></html>"
         
-        ai_content = response.message.content
-        logging.info(f"Full message content from agent: {ai_content[:500]}...")
-
-        # Check for error messages
-        if "technical difficulties" in ai_content.lower() or "error" in ai_content.lower():
-            logging.warning("AI response contains potential error message")
-            return "<html><body>Unexpected response received. Please contact support.</body></html>"
-
-        # Clean up markdown markers
+        ai_content = response.get('message', {}).get('content', '')
+        if not ai_content:
+            logging.warning("AI returned empty content.")
+            return "<html><body>No response generated. Please try again later.</body></html>"
+        
+        # Clean markdown markers
         ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
         logging.info(f"Cleaned content extracted from agent response: {ai_content[:500]}...")
-
-        # Validate content
-        if not ai_content.strip():
-            logging.warning("AI returned empty content")
-            return "<html><body>No response generated. Please try again later.</body></html>"
-
+        
+        # Check for error messages
+        if "technical difficulties" in ai_content.lower() or "error" in ai_content.lower():
+            logging.warning("AI response contains potential error message.")
+            return "<html><body>Unexpected response received. Please contact support.</body></html>"
+        
         # Ensure proper HTML structure
         if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html'):
-            logging.warning("Response doesn't appear to be proper HTML, wrapping it")
+            logging.warning("Response doesn't appear to be proper HTML, wrapping it.")
             ai_content = f"<html><body>{ai_content}</body></html>"
-
+        
         return ai_content
-
+    
+    except ResponseError as e:
+        logging.error(f"Ollama API error: {str(e)} (status: {getattr(e, 'status_code', 'unknown')})")
+        return "<html><body>We are currently experiencing technical difficulties. Please try again later.</body></html>"
     except Exception as e:
-        logging.error(f"Error in get_ai_response: {str(e)}")
-        return "<html><body>An error occurred while processing your request. Please try again later or contact support.</body></html>"
+        logging.error(f"Unexpected error in AI response generation: {str(e)}")
+        return "<html><body>We are currently experiencing technical difficulties. Please try again later.</body></html>"
 
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
@@ -180,25 +172,40 @@ def send_response(**kwargs):
             msg_content = msg.get("content", "").strip()
             msg_sender = msg["headers"].get("From", "Unknown")
             if msg_content:
-                # Decode HTML or clean content if necessary
+                # Clean HTML content to plain text
                 soup = BeautifulSoup(msg_content, 'html.parser')
                 clean_content = soup.get_text(separator=" ", strip=True)
                 thread_history += f"From: {msg_sender}\nContent: {clean_content}\n\n"
         
-        # Combine thread history with current query
+        # Clean the current query
         soup = BeautifulSoup(user_query, 'html.parser')
         clean_user_query = soup.get_text(separator=" ", strip=True)
         full_query = f"Conversation History:\n{thread_history}\nCurrent Message:\n{clean_user_query}" if thread_history else clean_user_query
         logging.debug(f"Sending query to AI: {full_query}")
         
+        # Get AI response
         ai_response_html = get_ai_response(full_query) if full_query else "<html><body>No content provided in the email.</body></html>"
         logging.debug(f"AI response received (first 200 chars): {ai_response_html[:200]}...")
-
-        send_email(
+        
+        # Validate AI response
+        if "technical difficulties" in ai_response_html.lower() or "error" in ai_response_html.lower():
+            logging.warning("AI response contains potential error message")
+            ai_response_html = "<html><body>Unexpected response received. Please contact support.</body></html>"
+        
+        # Ensure proper HTML structure
+        if not ai_response_html.strip().startswith('<!DOCTYPE') and not ai_response_html.strip().startswith('<html'):
+            logging.warning("Response doesn't appear to be proper HTML, wrapping it")
+            ai_response_html = f"<html><body>{ai_response_html}</body></html>"
+        
+        # Send the email
+        result = send_email(
             service, sender_email, subject, ai_response_html,
             email_data["headers"].get("Message-ID", ""),
             email_data["headers"].get("References", "")
         )
+        if not result:
+            logging.error("Email sending failed, no result returned.")
+        
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
 
