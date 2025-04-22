@@ -22,12 +22,13 @@ default_args = {
 }
 
 with DAG(
-    'shared_parse_website_sitemap',
+    'lowtouch_sitemap_parser',
     default_args=default_args,
     description='Parse lowtouch.ai sitemap and trigger HTML processing',
     schedule_interval='0 23 * * *',  # Daily at 11 PM UTC
     start_date=datetime(2025, 4, 16),
     catchup=False,
+    tags=['lowtouch', 'sitemap','agentvector','parse'],
 ) as parent_dag:
 
     def parse_sitemap():
@@ -80,11 +81,11 @@ with DAG(
         for i, url in enumerate(urls):
             # Generate unique run_id for each child DAG run
             child_run_id = f"triggered__{parent_run_id}_{i}"
-            logging.info(f"Triggering shared_process_website_html for URL: {url} with run_id: {child_run_id}")
+            logging.info(f"Triggering lowtouch_upload_html for URL: {url} with run_id: {child_run_id}")
             
             # Trigger the child DAG
             trigger_dag_func(
-                dag_id='shared_process_website_html',
+                dag_id='lowtouch_upload_html',
                 run_id=child_run_id,
                 conf={'url': url, 'uuid': uuid},
                 replace_microseconds=False,
@@ -100,7 +101,7 @@ with DAG(
 
 # Child DAG
 with DAG(
-    'shared_process_website_html',
+    'lowtouch_upload_html',
     default_args=default_args,
     description='Process individual lowtouch.ai HTML page',
     schedule_interval=None,  # Triggered by parent DAG
@@ -108,6 +109,7 @@ with DAG(
     catchup=False,
     max_active_runs=10,  # Limit concurrent runs
     concurrency=10,      # Limit concurrent tasks
+    tags=['lowtouch', 'agentvector', 'load', 'html'],
 ) as child_dag:
 
     def upload_html_to_agentvector(**context):
