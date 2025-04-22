@@ -32,13 +32,7 @@ OLLAMA_HOST = Variable.get("WEBSHOP_OLLAMA_HOST")
 
 def authenticate_gmail():
     try:
-        creds_info = Variable.get("WEBSHOP_GMAIL_CREDENTIALS", deserialize_json=True)
-        creds = Credentials.from_authorized_user_info(creds_info, scopes=["https://www.googleapis.com/auth/gmail.send"])
-        
-        # Refresh credentials if expired
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        
+        creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
         service = build("gmail", "v1", credentials=creds)
         profile = service.users().getProfile(userId="me").execute()
         logged_in_email = profile.get("emailAddress", "")
@@ -48,7 +42,7 @@ def authenticate_gmail():
         return service
     except Exception as e:
         logging.error(f"Failed to authenticate Gmail: {str(e)}")
-        raise
+        return None
 
 def decode_email_payload(payload):
     try:
