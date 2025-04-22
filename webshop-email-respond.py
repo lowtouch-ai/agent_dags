@@ -16,7 +16,6 @@ from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import os
 
-#changes1
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -86,6 +85,7 @@ def get_ai_response(user_query):
     try:
         logging.debug(f"Query received: {user_query}")
         
+        # Validate input
         if not user_query or not isinstance(user_query, str):
             return "<html><body>Invalid input provided. Please enter a valid query.</body></html>"
 
@@ -94,17 +94,12 @@ def get_ai_response(user_query):
 
         response = client.chat(
             model='webshop-email:0.5',
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an email assistant for WebShop. Generate responses based solely on the provided email thread context and the latest email's content. Do not query external databases or systems for order or customer records unless explicitly requested."
-                },
-                {"role": "user", "content": user_query}
-            ],
+            messages=[{"role": "user", "content": user_query}],
             stream=False
         )
         logging.info(f"Raw response from agent: {str(response)[:500]}...")
 
+        # Extract content
         if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
             logging.error("Response lacks expected 'message.content' structure")
             return "<html><body>Invalid response format from AI. Please try again later.</body></html>"
@@ -112,17 +107,21 @@ def get_ai_response(user_query):
         ai_content = response.message.content
         logging.info(f"Full message content from agent: {ai_content[:500]}...")
 
-        if "technical difficulties" in ai_content.lower() or "error" in ai_content.lower() or "failed_to_respond" in ai_content.lower():
+        # Check for error messages
+        if "technical difficulties" in ai_content.lower() or "error" in ai_content.lower():
             logging.warning("AI response contains potential error message")
-            return "<html><body>Unable to process the request due to missing or unclear information in the email thread. Please provide more details or contact support.</body></html>"
+            return "<html><body>Unexpected response received. Please contact support.</body></html>"
 
+        # Clean up markdown markers
         ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
         logging.info(f"Cleaned content extracted from agent response: {ai_content[:500]}...")
 
+        # Validate content
         if not ai_content.strip():
             logging.warning("AI returned empty content")
             return "<html><body>No response generated. Please try again later.</body></html>"
 
+        # Ensure proper HTML structure
         if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html'):
             logging.warning("Response doesn't appear to be proper HTML, wrapping it")
             ai_content = f"<html><body>{ai_content}</body></html>"
@@ -132,7 +131,6 @@ def get_ai_response(user_query):
     except Exception as e:
         logging.error(f"Error in get_ai_response: {str(e)}")
         return "<html><body>An error occurred while processing your request. Please try again later or contact support.</body></html>"
-
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
@@ -180,10 +178,6 @@ def send_response(**kwargs):
             thread_context = ""
             for idx, msg in enumerate(email_thread):
                 msg_content = msg.get("content", "").strip()
-                if not msg_content:
-                    # Decode payload if content is empty (fallback for HTML/multi-part emails)
-                    msg_data = service.users().messages().get(userId="me", id=email_data["id"]).execute()
-                    msg_content = decode_email_payload(msg_data.get("payload", {}))
                 msg_sender = msg["headers"].get("From", "Unknown")
                 msg_date = msg["headers"].get("Date", "Unknown")
                 thread_context += f"Message {idx + 1} (From: {msg_sender}, Date: {msg_date}):\n{msg_content}\n\n"
