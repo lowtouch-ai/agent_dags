@@ -136,6 +136,9 @@ def send_response(**kwargs):
         )
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'email_responder.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
 
 with DAG("shared_send_message_email", default_args=default_args, schedule_interval=None, catchup=False, doc_md=readme_content, tags=["email", "shared", "send", "message"]) as dag:
     send_response_task = PythonOperator(
