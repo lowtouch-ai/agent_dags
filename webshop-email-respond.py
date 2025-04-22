@@ -16,6 +16,7 @@ from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import os
 
+#changes1
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -81,7 +82,7 @@ def get_email_thread(service, email_data):
         logging.error(f"Error retrieving email thread: {str(e)}")
         return []
 
-def get_ai_response(user_query, email_thread):
+def get_ai_response(user_query):
     try:
         logging.debug(f"Query received: {user_query}")
         
@@ -92,23 +93,9 @@ def get_ai_response(user_query, email_thread):
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop-email:0.5'")
 
-        # Construct conversation history
-        messages = []
-        for email in email_thread:
-            sender = email["headers"].get("From", "").lower()
-            content = email.get("content", "").strip()
-            role = "user" if sender != WEBSHOP_FROM_ADDRESS.lower() else "assistant"
-            if content:
-                messages.append({"role": role, "content": content})
-
-        # Append the latest user query
-        messages.append({"role": "user", "content": user_query})
-
-        logging.debug(f"Conversation history: {messages}")
-
         response = client.chat(
             model='webshop-email:0.5',
-            messages=messages,
+            messages=[{"role": "user", "content": user_query}],
             stream=False
         )
         logging.info(f"Raw response from agent: {str(response)[:500]}...")
@@ -146,6 +133,7 @@ def get_ai_response(user_query, email_thread):
         logging.error(f"Error in get_ai_response: {str(e)}")
         return "<html><body>An error occurred while processing your request. Please try again later or contact support.</body></html>"
 
+
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
         logging.debug(f"Preparing email to {recipient} with subject: {subject}")
@@ -180,11 +168,25 @@ def send_response(**kwargs):
         sender_email = email_data["headers"].get("From", "")
         subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
         user_query = email_data.get("content", "").strip()
-        logging.debug(f"Sending query to AI: {user_query}")
         
-        # Retrieve email thread for context
+        # Retrieve the email thread to include conversation history
         email_thread = get_email_thread(service, email_data)
-        ai_response_html = get_ai_response(user_query, email_thread) if user_query else "<html><body>No content provided in the email.</body></html>"
+        if not email_thread:
+            logging.warning("No thread history retrieved, proceeding with current email content only.")
+        
+        # Construct the query with conversation history
+        thread_history = ""
+        for msg in email_thread:
+            msg_content = msg.get("content", "").strip()
+            msg_sender = msg["headers"].get("From", "Unknown")
+            if msg_content:
+                thread_history += f"From: {msg_sender}\nContent: {msg_content}\n\n"
+        
+        # Combine thread history with current query
+        full_query = f"Conversation History:\n{thread_history}\nCurrent Message:\n{user_query}" if thread_history else user_query
+        logging.debug(f"Sending query to AI: {full_query}")
+        
+        ai_response_html = get_ai_response(full_query) if full_query else "<html><body>No content provided in the email.</body></html>"
         logging.debug(f"AI response received (first 200 chars): {ai_response_html[:200]}...")
 
         send_email(
