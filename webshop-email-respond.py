@@ -180,10 +180,15 @@ def send_response(**kwargs):
             msg_content = msg.get("content", "").strip()
             msg_sender = msg["headers"].get("From", "Unknown")
             if msg_content:
-                thread_history += f"From: {msg_sender}\nContent: {msg_content}\n\n"
+                # Decode HTML or clean content if necessary
+                soup = BeautifulSoup(msg_content, 'html.parser')
+                clean_content = soup.get_text(separator=" ", strip=True)
+                thread_history += f"From: {msg_sender}\nContent: {clean_content}\n\n"
         
         # Combine thread history with current query
-        full_query = f"Conversation History:\n{thread_history}\nCurrent Message:\n{user_query}" if thread_history else user_query
+        soup = BeautifulSoup(user_query, 'html.parser')
+        clean_user_query = soup.get_text(separator=" ", strip=True)
+        full_query = f"Conversation History:\n{thread_history}\nCurrent Message:\n{clean_user_query}" if thread_history else clean_user_query
         logging.debug(f"Sending query to AI: {full_query}")
         
         ai_response_html = get_ai_response(full_query) if full_query else "<html><body>No content provided in the email.</body></html>"
