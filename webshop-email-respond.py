@@ -7,13 +7,12 @@ import json
 import logging
 import re
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from ollama import Client
 from ollama._types import ResponseError
-from email import message_from_bytes
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from bs4 import BeautifulSoup
 import os
 
 # Configure logging
@@ -23,8 +22,8 @@ default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 18),
-    "retries": 0,
-    "retry_delay": timedelta(seconds=15),
+    "retries": 3,
+    "retry_delay": timedelta(minutes=5),
 }
 
 WEBSHOP_FROM_ADDRESS = Variable.get("WEBSHOP_FROM_ADDRESS")
@@ -33,7 +32,13 @@ OLLAMA_HOST = Variable.get("WEBSHOP_OLLAMA_HOST")
 
 def authenticate_gmail():
     try:
-        creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
+        creds_info = Variable.get("WEBSHOP_GMAIL_CREDENTIALS", deserialize_json=True)
+        creds = Credentials.from_authorized_user_info(creds_info)
+        
+        # Refresh credentials if expired
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        
         service = build("gmail", "v1", credentials=creds)
         profile = service.users().getProfile(userId="me").execute()
         logged_in_email = profile.get("emailAddress", "")
@@ -43,7 +48,7 @@ def authenticate_gmail():
         return service
     except Exception as e:
         logging.error(f"Failed to authenticate Gmail: {str(e)}")
-        return None
+        raise
 
 def decode_email_payload(payload):
     try:
@@ -83,19 +88,24 @@ def get_email_thread(service, email_data):
 
 def get_ai_response(user_query):
     try:
-        logging.error(f"Unexpected error in AI response generation: {str(e)}")
-        
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
         response = client.chat(
             model='webshop-email:0.5',
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
-        return response.get('message', {}).get('content', "We are currently experiencing technical difficulties. Please check back later.")
+        ai_response = response.get('message', {}).get('content', "We are currently experiencing technical difficulties. Please check back later.")
+        logging.info(f"AI response: {ai_response}")
+        return ai_response
     except ResponseError as e:
         logging.error(f"Ollama API error: {str(e)} (status: {getattr(e, 'status_code', 'unknown')})")
-    except Exception as e:
         return "We are currently experiencing technical difficulties. Please check back later."
+    except Exception as e:
+        logging.error(f"Unexpected error in AI response generation: {str(e)}")
+        return "We are currently experiencing technical difficulties. Please check back later."
+
+def is_valid_email(email):
+    return re.match(r"[^@]+@[^@]+\.[^@]+", email)
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
@@ -107,10 +117,13 @@ def send_email(service, recipient, subject, body, in_reply_to, references):
         msg["References"] = references
         msg.attach(MIMEText(body, "html"))
         raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
-        return service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
+        logging.info(f"Sending email to {recipient} with subject {subject}")
+        result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
+        logging.info(f"Email sent successfully: {result}")
+        return result
     except Exception as e:
-        logging.error(f"Failed to send email: {str(e)}")
-        return None
+        logging.error(f"Failed to send email to {recipient}: {str(e)}")
+        raise
 
 def send_response(**kwargs):
     try:
@@ -126,8 +139,12 @@ def send_response(**kwargs):
             return
         
         sender_email = email_data["headers"].get("From", "")
+        if not is_valid_email(sender_email):
+            logging.error(f"Invalid sender emailed: {sender_email}")
+            return
+        
         subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
-        user_query = email_data.get("content", "").strip()  # Ensures we handle missing or empty content
+        user_query = email_data.get("content", "").strip()
         ai_response_html = get_ai_response(user_query) if user_query else "We are currently experiencing technical difficulties. Please check back later."
 
         send_email(
@@ -137,6 +154,7 @@ def send_response(**kwargs):
         )
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
+        raise
 
 readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'email_responder.md')
 with open(readme_path, 'r') as file:
