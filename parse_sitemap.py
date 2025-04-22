@@ -81,11 +81,11 @@ with DAG(
         for i, url in enumerate(urls):
             # Generate unique run_id for each child DAG run
             child_run_id = f"triggered__{parent_run_id}_{i}"
-            logging.info(f"Triggering lowtouch_upload_html for URL: {url} with run_id: {child_run_id}")
+            logging.info(f"Triggering lowtouch_html_to_vector for URL: {url} with run_id: {child_run_id}")
             
             # Trigger the child DAG
             trigger_dag_func(
-                dag_id='lowtouch_upload_html',
+                dag_id='lowtouch_html_to_vector',
                 run_id=child_run_id,
                 conf={'url': url, 'uuid': uuid},
                 replace_microseconds=False,
@@ -101,7 +101,7 @@ with DAG(
 
 # Child DAG
 with DAG(
-    'lowtouch_upload_html',
+    'lowtouch_html_to_vector',
     default_args=default_args,
     description='Process individual lowtouch.ai HTML page',
     schedule_interval=None,  # Triggered by parent DAG
