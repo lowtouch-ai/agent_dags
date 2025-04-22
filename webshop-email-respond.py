@@ -86,7 +86,6 @@ def get_ai_response(user_query):
     try:
         logging.debug(f"Query received: {user_query}")
         
-        # Validate input
         if not user_query or not isinstance(user_query, str):
             return "<html><body>Invalid input provided. Please enter a valid query.</body></html>"
 
@@ -95,12 +94,17 @@ def get_ai_response(user_query):
 
         response = client.chat(
             model='webshop-email:0.5',
-            messages=[{"role": "user", "content": user_query}],
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an email assistant for WebShop. Generate responses based solely on the provided email thread context and the latest email's content. Do not query external databases or systems for order or customer records unless explicitly requested."
+                },
+                {"role": "user", "content": user_query}
+            ],
             stream=False
         )
         logging.info(f"Raw response from agent: {str(response)[:500]}...")
 
-        # Extract content
         if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
             logging.error("Response lacks expected 'message.content' structure")
             return "<html><body>Invalid response format from AI. Please try again later.</body></html>"
@@ -108,21 +112,17 @@ def get_ai_response(user_query):
         ai_content = response.message.content
         logging.info(f"Full message content from agent: {ai_content[:500]}...")
 
-        # Check for error messages
-        if "technical difficulties" in ai_content.lower() or "error" in ai_content.lower():
+        if "technical difficulties" in ai_content.lower() or "error" in ai_content.lower() or "failed_to_respond" in ai_content.lower():
             logging.warning("AI response contains potential error message")
-            return "<html><body>Unexpected response received. Please contact support.</body></html>"
+            return "<html><body>Unable to process the request due to missing or unclear information in the email thread. Please provide more details or contact support.</body></html>"
 
-        # Clean up markdown markers
         ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
         logging.info(f"Cleaned content extracted from agent response: {ai_content[:500]}...")
 
-        # Validate content
         if not ai_content.strip():
             logging.warning("AI returned empty content")
             return "<html><body>No response generated. Please try again later.</body></html>"
 
-        # Ensure proper HTML structure
         if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html'):
             logging.warning("Response doesn't appear to be proper HTML, wrapping it")
             ai_content = f"<html><body>{ai_content}</body></html>"
@@ -167,6 +167,8 @@ def send_response(**kwargs):
         
         sender_email = email_data["headers"].get("From", "")
         subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
+        message_id = email_data["headers"].get("Message-ID", "")
+        references = email_data["headers"].get("References", "")
         
         # Fetch the entire email thread
         email_thread = get_email_thread(service, email_data)
@@ -178,23 +180,41 @@ def send_response(**kwargs):
             thread_context = ""
             for idx, msg in enumerate(email_thread):
                 msg_content = msg.get("content", "").strip()
+                if not msg_content:
+                    # Decode payload if content is empty (fallback for HTML/multi-part emails)
+                    msg_data = service.users().messages().get(userId="me", id=email_data["id"]).execute()
+                    msg_content = decode_email_payload(msg_data.get("payload", {}))
                 msg_sender = msg["headers"].get("From", "Unknown")
                 msg_date = msg["headers"].get("Date", "Unknown")
                 thread_context += f"Message {idx + 1} (From: {msg_sender}, Date: {msg_date}):\n{msg_content}\n\n"
             
-            # Use the latest email's content as the primary query, with thread context prepended
-            user_query = f"Thread Context:\n{thread_context}\nLatest Email:\n{email_data.get('content', '').strip()}"
+            # Combine thread context with the latest email's content
+            latest_content = email_data.get("content", "").strip()
+            user_query = f"Thread Context:\n{thread_context}Latest Email:\n{latest_content}"
         
-        logging.debug(f"Sending query to AI: {user_query[:500]}...")
+        logging.debug(f"Sending query to AI: {user_query[:1000]}...")
         
+        # Get AI response with thread context
         ai_response_html = get_ai_response(user_query) if user_query else "<html><body>No content provided in the email.</body></html>"
         logging.debug(f"AI response received (first 200 chars): {ai_response_html[:200]}...")
 
-        send_email(
+        # Send the email response
+        send_result = send_email(
             service, sender_email, subject, ai_response_html,
-            email_data["headers"].get("Message-ID", ""),
-            email_data["headers"].get("References", "")
+            message_id, references
         )
+        if not send_result:
+            logging.error("Failed to send email response.")
+            return
+
+        # Mark the email as read to avoid reprocessing
+        service.users().messages().modify(
+            userId="me",
+            id=email_data["id"],
+            body={"removeLabelIds": ["UNREAD"]}
+        ).execute()
+        logging.info(f"Marked email {email_data['id']} as read.")
+
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
 
