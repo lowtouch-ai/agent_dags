@@ -14,14 +14,12 @@ from email import message_from_bytes
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
-import os
 
-#changes1
-# Configure detailed logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
 default_args = {
-    "owner": "lowtouch.ai_developers",
+    "owner": "airflow",
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 18),
     "retries": 0,
@@ -84,51 +82,22 @@ def get_email_thread(service, email_data):
 
 def get_ai_response(user_query):
     try:
-        if not user_query or not isinstance(user_query, str):
-            logging.warning("Invalid input provided for AI query.")
-            return "<html><body>Invalid input provided. Please enter a valid query.</body></html>"
+        logging.error(f"Unexpected error in AI response generation: {str(e)}")
         
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
-        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop-email:0.5'")
-        
         response = client.chat(
             model='webshop-email:0.5',
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
-        
-        ai_content = response.get('message', {}).get('content', '')
-        if not ai_content:
-            logging.warning("AI returned empty content.")
-            return "<html><body>No response generated. Please try again later.</body></html>"
-        
-        # Clean markdown markers
-        ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
-        logging.info(f"Cleaned content extracted from agent response: {ai_content[:500]}...")
-        
-        # Check for error messages
-        if "technical difficulties" in ai_content.lower() or "error" in ai_content.lower():
-            logging.warning("AI response contains potential error message.")
-            return "<html><body>Unexpected response received. Please contact support.</body></html>"
-        
-        # Ensure proper HTML structure
-        if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html'):
-            logging.warning("Response doesn't appear to be proper HTML, wrapping it.")
-            ai_content = f"<html><body>{ai_content}</body></html>"
-        
-        return ai_content
-    
+        return response.get('message', {}).get('content', "We are currently experiencing technical difficulties. Please check back later.")
     except ResponseError as e:
         logging.error(f"Ollama API error: {str(e)} (status: {getattr(e, 'status_code', 'unknown')})")
-        return "<html><body>We are currently experiencing technical difficulties. Please try again later.</body></html>"
     except Exception as e:
-        logging.error(f"Unexpected error in AI response generation: {str(e)}")
-        return "<html><body>We are currently experiencing technical difficulties. Please try again later.</body></html>"
-
+        return "We are currently experiencing technical difficulties. Please check back later."
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
-        logging.debug(f"Preparing email to {recipient} with subject: {subject}")
         msg = MIMEMultipart()
         msg["From"] = f"WebShop via lowtouch.ai <{WEBSHOP_FROM_ADDRESS}>"
         msg["To"] = recipient
@@ -137,9 +106,7 @@ def send_email(service, recipient, subject, body, in_reply_to, references):
         msg["References"] = references
         msg.attach(MIMEText(body, "html"))
         raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
-        result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
-        logging.info(f"Email sent successfully: {result}")
-        return result
+        return service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
     except Exception as e:
         logging.error(f"Failed to send email: {str(e)}")
         return None
@@ -159,61 +126,18 @@ def send_response(**kwargs):
         
         sender_email = email_data["headers"].get("From", "")
         subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
-        user_query = email_data.get("content", "").strip()
-        
-        # Retrieve the email thread to include conversation history
-        email_thread = get_email_thread(service, email_data)
-        if not email_thread:
-            logging.warning("No thread history retrieved, proceeding with current email content only.")
-        
-        # Construct the query with conversation history
-        thread_history = ""
-        for msg in email_thread[:-1]:  # Exclude the current email to avoid duplication
-            msg_content = msg.get("content", "").strip()
-            msg_sender = msg["headers"].get("From", "Unknown")
-            if msg_content:
-                # Clean HTML content to plain text
-                soup = BeautifulSoup(msg_content, 'html.parser')
-                clean_content = soup.get_text(separator=" ", strip=True)
-                thread_history += f"From: {msg_sender}\nContent: {clean_content}\n\n"
-        
-        # Clean the current query
-        soup = BeautifulSoup(user_query, 'html.parser')
-        clean_user_query = soup.get_text(separator=" ", strip=True)
-        full_query = f"Conversation History:\n{thread_history}\nCurrent Message:\n{clean_user_query}" if thread_history else clean_user_query
-        logging.debug(f"Sending query to AI: {full_query}")
-        
-        # Get AI response
-        ai_response_html = get_ai_response(full_query) if full_query else "<html><body>No content provided in the email.</body></html>"
-        logging.debug(f"AI response received (first 200 chars): {ai_response_html[:200]}...")
-        
-        # Validate AI response
-        if "technical difficulties" in ai_response_html.lower() or "error" in ai_response_html.lower():
-            logging.warning("AI response contains potential error message")
-            ai_response_html = "<html><body>Unexpected response received. Please contact support.</body></html>"
-        
-        # Ensure proper HTML structure
-        if not ai_response_html.strip().startswith('<!DOCTYPE') and not ai_response_html.strip().startswith('<html'):
-            logging.warning("Response doesn't appear to be proper HTML, wrapping it")
-            ai_response_html = f"<html><body>{ai_response_html}</body></html>"
-        
-        # Send the email
-        result = send_email(
+        user_query = email_data.get("content", "").strip()  # Ensures we handle missing or empty content
+        ai_response_html = get_ai_response(user_query) if user_query else "We are currently experiencing technical difficulties. Please check back later."
+
+        send_email(
             service, sender_email, subject, ai_response_html,
             email_data["headers"].get("Message-ID", ""),
             email_data["headers"].get("References", "")
         )
-        if not result:
-            logging.error("Email sending failed, no result returned.")
-        
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
 
-readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'email_responder.md')
-with open(readme_path, 'r') as file:
-    readme_content = file.read()
-
-with DAG("shared_send_message_email", default_args=default_args, schedule_interval=None, catchup=False, doc_md=readme_content, tags=["email", "shared", "send", "message"]) as dag:
+with DAG("webshop-email-respond", default_args=default_args, schedule_interval=None, catchup=False) as dag:
     send_response_task = PythonOperator(
         task_id="send-response",
         python_callable=send_response,
