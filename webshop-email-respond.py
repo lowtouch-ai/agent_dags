@@ -176,7 +176,7 @@ def send_response(**kwargs):
         
         # Construct the query with conversation history
         thread_history = ""
-        for msg in email_thread:
+        for msg in email_thread[:-1]:  # Exclude the current email to avoid duplication
             msg_content = msg.get("content", "").strip()
             msg_sender = msg["headers"].get("From", "Unknown")
             if msg_content:
