@@ -14,6 +14,7 @@ from email import message_from_bytes
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -136,6 +137,7 @@ def send_response(**kwargs):
         )
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
+
 readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'email_responder.md')
 with open(readme_path, 'r') as file:
     readme_content = file.read()
