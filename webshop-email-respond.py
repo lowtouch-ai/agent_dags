@@ -16,6 +16,7 @@ from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import os
 
+#changes1
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -132,6 +133,7 @@ def get_ai_response(user_query):
         logging.error(f"Error in get_ai_response: {str(e)}")
         return "<html><body>An error occurred while processing your request. Please try again later or contact support.</body></html>"
 
+
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
         logging.debug(f"Preparing email to {recipient} with subject: {subject}")
@@ -165,50 +167,45 @@ def send_response(**kwargs):
         
         sender_email = email_data["headers"].get("From", "")
         subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
-        message_id = email_data["headers"].get("Message-ID", "")
+        in_reply_to = email_data["headers"].get("Message-ID", "")
         references = email_data["headers"].get("References", "")
         
-        # Fetch the entire email thread
+        # Fetch the full email thread
         email_thread = get_email_thread(service, email_data)
         if not email_thread:
-            logging.warning("No thread data retrieved, using only the latest email content.")
+            logging.warning("No thread history retrieved, using only current email content.")
             user_query = email_data.get("content", "").strip()
         else:
-            # Construct a query with the thread's context
-            thread_context = ""
-            for idx, msg in enumerate(email_thread):
-                msg_content = msg.get("content", "").strip()
-                msg_sender = msg["headers"].get("From", "Unknown")
-                msg_date = msg["headers"].get("Date", "Unknown")
-                thread_context += f"Message {idx + 1} (From: {msg_sender}, Date: {msg_date}):\n{msg_content}\n\n"
+            # Format thread history into a single query
+            thread_history = ""
+            for idx, email in enumerate(email_thread, 1):
+                email_content = email.get("content", "").strip()
+                email_from = email["headers"].get("From", "Unknown")
+                email_date = email["headers"].get("Date", "Unknown date")
+                # Clean HTML content if present
+                if email_content:
+                    soup = BeautifulSoup(email_content, "html.parser")
+                    email_content = soup.get_text(separator=" ", strip=True)
+                thread_history += f"Email {idx} (From: {email_from}, Date: {email_date}):\n{email_content}\n\n"
             
-            # Combine thread context with the latest email's content
-            latest_content = email_data.get("content", "").strip()
-            user_query = f"Thread Context:\n{thread_context}Latest Email:\n{latest_content}"
+            # Append the current email as the latest query
+            current_content = email_data.get("content", "").strip()
+            if current_content:
+                soup = BeautifulSoup(current_content, "html.parser")
+                current_content = soup.get_text(separator=" ", strip=True)
+            thread_history += f"Current Email (From: {sender_email}):\n{current_content}"
+            
+            user_query = f"Here is the email thread history:\n\n{thread_history}\n\nPlease respond to the latest email, considering the full context of the thread."
         
-        logging.debug(f"Sending query to AI: {user_query[:1000]}...")
+        logging.debug(f"Sending query to AI: {user_query}")
         
-        # Get AI response with thread context
         ai_response_html = get_ai_response(user_query) if user_query else "<html><body>No content provided in the email.</body></html>"
         logging.debug(f"AI response received (first 200 chars): {ai_response_html[:200]}...")
 
-        # Send the email response
-        send_result = send_email(
+        send_email(
             service, sender_email, subject, ai_response_html,
-            message_id, references
+            in_reply_to, references
         )
-        if not send_result:
-            logging.error("Failed to send email response.")
-            return
-
-        # Mark the email as read to avoid reprocessing
-        service.users().messages().modify(
-            userId="me",
-            id=email_data["id"],
-            body={"removeLabelIds": ["UNREAD"]}
-        ).execute()
-        logging.info(f"Marked email {email_data['id']} as read.")
-
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
 
