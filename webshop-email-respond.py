@@ -11,12 +11,12 @@ from googleapiclient.discovery import build
 from ollama import Client
 from ollama._types import ResponseError
 from email import message_from_bytes
+from email.header import decode_header
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import os
 
-#changes1
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -46,10 +46,27 @@ def authenticate_gmail():
         logging.error(f"Failed to authenticate Gmail: {str(e)}")
         return None
 
-def decode_email_payload(payload):
+def decode_email_payload(msg):
     try:
-        if "data" in payload.get("body", {}):
-            return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8")
+        # Handle multipart emails
+        if msg.is_multipart():
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                if content_type in ["text/plain", "text/html"]:
+                    try:
+                        body = part.get_payload(decode=True).decode()
+                        return body
+                    except UnicodeDecodeError:
+                        body = part.get_payload(decode=True).decode('latin-1')
+                        return body
+        # Handle single-part emails
+        else:
+            try:
+                body = msg.get_payload(decode=True).decode()
+                return body
+            except UnicodeDecodeError:
+                body = msg.get_payload(decode=True).decode('latin-1')
+                return body
         return ""
     except Exception as e:
         logging.error(f"Error decoding email payload: {str(e)}")
@@ -69,14 +86,30 @@ def get_email_thread(service, email_data):
         
         if not thread_id:
             logging.warning(f"No thread ID found for message ID {message_id}. Treating as a single email.")
-            return [{"headers": email_data["headers"], "content": email_data["content"]}]
+            raw_message = service.users().messages().get(userId="me", id=email_data["id"], format="raw").execute()
+            msg = message_from_bytes(base64.urlsafe_b64decode(raw_message["raw"]))
+            return [{
+                "headers": {header["name"]: header["value"] for header in email_data.get("payload", {}).get("headers", [])},
+                "content": decode_email_payload(msg)
+            }]
 
         thread = service.users().threads().get(userId="me", id=thread_id).execute()
-        email_thread = [{
-                "headers": {header["name"]: header["value"] for header in msg.get("payload", {}).get("headers", [])},
-                "content": decode_email_payload(msg.get("payload", {})).strip(),
-            }
-            for msg in thread.get("messages", [])]
+        email_thread = []
+        for msg in thread.get("messages", []):
+            raw_msg = base64.urlsafe_b64decode(msg["raw"]) if "raw" in msg else None
+            if not raw_msg:
+                raw_message = service.users().messages().get(userId="me", id=msg["id"], format="raw").execute()
+                raw_msg = base64.urlsafe_b64decode(raw_message["raw"])
+            email_msg = message_from_bytes(raw_msg)
+            headers = {header["name"]: header["value"] for header in msg.get("payload", {}).get("headers", [])}
+            content = decode_email_payload(email_msg)
+            email_thread.append({
+                "headers": headers,
+                "content": content.strip()
+            })
+        # Sort by date to ensure chronological order
+        email_thread.sort(key=lambda x: x["headers"].get("Date", ""), reverse=False)
+        logging.debug(f"Retrieved thread with {len(email_thread)} messages")
         return email_thread
     except Exception as e:
         logging.error(f"Error retrieving email thread: {str(e)}")
@@ -133,7 +166,6 @@ def get_ai_response(user_query):
         logging.error(f"Error in get_ai_response: {str(e)}")
         return "<html><body>An error occurred while processing your request. Please try again later or contact support.</body></html>"
 
-
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
         logging.debug(f"Preparing email to {recipient} with subject: {subject}")
@@ -167,7 +199,36 @@ def send_response(**kwargs):
         
         sender_email = email_data["headers"].get("From", "")
         subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
-        user_query = email_data.get("content", "").strip()
+        in_reply_to = email_data["headers"].get("Message-ID", "")
+        references = email_data["headers"].get("References", "")
+        
+        # Fetch the full email thread
+        email_thread = get_email_thread(service, email_data)
+        if not email_thread:
+            logging.warning("No thread history retrieved, using only current email content.")
+            user_query = email_data.get("content", "").strip()
+        else:
+            # Format thread history into a single query
+            thread_history = ""
+            for idx, email in enumerate(email_thread, 1):
+                email_content = email.get("content", "").strip()
+                email_from = email["headers"].get("From", "Unknown")
+                email_date = email["headers"].get("Date", "Unknown date")
+                # Clean HTML content if present
+                if email_content:
+                    soup = BeautifulSoup(email_content, "html.parser")
+                    email_content = soup.get_text(separator=" ", strip=True)
+                thread_history += f"Email {idx} (From: {email_from}, Date: {email_date}):\n{email_content}\n\n"
+            
+            # Append the current email as the latest query
+            current_content = email_data.get("content", "").strip()
+            if current_content:
+                soup = BeautifulSoup(current_content, "html.parser")
+                current_content = soup.get_text(separator=" ", strip=True)
+            thread_history += f"Current Email (From: {sender_email}):\n{current_content}"
+            
+            user_query = f"Here is the email thread history:\n\n{thread_history}\n\nPlease respond to the latest email, considering the full context of the thread. Ensure the response addresses the specific details requested, such as article IDs or order details from previous emails."
+        
         logging.debug(f"Sending query to AI: {user_query}")
         
         ai_response_html = get_ai_response(user_query) if user_query else "<html><body>No content provided in the email.</body></html>"
@@ -175,8 +236,7 @@ def send_response(**kwargs):
 
         send_email(
             service, sender_email, subject, ai_response_html,
-            email_data["headers"].get("Message-ID", ""),
-            email_data["headers"].get("References", "")
+            in_reply_to, references
         )
     except Exception as e:
         logging.error(f"Unexpected error in send_response: {str(e)}")
