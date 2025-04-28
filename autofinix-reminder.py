@@ -197,10 +197,10 @@ def generate_voice_message(api_url, agent_url, **kwargs):
         loan_id = loan['loan_id']
         call_id = loan['call_id']
         update_url = f"{api_url}loan/{loan_id}/update_reminder"
-        params = {"status": "CallInitiated", "call_id": call_id}
+        json_body = {"status": "CallInitiated", "call_id": call_id}
         
         try:
-            result = make_api_request(update_url, method="PUT", params=params)
+            result = make_api_request(update_url, method="PUT", json=json_body)
             updated_call_id = result.get('call_id')
             if not updated_call_id:
                 logger.error(f"Call ID not returned in API response for loan ID: {loan_id}")
@@ -313,15 +313,15 @@ def update_call_status(api_url, agent_url, **kwargs):
         try:
             # First PUT: Update status
             update_url = f"{api_url}loan/{loan_id}/update_reminder"
-            params = {"status": reminder_status, "call_id": call_id}
-            make_api_request(update_url, method="PUT", params=params)
+            json_body = {"status": reminder_status, "call_id": call_id}
+            make_api_request(update_url, method="PUT", json=json_body)
             logger.info(f"Updated status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
 
             # Second PUT: Update response_text if transcription exists and is valid
             if transcription and transcription not in ["No transcription available", "Transcription failed", "Transcription unclear; review recording required"]:
                 response_text = transcription[:500] if len(transcription) > 500 else transcription
-                params = {"status": reminder_status, "call_id": call_id, "response_text": response_text}
-                make_api_request(update_url, method="PUT", params=params)
+                json_body = {"status": reminder_status, "call_id": call_id, "response_text": response_text}
+                make_api_request(update_url, method="PUT", json=json_body)
                 logger.info(f"Saved response_text for call_id={call_id}, loan_id={loan_id}: {response_text}")
         except Exception as e:
             logger.error(f"Failed to update status or response_text: {str(e)}")
