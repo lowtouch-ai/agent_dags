@@ -9,6 +9,7 @@ import time
 import logging
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from agent_dags.slack_utils import slack_failure_alert
 
 # Default DAG arguments
 default_args = {
@@ -17,6 +18,7 @@ default_args = {
     "start_date": datetime(2024, 2, 24),
     "retries": 1,
     "retry_delay": timedelta(seconds=15),
+    "on_failure_callback": slack_failure_alert,
 }
 
 # Configuration variables
