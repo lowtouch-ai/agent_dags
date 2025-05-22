@@ -15,7 +15,7 @@ CHANNEL_IDS = ["C08SSCBDT3R", "C08T2N7LL7P", "C08T81YTH0S"]
 GOOGLE_SHEET_NAME = "Alert Count"
 TIMEZONE = "Asia/Kolkata"
 
-# Slack client
+# Slack client1
 client = WebClient(token=SLACK_BOT_TOKEN)
 
 # Google Sheets setup using service account info from Airflow Variable
