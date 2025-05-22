@@ -30,10 +30,36 @@ def get_channel_name(channel_id):
         response = client.conversations_info(channel=channel_id)
         return response['channel']['name']
     except SlackApiError as e:
-        return channel_id
+        print(f"Error fetching channel name for {channel_id}: {e}")
+        return f"Unknown_{channel_id[-4:]}"  # Fallback if name fetch fails
+
+def count_channel_messages(channel_id, start_ts, end_ts):
+    total_messages = 0
+    cursor = None
+    try:
+        while True:
+            response = client.conversations_history(
+                channel=channel_id,
+                cursor=cursor,
+                limit=1000,
+                oldest=start_ts,
+                latest=end_ts,
+                inclusive=True
+            )
+            messages = response["messages"]
+            print(f"Channel {channel_id}: Retrieved {len(messages)} messages")
+            total_messages += len(messages)
+            if not response.get("has_more"):
+                break
+            cursor = response.get("response_metadata", {}).get("next_cursor")
+    except SlackApiError as e:
+        print(f"Error fetching messages from {channel_id}: {e}")
+        total_messages = None
+    return total_messages
 
 def log_to_gsheet(date, counts_dict):
     header = sheet.row_values(1)
+
     if not header:
         header = ["Date"] + [f"{channel}_Count" for channel in counts_dict.keys()]
         sheet.append_row(header)
@@ -58,28 +84,6 @@ def log_to_gsheet(date, counts_dict):
             col_index = header.index(col_name) + 1
             sheet.update_cell(row_index, col_index, count)
 
-def count_channel_messages(channel_id, start_ts, end_ts):
-    total_messages = 0
-    cursor = None
-    try:
-        while True:
-            response = client.conversations_history(
-                channel=channel_id,
-                cursor=cursor,
-                limit=1000,
-                oldest=start_ts,
-                latest=end_ts,
-                inclusive=True
-            )
-            messages = response["messages"]
-            total_messages += len(messages)
-            if not response.get("has_more"):
-                break
-            cursor = response.get("response_metadata", {}).get("next_cursor")
-    except SlackApiError:
-        total_messages = None
-    return total_messages
-
 def slack_alert_count():
     tz = pytz.timezone(TIMEZONE)
     now = datetime.now(tz)
@@ -87,13 +91,14 @@ def slack_alert_count():
 
     start_of_day = tz.localize(datetime(now.year, now.month, now.day, 0, 0, 0))
     end_of_day = tz.localize(datetime(now.year, now.month, now.day, 23, 59, 59))
-    start_ts = start_of_day.timestamp()
-    end_ts = end_of_day.timestamp()
+    start_ts = str(start_of_day.timestamp())
+    end_ts = str(end_of_day.timestamp())
 
     counts = {}
     for channel_id in CHANNEL_IDS:
         name = get_channel_name(channel_id)
         count = count_channel_messages(channel_id, start_ts, end_ts)
+        print(f"{name} ({channel_id}) - Count: {count}")
         counts[name] = count if count is not None else 0
 
     log_to_gsheet(today, counts)
