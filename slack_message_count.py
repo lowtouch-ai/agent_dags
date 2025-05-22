@@ -8,7 +8,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 # Constants
-SLACK_BOT_TOKEN = "xoxb-8909060954471-8925820149396-GQOq2Y4EkvWdYvWa4SsByz4u"  # Replace with your actual token
+SLACK_BOT_TOKEN = Variable.get("BOT_TOKEN")  # Replace with your actual token
 CHANNEL_IDS = ["C08SSCBDT3R", "C08T2N7LL7P", "C08T81YTH0S"]
 GOOGLE_SHEET_NAME = "Alert Count"
 TIMEZONE = "Asia/Kolkata"
