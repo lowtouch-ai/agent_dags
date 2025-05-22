@@ -20,7 +20,7 @@ client = WebClient(token=SLACK_BOT_TOKEN)
 
 # Google Sheets setup using service account info from Airflow Variable
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-SERVICE_ACCOUNT_JSON = json.loads(Variable.get("COUNT_DAG", deserialize_json=True))
+SERVICE_ACCOUNT_JSON = Variable.get("COUNT_DAG", deserialize_json=True)
 creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_JSON, scopes=SCOPES)
 gc = gspread.authorize(creds)
 sheet = gc.open(GOOGLE_SHEET_NAME).sheet1
