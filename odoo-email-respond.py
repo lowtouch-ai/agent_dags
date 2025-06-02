@@ -130,7 +130,7 @@ def get_ai_response(user_query):
         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'InvoFlux:0.3'")
 
         response = client.chat(
-            model='InvoFlux:0.3',
+            model='invoflux-email:0.3',
             messages=[{"role": "user", "content": user_query}],
             stream=False
         )
