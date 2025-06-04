@@ -11,7 +11,6 @@ import logging
 import base64
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-import pdfplumber
 import re
 from langchain_community.document_loaders import PyPDFLoader
 # Default DAG arguments
@@ -31,7 +30,7 @@ ATTACHMENT_DIR = "/appz/data/attachments/"
 
 def authenticate_gmail():
     """Authenticate Gmail API and verify the correct email account is used."""
-    creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
+    creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
     service = build("gmail", "v1", credentials=creds)
     profile = service.users().getProfile(userId="me").execute()
     logged_in_email = profile.get("emailAddress", "")
