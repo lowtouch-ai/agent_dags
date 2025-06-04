@@ -11,7 +11,6 @@ import logging
 import base64
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-import pdfplumber
 import re
 from langchain_community.document_loaders import PyPDFLoader
 # Default DAG arguments
