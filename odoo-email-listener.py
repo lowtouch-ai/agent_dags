@@ -132,7 +132,10 @@ def fetch_unread_emails(**kwargs):
                     extracted_content = {}
                     if mime_type == "application/pdf":
                         extracted_content = pdf_to_markdown(attachment_path)
+
                         logging.info(f"Extracted content from PDF {filename}: {extracted_content['content'][:100]}...")
+
+
                     attachments.append({
                         "filename": filename,
                         "mime_type": mime_type,

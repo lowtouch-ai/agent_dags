@@ -55,10 +55,10 @@ with DAG(
     'shared_process_file_pdf2vector',
     default_args=default_args,
     description='Processes PDF files to vector format',
-    start_date=days_ago(1),
+    schedule_interval=None,
     catchup=False,
     tags=["shared", "process", "pdf", "vector"],
-    max_active_runs=50
+    max_active_runs=6
 ) as dag:
 
     process_task = PythonOperator(

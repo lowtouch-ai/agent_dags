@@ -3,8 +3,9 @@ from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.operators.dummy import DummyOperator
 from airflow.models import Variable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta,time
 import json
+import pytz
 import requests
 import re
 import logging
@@ -30,6 +31,7 @@ default_args = {
 AUTOFINIX_API_URL = Variable.get("AUTOFINIX_API_URL")
 AGENTOMATIC_API_URL = Variable.get("AGENTOMATIC_API_URL")
 AUTOFINIX_TEST_PHONE_NUMBER = Variable.get("AUTOFINIX_TEST_PHONE_NUMBER")
+AUTOFINIX_TEST_PHONE_NUMBER_QA=Variable.get("AUTOFINIX_TEST_PHONE_NUMBER_QA")
 AUTOFINIX_DEMO_PHONE_ODD=Variable.get("AUTOFINIX_DEMO_PHONE_ODD")
 AUTOFINIX_DEMO_PHONE_EVEN=Variable.get("AUTOFINIX_DEMO_PHONE_EVEN")
 
@@ -65,7 +67,7 @@ def make_api_request(url, method="GET", params=None, json=None, retries=3):
         logger.error(f"API request failed: {str(e)}")
         raise
 
-def fetch_due_loans(api_url, test_phone_number,even_phone_number,odd_phone_number, **kwargs):
+def fetch_due_loans(api_url, test_phone_number,test_phone_number_qa, even_phone_number,odd_phone_number, **kwargs):
     """Fetches loans that are due from the Autoloan API"""
     ti = kwargs['ti']
     try:
@@ -90,6 +92,8 @@ def fetch_due_loans(api_url, test_phone_number,even_phone_number,odd_phone_numbe
                 if int(reminder['loan_id'])%2==0:
                     if int(reminder['loan_id'])==550:
                         reminder["phone"] = test_phone_number
+                    elif int(reminder['loan_id'])==540:
+                        reminder["phone"] = test_phone_number_qa
                     else:
                         reminder["phone"] = even_phone_number
                 else:
@@ -127,7 +131,7 @@ def generate_voice_message_agent(loan_id, agent_url, transcription=None, inserte
     )
     if transcription and inserted_date:
         prompt = (
-            f"Analyze the following transcription: '{transcription}' to extract a date for the next loan reminder. "
+            f"Analyze the following transcription: '{transcription}' to extract a date for the next loan reminder. Do not use any tools since the result only need a data from the transcription. "
             f"Interpret relative time expressions (e.g., 'next week,' 'tomorrow') based on the current date: {inserted_date}. "
             f"For 'next week,' use the same weekday as the current date in the following week (e.g., if today is Wednesday, 'next week' is next Wednesday). "
             f"If a specific date or clear intent to pay is found, calculate that date; if it is more than 2 months (120 days) from {inserted_date}, treat it as unrealistic and set the date one week from {inserted_date}. "
@@ -193,10 +197,10 @@ def generate_voice_message(api_url, agent_url, **kwargs):
         loan_id = loan['loan_id']
         call_id = loan['call_id']
         update_url = f"{api_url}loan/{loan_id}/update_reminder"
-        params = {"status": "CallInitiated", "call_id": call_id}
+        json_body = {"status": "CallInitiated", "call_id": call_id}
         
         try:
-            result = make_api_request(update_url, method="PUT", params=params)
+            result = make_api_request(update_url, method="PUT", json=json_body)
             updated_call_id = result.get('call_id')
             if not updated_call_id:
                 logger.error(f"Call ID not returned in API response for loan ID: {loan_id}")
@@ -309,15 +313,15 @@ def update_call_status(api_url, agent_url, **kwargs):
         try:
             # First PUT: Update status
             update_url = f"{api_url}loan/{loan_id}/update_reminder"
-            params = {"status": reminder_status, "call_id": call_id}
-            make_api_request(update_url, method="PUT", params=params)
+            json_body = {"status": reminder_status, "call_id": call_id}
+            make_api_request(update_url, method="PUT", json=json_body)
             logger.info(f"Updated status to {reminder_status} for call_id={call_id}, loan_id={loan_id}")
 
             # Second PUT: Update response_text if transcription exists and is valid
             if transcription and transcription not in ["No transcription available", "Transcription failed", "Transcription unclear; review recording required"]:
                 response_text = transcription[:500] if len(transcription) > 500 else transcription
-                params = {"status": reminder_status, "call_id": call_id, "response_text": response_text}
-                make_api_request(update_url, method="PUT", params=params)
+                json_body = {"status": reminder_status, "call_id": call_id, "response_text": response_text}
+                make_api_request(update_url, method="PUT", json=json_body)
                 logger.info(f"Saved response_text for call_id={call_id}, loan_id={loan_id}: {response_text}")
         except Exception as e:
             logger.error(f"Failed to update status or response_text: {str(e)}")
@@ -337,9 +341,38 @@ def update_call_status(api_url, agent_url, **kwargs):
                         inserted_date=inserted_date
                     )
                     logger.info(f"Generated remind_on_date for call_id={call_id}: {remind_on_date}")
-                    remind_on_date=extract_final_datetime(remind_on_date)
-                    # Validate date format (ISO)
-                    datetime.fromisoformat(remind_on_date.replace("Z", "+00:00"))
+                    remind_on_date = extract_final_datetime(remind_on_date)
+
+                    # Parse the remind_on_date into a datetime object (already UTC-aware)
+                    remind_dt = datetime.fromisoformat(remind_on_date.replace("Z", "+00:00"))
+                    utc_tz = pytz.timezone("UTC")
+                    # No need to localize again since it's already UTC-aware
+
+                    # Determine target timezone based on loan_id parity
+                    target_tz = pytz.timezone("Asia/Kolkata") if int(loan_id) % 2 == 0 else pytz.timezone("America/New_York")
+                    start_time, end_time = time(9, 0), time(17, 0)  # 9 AM - 5 PM
+
+                    # Convert to target timezone
+                    local_dt = remind_dt.astimezone(target_tz)
+                    local_date = local_dt.date()
+                    local_time = local_dt.time()
+
+                    # Adjust time to fall within office hours
+                    if local_time < start_time or local_time > end_time:
+                        # Set to 9 AM if before office hours, or next day 9 AM if after
+                        if local_time < start_time:
+                            adjusted_local_dt = target_tz.localize(datetime.combine(local_date, start_time))
+                        else:
+                            next_day = local_date + timedelta(days=1)
+                            adjusted_local_dt = target_tz.localize(datetime.combine(next_day, start_time))
+                        # Convert back to UTC
+                        remind_dt = adjusted_local_dt.astimezone(utc_tz)
+                    else:
+                        remind_dt = local_dt.astimezone(utc_tz)  # Already in office hours, just keep it in UTC
+
+                    # Format back to ISO string
+                    remind_on_date = remind_dt.isoformat().replace("+00:00", "Z")
+                    logger.info(f"Adjusted remind_on_date to office hours for call_id={call_id}: {remind_on_date}")
 
                     # Set new reminder
                     set_reminder_url = f"{api_url}loan/{loan_id}/set_reminder"
@@ -434,6 +467,7 @@ with DAG(
         op_kwargs={
             "api_url": AUTOFINIX_API_URL,
             "test_phone_number": AUTOFINIX_TEST_PHONE_NUMBER,
+            "test_phone_number_qa": AUTOFINIX_TEST_PHONE_NUMBER_QA,
             "odd_phone_number":AUTOFINIX_DEMO_PHONE_ODD,
             "even_phone_number":AUTOFINIX_DEMO_PHONE_EVEN,
         },
