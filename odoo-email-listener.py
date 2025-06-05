@@ -68,7 +68,7 @@ def sanitize_text(text: str) -> str:
 def pdf_to_markdown(pdf_path: str) -> dict:
     """Extracts text from a PDF and returns serializable data using PyPDFLoader."""
     try:
-        if not os.path.exists(pdf OsPath(pdf_path):
+        if not os.path.exists(pdf_path):
             logging.error(f"PDF file not found: {pdf_path}")
             return {"content": "", "metadata": {}}
         loader = PyPDFLoader(pdf_path)
