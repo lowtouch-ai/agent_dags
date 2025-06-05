@@ -114,7 +114,7 @@ def fetch_unread_emails(**kwargs):
                     extracted_content = ""
                     if mime_type == "application/pdf":
                         extracted_content = pdf_to_markdown(attachment_path)
-                        logging.info(f"Extracted content from PDF {filename}: {extracted_content}...")
+                        logging.info(f"Extracted content from PDF {filename}: {extracted_content[:100]}...")
                     attachments.append({
                         "filename": filename,
                         "mime_type": mime_type,
@@ -136,6 +136,7 @@ def fetch_unread_emails(**kwargs):
             max_timestamp = timestamp
     if unread_emails:
         update_last_checked_timestamp(max_timestamp)
+    logging.info(f"Pushing to XCom: {unread_emails}")  # Added for debugging
     kwargs['ti'].xcom_push(key="unread_emails", value=unread_emails)
     return unread_emails
 
