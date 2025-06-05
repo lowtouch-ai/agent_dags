@@ -173,7 +173,7 @@ def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
         logging.debug(f"Preparing email to {recipient} with subject: {subject}")
         msg = MIMEMultipart()
-        msg["From"] = f"WebShop via lowtouch.ai <{ODOO_FROM_ADDRESS}>"
+        msg["From"] = f"InvoFlux via lowtouch.ai <{ODOO_FROM_ADDRESS}>"
         msg["To"] = recipient
         msg["Subject"] = subject
         msg["In-Reply-To"] = in_reply_to
