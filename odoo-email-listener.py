@@ -13,6 +13,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import re
 from langchain_community.document_loaders import PyPDFLoader
+
 # Default DAG arguments
 default_args = {
     "owner": "lowtouch.ai_developers",
@@ -22,7 +23,6 @@ default_args = {
     "retry_delay": timedelta(seconds=15),
 }
 
-# Configuration variables
 ODOO_FROM_ADDRESS = Variable.get("INVOFLUX_FROM_ADDRESS")  
 GMAIL_CREDENTIALS = Variable.get("INVOFLUX_GMAIL_CREDENTIALS")  
 LAST_PROCESSED_EMAIL_FILE = "/appz/cache/last_processed_email.json"
@@ -30,7 +30,7 @@ ATTACHMENT_DIR = "/appz/data/attachments/"
 
 def authenticate_gmail():
     """Authenticate Gmail API and verify the correct email account is used."""
-    creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
+    creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
     service = build("gmail", "v1", credentials=creds)
     profile = service.users().getProfile(userId="me").execute()
     logged_in_email = profile.get("emailAddress", "")
@@ -65,15 +65,33 @@ def sanitize_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def pdf_to_markdown(pdf_path: str) -> str:
-    """Extracts text from a PDF and formats it as Markdown using PyPDFLoader."""
+def pdf_to_markdown(pdf_path: str) -> dict:
+    """Extracts text from a PDF and returns serializable data using PyPDFLoader."""
     try:
+        if not os.path.exists(pdf OsPath(pdf_path):
+            logging.error(f"PDF file not found: {pdf_path}")
+            return {"content": "", "metadata": {}}
         loader = PyPDFLoader(pdf_path)
         documents = loader.load()
-        return documents[0]
+        if not documents:
+            logging.warning(f"No content extracted from PDF: {pdf_path}")
+            return {"content": "", "metadata": {}}
+        # Extract serializable data from Document objects
+        extracted_content = "\n".join(doc.page_content for doc in documents)
+        metadata = [doc.metadata for doc in documents]  # List of metadata dictionaries
+        if not extracted_content.strip():
+            logging.info(f"Extracted content is empty for PDF: {pdf_path}")
+            return {"content": "", "metadata": metadata}
+        logging.info(f"Extracted content from PDF {pdf_path}: {extracted_content[:100]}...")
+        # Return a dictionary with sanitized content and metadata
+        sanitized_content = sanitize_text(extracted_content)
+        return {
+            "content": f"```Invoice Content\n{sanitized_content}\n```",
+            "metadata": metadata
+        }
     except Exception as e:
-        logging.error(f"Error extracting PDF {pdf_path}: {str(e)}")
-        return ""
+        logging.error(f"Error extracting PDF {pdf_path}: {str(e)}", exc_info=True)
+        return {"content": str(e), "metadata": {}}
 
 def fetch_unread_emails(**kwargs):
     """Fetch unread emails and their attachments after the last processed email timestamp."""
@@ -111,10 +129,13 @@ def fetch_unread_emails(**kwargs):
                     attachment_path = os.path.join(ATTACHMENT_DIR, f"{msg['id']}_{filename}")
                     with open(attachment_path, "wb") as f:
                         f.write(file_data)
-                    extracted_content = ""
+                    extracted_content = {}
                     if mime_type == "application/pdf":
                         extracted_content = pdf_to_markdown(attachment_path)
-                        logging.info(f"Extracted content from PDF {filename}: {extracted_content}...")
+
+                        logging.info(f"Extracted content from PDF {filename}: {extracted_content['content'][:100]}...")
+
+
                     attachments.append({
                         "filename": filename,
                         "mime_type": mime_type,
@@ -136,7 +157,6 @@ def fetch_unread_emails(**kwargs):
             max_timestamp = timestamp
     if unread_emails:
         update_last_checked_timestamp(max_timestamp)
-    logging.info(f"Pushing to XCom: {unread_emails}")  # Added for debugging
     kwargs['ti'].xcom_push(key="unread_emails", value=unread_emails)
     return unread_emails
 
@@ -210,9 +230,6 @@ with DAG("invoflux_monitor_mailbox",
         provide_context=True
     )
 
-   
-
     # Set task dependencies
     fetch_emails_task >> branch_task
     branch_task >> [trigger_email_response_task, no_email_found_task]
-    
