@@ -186,7 +186,6 @@ def send_email(service, recipient, subject, body, in_reply_to, references):
     except Exception as e:
         logging.error(f"Failed to send email: {str(e)}")
         return None
-
 def send_response(**kwargs):
     try:
         email_data = kwargs['dag_run'].conf.get("email_data", {})
@@ -210,6 +209,13 @@ def send_response(**kwargs):
         if not email_thread:
             logging.warning("No thread history retrieved, using only current email content.")
             user_query = email_data.get("content", "").strip()
+            # Include attachment data for the current email if no thread history
+            if email_data.get("attachments"):
+                attachment_content = ""
+                for attachment in email_data["attachments"]:
+                    if "extracted_content" in attachment and "content" in attachment["extracted_content"]:
+                        attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
+                user_query += f"\n\n{attachment_content}" if attachment_content else ""
         else:
             # Format thread history into a single query
             thread_history = ""
@@ -228,8 +234,17 @@ def send_response(**kwargs):
             if current_content:
                 soup = BeautifulSoup(current_content, "html.parser")
                 current_content = soup.get_text(separator=" ", strip=True)
-            thread_history += f"Current Email (From: {sender_email}):\n{current_content}"
-            logging.info(f"Thred History:: {thread_history}")
+            thread_history += f"Current Email (From: {sender_email}):\n{current_content}\n"
+            
+            # Append attachment data for the current email
+            if email_data.get("attachments"):
+                attachment_content = ""
+                for attachment in email_data["attachments"]:
+                    if "extracted_content" in attachment and "content" in attachment["extracted_content"]:
+                        attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
+                thread_history += f"\n{attachment_content}" if attachment_content else ""
+            
+            logging.info(f"Thread History:: {thread_history}")
             user_query = f"Here is the email thread history:\n\n{thread_history}\n"
         
         logging.debug(f"Sending query to AI: {user_query}")
