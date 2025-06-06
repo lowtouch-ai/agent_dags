@@ -229,8 +229,8 @@ def send_response(**kwargs):
                 soup = BeautifulSoup(current_content, "html.parser")
                 current_content = soup.get_text(separator=" ", strip=True)
             thread_history += f"Current Email (From: {sender_email}):\n{current_content}"
-            
-            user_query = f"Here is the email thread history:\n\n{thread_history}\n\nPlease respond to the latest email, considering the full context of the thread. Ensure the response addresses the specific details requested, such as article IDs or order details from previous emails."
+            logging.info(f"Thred History:: {thread_history}")
+            user_query = f"Here is the email thread history:\n\n{thread_history}\n"
         
         logging.debug(f"Sending query to AI: {user_query}")
         
