@@ -8,8 +8,7 @@ import io
 from PyPDF2 import PdfReader
 
 # Constants
-FOLDER_ID = 'https://drive.google.com/drive/folders/1cFl0s4IkZi-pPhZ4mRoAFm_gj9wEF8g1'  # Replace with your actual Google Drive folder ID
-CREDENTIALS_PATH = Variable.get("credentials")  # Loaded from Airflow Variable
+FOLDER_ID = 'https://drive.google.com/drive/folders/1cFl0s4IkZi-pPhZ4mRoAFm_gj9wEF8g1'  # ← Replace this with your actual Drive folder ID
 
 default_args = {
     'owner': 'airflow',
@@ -21,14 +20,15 @@ default_args = {
 dag = DAG(
     'cv_drive_processing',
     default_args=default_args,
-    description='Extract CVs and JD from Google Drive and parse content',
+    description='Process CVs and JD from Google Drive using service account JSON from Airflow Variable',
     schedule_interval=None,
     catchup=False
 )
 
 def get_drive_service():
-    creds = service_account.Credentials.from_service_account_file(
-        CREDENTIALS_PATH,
+    service_account_info = Variable.get("gdrive_credentials_json", deserialize_json=True)
+    creds = service_account.Credentials.from_service_account_info(
+        service_account_info,
         scopes=['https://www.googleapis.com/auth/drive.readonly']
     )
     return build('drive', 'v3', credentials=creds)
@@ -43,7 +43,6 @@ def extract_text_from_pdf_bytes(pdf_bytes):
 def process_drive_files():
     service = get_drive_service()
 
-    # Query all PDF files in the folder
     results = service.files().list(
         q=f"'{FOLDER_ID}' in parents and mimeType='application/pdf' and trashed = false",
         fields="files(id, name)",
@@ -51,7 +50,7 @@ def process_drive_files():
 
     files = results.get('files', [])
     if not files:
-        print("No files found in the Drive folder.")
+        print("❗ No PDF files found in the Drive folder.")
         return
 
     jd_text = None
@@ -61,7 +60,7 @@ def process_drive_files():
         file_id = file['id']
         file_name = file['name'].lower()
 
-        # Read PDF content as bytes (not saving locally)
+        # Fetch PDF content (as bytes)
         pdf_bytes = service.files().get_media(fileId=file_id).execute()
         text_content = extract_text_from_pdf_bytes(pdf_bytes)
 
@@ -75,7 +74,7 @@ def process_drive_files():
                 'text': text_content
             })
 
-    # Output sample
+    # Log sample results
     print("\n📌 JD Preview:")
     print(jd_text[:500] if jd_text else "No JD file detected.")
 
