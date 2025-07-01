@@ -76,11 +76,11 @@ def process_drive_files():
 
     # Log sample results
     print("\n📌 JD Preview:")
-    print(jd_text[:500] if jd_text else "No JD file detected.")
+    print(jd_text if jd_text else "No JD file detected.")
 
     print("\n📌 CV Previews:")
     for cv in cv_texts:
-        print(f"- {cv['file_name']} → {cv['text'][:200]}")
+        print(f"\n--- {cv['file_name']} ---\n{cv['text']}\n")
 
 with dag:
     process_files_task = PythonOperator(
