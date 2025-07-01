@@ -8,7 +8,7 @@ import io
 from PyPDF2 import PdfReader
 
 # Constants
-FOLDER_ID = 'https://drive.google.com/drive/folders/1cFl0s4IkZi-pPhZ4mRoAFm_gj9wEF8g1'  # ← Replace this with your actual Drive folder ID
+FOLDER_ID = '1cFl0s4IkZi-pPhZ4mRoAFm_gj9wEF8g1'  # ← Replace this with your actual Drive folder ID
 
 default_args = {
     'owner': 'airflow',
