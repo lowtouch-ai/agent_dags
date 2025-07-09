@@ -3,6 +3,7 @@ from airflow.operators.bash import BashOperator
 from airflow.utils.task_group import TaskGroup
 from datetime import datetime, timedelta
 from airflow.models import Variable
+import os
 
 default_args = {
     'owner': 'lowtouch.ai_developers',
@@ -31,7 +32,7 @@ with open(readme_path, 'r') as file:
 daily_schedule_utc = "30 2 * * *"
 
 with DAG(
-    'webshop_reset_data_elementary',
+    'webshop_reset_data',
     default_args=default_args,
     schedule_interval=daily_schedule_utc,
     catchup=False,
