@@ -10,9 +10,10 @@ clean-targets:
     - "dbt_modules"
     - "logs"
 require-dbt-version: [">=1.0.0", "<2.0.0"]
+
 seeds:
   ai_lab:
-    order_seed:  # Renamed from 'order' to avoid conflict with the model
+    order_seed:
       +column_types:
         id: integer
         customerid: integer
@@ -24,86 +25,101 @@ seeds:
         updated: timestamp
     address:
       +column_types:
-          id: integer
-          customerid: integer
-          firstname: text
-          lastname: text
-          address1: text
-          address2: text
-          city: text
-          zip: text  # ZIP codes often contain letters, so use TEXT
-          created: timestamp
-          updated: timestamp
+        id: integer
+        customerid: integer
+        firstname: text
+        lastname: text
+        address1: text
+        address2: text
+        city: text
+        zip: text
+        created: timestamp
+        updated: timestamp
     articles:
-      +full_refresh: false  # Prevents truncation before inserting new data
+      +full_refresh: false
       +column_types:
-          id: integer
-          productid: integer
-          ean: text
-          colorid: integer
-          size: integer
-          description: text
-          originalprice: numeric
-          reducedprice: numeric
-          taxrate: integer
-          discountinpercent: integer
-          currentlyactive: boolean  # Assuming "t" and "f" represent true/false
-          created: timestamp
-          updated: timestamp
+        id: integer
+        productid: integer
+        ean: text
+        colorid: integer
+        size: integer
+        description: text
+        originalprice: numeric
+        reducedprice: numeric
+        taxrate: integer
+        discountinpercent: integer
+        currentlyactive: boolean
+        created: timestamp
+        updated: timestamp
     customer:
       +column_types:
-          id: integer
-          firstname: text
-          lastname: text
-          gender: text
-          email: text
-          dateofbirth: timestamp  # Can be converted to DATE in a dbt model later
-          currentaddressid: integer
-          created: timestamp
-          updated: timestamp
+        id: integer
+        firstname: text
+        lastname: text
+        gender: text
+        email: text
+        dateofbirth: timestamp
+        currentaddressid: integer
+        created: timestamp
+        updated: timestamp
     labels:
       +column_types:
-          id: integer
-          name: text
-          slugname: text
-          icon: text
+        id: integer
+        name: text
+        slugname: text
+        icon: text
     order_positions:
       +column_types:
-          id: integer
-          orderid: integer
-          articleid: integer
-          amount: integer
-          price: numeric  # Ensure "$" is removed before ingestion
-          created: timestamp
-          updated: timestamp
+        id: integer
+        orderid: integer
+        articleid: integer
+        amount: integer
+        price: numeric
+        created: timestamp
+        updated: timestamp
     products:
       +column_types:
-          id: integer
-          name: text
-          labelid: integer
-          category: text
-          gender: text
-          currentlyactive: boolean  # Assuming "t" and "f" represent true/false
-          created: timestamp
-          updated: timestamp
+        id: integer
+        name: text
+        labelid: integer
+        category: text
+        gender: text
+        currentlyactive: boolean
+        created: timestamp
+        updated: timestamp
     stock:
       +column_types:
-          id: integer
-          articleid: integer
-          count: integer
-          created: timestamp
-          updated: timestamp
+        id: integer
+        articleid: integer
+        count: integer
+        created: timestamp
+        updated: timestamp
     colors:
       +column_types:
-          id: integer
-          name: text
-          rgb: text  # Storing HEX color codes as text
-    sizes:     # Name of the seed, should match the CSV filename (apparel_sizes.csv)
+        id: integer
+        name: text
+        rgb: text
+    sizes:
       +column_types:
-          id: integer
-          gender: text
-          category: text
-          size: text
-          size_us: text
-          size_uk: text
-          size_eu: text
+        id: integer
+        gender: text
+        category: text
+        size: text
+        size_us: text
+        size_uk: text
+        size_eu: text
+
+models:
+  ai_lab:
+    materialization: "{{ 'table' if target.name == 'dev' else 'view'}}"
+    +meta:
+      orchestrator: "{{ env_var('ELEMENTARY_ORCHESTRATOR') }}"
+      job_name: "{{ env_var('ELEMENTARY_JOB_NAME') }}"
+      job_id: "{{ env_var('ELEMENTARY_JOB_ID') }}"
+      job_run_id: "{{ env_var('ELEMENTARY_JOB_RUN_ID') }}"
+  elementary:
+    +schema: "elementary"
+
+flags:
+  require_explicit_package_overrides_for_builtin_materializations: False
+  source_freshness_run_project_hooks: True
