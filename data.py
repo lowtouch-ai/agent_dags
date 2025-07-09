@@ -25,7 +25,9 @@ dbt_seed_commands = [
 ]
 
 dbt_run_commands = ["order"]
-
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'webshop.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
 daily_schedule_utc = "30 2 * * *"
 
 with DAG(
