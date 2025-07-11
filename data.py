@@ -26,6 +26,11 @@ dbt_seed_commands = [
 ]
 
 dbt_run_commands = ["order"]
+
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'webshop.md')
+with open(readme_path, 'r') as file:
+    readme_content = file.read()
+
 daily_schedule_utc = "30 2 * * *"
 
 with DAG(
@@ -102,6 +107,29 @@ with DAG(
                 }
             )
 
+    # ✅ NEW TASK to run Elementary's dbt models
+    dbt_run_elementary = BashOperator(
+        task_id="dbt_run_elementary",
+        bash_command=(
+            f"source {dbt_venv_path} && "
+            f"cd {dbt_project_dir} && "
+            f"{dbt_executable_path} run --select elementary "
+            f"--vars '{{\\\"orchestrator\\\": \\\"airflow\\\", "
+            f"\\\"job_name\\\": \\\"webshop_reset_data_elementary\\\", "
+            f"\\\"job_id\\\": \\\"{{{{ ti.dag_id }}}}\\\", "
+            f"\\\"job_run_id\\\": \\\"{{{{ ti.run_id }}}}\\\"}}'"
+        ),
+        env={
+            "WEBSHOP_POSTGRES_USER": postgres_user,
+            "WEBSHOP_POSTGRES_PASSWORD": postgres_password,
+            "DBT_PROFILES_DIR": dbt_project_dir,
+            "ELEMENTARY_ORCHESTRATOR": "airflow",
+            "ELEMENTARY_JOB_NAME": "webshop_reset_data_elementary",
+            "ELEMENTARY_JOB_ID": "{{ ti.dag_id }}",
+            "ELEMENTARY_JOB_RUN_ID": "{{ ti.run_id }}"
+        }
+    )
+
     elementary_report_task = BashOperator(
         task_id="generate_elementary_report",
         bash_command=(
@@ -131,4 +159,5 @@ with DAG(
         )
     )
 
-    dbt_deps_task >> dbt_seed_group >> dbt_run_group >> elementary_report_task >> copy_elementary_report
+    # DAG dependencies
+    dbt_deps_task >> dbt_seed_group >> dbt_run_group >> dbt_run_elementary >> elementary_report_task >> copy_elementary_report
