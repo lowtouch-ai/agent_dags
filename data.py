@@ -107,7 +107,6 @@ with DAG(
                 }
             )
 
-    # ✅ NEW TASK to run Elementary's dbt models
     dbt_run_elementary = BashOperator(
         task_id="dbt_run_elementary",
         bash_command=(
