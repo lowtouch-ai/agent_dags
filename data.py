@@ -138,7 +138,7 @@ with DAG(
             f"/dbt_venv/bin/edr report "
             f"--project-dir {dbt_project_dir} "
             f"--profiles-dir {dbt_project_dir} "
-            f"--target-dir {dbt_project_dir}/edr_target"
+            f"--target-path {dbt_project_dir}/edr_target"
         ),
         env={
             "WEBSHOP_POSTGRES_USER": postgres_user,
