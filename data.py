@@ -107,7 +107,7 @@ with DAG(
                 }
             )
 
-    
+    # ✅ NEW TASK to run Elementary's dbt models
     dbt_run_elementary = BashOperator(
         task_id="dbt_run_elementary",
         bash_command=(
@@ -138,6 +138,7 @@ with DAG(
             f"/dbt_venv/bin/edr report "
             f"--project-dir {dbt_project_dir} "
             f"--profiles-dir {dbt_project_dir} "
+            f"--output {dbt_project_dir}/edr_target/elementary_report.html"
         ),
         env={
             "WEBSHOP_POSTGRES_USER": postgres_user,
