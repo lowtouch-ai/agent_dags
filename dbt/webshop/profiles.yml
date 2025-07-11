@@ -10,3 +10,14 @@ ai_lab:
       dbname: webshop_v2
       schema: webshop
       threads: 6
+elementary:
+  outputs:
+    default:
+      type: "postgres"
+      host: "connector"
+      port: 5432
+      user: "{{env_var('WEBSHOP_POSTGRES_USER')}}"
+      password: "{{env_var('WEBSHOP_POSTGRES_PASSWORD')}}"
+      dbname: "webshop_v2"
+      schema: "webshop_elementary"
+      threads: 6
