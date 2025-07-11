@@ -24,3 +24,7 @@
 2. **DBT Run Tasks**:
    - Models: order
    - Purpose: Executes transformations to build derived tables/views
+     
+### Elementary Data
+
+For generated docs, [click here](https://airflow2025a.lowtouch.ai/docs/edr_target/elementary_report.html).
