@@ -30,7 +30,9 @@ seeds:
               field: id
       - name: originalprice
         tests: [not_null]
-
+      - name: reducedprice
+        tests: [not_null]
+        
   - name: customer
     columns:
       - name: id
