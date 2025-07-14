@@ -117,7 +117,8 @@ with DAG(
             f"--vars '{{\\\"orchestrator\\\": \\\"airflow\\\", "
             f"\\\"job_name\\\": \\\"webshop_reset_data_elementary\\\", "
             f"\\\"job_id\\\": \\\"{{{{ ti.dag_id }}}}\\\", "
-            f"\\\"job_run_id\\\": \\\"{{{{ ti.run_id }}}}\\\"}}'"
+            f"\\\"job_run_id\\\": \\\"{{{{ ti.run_id }}}}\\\"}}' "
+            f"|| true"
         ),
         env={
             "WEBSHOP_POSTGRES_USER": postgres_user,
@@ -129,6 +130,7 @@ with DAG(
             "ELEMENTARY_JOB_RUN_ID": "{{ ti.run_id }}"
         }
     )
+
 
 
     dbt_run_elementary = BashOperator(
