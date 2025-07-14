@@ -1,0 +1,105 @@
+version: 2
+
+seeds:
+  - name: address
+    columns:
+      - name: id
+        tests: [not_null, unique]
+      - name: customerid
+        tests:
+          - not_null
+          - relationships:
+              to: ref('customer')
+              field: id
+
+  - name: articles
+    columns:
+      - name: id
+        tests: [not_null, unique]
+      - name: productid
+        tests:
+          - not_null
+          - relationships:
+              to: ref('products')
+              field: id
+      - name: colorid
+        tests:
+          - not_null
+          - relationships:
+              to: ref('colors')
+              field: id
+      - name: originalprice
+        tests: [not_null]
+      - name: reducedprice
+        tests: [not_null]
+      - name: taxrate
+        tests: [not_null]
+      - name: currentlyactive
+        tests: [not_null]
+
+  - name: customer
+    columns:
+      - name: id
+        tests: [not_null, unique]
+      - name: currentaddressid
+        tests:
+          - not_null
+          - relationships:
+              to: ref('address')
+              field: id
+
+  - name: order_position
+    columns:
+      - name: id
+        tests: [not_null, unique]
+      - name: orderid
+        tests:
+          - not_null
+          - relationships:
+              to: ref('order_seed')
+              field: id
+      - name: articleid
+        tests:
+          - not_null
+          - relationships:
+              to: ref('articles')
+              field: id
+
+  - name: order_seed
+    columns:
+      - name: id
+        tests: [not_null, unique]
+      - name: customerid
+        tests:
+          - not_null
+          - relationships:
+              to: ref('customer')
+              field: id
+      - name: shippingaddressid
+        tests:
+          - not_null
+          - relationships:
+              to: ref('address')
+              field: id
+
+  - name: products
+    columns:
+      - name: id
+        tests: [not_null, unique]
+      - name: labelid
+        tests:
+          - not_null
+          - relationships:
+              to: ref('labels')
+              field: id
+
+  - name: stock
+    columns:
+      - name: id
+        tests: [not_null, unique]
+      - name: articleid
+        tests:
+          - not_null
+          - relationships:
+              to: ref('articles')
+              field: id
