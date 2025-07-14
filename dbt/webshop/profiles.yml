@@ -3,7 +3,7 @@ ai_lab:
   outputs:
     dev:
       type: postgres
-      host: connector
+      host: postgres
       user: "{{env_var('WEBSHOP_POSTGRES_USER')}}"
       password: "{{env_var('WEBSHOP_POSTGRES_PASSWORD')}}"
       port: 5432
@@ -14,7 +14,7 @@ elementary:
   outputs:
     default:
       type: "postgres"
-      host: "connector"
+      host: "postgres"
       port: 5432
       user: "{{env_var('WEBSHOP_POSTGRES_USER')}}"
       password: "{{env_var('WEBSHOP_POSTGRES_PASSWORD')}}"
