@@ -1,7 +1,7 @@
 version: 2
 
 models:
-  - name: orders
+  - name: order
     description: "Transformed orders data with dynamically shifted timestamps."
     columns:
       - name: id
