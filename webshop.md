@@ -2,7 +2,8 @@
 
 ## Overview
 - **Purpose**: Refreshes the webshop database by reloading seed data and rebuilding models using DBT. This resets specified tables to a baseline state defined in seed files and updates derived models daily.
-- **Maintained by**: 
+- **Maintained by**:
+  - Adhil Ahammed (aahammed@ecloudcontrol)
   - Akshai Surendran (asurendran@ecloudcontrol.com)
   - Ansu Anna Varghese (aannavarghese@ecloudcontrol.com)
 - **Schedule**: Daily at 8:00 AM IST (2:30 AM UTC)

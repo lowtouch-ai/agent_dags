@@ -38,6 +38,7 @@ with DAG(
     default_args=default_args,
     schedule_interval=daily_schedule_utc,
     catchup=False,
+    doc_md=readme_content,
     tags=["reset", "webshop", "data"]
 ) as dag:
 
@@ -107,6 +108,31 @@ with DAG(
                 }
             )
 
+    dbt_test = BashOperator(
+        task_id="dbt_test",
+        bash_command=(
+            f"source {dbt_venv_path} && "
+            f"cd {dbt_project_dir} && "
+            f"{dbt_executable_path} test "
+            f"--vars '{{\\\"orchestrator\\\": \\\"airflow\\\", "
+            f"\\\"job_name\\\": \\\"webshop_reset_data_elementary\\\", "
+            f"\\\"job_id\\\": \\\"{{{{ ti.dag_id }}}}\\\", "
+            f"\\\"job_run_id\\\": \\\"{{{{ ti.run_id }}}}\\\"}}' "
+            f"|| true"
+        ),
+        env={
+            "WEBSHOP_POSTGRES_USER": postgres_user,
+            "WEBSHOP_POSTGRES_PASSWORD": postgres_password,
+            "DBT_PROFILES_DIR": dbt_project_dir,
+            "ELEMENTARY_ORCHESTRATOR": "airflow",
+            "ELEMENTARY_JOB_NAME": "webshop_reset_data_elementary",
+            "ELEMENTARY_JOB_ID": "{{ ti.dag_id }}",
+            "ELEMENTARY_JOB_RUN_ID": "{{ ti.run_id }}"
+        }
+    )
+
+
+
     dbt_run_elementary = BashOperator(
         task_id="dbt_run_elementary",
         bash_command=(
@@ -159,4 +185,4 @@ with DAG(
     )
 
     # DAG dependencies
-    dbt_deps_task >> dbt_seed_group >> dbt_run_group >> dbt_run_elementary >> elementary_report_task >> copy_elementary_report
+    dbt_deps_task >> dbt_seed_group >> dbt_run_group >> dbt_test >> dbt_run_elementary >> elementary_report_task >> copy_elementary_report

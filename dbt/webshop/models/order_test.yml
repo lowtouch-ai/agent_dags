@@ -1,0 +1,57 @@
+version: 2
+
+models:
+  - name: order
+    description: "Transformed orders data with dynamically shifted timestamps."
+    columns:
+      - name: id
+        description: "Primary key for the order."
+        tests:
+          - not_null
+          - unique
+
+      - name: customerid
+        description: "Foreign key to the customer table."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('customer')
+              field: id
+
+      - name: ordertimestamp
+        description: "Order timestamp, dynamically shifted to simulate new data."
+        tests:
+          - not_null
+
+      - name: shippingaddressid
+        description: "Foreign key to the address table."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('address')
+              field: id
+
+      - name: total
+        description: "Total amount of the order."
+        tests:
+          - not_null
+          # You can use accepted_values if total can be either 0 or 1 (probably incorrect here)
+          # Remove this if it's not intentional:
+          # - accepted_values:
+          #     values: ['0', '1']
+          #     severity: warn
+
+      - name: shippingcost
+        description: "Shipping cost for the order."
+        tests:
+          - not_null
+
+      - name: created
+        description: "Timestamp when the order record was created."
+        tests:
+          - not_null
+
+      - name: updated
+        description: "Timestamp when the order record was last updated."
+        tests:
+          - not_null
