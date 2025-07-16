@@ -10,7 +10,8 @@ import csv
 from PyPDF2 import PdfReader
 from ollama import Client
 
-FOLDER_ID = '1cFl0s4IkZi-pPhZ4mRoAFm_gj9wEF8g1'  # Shared drive folder ID
+# Shared Drive folder ID where JD and CVs are uploaded
+FOLDER_ID = '1cFl0s4IkZi-pPhZ4mRoAFm_gj9wEF8g1'
 CSV_FILENAME = 'cv_results.csv'
 MODEL_NAME = 'recruitment-agent:0.3'
 
@@ -63,6 +64,7 @@ def call_agent(jd_text, cv_text, cv_file_name):
 def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
     media = MediaIoBaseUpload(io.BytesIO(content_bytes), mimetype=mimetype)
 
+    # Check and delete existing file (to avoid quota issue)
     existing_files = service.files().list(
         q=f"name='{filename}' and '{folder_id}' in parents and trashed=false",
         supportsAllDrives=True,
@@ -70,22 +72,19 @@ def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
         fields="files(id, name)"
     ).execute().get('files', [])
 
-    if existing_files:
-        file_id = existing_files[0]['id']
-        service.files().update(
-            fileId=file_id,
-            media_body=media,
-            body={'name': filename},
-            supportsAllDrives=True,
-            fields='id'
-        ).execute()
-    else:
-        service.files().create(
-            body={'name': filename, 'parents': [folder_id]},
-            media_body=media,
-            supportsAllDrives=True,
-            fields='id'
-        ).execute()
+    for file in existing_files:
+        try:
+            service.files().delete(fileId=file['id'], supportsAllDrives=True).execute()
+        except Exception as e:
+            print(f"⚠️ Failed to delete existing file {file['name']}: {e}")
+
+    # Upload new file into the shared drive
+    service.files().create(
+        body={'name': filename, 'parents': [folder_id]},
+        media_body=media,
+        supportsAllDrives=True,
+        fields='id'
+    ).execute()
 
 def process_and_score(ti, **kwargs):
     service = get_drive_service()
