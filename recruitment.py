@@ -6,11 +6,12 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 import io
-import csv
+import re
+import pandas as pd
 from PyPDF2 import PdfReader
 from ollama import Client
 
-# 📁 Google Drive Shared Drive and Folder Config
+#  Google Drive Shared Drive and Folder Config
 SHARED_DRIVE_ID = '0AO6Pw6zAUDLJUk9PVA'
 FOLDER_ID = '1sqk2IONrPJHtNruCMzAyYqOd3igXJmND'
 MODEL_NAME = 'recruitment-agent:0.3'
@@ -25,7 +26,7 @@ default_args = {
 dag = DAG(
     'cv_agent_processing',
     default_args=default_args,
-    description='Process one JD and multiple CVs via AgentOmatic and save result to Drive CSV',
+    description='Process one JD and multiple CVs via AgentOmatic and save structured results to Drive CSV',
     schedule_interval=None,
     catchup=False,
 )
@@ -61,9 +62,28 @@ def call_agent(jd_text, cv_text, cv_file_name):
     )
     return response['message']['content']
 
+def parse_agent_response(response_text):
+    """
+    Extract structured data from agent response using regex or assumed patterns.
+    """
+    def extract(pattern):
+        match = re.search(pattern, response_text, re.IGNORECASE)
+        return match.group(1).strip() if match else ""
+
+    return {
+        "Name": extract(r"Name\s*:\s*(.*)"),
+        "Email": extract(r"Email\s*:\s*([\w\.-]+@[\w\.-]+)"),
+        "Phone Number": extract(r"Phone\s*:\s*([\d\-\+\(\)\s]+)"),
+        "Overall Score": extract(r"Overall Score\s*:\s*(.*)"),
+        "Must-Have Criteria": extract(r"Must[- ]?Have Criteria\s*:\s*(.*)"),
+        "Nice-to-Have Criteria": extract(r"Nice[- ]?to[- ]?Have Criteria\s*:\s*(.*)"),
+        "Other Criteria": extract(r"Other Criteria\s*:\s*(.*)"),
+        "Notes": extract(r"Notes\s*:\s*(.*)"),
+        "Remarks": extract(r"Remarks\s*:\s*(.*)")
+    }
+
 def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
     media = MediaIoBaseUpload(io.BytesIO(content_bytes), mimetype=mimetype)
-
     try:
         service.files().create(
             body={'name': filename, 'parents': [folder_id]},
@@ -107,25 +127,20 @@ def process_and_score(ti, **kwargs):
     if not jd_text:
         raise ValueError("❗ No JD found in Drive folder.")
 
-    results = []
+    structured_results = []
     for cv in cvs:
         print(f"⚙️ Processing CV: {cv['name']}")
         agent_result = call_agent(jd_text, cv['text'], cv['name'])
-        results.append({
-            "cv_file": cv['name'],
-            "score_or_result": agent_result
-        })
+        parsed = parse_agent_response(agent_result)
+        parsed['CV File'] = cv['name']
+        structured_results.append(parsed)
 
-    # ✨ Generate timestamped filename
+    df = pd.DataFrame(structured_results)
     timestamp_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     dynamic_filename = f"cv_results_{timestamp_str}.csv"
 
-    # 📄 Write CSV
     csv_buffer = io.StringIO()
-    writer = csv.DictWriter(csv_buffer, fieldnames=["cv_file", "score_or_result"])
-    writer.writeheader()
-    for row in results:
-        writer.writerow(row)
+    df.to_csv(csv_buffer, index=False)
 
     upload_to_drive(
         service=service,
@@ -134,7 +149,7 @@ def process_and_score(ti, **kwargs):
         folder_id=FOLDER_ID,
         mimetype='text/csv'
     )
-    print(f"✅ Uploaded new CSV '{dynamic_filename}' with {len(results)} results to Drive.")
+    print(f"✅ Uploaded structured CSV '{dynamic_filename}' with {len(df)} records to Drive.")
 
 with dag:
     process_and_score_task = PythonOperator(
