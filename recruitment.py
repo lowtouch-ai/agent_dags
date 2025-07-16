@@ -4,8 +4,8 @@ from airflow.models import Variable
 from datetime import datetime, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 import io
-import os
 import csv
 from PyPDF2 import PdfReader
 from ollama import Client
@@ -61,7 +61,8 @@ def call_agent(jd_text, cv_text, cv_file_name):
     return response['message']['content']
 
 def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
-    # Check if file already exists
+    media = MediaIoBaseUpload(io.BytesIO(content_bytes), mimetype=mimetype)
+
     existing_files = service.files().list(
         q=f"name='{filename}' and '{folder_id}' in parents and trashed=false",
         fields="files(id, name)"
@@ -71,14 +72,14 @@ def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
         file_id = existing_files[0]['id']
         service.files().update(
             fileId=file_id,
-            media_body=io.BytesIO(content_bytes),
+            media_body=media,
             body={'name': filename},
             fields='id'
         ).execute()
     else:
         service.files().create(
             body={'name': filename, 'parents': [folder_id]},
-            media_body=io.BytesIO(content_bytes),
+            media_body=media,
             fields='id'
         ).execute()
 
