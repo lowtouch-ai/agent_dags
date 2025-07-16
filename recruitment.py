@@ -10,10 +10,9 @@ import csv
 from PyPDF2 import PdfReader
 from ollama import Client
 
-# ✅ Shared Drive and folder configuration
-SHARED_DRIVE_ID = '0AO6Pw6zAUDLJUk9PVA'  # Shared Drive ID
-FOLDER_ID = '1sqk2IONrPJHtNruCMzAyYqOd3igXJmND'  # Folder inside the Shared Drive
-CSV_FILENAME = 'cv_results.csv'
+# 📁 Google Drive Shared Drive and Folder Config
+SHARED_DRIVE_ID = '0AO6Pw6zAUDLJUk9PVA'
+FOLDER_ID = '1sqk2IONrPJHtNruCMzAyYqOd3igXJmND'
 MODEL_NAME = 'recruitment-agent:0.3'
 
 default_args = {
@@ -65,27 +64,6 @@ def call_agent(jd_text, cv_text, cv_file_name):
 def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
     media = MediaIoBaseUpload(io.BytesIO(content_bytes), mimetype=mimetype)
 
-    # ✅ First delete existing files named `filename` in the same Shared Drive folder
-    try:
-        existing_files = service.files().list(
-            q=f"name='{filename}' and '{folder_id}' in parents and trashed=false",
-            driveId=SHARED_DRIVE_ID,
-            corpora="drive",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-            fields="files(id, name)"
-        ).execute().get('files', [])
-
-        for file in existing_files:
-            try:
-                service.files().delete(fileId=file['id'], supportsAllDrives=True).execute()
-                print(f"✅ Deleted existing file: {file['name']}")
-            except Exception as e:
-                print(f"⚠️ Failed to delete existing file {file['name']}: {e}")
-    except Exception as e:
-        print(f"⚠️ Error checking existing files: {e}")
-
-    # ✅ Upload new CSV to the same folder
     try:
         service.files().create(
             body={'name': filename, 'parents': [folder_id]},
@@ -138,7 +116,11 @@ def process_and_score(ti, **kwargs):
             "score_or_result": agent_result
         })
 
-    # ✅ Prepare CSV in memory
+    # ✨ Generate timestamped filename
+    timestamp_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    dynamic_filename = f"cv_results_{timestamp_str}.csv"
+
+    # 📄 Write CSV
     csv_buffer = io.StringIO()
     writer = csv.DictWriter(csv_buffer, fieldnames=["cv_file", "score_or_result"])
     writer.writeheader()
@@ -148,11 +130,11 @@ def process_and_score(ti, **kwargs):
     upload_to_drive(
         service=service,
         content_bytes=csv_buffer.getvalue().encode('utf-8'),
-        filename=CSV_FILENAME,
+        filename=dynamic_filename,
         folder_id=FOLDER_ID,
         mimetype='text/csv'
     )
-    print(f"✅ Uploaded updated CSV with {len(results)} results to Drive.")
+    print(f"✅ Uploaded new CSV '{dynamic_filename}' with {len(results)} results to Drive.")
 
 with dag:
     process_and_score_task = PythonOperator(
