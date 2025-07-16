@@ -11,7 +11,7 @@ from PyPDF2 import PdfReader
 from ollama import Client
 
 # Shared Drive folder ID where JD and CVs are uploaded
-FOLDER_ID = '1cFl0s4IkZi-pPhZ4mRoAFm_gj9wEF8g1'
+FOLDER_ID = '1sqk2IONrPJHtNruCMzAyYqOd3igXJmND'
 CSV_FILENAME = 'cv_results.csv'
 MODEL_NAME = 'recruitment-agent:0.3'
 
