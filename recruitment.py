@@ -10,8 +10,9 @@ import csv
 from PyPDF2 import PdfReader
 from ollama import Client
 
-# Shared Drive ID where JD and CVs are uploaded
-FOLDER_ID = '1sqk2IONrPJHtNruCMzAyYqOd3igXJmND'
+# new Shared Drive and folder settings
+SHARED_DRIVE_ID = '0AO6Pw6zAUDLJUk9PVA'  # ✅ Actual Shared Drive ID
+FOLDER_ID = '1sqk2IONrPJHtNruCMzAyYqOd3igXJmND'  # ✅ Folder inside the Shared Drive
 CSV_FILENAME = 'cv_results.csv'
 MODEL_NAME = 'recruitment-agent:0.3'
 
@@ -65,14 +66,13 @@ def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
     media = MediaIoBaseUpload(io.BytesIO(content_bytes), mimetype=mimetype)
 
     try:
-        # Search the full Shared Drive for the file by name (using driveId + corpora="drive")
         existing_files = service.files().list(
             q=f"name='{filename}' and trashed=false",
-            driveId=folder_id,
+            driveId=SHARED_DRIVE_ID,
             corpora="drive",
             supportsAllDrives=True,
             includeItemsFromAllDrives=True,
-            fields="files(id, name, parents)"
+            fields="files(id, name)"
         ).execute().get('files', [])
 
         for file in existing_files:
