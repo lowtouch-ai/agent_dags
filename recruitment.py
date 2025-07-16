@@ -45,7 +45,7 @@ def extract_text_from_pdf_bytes(pdf_bytes):
     return text.strip()
 
 def call_agent(jd_text, cv_text, cv_file_name):
-    agent_url = f"http://{Variable.get('AGENT_HOST', default_var='agentomatic:8000')}/"
+    agent_url = f"http://{Variable.get('AGENT_HOST', default_var='agentomatic:8080')}/"
     client = Client(host=agent_url)
 
     messages = [
