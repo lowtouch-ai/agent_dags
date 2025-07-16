@@ -10,7 +10,7 @@ import csv
 from PyPDF2 import PdfReader
 from ollama import Client
 # new
-FOLDER_ID = '1cFl0s4IkZi-pPhZ4mRoAFm_gj9wEF8g1'
+FOLDER_ID = '0AO6Pw6zAUDLJUk9PVA'
 CSV_FILENAME = 'cv_results.csv'
 MODEL_NAME = 'recruitment-agent:0.3'
 
