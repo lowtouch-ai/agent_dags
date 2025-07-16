@@ -10,9 +10,9 @@ import csv
 from PyPDF2 import PdfReader
 from ollama import Client
 
-# new Shared Drive and folder settings
-SHARED_DRIVE_ID = '0AO6Pw6zAUDLJUk9PVA'  # ✅ Actual Shared Drive ID
-FOLDER_ID = '1sqk2IONrPJHtNruCMzAyYqOd3igXJmND'  # ✅ Folder inside the Shared Drive
+# ✅ Shared Drive and folder configuration
+SHARED_DRIVE_ID = '0AO6Pw6zAUDLJUk9PVA'  # Shared Drive ID
+FOLDER_ID = '1sqk2IONrPJHtNruCMzAyYqOd3igXJmND'  # Folder inside the Shared Drive
 CSV_FILENAME = 'cv_results.csv'
 MODEL_NAME = 'recruitment-agent:0.3'
 
@@ -65,9 +65,10 @@ def call_agent(jd_text, cv_text, cv_file_name):
 def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
     media = MediaIoBaseUpload(io.BytesIO(content_bytes), mimetype=mimetype)
 
+    # ✅ First delete existing files named `filename` in the same Shared Drive folder
     try:
         existing_files = service.files().list(
-            q=f"name='{filename}' and trashed=false",
+            q=f"name='{filename}' and '{folder_id}' in parents and trashed=false",
             driveId=SHARED_DRIVE_ID,
             corpora="drive",
             supportsAllDrives=True,
@@ -84,6 +85,7 @@ def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
     except Exception as e:
         print(f"⚠️ Error checking existing files: {e}")
 
+    # ✅ Upload new CSV to the same folder
     try:
         service.files().create(
             body={'name': filename, 'parents': [folder_id]},
@@ -136,7 +138,7 @@ def process_and_score(ti, **kwargs):
             "score_or_result": agent_result
         })
 
-    # Prepare CSV content
+    # ✅ Prepare CSV in memory
     csv_buffer = io.StringIO()
     writer = csv.DictWriter(csv_buffer, fieldnames=["cv_file", "score_or_result"])
     writer.writeheader()
