@@ -10,7 +10,7 @@ import csv
 from PyPDF2 import PdfReader
 from ollama import Client
 
-# Shared Drive folder ID where JD and CVs are uploaded
+# new Shared Drive folder ID where JD and CVs are uploaded
 FOLDER_ID = '1sqk2IONrPJHtNruCMzAyYqOd3igXJmND'
 CSV_FILENAME = 'cv_results.csv'
 MODEL_NAME = 'recruitment-agent:0.3'
@@ -64,27 +64,36 @@ def call_agent(jd_text, cv_text, cv_file_name):
 def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
     media = MediaIoBaseUpload(io.BytesIO(content_bytes), mimetype=mimetype)
 
-    # Check and delete existing file (to avoid quota issue)
-    existing_files = service.files().list(
-        q=f"name='{filename}' and '{folder_id}' in parents and trashed=false",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-        fields="files(id, name)"
-    ).execute().get('files', [])
+    # Find existing file with the same name in the target folder
+    try:
+        existing_files = service.files().list(
+            q=f"name='{filename}' and '{folder_id}' in parents and trashed=false",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            fields="files(id, name)"
+        ).execute().get('files', [])
 
-    for file in existing_files:
-        try:
-            service.files().delete(fileId=file['id'], supportsAllDrives=True).execute()
-        except Exception as e:
-            print(f"⚠️ Failed to delete existing file {file['name']}: {e}")
+        for file in existing_files:
+            try:
+                service.files().delete(fileId=file['id'], supportsAllDrives=True).execute()
+                print(f"✅ Deleted existing file: {file['name']}")
+            except Exception as e:
+                print(f"⚠️ Failed to delete existing file {file['name']}: {e}")
+    except Exception as e:
+        print(f"⚠️ Error checking existing file: {e}")
 
-    # Upload new file into the shared drive
-    service.files().create(
-        body={'name': filename, 'parents': [folder_id]},
-        media_body=media,
-        supportsAllDrives=True,
-        fields='id'
-    ).execute()
+    # Upload new file to the folder
+    try:
+        service.files().create(
+            body={'name': filename, 'parents': [folder_id]},
+            media_body=media,
+            supportsAllDrives=True,
+            fields='id'
+        ).execute()
+        print(f"✅ Uploaded file: {filename}")
+    except Exception as e:
+        print(f"❌ Failed to upload file {filename}: {e}")
+        raise
 
 def process_and_score(ti, **kwargs):
     service = get_drive_service()
