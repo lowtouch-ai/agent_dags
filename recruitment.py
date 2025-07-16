@@ -4,18 +4,14 @@ from airflow.models import Variable
 from datetime import datetime, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+import io
+import os
+import csv
+from PyPDF2 import PdfReader
 from ollama import Client
 
-import io
-from PyPDF2 import PdfReader
-import pandas as pd
-import os
-import logging
-
-# Constants
-FOLDER_ID = '1cFl0s4IkZi-pPhZ4mRoAFm_gj9wEF8g1'  # Replace with your folder ID
-CSV_FILENAME = 'agent_results.csv'
+FOLDER_ID = '1cFl0s4IkZi-pPhZ4mRoAFm_gj9wEF8g1'
+CSV_FILENAME = 'cv_results.csv'
 MODEL_NAME = 'recruitment-agent:0.3'
 
 default_args = {
@@ -26,11 +22,11 @@ default_args = {
 }
 
 dag = DAG(
-    'cv_process_one_by_one',
+    'cv_agent_processing',
     default_args=default_args,
-    description='Process each CV one-by-one with the same JD and append results to Drive CSV',
+    description='Process one JD and multiple CVs via AgentOmatic and save result to Drive CSV',
     schedule_interval=None,
-    catchup=False
+    catchup=False,
 )
 
 def get_drive_service():
@@ -48,31 +44,52 @@ def extract_text_from_pdf_bytes(pdf_bytes):
         text += page.extract_text() or ''
     return text.strip()
 
-def call_recruitment_agent(jd_text, cv_text):
-    client = Client()  # ✅ No model argument here
+def call_agent(jd_text, cv_text, cv_file_name):
+    agent_url = f"http://{Variable.get('AGENT_HOST', default_var='agentomatic:8080')}/"
+    client = Client(host=agent_url)
+
+    messages = [
+        {"role": "user", "content": f"Job Description:\n{jd_text}"},
+        {"role": "user", "content": f"Candidate CV:\n{cv_text}"}
+    ]
+
     response = client.chat(
         model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": "You are a recruitment assistant."},
-            {"role": "user", "content": f"JD:\n{jd_text}\n\nCV:\n{cv_text}"}
-        ]
+        messages=messages,
+        stream=False
     )
     return response['message']['content']
 
-def process_and_append():
+def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
+    # Check if file already exists
+    existing_files = service.files().list(
+        q=f"name='{filename}' and '{folder_id}' in parents and trashed=false",
+        fields="files(id, name)"
+    ).execute().get('files', [])
+
+    if existing_files:
+        file_id = existing_files[0]['id']
+        service.files().update(
+            fileId=file_id,
+            media_body=io.BytesIO(content_bytes),
+            body={'name': filename},
+            fields='id'
+        ).execute()
+    else:
+        service.files().create(
+            body={'name': filename, 'parents': [folder_id]},
+            media_body=io.BytesIO(content_bytes),
+            fields='id'
+        ).execute()
+
+def process_and_score(ti, **kwargs):
     service = get_drive_service()
-
-    # Get list of PDF files in the folder
     results = service.files().list(
-        q=f"'{FOLDER_ID}' in parents and mimeType='application/pdf' and trashed = false",
-        fields="files(id, name)",
+        q=f"'{FOLDER_ID}' in parents and mimeType='application/pdf' and trashed=false",
+        fields="files(id, name)"
     ).execute()
+
     files = results.get('files', [])
-
-    if not files:
-        logging.info("No PDF files found.")
-        return
-
     jd_text = None
     cvs = []
 
@@ -80,70 +97,47 @@ def process_and_append():
         file_id = file['id']
         file_name = file['name'].lower()
         pdf_bytes = service.files().get_media(fileId=file_id).execute()
-        text = extract_text_from_pdf_bytes(pdf_bytes)
+        extracted_text = extract_text_from_pdf_bytes(pdf_bytes)
 
         if 'jd' in file_name or 'job description' in file_name:
-            jd_text = text
-            logging.info(f"✅ JD found: {file['name']}")
+            jd_text = extracted_text
+            print(f"✅ Found JD: {file['name']}")
         else:
             cvs.append({
-                'file_id': file_id,
-                'file_name': file['name'],
-                'text': text
+                'name': file['name'],
+                'text': extracted_text
             })
 
     if not jd_text:
-        raise ValueError("No JD file found in folder.")
+        raise ValueError("❗ No JD found in Drive folder.")
 
-    # Try to download existing CSV
-    csv_file_id = None
-    existing_csv = None
-
-    results = service.files().list(
-        q=f"'{FOLDER_ID}' in parents and name='{CSV_FILENAME}' and mimeType='text/csv'",
-        fields="files(id, name)"
-    ).execute()
-    items = results.get('files', [])
-    if items:
-        csv_file_id = items[0]['id']
-        file_content = service.files().get_media(fileId=csv_file_id).execute()
-        existing_csv = pd.read_csv(io.BytesIO(file_content))
-    else:
-        existing_csv = pd.DataFrame(columns=['cv_file', 'agent_response'])
-
-    # Process each CV and append result
+    results = []
     for cv in cvs:
-        logging.info(f"📄 Processing CV: {cv['file_name']}")
-        agent_response = call_recruitment_agent(jd_text, cv['text'])
-        new_row = pd.DataFrame([{
-            'cv_file': cv['file_name'],
-            'agent_response': agent_response
-        }])
-        existing_csv = pd.concat([existing_csv, new_row], ignore_index=True)
+        print(f"⚙️ Processing CV: {cv['name']}")
+        agent_result = call_agent(jd_text, cv['text'], cv['name'])
+        results.append({
+            "cv_file": cv['name'],
+            "score_or_result": agent_result
+        })
 
-    # Save CSV to buffer
-    csv_buffer = io.BytesIO()
-    existing_csv.to_csv(csv_buffer, index=False)
-    csv_buffer.seek(0)
+    # Prepare CSV content
+    csv_buffer = io.StringIO()
+    writer = csv.DictWriter(csv_buffer, fieldnames=["cv_file", "score_or_result"])
+    writer.writeheader()
+    for row in results:
+        writer.writerow(row)
 
-    media = MediaIoBaseUpload(csv_buffer, mimetype='text/csv')
-
-    if csv_file_id:
-        # Update existing file
-        service.files().update(fileId=csv_file_id, media_body=media).execute()
-        logging.info(f"✅ Updated existing CSV: {CSV_FILENAME}")
-    else:
-        # Upload new file
-        file_metadata = {
-            'name': CSV_FILENAME,
-            'parents': [FOLDER_ID],
-            'mimeType': 'text/csv'
-        }
-        service.files().create(body=file_metadata, media_body=media).execute()
-        logging.info(f"✅ Uploaded new CSV: {CSV_FILENAME}")
+    upload_to_drive(
+        service=service,
+        content_bytes=csv_buffer.getvalue().encode('utf-8'),
+        filename=CSV_FILENAME,
+        folder_id=FOLDER_ID,
+        mimetype='text/csv'
+    )
+    print(f"✅ Uploaded updated CSV with {len(results)} results to Drive.")
 
 with dag:
-    process_each_cv_and_append = PythonOperator(
-        task_id='process_each_cv_and_append',
-        python_callable=process_and_append
+    process_and_score_task = PythonOperator(
+        task_id='process_and_score_cv_against_jd',
+        python_callable=process_and_score
     )
