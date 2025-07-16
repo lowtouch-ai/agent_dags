@@ -9,8 +9,8 @@ import io
 import csv
 from PyPDF2 import PdfReader
 from ollama import Client
-# new
-FOLDER_ID = '0AO6Pw6zAUDLJUk9PVA'
+
+FOLDER_ID = '1cFl0s4IkZi-pPhZ4mRoAFm_gj9wEF8g1'  # Shared drive folder ID
 CSV_FILENAME = 'cv_results.csv'
 MODEL_NAME = 'recruitment-agent:0.3'
 
@@ -65,6 +65,8 @@ def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
 
     existing_files = service.files().list(
         q=f"name='{filename}' and '{folder_id}' in parents and trashed=false",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
         fields="files(id, name)"
     ).execute().get('files', [])
 
@@ -74,12 +76,14 @@ def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
             fileId=file_id,
             media_body=media,
             body={'name': filename},
+            supportsAllDrives=True,
             fields='id'
         ).execute()
     else:
         service.files().create(
             body={'name': filename, 'parents': [folder_id]},
             media_body=media,
+            supportsAllDrives=True,
             fields='id'
         ).execute()
 
@@ -87,6 +91,8 @@ def process_and_score(ti, **kwargs):
     service = get_drive_service()
     results = service.files().list(
         q=f"'{FOLDER_ID}' in parents and mimeType='application/pdf' and trashed=false",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
         fields="files(id, name)"
     ).execute()
 
