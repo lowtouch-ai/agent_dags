@@ -7,9 +7,10 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 import io
 import csv
+import json
 from PyPDF2 import PdfReader
 from ollama import Client
-# new
+
 FOLDER_ID = '1cFl0s4IkZi-pPhZ4mRoAFm_gj9wEF8g1'
 CSV_FILENAME = 'cv_results.csv'
 MODEL_NAME = 'recruitment-agent:0.3'
@@ -24,7 +25,7 @@ default_args = {
 dag = DAG(
     'cv_agent_processing',
     default_args=default_args,
-    description='Process one JD and multiple CVs via AgentOmatic and save result to Drive CSV',
+    description='Process CVs with JD via AgentOmatic and write structured results to Excel',
     schedule_interval=None,
     catchup=False,
 )
@@ -44,13 +45,14 @@ def extract_text_from_pdf_bytes(pdf_bytes):
         text += page.extract_text() or ''
     return text.strip()
 
-def call_agent(jd_text, cv_text, cv_file_name):
+def call_agent(jd_text, cv_text):
     agent_url = f"http://{Variable.get('AGENT_HOST', default_var='agentomatic:8000')}/"
     client = Client(host=agent_url)
 
     messages = [
         {"role": "user", "content": f"Job Description:\n{jd_text}"},
-        {"role": "user", "content": f"Candidate CV:\n{cv_text}"}
+        {"role": "user", "content": f"Candidate CV:\n{cv_text}"},
+        {"role": "user", "content": "Please respond in JSON with fields: summary, overall_score, matched_skills (list), recommendation."}
     ]
 
     response = client.chat(
@@ -83,6 +85,24 @@ def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
             fields='id'
         ).execute()
 
+def parse_response(agent_response: str) -> dict:
+    """Try parsing structured JSON; fallback to raw response."""
+    try:
+        data = json.loads(agent_response)
+        return {
+            "summary": data.get("summary", ""),
+            "overall_score": data.get("overall_score", ""),
+            "matched_skills": ', '.join(data.get("matched_skills", [])),
+            "recommendation": data.get("recommendation", "")
+        }
+    except Exception as e:
+        return {
+            "summary": "",
+            "overall_score": "",
+            "matched_skills": "",
+            "recommendation": f"⚠ Parsing failed. Raw response: {agent_response[:100]}"
+        }
+
 def process_and_score(ti, **kwargs):
     service = get_drive_service()
     results = service.files().list(
@@ -112,20 +132,22 @@ def process_and_score(ti, **kwargs):
     if not jd_text:
         raise ValueError("❗ No JD found in Drive folder.")
 
-    results = []
+    structured_rows = []
     for cv in cvs:
         print(f"⚙️ Processing CV: {cv['name']}")
-        agent_result = call_agent(jd_text, cv['text'], cv['name'])
-        results.append({
+        raw_response = call_agent(jd_text, cv['text'])
+        parsed = parse_response(raw_response)
+        structured_rows.append({
             "cv_file": cv['name'],
-            "score_or_result": agent_result
+            **parsed
         })
 
     # Prepare CSV content
     csv_buffer = io.StringIO()
-    writer = csv.DictWriter(csv_buffer, fieldnames=["cv_file", "score_or_result"])
+    fieldnames = ["cv_file", "summary", "overall_score", "matched_skills", "recommendation"]
+    writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
     writer.writeheader()
-    for row in results:
+    for row in structured_rows:
         writer.writerow(row)
 
     upload_to_drive(
@@ -135,7 +157,7 @@ def process_and_score(ti, **kwargs):
         folder_id=FOLDER_ID,
         mimetype='text/csv'
     )
-    print(f"✅ Uploaded updated CSV with {len(results)} results to Drive.")
+    print(f"✅ Uploaded structured results to CSV with {len(structured_rows)} records.")
 
 with dag:
     process_and_score_task = PythonOperator(
