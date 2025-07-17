@@ -6,11 +6,12 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 import io
-import csv
+import pandas as pd
+import re
 from PyPDF2 import PdfReader
 from ollama import Client
 
-# 📁 Google Drive Shared Drive and Folder Config
+#  Drive Shared Drive and Folder Config
 SHARED_DRIVE_ID = '0AO6Pw6zAUDLJUk9PVA'
 FOLDER_ID = '1sqk2IONrPJHtNruCMzAyYqOd3igXJmND'
 MODEL_NAME = 'recruitment-agent:0.3'
@@ -61,6 +62,40 @@ def call_agent(jd_text, cv_text, cv_file_name):
     )
     return response['message']['content']
 
+def parse_agent_response(agent_text):
+    # Extract CV Score
+    score_match = re.search(r'CV Score:\s*(\d+/\d+)', agent_text)
+    overall_score = score_match.group(1) if score_match else ''
+
+    # Extract the markdown table
+    table_lines = []
+    in_table = False
+    for line in agent_text.splitlines():
+        if '|' in line:
+            in_table = True
+            table_lines.append(line.strip())
+        elif in_table:
+            break  # stop collecting once table ends
+
+    if len(table_lines) < 3:
+        return []
+
+    header = [h.strip() for h in table_lines[0].strip('|').split('|')]
+    row = [r.strip() for r in table_lines[2].strip('|').split('|')]
+
+    data = dict(zip(header, row))
+    return {
+        'Name': data.get('Name', ''),
+        'Email': data.get('Email', ''),
+        'Phone Number': data.get('Phone Number', ''),
+        'Overall Score': overall_score,
+        'Must-Have Criteria': data.get('Must-Have Skills', ''),
+        'Nice-to-Have Criteria': data.get('Nice-to-Have Skills', ''),
+        'Other Criteria': data.get('Other Criteria', ''),
+        'Remarks': data.get('Remarks', '').replace('<br>', '; ').strip(),
+        'Notes': data.get('Notes', '').replace('<br>', '; ').strip(),
+    }
+
 def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
     media = MediaIoBaseUpload(io.BytesIO(content_bytes), mimetype=mimetype)
 
@@ -107,25 +142,21 @@ def process_and_score(ti, **kwargs):
     if not jd_text:
         raise ValueError("❗ No JD found in Drive folder.")
 
-    results = []
+    structured_results = []
     for cv in cvs:
         print(f"⚙️ Processing CV: {cv['name']}")
         agent_result = call_agent(jd_text, cv['text'], cv['name'])
-        results.append({
-            "cv_file": cv['name'],
-            "score_or_result": agent_result
-        })
+        parsed = parse_agent_response(agent_result)
+        parsed['cv_file'] = cv['name']
+        structured_results.append(parsed)
 
-    # ✨ Generate timestamped filename
+    df = pd.DataFrame(structured_results)
+
     timestamp_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     dynamic_filename = f"cv_results_{timestamp_str}.csv"
 
-    # 📄 Write CSV
     csv_buffer = io.StringIO()
-    writer = csv.DictWriter(csv_buffer, fieldnames=["cv_file", "score_or_result"])
-    writer.writeheader()
-    for row in results:
-        writer.writerow(row)
+    df.to_csv(csv_buffer, index=False)
 
     upload_to_drive(
         service=service,
@@ -134,7 +165,7 @@ def process_and_score(ti, **kwargs):
         folder_id=FOLDER_ID,
         mimetype='text/csv'
     )
-    print(f"✅ Uploaded new CSV '{dynamic_filename}' with {len(results)} results to Drive.")
+    print(f"✅ Uploaded new CSV '{dynamic_filename}' with {len(df)} rows to Drive.")
 
 with dag:
     process_and_score_task = PythonOperator(
