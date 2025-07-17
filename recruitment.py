@@ -6,12 +6,12 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 import io
+import pandas as pd
+import json
 from PyPDF2 import PdfReader
 from ollama import Client
-import pandas as pd
-import re
-from bs4 import BeautifulSoup
 
+# 📁 Google Drive Shared Drive and Folder Config
 SHARED_DRIVE_ID = '0AO6Pw6zAUDLJUk9PVA'
 FOLDER_ID = '1sqk2IONrPJHtNruCMzAyYqOd3igXJmND'
 MODEL_NAME = 'recruitment-agent:0.3'
@@ -26,7 +26,7 @@ default_args = {
 dag = DAG(
     'cv_agent_processing',
     default_args=default_args,
-    description='Process JD and CVs with AgentOmatic and save structured results to Drive',
+    description='Score CVs using JD and Agent, save structured JSON as CSV to Drive',
     schedule_interval=None,
     catchup=False,
 )
@@ -50,8 +50,26 @@ def call_agent(jd_text, cv_text, cv_file_name):
     agent_url = f"http://{Variable.get('AGENT_HOST', default_var='agentomatic:8000')}/"
     client = Client(host=agent_url)
 
+    instructions = """
+You are a CV evaluation agent. Given a job description and candidate CV, evaluate the CV and return the result in the following strict JSON format:
+
+{
+  "Name": "",
+  "Email": "",
+  "Phone Number": "",
+  "Overall Score": "",
+  "Must-Have Criteria": "",
+  "Nice-to-Have Criteria": "",
+  "Other Criteria": "",
+  "Notes": "",
+  "Remarks": ""
+}
+
+Respond only with valid JSON.
+"""
+
     messages = [
-        {"role": "user", "content": f"Job Description:\n{jd_text}"},
+        {"role": "user", "content": f"{instructions}\nJob Description:\n{jd_text}"},
         {"role": "user", "content": f"Candidate CV:\n{cv_text}"}
     ]
 
@@ -61,43 +79,6 @@ def call_agent(jd_text, cv_text, cv_file_name):
         stream=False
     )
     return response['message']['content']
-
-def parse_agent_response(agent_result):
-    # Extract score using regex
-    score_match = re.search(r'CV Score:\s*(\d+)', agent_result)
-    score = score_match.group(1) if score_match else ''
-
-    # Extract HTML table part and parse with BeautifulSoup
-    soup = BeautifulSoup(agent_result, 'html.parser')
-    table = soup.find('table')
-
-    if not table:
-        return {
-            "Name": "", "Email": "", "Phone Number": "", "Overall Score": score,
-            "Must-Have Criteria": "", "Nice-to-Have Criteria": "",
-            "Other Criteria": "", "Notes": "", "Remarks": ""
-        }
-
-    # Extract table data row
-    rows = table.find_all('tr')
-    if len(rows) < 2:
-        return {}
-
-    headers = [th.text.strip() for th in rows[0].find_all(['th', 'td'])]
-    values = [td.text.strip().replace('\n', ' ').replace('\r', '') for td in rows[1].find_all('td')]
-
-    data = dict(zip(headers, values))
-    return {
-        "Name": data.get("Name", ""),
-        "Email": data.get("Email", ""),
-        "Phone Number": data.get("Phone Number", ""),
-        "Overall Score": score,
-        "Must-Have Criteria": data.get("Must-Have Skills", ""),
-        "Nice-to-Have Criteria": data.get("Nice-to-Have Skills", ""),
-        "Other Criteria": data.get("Other Criteria", ""),
-        "Notes": data.get("Notes", ""),
-        "Remarks": data.get("Remarks", "")
-    }
 
 def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
     media = MediaIoBaseUpload(io.BytesIO(content_bytes), mimetype=mimetype)
@@ -144,36 +125,42 @@ def process_and_score(ti, **kwargs):
     if not jd_text:
         raise ValueError("❗ No JD found in Drive folder.")
 
-    structured_rows = []
+    structured_results = []
     for cv in cvs:
         print(f"⚙️ Processing CV: {cv['name']}")
-        agent_result = call_agent(jd_text, cv['text'], cv['name'])
-        parsed_result = parse_agent_response(agent_result)
-        parsed_result["CV File"] = cv['name']
-        structured_rows.append(parsed_result)
+        agent_output = call_agent(jd_text, cv['text'], cv['name'])
 
-    # ✨ Create DataFrame and save to CSV
-    df = pd.DataFrame(structured_rows, columns=[
-        "CV File", "Name", "Email", "Phone Number", "Overall Score",
-        "Must-Have Criteria", "Nice-to-Have Criteria", "Other Criteria",
-        "Notes", "Remarks"
-    ])
+        try:
+            data = json.loads(agent_output)
+            structured_results.append(data)
+        except json.JSONDecodeError:
+            print(f"❌ JSON parsing failed for {cv['name']}")
+            structured_results.append({
+                "Name": cv['name'],
+                "Email": "",
+                "Phone Number": "",
+                "Overall Score": "",
+                "Must-Have Criteria": "",
+                "Nice-to-Have Criteria": "",
+                "Other Criteria": "",
+                "Notes": "Failed to parse JSON",
+                "Remarks": agent_output[:1000]  # Keep raw response snippet
+            })
 
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
+    df = pd.DataFrame(structured_results)
 
     timestamp_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    filename = f"cv_results_{timestamp_str}.csv"
+    dynamic_filename = f"cv_results_{timestamp_str}.csv"
 
+    csv_bytes = df.to_csv(index=False).encode('utf-8')
     upload_to_drive(
         service=service,
-        content_bytes=csv_buffer.getvalue().encode('utf-8'),
-        filename=filename,
+        content_bytes=csv_bytes,
+        filename=dynamic_filename,
         folder_id=FOLDER_ID,
         mimetype='text/csv'
     )
-
-    print(f"✅ Uploaded structured CSV with {len(df)} rows to Drive.")
+    print(f"✅ Uploaded structured CSV '{dynamic_filename}' with {len(df)} entries to Drive.")
 
 with dag:
     process_and_score_task = PythonOperator(
