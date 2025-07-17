@@ -5,11 +5,12 @@ from datetime import datetime, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-import io
-import pandas as pd
-import json
 from PyPDF2 import PdfReader
 from ollama import Client
+import io
+import csv
+import json
+import re
 
 # 📁 Google Drive Shared Drive and Folder Config
 SHARED_DRIVE_ID = '0AO6Pw6zAUDLJUk9PVA'
@@ -26,7 +27,7 @@ default_args = {
 dag = DAG(
     'cv_agent_processing',
     default_args=default_args,
-    description='Score CVs using JD and Agent, save structured JSON as CSV to Drive',
+    description='Process one JD and multiple CVs via AgentOmatic and save structured result to Drive CSV',
     schedule_interval=None,
     catchup=False,
 )
@@ -46,30 +47,43 @@ def extract_text_from_pdf_bytes(pdf_bytes):
         text += page.extract_text() or ''
     return text.strip()
 
+def extract_json_from_text(text):
+    try:
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+    except Exception:
+        return None
+    return None
+
 def call_agent(jd_text, cv_text, cv_file_name):
     agent_url = f"http://{Variable.get('AGENT_HOST', default_var='agentomatic:8000')}/"
     client = Client(host=agent_url)
 
     instructions = """
-You are a CV evaluation agent. Given a job description and candidate CV, evaluate the CV and return the result in the following strict JSON format:
+Act as a CV Evaluation Bot.
+
+Given a Job Description and a Candidate CV, compare and evaluate the candidate.
+
+Your response MUST be a valid JSON object only, and must contain ONLY the following fields:
 
 {
-  "Name": "",
-  "Email": "",
-  "Phone Number": "",
-  "Overall Score": "",
-  "Must-Have Criteria": "",
-  "Nice-to-Have Criteria": "",
-  "Other Criteria": "",
-  "Notes": "",
-  "Remarks": ""
+  "Name": "string",
+  "Email": "string",
+  "Phone Number": "string",
+  "Overall Score": "string or number",
+  "Must-Have Criteria": "string",
+  "Nice-to-Have Criteria": "string",
+  "Other Criteria": "string",
+  "Notes": "string",
+  "Remarks": "string"
 }
 
-Respond only with valid JSON.
+❗Do not add explanation, markdown, or formatting. Respond with ONLY a pure JSON object.
 """
 
     messages = [
-        {"role": "user", "content": f"{instructions}\nJob Description:\n{jd_text}"},
+        {"role": "user", "content": f"{instructions}\n\nJob Description:\n{jd_text}"},
         {"role": "user", "content": f"Candidate CV:\n{cv_text}"}
     ]
 
@@ -82,6 +96,7 @@ Respond only with valid JSON.
 
 def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
     media = MediaIoBaseUpload(io.BytesIO(content_bytes), mimetype=mimetype)
+
     try:
         service.files().create(
             body={'name': filename, 'parents': [folder_id]},
@@ -129,11 +144,10 @@ def process_and_score(ti, **kwargs):
     for cv in cvs:
         print(f"⚙️ Processing CV: {cv['name']}")
         agent_output = call_agent(jd_text, cv['text'], cv['name'])
-
-        try:
-            data = json.loads(agent_output)
-            structured_results.append(data)
-        except json.JSONDecodeError:
+        parsed = extract_json_from_text(agent_output)
+        if parsed:
+            structured_results.append(parsed)
+        else:
             print(f"❌ JSON parsing failed for {cv['name']}")
             structured_results.append({
                 "Name": cv['name'],
@@ -143,24 +157,32 @@ def process_and_score(ti, **kwargs):
                 "Must-Have Criteria": "",
                 "Nice-to-Have Criteria": "",
                 "Other Criteria": "",
-                "Notes": "Failed to parse JSON",
-                "Remarks": agent_output[:1000]  # Keep raw response snippet
+                "Notes": "Parsing failed",
+                "Remarks": agent_output[:1000]
             })
-
-    df = pd.DataFrame(structured_results)
 
     timestamp_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     dynamic_filename = f"cv_results_{timestamp_str}.csv"
 
-    csv_bytes = df.to_csv(index=False).encode('utf-8')
+    csv_buffer = io.StringIO()
+    fieldnames = [
+        "Name", "Email", "Phone Number", "Overall Score",
+        "Must-Have Criteria", "Nice-to-Have Criteria", "Other Criteria",
+        "Notes", "Remarks"
+    ]
+    writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in structured_results:
+        writer.writerow(row)
+
     upload_to_drive(
         service=service,
-        content_bytes=csv_bytes,
+        content_bytes=csv_buffer.getvalue().encode('utf-8'),
         filename=dynamic_filename,
         folder_id=FOLDER_ID,
         mimetype='text/csv'
     )
-    print(f"✅ Uploaded structured CSV '{dynamic_filename}' with {len(df)} entries to Drive.")
+    print(f"✅ Uploaded new structured CSV '{dynamic_filename}' with {len(structured_results)} results to Drive.")
 
 with dag:
     process_and_score_task = PythonOperator(
