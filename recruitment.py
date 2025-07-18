@@ -13,8 +13,8 @@ import json
 import re
 
 # 📁 Google Drive Shared Drive and Folder Config
-SHARED_DRIVE_ID = '0AO6Pw6zAUDLJUk9PVA'
-FOLDER_ID = '1sqk2IONrPJHtNruCMzAyYqOd3igXJmND'
+SHARED_DRIVE_ID = Variable.get("SHARED_DRIVE_ID")
+FOLDER_ID = Variable.get("FOLDER_ID")
 MODEL_NAME = 'recruitment-agent:0.3'
 
 default_args = {
