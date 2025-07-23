@@ -12,7 +12,7 @@ import csv
 import json
 import re
 
-# 📁 Google Drive Shared Drive and Folder Config
+#  Google Drive Shared Drive and Folder Config
 SHARED_DRIVE_ID = Variable.get("SHARED_DRIVE_ID")
 FOLDER_ID = Variable.get("FOLDER_ID")
 MODEL_NAME = 'recruitment-agent:0.3'
