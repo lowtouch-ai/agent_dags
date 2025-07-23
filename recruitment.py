@@ -109,6 +109,14 @@ def upload_to_drive(service, content_bytes, filename, folder_id, mimetype):
         print(f"❌ Failed to upload file {filename}: {e}")
         raise
 
+def generate_markdown_table(data, headers):
+    lines = []
+    lines.append('| ' + ' | '.join(headers) + ' |')
+    lines.append('| ' + ' | '.join(['---'] * len(headers)) + ' |')
+    for row in data:
+        lines.append('| ' + ' | '.join(str(row.get(h, "")).replace('\n', ' ').replace('|', '\\|') for h in headers) + ' |')
+    return '\n'.join(lines)
+
 def process_and_score(ti, **kwargs):
     service = get_drive_service()
     results = service.files().list(
@@ -161,15 +169,20 @@ def process_and_score(ti, **kwargs):
                 "Remarks": agent_output[:1000]
             })
 
-    timestamp_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    dynamic_filename = f"cv_results_{timestamp_str}.csv"
-
-    csv_buffer = io.StringIO()
+    # Push Markdown formatted summary to XCom
     fieldnames = [
         "Name", "Email", "Phone Number", "Overall Score",
         "Must-Have Criteria", "Nice-to-Have Criteria", "Other Criteria",
         "Notes", "Remarks"
     ]
+    markdown_output = generate_markdown_table(structured_results, fieldnames)
+    ti.xcom_push(key='md_result', value=markdown_output)
+
+    # Create and upload CSV
+    timestamp_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    dynamic_filename = f"cv_results_{timestamp_str}.csv"
+
+    csv_buffer = io.StringIO()
     writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
     writer.writeheader()
     for row in structured_results:
