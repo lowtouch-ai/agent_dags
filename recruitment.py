@@ -15,7 +15,7 @@ import re
 #  Google Drive Shared Drive and Folder Config
 SHARED_DRIVE_ID = Variable.get("SHARED_DRIVE_ID")
 FOLDER_ID = Variable.get("FOLDER_ID")
-MODEL_NAME = 'recruitment-agent:0.3'
+MODEL_NAME = 'cvscan:0.3'
 
 default_args = {
     'owner': 'airflow',
