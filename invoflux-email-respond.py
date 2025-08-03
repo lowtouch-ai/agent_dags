@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 import os
 
 # Configure detailed logging
-logging.basicConfig(level=logging.info, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 default_args = {
     "owner": "lowtouch.ai_developers",
@@ -138,16 +138,7 @@ def get_ai_response(user_query, images=None):
         messages[0]["content"] += (
             "\n\nRespond in HTML format \n Your Task is Extract and create the invoice"
         )
-        import re
-        content = messages[0]["content"]
-        match = re.search(r"Current Email.*?:\n(.*?)(?:\n\nRespond in HTML format|$)", content, re.DOTALL)
-        if match:
-            final_message = match.group(1).strip()
-        else:
-            final_message = content.strip()  # Fallback to full content if parsing fails
-
-        
-        
+          
         logging.info(f"Sending request to Ollama with model 'InvoFlux:0.3' and messages: {messages}")
         response = client.chat(
             model='invoflux-email:0.3',
