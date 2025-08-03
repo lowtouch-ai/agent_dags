@@ -13,6 +13,8 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import re
 from langchain_community.document_loaders import PyPDFLoader
+from PIL import Image
+import io
 
 # Default DAG arguments
 default_args = {
@@ -76,14 +78,12 @@ def pdf_to_markdown(pdf_path: str) -> dict:
         if not documents:
             logging.warning(f"No content extracted from PDF: {pdf_path}")
             return {"content": "", "metadata": {}}
-        # Extract serializable data from Document objects
         extracted_content = "\n".join(doc.page_content for doc in documents)
-        metadata = [doc.metadata for doc in documents]  # List of metadata dictionaries
+        metadata = [doc.metadata for doc in documents]
         if not extracted_content.strip():
             logging.info(f"Extracted content is empty for PDF: {pdf_path}")
             return {"content": "", "metadata": metadata}
         logging.info(f"Extracted content from PDF {pdf_path}: {extracted_content[:100]}...")
-        # Return a dictionary with sanitized content and metadata
         sanitized_content = sanitize_text(extracted_content)
         return {
             "content": f"```Invoice Content\n{sanitized_content}\n```",
@@ -93,6 +93,20 @@ def pdf_to_markdown(pdf_path: str) -> dict:
         logging.error(f"Error extracting PDF {pdf_path}: {str(e)}", exc_info=True)
         return {"content": str(e), "metadata": {}}
 
+def image_to_base64(image_path: str) -> str:
+    """Convert an image to a base64 string."""
+    try:
+        with Image.open(image_path) as img:
+            img_byte_arr = io.BytesIO()
+            img.save(img_byte_arr, format=img.format)
+            img_data = img_byte_arr.getvalue()
+            base64_string = base64.b64encode(img_data).decode("utf-8")
+            logging.info(f"Converted image {image_path} to base64 string (length: {len(base64_string)})")
+            return base64_string
+    except Exception as e:
+        logging.error(f"Error converting image {image_path} to base64: {str(e)}", exc_info=True)
+        return ""
+
 def fetch_unread_emails(**kwargs):
     """Fetch unread emails and their attachments after the last processed email timestamp."""
     service = authenticate_gmail()
@@ -101,7 +115,8 @@ def fetch_unread_emails(**kwargs):
     logging.info(f"Fetching emails with query: {query}")
     results = service.users().messages().list(userId="me", labelIds=["INBOX"], q=query).execute()
     messages = results.get("messages", [])
-    logging.info(f"Found {len(messages)} unread emails.")
+    logging.info(f"Found {len(messages)} unread emails since last checked timestamp: {last_checked_timestamp}")
+    
     unread_emails = []
     max_timestamp = last_checked_timestamp
     os.makedirs(ATTACHMENT_DIR, exist_ok=True)
@@ -130,17 +145,19 @@ def fetch_unread_emails(**kwargs):
                     with open(attachment_path, "wb") as f:
                         f.write(file_data)
                     extracted_content = {}
+                    base64_content = ""
                     if mime_type == "application/pdf":
                         extracted_content = pdf_to_markdown(attachment_path)
-
                         logging.info(f"Extracted content from PDF {filename}: {extracted_content['content'][:100]}...")
-
-
+                    elif mime_type in ["image/png", "image/jpeg", "image/jpg"]:
+                        base64_content = image_to_base64(attachment_path)
+                        logging.info(f"Converted image {filename} to base64")
                     attachments.append({
                         "filename": filename,
                         "mime_type": mime_type,
                         "path": attachment_path,
-                        "extracted_content": extracted_content
+                        "extracted_content": extracted_content,
+                        "base64_content": base64_content
                     })
                     logging.info(f"Saved attachment: {filename} at {attachment_path}")
         email_object = {
