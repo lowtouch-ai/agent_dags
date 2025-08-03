@@ -115,20 +115,31 @@ def get_email_thread(service, email_data):
         logging.error(f"Error retrieving email thread: {str(e)}")
         return []
 
-def get_ai_response(user_query):
+def get_ai_response(prompt, conversation_history=None):
+    """Get AI response with conversation history context"""
     try:
-        logging.debug(f"Query received: {user_query}")
+        logging.debug(f"Query received: {prompt}")
         
         # Validate input
-        if not user_query or not isinstance(user_query, str):
-            return "<html><body>Invalid input provided. Please enter a valid query.</body></html>"
+        if not prompt or not isinstance(prompt, str):
+            return "Invalid input provided. Please enter a valid query."
 
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
-        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop-email:0.5'")
+        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'webshop:0.5'")
+
+        # Build messages array with conversation history
+        messages = []
+        if conversation_history:
+            for history_item in conversation_history:
+                messages.append({"role": "user", "content": history_item["prompt"]})
+                messages.append({"role": "assistant", "content": history_item["response"]})
+        
+        # Add current prompt
+        messages.append({"role": "user", "content": prompt})
 
         response = client.chat(
             model='webshop-email:0.5',
-            messages=[{"role": "user", "content": user_query}],
+            messages=messages,
             stream=False
         )
         logging.info(f"Raw response from agent: {str(response)[:500]}...")
@@ -136,35 +147,16 @@ def get_ai_response(user_query):
         # Extract content
         if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
             logging.error("Response lacks expected 'message.content' structure")
-            return "<html><body>Invalid response format from AI. Please try again later.</body></html>"
+            return "Invalid response format from AI. Please try again later."
         
         ai_content = response.message.content
         logging.info(f"Full message content from agent: {ai_content[:500]}...")
 
-        # Check for error messages
-        if "technical difficulties" in ai_content.lower() or "error" in ai_content.lower():
-            logging.warning("AI response contains potential error message")
-            return "<html><body>Unexpected response received. Please contact support.</body></html>"
-
-        # Clean up markdown markers
-        ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
-        logging.info(f"Cleaned content extracted from agent response: {ai_content[:500]}...")
-
-        # Validate content
-        if not ai_content.strip():
-            logging.warning("AI returned empty content")
-            return "<html><body>No response generated. Please try again later.</body></html>"
-
-        # Ensure proper HTML structure
-        if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html'):
-            logging.warning("Response doesn't appear to be proper HTML, wrapping it")
-            ai_content = f"<html><body>{ai_content}</body></html>"
-
-        return ai_content
+        return ai_content.strip()
 
     except Exception as e:
         logging.error(f"Error in get_ai_response: {str(e)}")
-        return "<html><body>An error occurred while processing your request. Please try again later or contact support.</body></html>"
+        return f"An error occurred while processing your request: {str(e)}"
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
@@ -184,70 +176,255 @@ def send_email(service, recipient, subject, body, in_reply_to, references):
         logging.error(f"Failed to send email: {str(e)}")
         return None
 
-def send_response(**kwargs):
+# Multi-step prompt processing functions
+def step_1_initial_quote_request(ti, **context):
+    """Step 1: Process initial quote request"""
+    email_data = context['dag_run'].conf.get("email_data", {})
+    
+    # Get email content
+    current_content = email_data.get("content", "").strip()
+    if current_content:
+        soup = BeautifulSoup(current_content, "html.parser")
+        current_content = soup.get_text(separator=" ", strip=True)
+    
+    prompt = f'Here is an email from a customer: {current_content}'
+    
+    response = get_ai_response(prompt)
+    
+    # Store in XCom
+    ti.xcom_push(key="step_1_prompt", value=prompt)
+    ti.xcom_push(key="step_1_response", value=response)
+    ti.xcom_push(key="conversation_history", value=[{"prompt": prompt, "response": response}])
+    
+    logging.info(f"Step 1 completed: {response[:200]}...")
+    return response
+
+def step_2_customer_lookup(ti, **context):
+    """Step 2: Look up customer information"""
+    # Get previous conversation
+    history = ti.xcom_pull(key="conversation_history")
+    
+    prompt = "look up the customer; get customer id and email"
+    
+    response = get_ai_response(prompt, history)
+    
+    # Update conversation history
+    history.append({"prompt": prompt, "response": response})
+    ti.xcom_push(key="step_2_prompt", value=prompt)
+    ti.xcom_push(key="step_2_response", value=response)
+    ti.xcom_push(key="conversation_history", value=history)
+    
+    logging.info(f"Step 2 completed: {response[:200]}...")
+    return response
+
+def step_3_apply_discounts(ti, **context):
+    """Step 3: Apply discounts to each article"""
+    # Get previous conversation
+    history = ti.xcom_pull(key="conversation_history")
+    
+    prompt = "apply discounts to each article"
+    
+    response = get_ai_response(prompt, history)
+    
+    # Update conversation history
+    history.append({"prompt": prompt, "response": response})
+    ti.xcom_push(key="step_3_prompt", value=prompt)
+    ti.xcom_push(key="step_3_response", value=response)
+    ti.xcom_push(key="conversation_history", value=history)
+    
+    logging.info(f"Step 3 completed: {response[:200]}...")
+    return response
+
+def step_4_include_summary(ti, **context):
+    """Step 4: Include subtotal, discount, and shipping"""
+    # Get previous conversation
+    history = ti.xcom_pull(key="conversation_history")
+    
+    prompt = "Include subtotal, total discount ($ and %) and shipping to the summary"
+    
+    response = get_ai_response(prompt, history)
+    
+    # Update conversation history
+    history.append({"prompt": prompt, "response": response})
+    ti.xcom_push(key="step_4_prompt", value=prompt)
+    ti.xcom_push(key="step_4_response", value=response)
+    ti.xcom_push(key="conversation_history", value=history)
+    
+    logging.info(f"Step 4 completed: {response[:200]}...")
+    return response
+
+def step_5_calculate_discount(ti, **context):
+    """Step 5: Calculate total discount percentage"""
+    # Get previous conversation
+    history = ti.xcom_pull(key="conversation_history")
+    
+    prompt = "calculate the total discount = (total cost of items before discount - total cost of items after discount)/(total cost of items before discount) * 100"
+    
+    response = get_ai_response(prompt, history)
+    
+    # Update conversation history
+    history.append({"prompt": prompt, "response": response})
+    ti.xcom_push(key="step_5_prompt", value=prompt)
+    ti.xcom_push(key="step_5_response", value=response)
+    ti.xcom_push(key="conversation_history", value=history)
+    
+    logging.info(f"Step 5 completed: {response[:200]}...")
+    return response
+
+def step_6_quality_check(ti, **context):
+    """Step 6: Conduct quality check"""
+    # Get previous conversation
+    history = ti.xcom_pull(key="conversation_history")
+    
+    prompt = "conduct a quality check to ensure the total, subtotal, total discount are all accurate as per original request from the customer"
+    
+    response = get_ai_response(prompt, history)
+    
+    # Update conversation history
+    history.append({"prompt": prompt, "response": response})
+    ti.xcom_push(key="step_6_prompt", value=prompt)
+    ti.xcom_push(key="step_6_response", value=response)
+    ti.xcom_push(key="conversation_history", value=history)
+    
+    logging.info(f"Step 6 completed: {response[:200]}...")
+    return response
+
+def step_7_compose_final_email(ti, **context):
+    """Step 7: Compose final quote email"""
+    # Get previous conversation
+    history = ti.xcom_pull(key="conversation_history")
+    
+    prompt = "compose the final quote in the form of an email addressed to the customer using american business tone in html; include all details of the articles in tabular format; Include subtotal, total discount ($ and %) and shipping to the summary."
+    
+    response = get_ai_response(prompt, history)
+    
+    # Clean up markdown markers if present
+    cleaned_response = re.sub(r'```html\n|```', '', response).strip()
+    
+    # Ensure proper HTML structure
+    if not cleaned_response.strip().startswith('<!DOCTYPE') and not cleaned_response.strip().startswith('<html'):
+        if not cleaned_response.strip().startswith('<'):
+            cleaned_response = f"<html><body>{cleaned_response}</body></html>"
+    
+    # Update conversation history
+    history.append({"prompt": prompt, "response": cleaned_response})
+    ti.xcom_push(key="step_7_prompt", value=prompt)
+    ti.xcom_push(key="step_7_response", value=cleaned_response)
+    ti.xcom_push(key="conversation_history", value=history)
+    ti.xcom_push(key="final_html_content", value=cleaned_response)
+    
+    logging.info(f"Step 7 completed: {cleaned_response[:200]}...")
+    return cleaned_response
+
+def step_8_send_quote_email(ti, **context):
+    """Step 8: Send the final quote email"""
     try:
-        email_data = kwargs['dag_run'].conf.get("email_data", {})
-        logging.info(f"Received email data: {email_data}")
+        email_data = context['dag_run'].conf.get("email_data", {})
         if not email_data:
             logging.warning("No email data received! This DAG was likely triggered manually.")
-            return
+            return "No email data available"
         
+        # Get the final HTML content from previous step
+        final_html_content = ti.xcom_pull(key="final_html_content")
+        if not final_html_content:
+            logging.error("No final HTML content found from previous steps")
+            return "Error: No content to send"
+        
+        # Authenticate Gmail
         service = authenticate_gmail()
         if not service:
             logging.error("Gmail authentication failed, aborting email response.")
-            return
+            return "Gmail authentication failed"
         
+        # Prepare email details
         sender_email = email_data["headers"].get("From", "")
-        subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
+        subject = f"Re: {email_data['headers'].get('Subject', 'Quote Request')}"
         in_reply_to = email_data["headers"].get("Message-ID", "")
         references = email_data["headers"].get("References", "")
         
-        # Fetch the full email thread
-        email_thread = get_email_thread(service, email_data)
-        if not email_thread:
-            logging.warning("No thread history retrieved, using only current email content.")
-            user_query = email_data.get("content", "").strip()
-        else:
-            # Format thread history into a single query
-            thread_history = ""
-            for idx, email in enumerate(email_thread, 1):
-                email_content = email.get("content", "").strip()
-                email_from = email["headers"].get("From", "Unknown")
-                email_date = email["headers"].get("Date", "Unknown date")
-                # Clean HTML content if present
-                if email_content:
-                    soup = BeautifulSoup(email_content, "html.parser")
-                    email_content = soup.get_text(separator=" ", strip=True)
-                thread_history += f"Email {idx} (From: {email_from}, Date: {email_date}):\n{email_content}\n\n"
-            
-            # Append the current email as the latest query
-            current_content = email_data.get("content", "").strip()
-            if current_content:
-                soup = BeautifulSoup(current_content, "html.parser")
-                current_content = soup.get_text(separator=" ", strip=True)
-            thread_history += f"Current Email (From: {sender_email}):\n{current_content}"
-            
-            user_query = f"Here is the email thread history:\n\n{thread_history}\n\nPlease respond to the latest email, considering the full context of the thread. Ensure the response addresses the specific details requested, such as article IDs or order details from previous emails."
-        
-        logging.debug(f"Sending query to AI: {user_query}")
-        
-        ai_response_html = get_ai_response(user_query) if user_query else "<html><body>No content provided in the email.</body></html>"
-        logging.debug(f"AI response received (first 200 chars): {ai_response_html[:200]}...")
-
-        send_email(
-            service, sender_email, subject, ai_response_html,
+        # Send the email
+        result = send_email(
+            service, sender_email, subject, final_html_content,
             in_reply_to, references
         )
+        
+        if result:
+            logging.info(f"Quote email sent successfully to {sender_email}")
+            return f"Email sent successfully to {sender_email}"
+        else:
+            logging.error("Failed to send quote email")
+            return "Failed to send email"
+            
     except Exception as e:
-        logging.error(f"Unexpected error in send_response: {str(e)}")
+        logging.error(f"Error in step_8_send_quote_email: {str(e)}")
+        return f"Error sending email: {str(e)}"
 
+# Read README if available
 readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'email_responder.md')
-with open(readme_path, 'r') as file:
-    readme_content = file.read()
+readme_content = ""
+try:
+    with open(readme_path, 'r') as file:
+        readme_content = file.read()
+except FileNotFoundError:
+    readme_content = "Multi-step email quote processing DAG"
 
-with DAG("shared_send_message_email", default_args=default_args, schedule_interval=None, catchup=False, doc_md=readme_content, tags=["email", "shared", "send", "message"]) as dag:
-    send_response_task = PythonOperator(
-        task_id="send-response",
-        python_callable=send_response,
+with DAG(
+    "webshop_quote_email_v2", 
+    default_args=default_args, 
+    schedule_interval=None, 
+    catchup=False, 
+    doc_md=readme_content, 
+    tags=["email", "webshop", "quote", "multi-step"]
+) as dag:
+    
+    # Define all tasks in sequence
+    task_1 = PythonOperator(
+        task_id="step_1_initial_quote_request",
+        python_callable=step_1_initial_quote_request,
         provide_context=True
     )
+    
+    task_2 = PythonOperator(
+        task_id="step_2_customer_lookup",
+        python_callable=step_2_customer_lookup,
+        provide_context=True
+    )
+    
+    task_3 = PythonOperator(
+        task_id="step_3_apply_discounts",
+        python_callable=step_3_apply_discounts,
+        provide_context=True
+    )
+    
+    task_4 = PythonOperator(
+        task_id="step_4_include_summary",
+        python_callable=step_4_include_summary,
+        provide_context=True
+    )
+    
+    task_5 = PythonOperator(
+        task_id="step_5_calculate_discount",
+        python_callable=step_5_calculate_discount,
+        provide_context=True
+    )
+    
+    task_6 = PythonOperator(
+        task_id="step_6_quality_check",
+        python_callable=step_6_quality_check,
+        provide_context=True
+    )
+    
+    task_7 = PythonOperator(
+        task_id="step_7_compose_final_email",
+        python_callable=step_7_compose_final_email,
+        provide_context=True
+    )
+    
+    task_8 = PythonOperator(
+        task_id="step_8_send_quote_email",
+        python_callable=step_8_send_quote_email,
+        provide_context=True
+    )
+    
+    # Set up task dependencies (sequential execution)
+    task_1 >> task_2 >> task_3 >> task_4 >> task_5 >> task_6 >> task_7 >> task_8
