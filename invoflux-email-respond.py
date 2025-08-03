@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 import os
 
 # Configure detailed logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.info, format='%(asctime)s - %(levelname)s - %(message)s')
 
 default_args = {
     "owner": "lowtouch.ai_developers",
@@ -27,8 +27,6 @@ default_args = {
     "retries": 0,
     "retry_delay": timedelta(seconds=15),
 }
-
-
 
 ODOO_FROM_ADDRESS = Variable.get("INVOFLUX_FROM_ADDRESS")  
 GMAIL_CREDENTIALS = Variable.get("INVOFLUX_GMAIL_CREDENTIALS")
@@ -112,26 +110,48 @@ def get_email_thread(service, email_data):
             })
         # Sort by date to ensure chronological order
         email_thread.sort(key=lambda x: x["headers"].get("Date", ""), reverse=False)
-        logging.debug(f"Retrieved thread with {len(email_thread)} messages")
+        logging.info(f"Retrieved thread with {len(email_thread)} messages")
         return email_thread
     except Exception as e:
         logging.error(f"Error retrieving email thread: {str(e)}")
         return []
 
-def get_ai_response(user_query):
+def get_ai_response(user_query, images=None):
     try:
-        logging.debug(f"Query received: {user_query}")
+        logging.info(f"Query received: {user_query}")
         
         # Validate input
         if not user_query or not isinstance(user_query, str):
             return "<html><body>Invalid input provided. Please enter a valid query.</body></html>"
 
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'InvoFlux'})
-        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'InvoFlux:0.3'")
+        client = Client(
+            host=OLLAMA_HOST,
+            headers={'x-ltai-client': 'Invoflux-email'}
+        )
+        logging.info(f"Connecting to Ollama at {OLLAMA_HOST} with model 'InvoFlux:0.3'")
+        # Prepare messages with images if provided
+        messages = [{"role": "user", "content": user_query}]
+        if images:
+            logging.info(f"Images provided: {len(images)}")
+            messages[0]["images"] = images
+        
+        messages[0]["content"] += (
+            "\n\nRespond in HTML format \n Your Task is Extract and create the invoice"
+        )
+        import re
+        content = messages[0]["content"]
+        match = re.search(r"Current Email.*?:\n(.*?)(?:\n\nRespond in HTML format|$)", content, re.DOTALL)
+        if match:
+            final_message = match.group(1).strip()
+        else:
+            final_message = content.strip()  # Fallback to full content if parsing fails
 
+        
+        
+        logging.info(f"Sending request to Ollama with model 'InvoFlux:0.3' and messages: {messages}")
         response = client.chat(
             model='invoflux-email:0.3',
-            messages=[{"role": "user", "content": user_query}],
+            messages=messages,
             stream=False
         )
         logging.info(f"Raw response from agent: {str(response)[:500]}...")
@@ -142,7 +162,7 @@ def get_ai_response(user_query):
             return "<html><body>Invalid response format from AI. Please try again later.</body></html>"
         
         ai_content = response.message.content
-        logging.info(f"Full message content from agent: {ai_content[:500]}...")
+
 
         # Check for error messages
         if "technical difficulties" in ai_content.lower() or "error" in ai_content.lower():
@@ -171,25 +191,34 @@ def get_ai_response(user_query):
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
-        logging.debug(f"Preparing email to {recipient} with subject: {subject}")
+        logging.info(f"Preparing email to {recipient} with subject: {subject} references: {references} in_reply_to: {in_reply_to} length of body: {len(body)}")
         msg = MIMEMultipart()
         msg["From"] = f"InvoFlux via lowtouch.ai <{ODOO_FROM_ADDRESS}>"
         msg["To"] = recipient
         msg["Subject"] = subject
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = references
+        logging.info(f"body of the message : {body[:500]}...")  # Log first 500 chars of body for debugging
         msg.attach(MIMEText(body, "html"))
         raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
+        logging.info(f"raw message prepared for sending: {raw_msg[:500]}...")  # Log first 500 chars of raw message for debugging
         result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
         logging.info(f"Email sent successfully: {result}")
         return result
     except Exception as e:
         logging.error(f"Failed to send email: {str(e)}")
         return None
+
 def send_response(**kwargs):
     try:
         email_data = kwargs['dag_run'].conf.get("email_data", {})
-        logging.info(f"Received email data: {email_data}")
+        logging.info(f"Received email data keys: {list(email_data.keys())}")
+        # log the email data for debugging only small parts of every key
+        for key, value in email_data.items():
+            if isinstance(value, (str, list, tuple)):
+                logging.info(f"Email data - {key}: {str(value)[:100]}")  # Safely slice strings or stringified lists/tuples
+            else:
+                logging.info(f"Email data - {key}: {value}")  # Log non-sliceable types as-is
         if not email_data:
             logging.warning("No email data received! This DAG was likely triggered manually.")
             return
@@ -206,16 +235,31 @@ def send_response(**kwargs):
         
         # Fetch the full email thread
         email_thread = get_email_thread(service, email_data)
+        image_attachments = []
+        
+        # Collect base64 image content from attachments
+        if email_data.get("attachments"):
+            logging.info(f"keys in email_data['attachments']: {list(email_data['attachments'][0].keys())}")
+            # log small portion of each keys in the attachment 
+            logging.info(f"Number of attachments: {len(email_data['attachments'])}")
+            
+            for attachment in email_data["attachments"]:
+                if "base64_content" in attachment and attachment["base64_content"]:
+                    image_attachments.append(attachment["base64_content"])
+                    logging.info(f"Found base64 image attachment: {attachment['filename']}")
+        
         if not email_thread:
             logging.warning("No thread history retrieved, using only current email content.")
             user_query = email_data.get("content", "").strip()
             # Include attachment data for the current email if no thread history
             if email_data.get("attachments"):
+                logging.info("No thread history found, using current email content with attachments.")
                 attachment_content = ""
                 for attachment in email_data["attachments"]:
                     if "extracted_content" in attachment and "content" in attachment["extracted_content"]:
                         attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
                 user_query += f"\n\n{attachment_content}" if attachment_content else ""
+                logging.info(f"User query constructed from current email: {user_query}...")
         else:
             # Format thread history into a single query
             thread_history = ""
@@ -244,13 +288,14 @@ def send_response(**kwargs):
                         attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
                 thread_history += f"\n{attachment_content}" if attachment_content else ""
             
-            logging.info(f"Thread History:: {thread_history}")
+            logging.info(f"Thread History: {thread_history}")
             user_query = f"Here is the email thread history:\n\n{thread_history}\n"
         
-        logging.debug(f"Sending query to AI: {user_query}")
         
-        ai_response_html = get_ai_response(user_query) if user_query else "<html><body>No content provided in the email.</body></html>"
-        logging.debug(f"AI response received (first 200 chars): {ai_response_html[:200]}...")
+        
+        # Pass images to get_ai_response if available
+        ai_response_html = get_ai_response(user_query, images=image_attachments if image_attachments else None)
+        logging.info(f"AI response received (first 200 chars): {ai_response_html}...")
 
         send_email(
             service, sender_email, subject, ai_response_html,
