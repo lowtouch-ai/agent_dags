@@ -240,7 +240,7 @@ def step_4_include_summary(ti, **context):
     # Get previous conversation
     history = ti.xcom_pull(key="conversation_history")
     
-    prompt = "Include subtotal, total discount ($ and %) and shipping to the summary"
+    prompt = "Include subtotal (after discount), total discount ($ and %) and shipping to the summary"
     
     response = get_ai_response(prompt, history)
     
