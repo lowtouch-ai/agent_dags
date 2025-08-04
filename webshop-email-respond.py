@@ -294,7 +294,7 @@ def step_7_compose_final_email(ti, **context):
     # Get previous conversation
     history = ti.xcom_pull(key="conversation_history")
     
-    prompt = "compose the final quote in the form of an email addressed to the customer using american business tone in html; include all details of the articles in tabular format; Include subtotal, total discount ($ and %) and shipping to the summary."
+    prompt = "compose the final quote in the form of an email addressed to the customer using american business tone in html; include all details of the articles in tabular format; Include subtotal, total discount ($ and %) and shipping to the summary. Provide only the HTML draft of the email, with no introductory or concluding sentences outside the HTML content."
     
     response = get_ai_response(prompt, history)
     
