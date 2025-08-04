@@ -136,7 +136,7 @@ def get_ai_response(user_query, images=None):
             messages[0]["images"] = images
         
         messages[0]["content"] += (
-            "\n\nRespond in HTML format \n Your Task is Extract and create the invoice"
+            "\n\nYour Task: Extract and create the invoice. Always respond in valid HTML format with proper HTML structure, including <!DOCTYPE html>, <html>, <head>, and <body> tags. Ensure the invoice content is formatted clearly within the HTML structure."
         )
           
         logging.info(f"Sending request to Ollama with model 'InvoFlux:0.3' and messages: {messages}")
