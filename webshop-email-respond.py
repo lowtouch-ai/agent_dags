@@ -369,7 +369,7 @@ except FileNotFoundError:
     readme_content = "Multi-step email quote processing DAG"
 
 with DAG(
-    "webshop_quote_email_v2", 
+    "shared_send_message_email", 
     default_args=default_args, 
     schedule_interval=None, 
     catchup=False, 
