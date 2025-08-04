@@ -138,7 +138,7 @@ def get_ai_response(prompt, conversation_history=None):
         messages.append({"role": "user", "content": prompt})
 
         response = client.chat(
-            model='webshop-email:0.5',
+            model='webshop:0.5',
             messages=messages,
             stream=False
         )
