@@ -9,9 +9,7 @@ import re
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
-from ollama._types import ResponseError
 from email import message_from_bytes
-from email.header import decode_header
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
@@ -28,9 +26,8 @@ default_args = {
     "retry_delay": timedelta(seconds=15),
 }
 
-ODOO_FROM_ADDRESS = Variable.get("INVOFLUX_FROM_ADDRESS")  
+ODOO_FROM_ADDRESS = Variable.get("INVOFLUX_FROM_ADDRESS")
 GMAIL_CREDENTIALS = Variable.get("INVOFLUX_GMAIL_CREDENTIALS")
-
 OLLAMA_HOST = "http://agentomatic:8000/"
 
 def authenticate_gmail():
@@ -49,7 +46,6 @@ def authenticate_gmail():
 
 def decode_email_payload(msg):
     try:
-        # Handle multipart emails
         if msg.is_multipart():
             for part in msg.walk():
                 content_type = part.get_content_type()
@@ -60,13 +56,12 @@ def decode_email_payload(msg):
                     except UnicodeDecodeError:
                         body = part.get_payload(decode=True).decode('latin-1')
                         return body
-        # Handle single-part emails
         else:
             try:
                 body = msg.get_payload(decode=True).decode()
                 return body
             except UnicodeDecodeError:
-                body = msg.get_payload(decode=True).decode('latin-1')
+                body = part.get_payload(decode=True).decode('latin-1')
                 return body
         return ""
     except Exception as e:
@@ -108,38 +103,35 @@ def get_email_thread(service, email_data):
                 "headers": headers,
                 "content": content.strip()
             })
-        # Sort by date to ensure chronological order
         email_thread.sort(key=lambda x: x["headers"].get("Date", ""), reverse=False)
-        logging.info(f"Retrieved thread with {len(email_thread)} messages")
+        logging.debug(f"Retrieved thread with {len(email_thread)} messages")
         return email_thread
     except Exception as e:
         logging.error(f"Error retrieving email thread: {str(e)}")
         return []
 
-def get_ai_response(user_query, images=None):
+def get_ai_response(prompt, images=None, conversation_history=None):
     try:
-        logging.info(f"Query received: {user_query}")
+        logging.debug(f"Query received: {prompt}")
         
-        # Validate input
-        if not user_query or not isinstance(user_query, str):
+        if not prompt or not isinstance(prompt, str):
             return "<html><body>Invalid input provided. Please enter a valid query.</body></html>"
 
-        client = Client(
-            host=OLLAMA_HOST,
-            headers={'x-ltai-client': 'Invoflux-email'}
-        )
-        logging.info(f"Connecting to Ollama at {OLLAMA_HOST} with model 'InvoFlux:0.3'")
-        # Prepare messages with images if provided
-        messages = [{"role": "user", "content": user_query}]
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'Invoflux-email'})
+        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'InvoFlux:0.3'")
+
+        messages = []
+        if conversation_history:
+            for history_item in conversation_history:
+                messages.append({"role": "user", "content": history_item["prompt"]})
+                messages.append({"role": "assistant", "content": history_item["response"]})
+        
+        user_message = {"role": "user", "content": prompt}
         if images:
             logging.info(f"Images provided: {len(images)}")
-            messages[0]["images"] = images
-        
-        messages[0]["content"] += (
-            "\n\nYour Task: Extract and create the invoice. Always respond in valid HTML format with proper HTML structure, including <!DOCTYPE html>, <html>, <head>, and <body> tags. Ensure the invoice content is formatted clearly within the HTML structure."
-        )
-          
-        logging.info(f"Sending request to Ollama with model 'InvoFlux:0.3' and messages: {messages}")
+            user_message["images"] = images
+        messages.append(user_message)
+
         response = client.chat(
             model='invoflux-email:0.3',
             messages=messages,
@@ -147,52 +139,43 @@ def get_ai_response(user_query, images=None):
         )
         logging.info(f"Raw response from agent: {str(response)[:500]}...")
 
-        # Extract content
         if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
             logging.error("Response lacks expected 'message.content' structure")
             return "<html><body>Invalid response format from AI. Please try again later.</body></html>"
         
         ai_content = response.message.content
+        logging.info(f"Full message content from agent: {ai_content[:500]}...")
 
-
-        # Check for error messages
         if "technical difficulties" in ai_content.lower() or "error" in ai_content.lower():
             logging.warning("AI response contains potential error message")
             return "<html><body>Unexpected response received. Please contact support.</body></html>"
 
-        # Clean up markdown markers
         ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
-        logging.info(f"Cleaned content extracted from agent response: {ai_content[:500]}...")
-
-        # Validate content
         if not ai_content.strip():
             logging.warning("AI returned empty content")
             return "<html><body>No response generated. Please try again later.</body></html>"
 
-        # Ensure proper HTML structure
         if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html'):
             logging.warning("Response doesn't appear to be proper HTML, wrapping it")
             ai_content = f"<html><body>{ai_content}</body></html>"
 
-        return ai_content
+        return ai_content.strip()
 
     except Exception as e:
         logging.error(f"Error in get_ai_response: {str(e)}")
-        return "<html><body>An error occurred while processing your request. Please try again later or contact support.</body></html>"
+        return f"<html><body>An error occurred while processing your request: {str(e)}</body></html>"
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
-        logging.info(f"Preparing email to {recipient} with subject: {subject} references: {references} in_reply_to: {in_reply_to} length of body: {len(body)}")
+        logging.debug(f"Preparing email to {recipient} with subject: {subject}")
         msg = MIMEMultipart()
         msg["From"] = f"InvoFlux via lowtouch.ai <{ODOO_FROM_ADDRESS}>"
         msg["To"] = recipient
         msg["Subject"] = subject
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = references
-        logging.info(f"body of the message : {body[:500]}...")  # Log first 500 chars of body for debugging
         msg.attach(MIMEText(body, "html"))
         raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
-        logging.info(f"raw message prepared for sending: {raw_msg[:500]}...")  # Log first 500 chars of raw message for debugging
         result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
         logging.info(f"Email sent successfully: {result}")
         return result
@@ -200,108 +183,178 @@ def send_email(service, recipient, subject, body, in_reply_to, references):
         logging.error(f"Failed to send email: {str(e)}")
         return None
 
-def send_response(**kwargs):
+def step_1_process_email(ti, **context):
+    """Step 1: Process message from email with image attachment"""
+    email_data = context['dag_run'].conf.get("email_data", {})
+    
+    service = authenticate_gmail()
+    if not service:
+        logging.error("Gmail authentication failed, aborting.")
+        return "Gmail authentication failed"
+    
+    email_thread = get_email_thread(service, email_data)
+    image_attachments = []
+    
+    if email_data.get("attachments"):
+        logging.info(f"Number of attachments: {len(email_data['attachments'])}")
+        for attachment in email_data["attachments"]:
+            if "base64_content" in attachment and attachment["base64_content"]:
+                image_attachments.append(attachment["base64_content"])
+                logging.info(f"Found base64 image attachment: {attachment['filename']}")
+    
+    thread_history = ""
+    for idx, email in enumerate(email_thread, 1):
+        email_content = email.get("content", "").strip()
+        email_from = email["headers"].get("From", "Unknown")
+        email_date = email["headers"].get("Date", "Unknown date")
+        if email_content:
+            soup = BeautifulSoup(email_content, "html.parser")
+            email_content = soup.get_text(separator=" ", strip=True)
+        thread_history += f"Email {idx} (From: {email_from}, Date: {email_date}):\n{email_content}\n\n"
+    
+    current_content = email_data.get("content", "").strip()
+    if current_content:
+        soup = BeautifulSoup(current_content, "html.parser")
+        current_content = soup.get_text(separator=" ", strip=True)
+    thread_history += f"Current Email (From: {email_data['headers'].get('From', 'Unknown')}):\n{current_content}\n"
+    
+    if email_data.get("attachments"):
+        attachment_content = ""
+        for attachment in email_data["attachments"]:
+            if "extracted_content" in attachment and "content" in attachment["extracted_content"]:
+                attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
+        thread_history += f"\n{attachment_content}" if attachment_content else ""
+    
+    prompt = f"extract the invoice and prepare for system entry :\n\n{thread_history} \n\n Note : Here Extract the invoice details from the Image is enough and ask for confirmation"
+    
+    response = get_ai_response(prompt, images=image_attachments if image_attachments else None)
+    
+    ti.xcom_push(key="step_1_prompt", value=prompt)
+    ti.xcom_push(key="step_1_response", value=response)
+    ti.xcom_push(key="conversation_history", value=[{"prompt": prompt, "response": response}])
+    
+    logging.info(f"Step 1 completed: {response[:200]}...")
+    return response
+
+def step_2_create_vendor_bill(ti, **context):
+    """Step 2: Extract and prepare for system entry"""
+    history = ti.xcom_pull(key="conversation_history")
+    
+    prompt = "Create the Vendor bill"
+    
+    response = get_ai_response(prompt, conversation_history=history)
+    
+    history.append({"prompt": prompt, "response": response})
+    ti.xcom_push(key="step_2_prompt", value=prompt)
+    ti.xcom_push(key="step_2_response", value=response)
+    ti.xcom_push(key="conversation_history", value=history)
+    
+    logging.info(f"Step 2 completed: {response[:200]}...")
+    return response
+
+def step_3_compose_email(ti, **context):
+    """Step 3: Create the vendor bill"""
+    history = ti.xcom_pull(key="conversation_history")
+    
+    prompt = "Compose a professional and human-like business email in American English, written in the tone of a senior Customer Success Manager, to notify a vendor about the outcome of an invoice submission (Posted, Draft, or Failed). The email must include a clear introductory line, a natural explanation of the status outcome (including Invoice ID and issues if any), a concise summary of invoice details in paragraph or bullet format, a product line item table (with description, quantity, unit price, and total) placed right after the invoice summary, a naturally worded sentence or short paragraph explaining the next steps based on the invoice status (not as a bullet list or section header), and a polite closing with the signature 'Invoice Processing Team, InvoFlux'. Use only clean, valid HTML for the email body without any headers like 'Status-Based Message' or 'Invoice Summary'. Avoid technical or template-style formatting. The email should read like it was written personally. Return only the HTML body, with no additional content or explanation outside the HTML."
+    
+    response = get_ai_response(prompt, conversation_history=history)
+    # Clean the HTML response
+    cleaned_response = re.sub(r'```html\n|```', '', response).strip()
+    
+    if not cleaned_response.strip().startswith('<!DOCTYPE') and not cleaned_response.strip().startswith('<html'):
+        if not cleaned_response.strip().startswith('<'):
+            cleaned_response = f"<html><body>{cleaned_response}</body></html>"
+    
+    history.append({"prompt": prompt, "response": response})
+    ti.xcom_push(key="step_3_prompt", value=prompt)
+    ti.xcom_push(key="step_3_response", value=response)
+    ti.xcom_push(key="conversation_history", value=history)
+    ti.xcom_push(key="final_html_content", value=cleaned_response)
+    
+    logging.info(f"Step 3 completed: {response[:200]}...")
+    return response
+
+
+def step_4_send_email(ti, **context):
+    """Step 5: Send the final email"""
     try:
-        email_data = kwargs['dag_run'].conf.get("email_data", {})
-        logging.info(f"Received email data keys: {list(email_data.keys())}")
-        # log the email data for debugging only small parts of every key
-        for key, value in email_data.items():
-            if isinstance(value, (str, list, tuple)):
-                logging.info(f"Email data - {key}: {str(value)[:100]}")  # Safely slice strings or stringified lists/tuples
-            else:
-                logging.info(f"Email data - {key}: {value}")  # Log non-sliceable types as-is
+        email_data = context['dag_run'].conf.get("email_data", {})
         if not email_data:
             logging.warning("No email data received! This DAG was likely triggered manually.")
-            return
+            return "No email data available"
+        
+        final_html_content = ti.xcom_pull(key="final_html_content")
+        if not final_html_content:
+            logging.error("No final HTML content found from previous steps")
+            return "Error: No content to send"
         
         service = authenticate_gmail()
         if not service:
             logging.error("Gmail authentication failed, aborting email response.")
-            return
+            return "Gmail authentication failed"
         
         sender_email = email_data["headers"].get("From", "")
-        subject = f"Re: {email_data['headers'].get('Subject', 'No Subject')}"
+        subject = f"Re: {email_data['headers'].get('Subject', 'Invoice Processing')}"
         in_reply_to = email_data["headers"].get("Message-ID", "")
         references = email_data["headers"].get("References", "")
         
-        # Fetch the full email thread
-        email_thread = get_email_thread(service, email_data)
-        image_attachments = []
-        
-        # Collect base64 image content from attachments
-        if email_data.get("attachments"):
-            logging.info(f"keys in email_data['attachments']: {list(email_data['attachments'][0].keys())}")
-            # log small portion of each keys in the attachment 
-            logging.info(f"Number of attachments: {len(email_data['attachments'])}")
-            
-            for attachment in email_data["attachments"]:
-                if "base64_content" in attachment and attachment["base64_content"]:
-                    image_attachments.append(attachment["base64_content"])
-                    logging.info(f"Found base64 image attachment: {attachment['filename']}")
-        
-        if not email_thread:
-            logging.warning("No thread history retrieved, using only current email content.")
-            user_query = email_data.get("content", "").strip()
-            # Include attachment data for the current email if no thread history
-            if email_data.get("attachments"):
-                logging.info("No thread history found, using current email content with attachments.")
-                attachment_content = ""
-                for attachment in email_data["attachments"]:
-                    if "extracted_content" in attachment and "content" in attachment["extracted_content"]:
-                        attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
-                user_query += f"\n\n{attachment_content}" if attachment_content else ""
-                logging.info(f"User query constructed from current email: {user_query}...")
-        else:
-            # Format thread history into a single query
-            thread_history = ""
-            for idx, email in enumerate(email_thread, 1):
-                email_content = email.get("content", "").strip()
-                email_from = email["headers"].get("From", "Unknown")
-                email_date = email["headers"].get("Date", "Unknown date")
-                # Clean HTML content if present
-                if email_content:
-                    soup = BeautifulSoup(email_content, "html.parser")
-                    email_content = soup.get_text(separator=" ", strip=True)
-                thread_history += f"Email {idx} (From: {email_from}, Date: {email_date}):\n{email_content}\n\n"
-            
-            # Append the current email as the latest query
-            current_content = email_data.get("content", "").strip()
-            if current_content:
-                soup = BeautifulSoup(current_content, "html.parser")
-                current_content = soup.get_text(separator=" ", strip=True)
-            thread_history += f"Current Email (From: {sender_email}):\n{current_content}\n"
-            
-            # Append attachment data for the current email
-            if email_data.get("attachments"):
-                attachment_content = ""
-                for attachment in email_data["attachments"]:
-                    if "extracted_content" in attachment and "content" in attachment["extracted_content"]:
-                        attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
-                thread_history += f"\n{attachment_content}" if attachment_content else ""
-            
-            logging.info(f"Thread History: {thread_history}")
-            user_query = f"Here is the email thread history:\n\n{thread_history}\n"
-        
-        
-        
-        # Pass images to get_ai_response if available
-        ai_response_html = get_ai_response(user_query, images=image_attachments if image_attachments else None)
-        logging.info(f"AI response received (first 200 chars): {ai_response_html}...")
-
-        send_email(
-            service, sender_email, subject, ai_response_html,
+        result = send_email(
+            service, sender_email, subject, final_html_content,
             in_reply_to, references
         )
+        
+        if result:
+            logging.info(f"Email sent successfully to {sender_email}")
+            return f"Email sent successfully to {sender_email}"
+        else:
+            logging.error("Failed to send email")
+            return "Failed to send email"
+            
     except Exception as e:
-        logging.error(f"Unexpected error in send_response: {str(e)}")
+        logging.error(f"Error in step_5_send_email: {str(e)}")
+        return f"Error sending email: {str(e)}"
 
 readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'email_responder.md')
-with open(readme_path, 'r') as file:
-    readme_content = file.read()
+readme_content = ""
+try:
+    with open(readme_path, 'r') as file:
+        readme_content = file.read()
+except FileNotFoundError:
+    readme_content = "Multi-step invoice processing DAG"
 
-with DAG("invoflux_send_message_email", default_args=default_args, schedule_interval=None, catchup=False, doc_md=readme_content, tags=["email", "shared", "send", "message"]) as dag:
-    send_response_task = PythonOperator(
-        task_id="send-response",
-        python_callable=send_response,
+with DAG(
+    "invoflux_send_message_email",
+    default_args=default_args,
+    schedule_interval=None,
+    catchup=False,
+    doc_md=readme_content,
+    tags=["email", "shared", "send", "message", "invoice"]
+) as dag:
+    
+    task_1 = PythonOperator(
+        task_id="step_1_process_email",
+        python_callable=step_1_process_email,
         provide_context=True
     )
+    
+    task_2 = PythonOperator(
+        task_id="step_2_create_vendor_bill",
+        python_callable=step_2_create_vendor_bill,
+        provide_context=True
+    )
+    
+    task_3 = PythonOperator(
+        task_id="step_3_compose_email",
+        python_callable=step_3_compose_email,
+        provide_context=True
+    )
+    
+    
+    task_4 = PythonOperator(
+        task_id="step_4_send_email",
+        python_callable=step_4_send_email,
+        provide_context=True
+    )
+    
+    task_1 >> task_2 >> task_3 >> task_4 
