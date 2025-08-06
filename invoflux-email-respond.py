@@ -256,7 +256,21 @@ def step_3_compose_email(ti, **context):
     """Step 3: Create the vendor bill"""
     history = ti.xcom_pull(key="conversation_history")
     
-    prompt = "Compose a professional and human-like business email in American English, written in the tone of a senior Customer Success Manager, to notify a vendor about the outcome of an invoice submission (Posted, Draft, or Failed). The email must include a clear introductory line, a natural explanation of the status outcome (including Invoice ID and issues if any), a concise summary of invoice details in paragraph or bullet format, a product line item table (with description, quantity, unit price, and total) placed right after the invoice summary, a naturally worded sentence or short paragraph explaining the next steps based on the invoice status (not as a bullet list or section header), and a polite closing with the signature 'Invoice Processing Team, InvoFlux'. Use only clean, valid HTML for the email body without any headers like 'Status-Based Message' or 'Invoice Summary'. Avoid technical or template-style formatting. The email should read like it was written personally. Return only the HTML body, with no additional content or explanation outside the HTML."
+    prompt = """
+        Compose a professional and human-like business email in American English, written in the tone of a senior Customer Success Manager, to notify a vendor about the outcome of an invoice submission (Posted, Draft, or Failed).
+        The email must include:
+        - A clear introductory line acknowledging the invoice receipt with the invoice number and vendor name (if available), followed by a short sentence stating the current status of the invoice (Posted, Draft, or Failed).
+        - A natural explanation of the status outcome (including Invoice Number and, for Draft or Failed, specific issues like price mismatch, missing PO, unreadable file, duplicate invoice, or unrecognized product in a bulleted list).
+        - A concise summary of invoice details (Invoice Number, Invoice Date, Due Date, Internal Invoice ID, Status, Vendor Name if available, Purchase Order if available, Currency, Subtotal, Tax with rate if available, Total Amount) in paragraph or bullet format.
+        - A product line item table **with borders** (including Item Description, Quantity, Unit Price, Tax, Total Price), placed immediately after the invoice summary.
+        - If the invoice status is Draft or Failed, include a short, natural-language paragraph below the product table briefly summarizing the **validation issues**.
+        - A naturally worded sentence or short paragraph explaining the next steps based on the invoice status:
+            - For **Posted**, confirm the invoice has been successfully entered into the payment cycle.
+            - For **Draft** or **Failed**, kindly request corrections and resubmission to invoflux-agent-8013@lowtouch.ai.
+        - A polite closing paragraph offering further assistance, mentioning the contact email invoflux-agent-8013@lowtouch.ai, and signed with 'Invoice Processing Team, InvoFlux'.
+        Use only clean, valid HTML for the email body without any section headers (e.g., no 'Status-Based Message', 'Invoice Summary', or 'Validation Issues Identified'). Avoid technical or template-style formatting and placeholders (e.g., '[Invoice Number]'). The email should read as if it was personally written.
+        Return only the HTML body, and nothing else.
+    """
     
     response = get_ai_response(prompt, conversation_history=history)
     # Clean the HTML response
