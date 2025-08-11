@@ -1,22 +1,31 @@
 package utils;
 
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.util.Properties;
-
 public class ConfigReader {
-    private static final Properties properties = new Properties();
-
-    static {
-        try {
-            FileInputStream fis = new FileInputStream("src/test/resources/application.properties");
-            properties.load(fis);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to load application.properties file", e);
-        }
-    }
 
     public static String get(String key) {
-        return properties.getProperty(key);
+        // First Check environment variable
+        String envValue = System.getenv(key);
+        if (envValue != null && !envValue.isEmpty()) {
+            return envValue;
+        }
+
+        // Fallback to system property
+        String sysValue = System.getProperty(key);
+        if (sysValue != null && !sysValue.isEmpty()) {
+            return sysValue;
+        }
+
+        // Fallback to application.properties if present
+        try (java.io.InputStream input = ConfigReader.class.getClassLoader().getResourceAsStream("application.properties")) {
+            if (input != null) {
+                java.util.Properties props = new java.util.Properties();
+                props.load(input);
+                return props.getProperty(key);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        throw new RuntimeException("Config key not found: " + key);
     }
 }

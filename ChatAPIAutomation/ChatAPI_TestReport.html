@@ -35,7 +35,7 @@
 <a href="#"><span class="badge badge-primary">AI Response Keyword Validation</span></a>
 </li>
 <li class="m-r-10">
-<a href="#"><span class="badge badge-primary">Aug 4, 2025 04:47:17 PM</span></a>
+<a href="#"><span class="badge badge-primary">Aug 11, 2025 01:53:39 PM</span></a>
 </li>
 </ul>
 </div>
@@ -81,7 +81,7 @@
           <div class="test-detail">
             <p class="name">Prompt: Show me order details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock</p>
             <p class="text-sm">
-              <span>4:47:17 PM</span> / <span>00:00:18:183</span>
+              <span>1:53:39 PM</span> / <span>00:00:20:301</span>
               <span class="badge pass-bg log float-right">Pass</span>
             </p>
           </div>
@@ -90,9 +90,9 @@
 <div class="p-v-10">
 <div class="info">
 <h5 class="test-status text-pass">Prompt: Show me order details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock</h5>
-<span class='badge badge-success'>08.04.2025 4:47:17 PM</span>
-<span class='badge badge-danger'>08.04.2025 4:47:35 PM</span>
-<span class='badge badge-default'>00:00:18:183</span>
+<span class='badge badge-success'>08.11.2025 1:53:39 PM</span>
+<span class='badge badge-danger'>08.11.2025 1:54:00 PM</span>
+<span class='badge badge-default'>00:00:20:301</span>
 &middot; <span class='uri-anchor badge badge-default'>#test-id=1</span>
 <span class='badge badge-default pointer float-right ml-1 et'><i class="fa fa-chevron-down"></i></span>
 <span class='badge badge-default pointer float-right ct'><i class="fa fa-chevron-up"></i></span>
@@ -104,23 +104,23 @@
   <tbody>
       <tr class="event-row">
         <td><span class="badge log info-bg">Info</span></td>
-        <td>4:47:17 PM</td>
+        <td>1:53:39 PM</td>
         <td>
           Prompt: Show me order details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log info-bg">Info</span></td>
-        <td>4:47:35 PM</td>
+        <td>1:54:00 PM</td>
         <td>
-          Raw Response:<br><pre>{"id":"webshop:0.5-f726bc96-4fe4-49ae-a511-4cbd3964d165","created":1754306256,"model":"webshop:0.5","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"Here are the details for Order ID **788**:\n\n### Customer Details\n- **Name:** Patricia Montgomery\n- **Email:** patricia.montgomery@example.com\n- **Age:** 67\n- **Gender:** Female\n- **Shipping Address:** 9599 Main Street, Nottingham, B8I 0BH\n- **Total Amount:** $371.98\n- **Shipping Cost:** $3.90\n- **Order Date:** November 12, 2024, 11:58 PM (UTC)\n\n### Articles in the Order\n\n| Article ID | Product Name               | Price   | Quantity | Color           | Size | Current Stock Count | Status         |\n|------------|----------------------------|---------|----------|------------------|------|---------------------|----------------|\n| 2937       | Athletic Shoes Andiamo      | $101.70 | 1        | Pale Violet Red   | XL   | 2                   | In Stock       |\n| 7790       | Jumpsuit Nanzo             | $39.00  | 1        | Dim Gray          | M    | 8                   | In Stock       |\n| 10714      | Nailpolish Gabor           | $78.60  | 1        | Powder Blue       | S    | 8                   | In Stock       |\n| 12384      | Gym Bag Muneca             | $79.68  | 1        | Medium Slate Blue | S    | 0                   | **Out of Stock** |\n| 13535      | Skirt Bienchen             | $73.00  | 1        | Aquamarine        | M    | 4                   | In Stock       |\n\n### Summary of Stock Availability\n- **Out of Stock:**\n  - Gym Bag Muneca (Article ID: 12384) - **Current Stock Count: 0**\n\n- **Low Stock:**\n  - Athletic Shoes Andiamo (Article ID: 2937) - **Current Stock Count: 2** (Please note this item is low in stock but still available)\n\nThis order includes a total of **5 articles**, with one item currently out of stock. If you need any further information or actions regarding this order, feel free to ask!"}}],"object":"chat.completion","usage":{"response_token/s":62.17,"prompt_token/s":75.9,"total_duration":4883583458,"load_duration":1334875,"prompt_eval_count":26,"prompt_tokens":26,"prompt_eval_duration":342546000,"eval_count":282,"completion_tokens":282,"eval_duration":4535599000,"approximate_total":"0h0m4s","total_tokens":308,"completion_tokens_details":{"reasoning_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}</pre>
+          Raw Response:<br><pre>{"id":"webshop:0.5-c4ae29d2-2c58-46bc-8d0e-f75b444508ab","created":1754900640,"model":"webshop:0.5","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"content":"Here are the details for Order ID **788**, including customer information, shipping details, and articles with their stock availability:\n\n### Customer Details\n- **Name:** Patricia Montgomery\n- **Email:** patricia.montgomery@example.com\n- **Age:** 67\n- **Gender:** Female\n- **Shipping Address:** 9599 Main Street, Nottingham, B8I 0BH\n- **Order Total:** $371.98\n- **Shipping Cost:** $3.90\n- **Order Date:** November 14, 2024\n\n### Articles in Order\n| Article ID | Product Name                  | Price  | Quantity | Color            | Size | Current Stock Count | Description                               | Discount | Reduced Price |\n|------------|-------------------------------|--------|----------|-------------------|------|---------------------|-------------------------------------------|----------|---------------|\n| 2937       | Athletic Shoes Andiamo        | $101.70| 1        | Pale Violet Red    | XL   | 2                   | The stylish Athletic Shoes Andiamo is just what you need right now! | 10%      | $101.70       |\n| 7790       | Jumpsuit Nanzo               | $39.00 | 1        | Dim Gray           | M    | 8                   | The stylish Jumpsuit Nanzo is just what you need right now! | 40%      | $39.00        |\n| 10714      | Nailpolish Gabor             | $78.60 | 1        | Powder Blue        | S    | 8                   | The stylish Nailpolish Gabor is just what you need right now! | 40%      | $78.60        |\n| 12384      | Gym Bag Muneca               | $79.68 | 1        | Medium Slate Blue  | S    | 0 (Out of Stock)    | The stylish Gym Bag Muneca is just what you need right now! | 4%       | $79.68        |\n| 13535      | Skirt Bienchen               | $73.00 | 1        | Aquamarine         | M    | 4                   | The stylish Skirt Bienchen is just what you need right now! | None     | None          |\n\n### Stock Availability\n- **Out of Stock Articles:**\n  - **Gym Bag Muneca** (Current Stock Count: 0)\n\n- **Low Stock Articles:**\n  - **Athletic Shoes Andiamo** (Current Stock Count: 2)\n\nPlease let me know if you need further assistance!","role":"assistant"}}],"object":"chat.completion","usage":{"response_token/s":62.17,"prompt_token/s":75.9,"total_duration":4883583458,"load_duration":1334875,"prompt_eval_count":26,"prompt_tokens":26,"prompt_eval_duration":342546000,"eval_count":282,"completion_tokens":282,"eval_duration":4535599000,"approximate_total":"0h0m4s","total_tokens":308,"completion_tokens_details":{"reasoning_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}</pre>
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log info-bg">Info</span></td>
-        <td>4:47:35 PM</td>
+        <td>1:54:00 PM</td>
         <td>
-          Parsed Content:<br><pre>Here are the details for Order ID **788**:
+          Parsed Content:<br><pre>Here are the details for Order ID **788**, including customer information, shipping details, and articles with their stock availability:
 
 ### Customer Details
 - **Name:** Patricia Montgomery
@@ -128,47 +128,46 @@
 - **Age:** 67
 - **Gender:** Female
 - **Shipping Address:** 9599 Main Street, Nottingham, B8I 0BH
-- **Total Amount:** $371.98
+- **Order Total:** $371.98
 - **Shipping Cost:** $3.90
-- **Order Date:** November 12, 2024, 11:58 PM (UTC)
+- **Order Date:** November 14, 2024
 
-### Articles in the Order
+### Articles in Order
+| Article ID | Product Name                  | Price  | Quantity | Color            | Size | Current Stock Count | Description                               | Discount | Reduced Price |
+|------------|-------------------------------|--------|----------|-------------------|------|---------------------|-------------------------------------------|----------|---------------|
+| 2937       | Athletic Shoes Andiamo        | $101.70| 1        | Pale Violet Red    | XL   | 2                   | The stylish Athletic Shoes Andiamo is just what you need right now! | 10%      | $101.70       |
+| 7790       | Jumpsuit Nanzo               | $39.00 | 1        | Dim Gray           | M    | 8                   | The stylish Jumpsuit Nanzo is just what you need right now! | 40%      | $39.00        |
+| 10714      | Nailpolish Gabor             | $78.60 | 1        | Powder Blue        | S    | 8                   | The stylish Nailpolish Gabor is just what you need right now! | 40%      | $78.60        |
+| 12384      | Gym Bag Muneca               | $79.68 | 1        | Medium Slate Blue  | S    | 0 (Out of Stock)    | The stylish Gym Bag Muneca is just what you need right now! | 4%       | $79.68        |
+| 13535      | Skirt Bienchen               | $73.00 | 1        | Aquamarine         | M    | 4                   | The stylish Skirt Bienchen is just what you need right now! | None     | None          |
 
-| Article ID | Product Name               | Price   | Quantity | Color           | Size | Current Stock Count | Status         |
-|------------|----------------------------|---------|----------|------------------|------|---------------------|----------------|
-| 2937       | Athletic Shoes Andiamo      | $101.70 | 1        | Pale Violet Red   | XL   | 2                   | In Stock       |
-| 7790       | Jumpsuit Nanzo             | $39.00  | 1        | Dim Gray          | M    | 8                   | In Stock       |
-| 10714      | Nailpolish Gabor           | $78.60  | 1        | Powder Blue       | S    | 8                   | In Stock       |
-| 12384      | Gym Bag Muneca             | $79.68  | 1        | Medium Slate Blue | S    | 0                   | **Out of Stock** |
-| 13535      | Skirt Bienchen             | $73.00  | 1        | Aquamarine        | M    | 4                   | In Stock       |
+### Stock Availability
+- **Out of Stock Articles:**
+  - **Gym Bag Muneca** (Current Stock Count: 0)
 
-### Summary of Stock Availability
-- **Out of Stock:**
-  - Gym Bag Muneca (Article ID: 12384) - **Current Stock Count: 0**
+- **Low Stock Articles:**
+  - **Athletic Shoes Andiamo** (Current Stock Count: 2)
 
-- **Low Stock:**
-  - Athletic Shoes Andiamo (Article ID: 2937) - **Current Stock Count: 2** (Please note this item is low in stock but still available)
-
-This order includes a total of **5 articles**, with one item currently out of stock. If you need any further information or actions regarding this order, feel free to ask!</pre>
+Please let me know if you need further assistance!</pre>
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log pass-bg">Pass</span></td>
-        <td>4:47:35 PM</td>
+        <td>1:54:00 PM</td>
         <td>
           Found: **Patricia Montgomery**
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log pass-bg">Pass</span></td>
-        <td>4:47:35 PM</td>
+        <td>1:54:00 PM</td>
         <td>
           Found: **patricia.montgomery@example.com**
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log pass-bg">Pass</span></td>
-        <td>4:47:35 PM</td>
+        <td>1:54:00 PM</td>
         <td>
           Found: **Gym Bag Muneca**
         </td>
@@ -185,7 +184,7 @@ This order includes a total of **5 articles**, with one item currently out of st
           <div class="test-detail">
             <p class="name">Prompt: Plot a bar chart comparing revenue and order count for December 2024 sales revenue by day</p>
             <p class="text-sm">
-              <span>4:47:35 PM</span> / <span>00:00:26:192</span>
+              <span>1:54:00 PM</span> / <span>00:00:24:954</span>
               <span class="badge pass-bg log float-right">Pass</span>
             </p>
           </div>
@@ -194,9 +193,9 @@ This order includes a total of **5 articles**, with one item currently out of st
 <div class="p-v-10">
 <div class="info">
 <h5 class="test-status text-pass">Prompt: Plot a bar chart comparing revenue and order count for December 2024 sales revenue by day</h5>
-<span class='badge badge-success'>08.04.2025 4:47:35 PM</span>
-<span class='badge badge-danger'>08.04.2025 4:48:01 PM</span>
-<span class='badge badge-default'>00:00:26:192</span>
+<span class='badge badge-success'>08.11.2025 1:54:00 PM</span>
+<span class='badge badge-danger'>08.11.2025 1:54:25 PM</span>
+<span class='badge badge-default'>00:00:24:954</span>
 &middot; <span class='uri-anchor badge badge-default'>#test-id=2</span>
 <span class='badge badge-default pointer float-right ml-1 et'><i class="fa fa-chevron-down"></i></span>
 <span class='badge badge-default pointer float-right ct'><i class="fa fa-chevron-up"></i></span>
@@ -208,46 +207,46 @@ This order includes a total of **5 articles**, with one item currently out of st
   <tbody>
       <tr class="event-row">
         <td><span class="badge log info-bg">Info</span></td>
-        <td>4:47:35 PM</td>
+        <td>1:54:00 PM</td>
         <td>
           Prompt: Plot a bar chart comparing revenue and order count for December 2024 sales revenue by day
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log info-bg">Info</span></td>
-        <td>4:48:01 PM</td>
+        <td>1:54:25 PM</td>
         <td>
-          Raw Response:<br><pre>{"id":"webshop:0.5-cf75087b-15d4-43d2-8be6-f8ff33cc3afa","created":1754306283,"model":"webshop:0.5","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"Here is the bar chart comparing revenue and order count for December 2024 sales, displayed by day:\n\n![Sales Revenue and Order Count for December 2024](/static/charts/chart_529de307-00b8-48c3-8fe6-c2d1e5afb6c8.png) \n\nIf you need any further details or another analysis, feel free to ask!"}}],"object":"chat.completion","usage":{"response_token/s":62.17,"prompt_token/s":75.9,"total_duration":4883583458,"load_duration":1334875,"prompt_eval_count":26,"prompt_tokens":26,"prompt_eval_duration":342546000,"eval_count":282,"completion_tokens":282,"eval_duration":4535599000,"approximate_total":"0h0m4s","total_tokens":308,"completion_tokens_details":{"reasoning_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}</pre>
+          Raw Response:<br><pre>{"id":"webshop:0.5-5f734a0c-260c-4a90-b302-371086584d9c","created":1754900665,"model":"webshop:0.5","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"content":"Here is the bar chart comparing revenue and order count for December 2024 sales by day:\n\n![Revenue and Order Count Comparison for December 2024](/static/charts/chart_d7576135-b7e7-4fc5-9f96-20f72e8251a8.png)\n\nIf you have any further questions or need additional information, feel free to ask!","role":"assistant"}}],"object":"chat.completion","usage":{"response_token/s":62.17,"prompt_token/s":75.9,"total_duration":4883583458,"load_duration":1334875,"prompt_eval_count":26,"prompt_tokens":26,"prompt_eval_duration":342546000,"eval_count":282,"completion_tokens":282,"eval_duration":4535599000,"approximate_total":"0h0m4s","total_tokens":308,"completion_tokens_details":{"reasoning_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}</pre>
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log info-bg">Info</span></td>
-        <td>4:48:01 PM</td>
+        <td>1:54:25 PM</td>
         <td>
-          Parsed Content:<br><pre>Here is the bar chart comparing revenue and order count for December 2024 sales, displayed by day:
+          Parsed Content:<br><pre>Here is the bar chart comparing revenue and order count for December 2024 sales by day:
 
-![Sales Revenue and Order Count for December 2024](/static/charts/chart_529de307-00b8-48c3-8fe6-c2d1e5afb6c8.png) 
+![Revenue and Order Count Comparison for December 2024](/static/charts/chart_d7576135-b7e7-4fc5-9f96-20f72e8251a8.png)
 
-If you need any further details or another analysis, feel free to ask!</pre>
+If you have any further questions or need additional information, feel free to ask!</pre>
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log pass-bg">Pass</span></td>
-        <td>4:48:01 PM</td>
+        <td>1:54:25 PM</td>
         <td>
           Found: **chart**
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log pass-bg">Pass</span></td>
-        <td>4:48:01 PM</td>
+        <td>1:54:25 PM</td>
         <td>
           Found: **bar**
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log pass-bg">Pass</span></td>
-        <td>4:48:01 PM</td>
+        <td>1:54:25 PM</td>
         <td>
           Found: **Revenue**
         </td>
@@ -264,7 +263,7 @@ If you need any further details or another analysis, feel free to ask!</pre>
           <div class="test-detail">
             <p class="name">Prompt: Compose a well-formatted American-style business email with a quote for existing customer Enni Kivi for articles 1139 and 3876, apply discounts and shipping as per policies, include the total, shipping, and discount in the quote. Use a single table to show all the articles, subtotal, discount, shipping and total; Add a summary section with total before discount, total discount ($ and %), subtotal, shipping and total.</p>
             <p class="text-sm">
-              <span>4:48:01 PM</span> / <span>00:00:14:931</span>
+              <span>1:54:25 PM</span> / <span>00:00:12:856</span>
               <span class="badge pass-bg log float-right">Pass</span>
             </p>
           </div>
@@ -273,9 +272,9 @@ If you need any further details or another analysis, feel free to ask!</pre>
 <div class="p-v-10">
 <div class="info">
 <h5 class="test-status text-pass">Prompt: Compose a well-formatted American-style business email with a quote for existing customer Enni Kivi for articles 1139 and 3876, apply discounts and shipping as per policies, include the total, shipping, and discount in the quote. Use a single table to show all the articles, subtotal, discount, shipping and total; Add a summary section with total before discount, total discount ($ and %), subtotal, shipping and total.</h5>
-<span class='badge badge-success'>08.04.2025 4:48:01 PM</span>
-<span class='badge badge-danger'>08.04.2025 4:48:16 PM</span>
-<span class='badge badge-default'>00:00:14:931</span>
+<span class='badge badge-success'>08.11.2025 1:54:25 PM</span>
+<span class='badge badge-danger'>08.11.2025 1:54:37 PM</span>
+<span class='badge badge-default'>00:00:12:856</span>
 &middot; <span class='uri-anchor badge badge-default'>#test-id=3</span>
 <span class='badge badge-default pointer float-right ml-1 et'><i class="fa fa-chevron-down"></i></span>
 <span class='badge badge-default pointer float-right ct'><i class="fa fa-chevron-up"></i></span>
@@ -287,74 +286,72 @@ If you need any further details or another analysis, feel free to ask!</pre>
   <tbody>
       <tr class="event-row">
         <td><span class="badge log info-bg">Info</span></td>
-        <td>4:48:01 PM</td>
+        <td>1:54:25 PM</td>
         <td>
           Prompt: Compose a well-formatted American-style business email with a quote for existing customer Enni Kivi for articles 1139 and 3876, apply discounts and shipping as per policies, include the total, shipping, and discount in the quote. Use a single table to show all the articles, subtotal, discount, shipping and total; Add a summary section with total before discount, total discount ($ and %), subtotal, shipping and total.
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log info-bg">Info</span></td>
-        <td>4:48:16 PM</td>
+        <td>1:54:37 PM</td>
         <td>
-          Raw Response:<br><pre>{"id":"webshop:0.5-76b14c03-cf92-45d1-b607-0243893e8b4f","created":1754306297,"model":"webshop:0.5","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"Here's a well-formatted email draft for the quote:\n\n---\n\n**Subject:** Quote for Your Recent Order\n\n**Dear Enni Kivi,**\n\nThank you for your continued support! We are pleased to provide you with a quote for your recent order of the following articles:\n\n| Article Name      | Article ID | Size | Color        | Price   | Discount (%) | Discounted Price | Quantity | Total Price |\n|-------------------|------------|------|--------------|---------|--------------|-------------------|----------|-------------|\n| Hoodie Dexel      | 1139       | S    | Rosybrown    | $61.00  | 17%          | $50.63            | 1        | $50.63      |\n| Capris Panka      | 3876       | L    | Cadetblue    | $101.00 | 36%          | $64.64            | 1        | $64.64      |\n\n| **Subtotal**      | **Discount**  | **Shipping** | **Total**     |\n|-------------------|----------------|--------------|----------------|\n| $115.27           | $46.73 (28.82%)| $19.90       | $88.44         |\n\n### Summary\n- **Total before Discount:** $115.27\n- **Total Discount:** $46.73 (28.82%)\n- **Subtotal:** $115.27\n- **Shipping:** $19.90\n- **Total:** $88.44\n\nPlease let us know if you would like to proceed with this order or if you have any questions.\n\nThank you!\n\nBest regards,\n\nFred  \nAutonomous Customer Specialist  \nWebShop  \nfred@webshop.com  \n\n---\n\nPlease review the email draft and let me know if you'd like to make any changes or if I should send it!"}}],"object":"chat.completion","usage":{"response_token/s":62.17,"prompt_token/s":75.9,"total_duration":4883583458,"load_duration":1334875,"prompt_eval_count":26,"prompt_tokens":26,"prompt_eval_duration":342546000,"eval_count":282,"completion_tokens":282,"eval_duration":4535599000,"approximate_total":"0h0m4s","total_tokens":308,"completion_tokens_details":{"reasoning_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}</pre>
+          Raw Response:<br><pre>{"id":"webshop:0.5-06970baf-2fbb-4f7e-b56a-9bb8eade8adf","created":1754900678,"model":"webshop:0.5","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"content":"Here is the well-formatted email quote for the existing customer Enni Kivi, including all requested details:\n\n---\n\n**Subject:** Quote for Your Recent Inquiry\n\n**Dear Enni Kivi,**\n\nThank you for your interest in our products! Below is the quote for the articles you inquired about:\n\n| Article Name      | Color       | Size | Price ($) | Discount (%) | Reduced Price ($) | Quantity | Total ($) |\n|-------------------|-------------|------|-----------|--------------|-------------------|----------|-----------|\n| Hoodie Dexel      | Rosybrown   | S    | 61.00     | 17           | 50.63             | 1        | 50.63     |\n| Capris Panka      | Cadetblue   | L    | 101.00    | 36           | 64.64             | 1        | 64.64     |\n| **Subtotal**      |             |      |           |              |                   |          | **115.27** |\n| **Total Discount**|             |      |           |              |                   |          | **$45.09 (39.11%)** |\n| **Shipping**      |             |      |           |              |                   |          | **$19.90** |\n| **Total Amount**  |             |      |           |              |                   |          | **$135.17** |\n\n### Summary\n- **Total Before Discount:** $180.36\n- **Total Discount:** $45.09 (39.11%)\n- **Subtotal:** $115.27\n- **Shipping:** $19.90\n- **Total Amount:** $135.17\n\nIf you have any questions or need further assistance, please feel free to reach out. We look forward to serving you!\n\nBest regards,  \nFred  \n\nAutonomous Customer Specialist  \nWebShop  \nfred@webshop.com  \n\n--- \n\nPlease review the email draft, and let me know if you would like to make any changes or if you would like me to send it!","role":"assistant"}}],"object":"chat.completion","usage":{"response_token/s":62.17,"prompt_token/s":75.9,"total_duration":4883583458,"load_duration":1334875,"prompt_eval_count":26,"prompt_tokens":26,"prompt_eval_duration":342546000,"eval_count":282,"completion_tokens":282,"eval_duration":4535599000,"approximate_total":"0h0m4s","total_tokens":308,"completion_tokens_details":{"reasoning_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}</pre>
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log info-bg">Info</span></td>
-        <td>4:48:16 PM</td>
+        <td>1:54:37 PM</td>
         <td>
-          Parsed Content:<br><pre>Here's a well-formatted email draft for the quote:
+          Parsed Content:<br><pre>Here is the well-formatted email quote for the existing customer Enni Kivi, including all requested details:
 
 ---
 
-**Subject:** Quote for Your Recent Order
+**Subject:** Quote for Your Recent Inquiry
 
 **Dear Enni Kivi,**
 
-Thank you for your continued support! We are pleased to provide you with a quote for your recent order of the following articles:
+Thank you for your interest in our products! Below is the quote for the articles you inquired about:
 
-| Article Name      | Article ID | Size | Color        | Price   | Discount (%) | Discounted Price | Quantity | Total Price |
-|-------------------|------------|------|--------------|---------|--------------|-------------------|----------|-------------|
-| Hoodie Dexel      | 1139       | S    | Rosybrown    | $61.00  | 17%          | $50.63            | 1        | $50.63      |
-| Capris Panka      | 3876       | L    | Cadetblue    | $101.00 | 36%          | $64.64            | 1        | $64.64      |
-
-| **Subtotal**      | **Discount**  | **Shipping** | **Total**     |
-|-------------------|----------------|--------------|----------------|
-| $115.27           | $46.73 (28.82%)| $19.90       | $88.44         |
+| Article Name      | Color       | Size | Price ($) | Discount (%) | Reduced Price ($) | Quantity | Total ($) |
+|-------------------|-------------|------|-----------|--------------|-------------------|----------|-----------|
+| Hoodie Dexel      | Rosybrown   | S    | 61.00     | 17           | 50.63             | 1        | 50.63     |
+| Capris Panka      | Cadetblue   | L    | 101.00    | 36           | 64.64             | 1        | 64.64     |
+| **Subtotal**      |             |      |           |              |                   |          | **115.27** |
+| **Total Discount**|             |      |           |              |                   |          | **$45.09 (39.11%)** |
+| **Shipping**      |             |      |           |              |                   |          | **$19.90** |
+| **Total Amount**  |             |      |           |              |                   |          | **$135.17** |
 
 ### Summary
-- **Total before Discount:** $115.27
-- **Total Discount:** $46.73 (28.82%)
+- **Total Before Discount:** $180.36
+- **Total Discount:** $45.09 (39.11%)
 - **Subtotal:** $115.27
 - **Shipping:** $19.90
-- **Total:** $88.44
+- **Total Amount:** $135.17
 
-Please let us know if you would like to proceed with this order or if you have any questions.
+If you have any questions or need further assistance, please feel free to reach out. We look forward to serving you!
 
-Thank you!
-
-Best regards,
-
+Best regards,  
 Fred  
+
 Autonomous Customer Specialist  
 WebShop  
 fred@webshop.com  
 
----
+--- 
 
-Please review the email draft and let me know if you'd like to make any changes or if I should send it!</pre>
+Please review the email draft, and let me know if you would like to make any changes or if you would like me to send it!</pre>
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log pass-bg">Pass</span></td>
-        <td>4:48:16 PM</td>
+        <td>1:54:37 PM</td>
         <td>
           Found: **Enni Kivi**
         </td>
       </tr>
       <tr class="event-row">
         <td><span class="badge log pass-bg">Pass</span></td>
-        <td>4:48:16 PM</td>
+        <td>1:54:37 PM</td>
         <td>
           Found: **fred@webshop.com**
         </td>
@@ -378,13 +375,13 @@ Please review the email draft and let me know if you'd like to make any changes 
 <div class="col-md-3">
 <div class="card"><div class="card-body">
 <p class="m-b-0">Started</p>
-<h3>Aug 4, 2025 04:47:17 PM</h3>
+<h3>Aug 11, 2025 01:53:39 PM</h3>
 </div></div>
 </div>
 <div class="col-md-3">
 <div class="card"><div class="card-body">
 <p class="m-b-0">Ended</p>
-<h3>Aug 4, 2025 04:48:16 PM</h3>
+<h3>Aug 11, 2025 01:54:37 PM</h3>
 </div></div>
 </div>
 <div class="col-md-3">
@@ -454,7 +451,7 @@ Please review the email draft and let me know if you'd like to make any changes 
 </div></div>
 <script>
 var timeline = {
-"Prompt: Show me order details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock":18.183,"Prompt: Plot a bar chart comparing revenue and order count for December 2024 sales revenue by day":26.192,"Prompt: Compose a well-formatted American-style business email with a quote for existing customer Enni Kivi for articles 1139 and 3876, apply discounts and shipping as per policies, include the total, shipping, and discount in the quote. Use a single table to show all the articles, subtotal, discount, shipping and total; Add a summary section with total before discount, total discount ($ and %), subtotal, shipping and total.":14.931
+"Prompt: Show me order details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock":20.301,"Prompt: Plot a bar chart comparing revenue and order count for December 2024 sales revenue by day":24.954,"Prompt: Compose a well-formatted American-style business email with a quote for existing customer Enni Kivi for articles 1139 and 3876, apply discounts and shipping as per policies, include the total, shipping, and discount in the quote. Use a single table to show all the articles, subtotal, discount, shipping and total; Add a summary section with total before discount, total discount ($ and %), subtotal, shipping and total.":12.856
 };
 </script>
 <div class="row">
