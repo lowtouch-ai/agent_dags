@@ -20,7 +20,7 @@ default_args = {
 }
 
 with DAG(
-    dag_id='mvn_test_webshopchatapi',
+    dag_id='WebshopChatAPIAutomation',
     default_args=default_args,
     schedule_interval='30 14 * * *',  # 14:30 IST
     catchup=False,
