@@ -4,7 +4,7 @@ from airflow.models import Variable
 from datetime import datetime, timedelta
 import pendulum
 
-# Timezone
+# Set IST timezone
 ist = pendulum.timezone("Asia/Kolkata")
 
 # Fetch Airflow variables
@@ -22,7 +22,7 @@ default_args = {
 with DAG(
     dag_id='mvn_test_webshopchatapi',
     default_args=default_args,
-    schedule_interval='0 9 * * *',  # 14:30 IST
+    schedule_interval='30 14 * * *',  # 14:30 IST
     catchup=False,
     tags=['maven', 'automation', 'test'],
 ) as dag:
