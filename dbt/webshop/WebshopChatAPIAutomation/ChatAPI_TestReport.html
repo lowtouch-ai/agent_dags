@@ -1,0 +1,492 @@
+
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+<title>Chat API Test Report</title>
+<link rel="apple-touch-icon" href="https://cdn.jsdelivr.net/gh/extent-framework/extent-github-cdn@b00a2d0486596e73dd7326beacf352c639623a0e/commons/img/logo.png">
+<link rel="shortcut icon" href="https://cdn.jsdelivr.net/gh/extent-framework/extent-github-cdn@b00a2d0486596e73dd7326beacf352c639623a0e/commons/img/logo.png">
+<link href="https://cdn.jsdelivr.net/gh/extent-framework/extent-github-cdn@d6562a79075e061305ccfdb82f01e5e195e2d307/spark/css/spark-style.css" rel="stylesheet" />
+<link href="https://stackpath.bootstrapcdn.com/font-awesome/4.7.0/css/font-awesome.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/gh/extent-framework/extent-github-cdn@7cc78ce/spark/js/jsontree.js"></script>
+<style type="text/css"></style></head><body class="spa -report standard">
+  <div class="app">
+    <div class="layout">
+<div class="header navbar">
+<div class="vheader">
+<div class="nav-logo">
+<a href="#">
+<div class="logo" style="background-image: url('https://cdn.jsdelivr.net/gh/extent-framework/extent-github-cdn@b00a2d0486596e73dd7326beacf352c639623a0e/commons/img/logo.png')"></div>
+</a>
+</div>
+<ul class="nav-left">
+<li class="search-box">
+<a class="search-toggle" href="#">
+<i class="search-icon fa fa-search"></i>
+<i class="search-icon-close fa fa-close"></i>
+</a>
+</li>
+<li class="search-input"><input id="search-tests" class="form-control" type="text" placeholder="Search..."></li>
+</ul>
+<ul class="nav-right">
+<li class="m-r-10">
+<a href="#"><span class="badge badge-primary">AI Response Keyword Validation</span></a>
+</li>
+<li class="m-r-10">
+<a href="#"><span class="badge badge-primary">Aug 11, 2025 01:53:39 PM</span></a>
+</li>
+</ul>
+</div>
+</div><div class="side-nav">
+<div class="side-nav-inner">
+<ul class="side-nav-menu">
+<li class="nav-item dropdown" onclick="toggleView('test-view')">
+<a id="nav-test" class="dropdown-toggle" href="#">
+<span class="ico"><i class="fa fa-list"></i></span>
+</a>
+</li>
+<li class="nav-item dropdown" onclick="toggleView('dashboard-view')">
+<a id="nav-dashboard" class="dropdown-toggle" href="#">
+<span class="ico"><i class="fa fa-bar-chart"></i></span>
+</a>
+</li>
+</ul>
+</div>
+</div>      <div class="vcontainer">
+        <div class="main-content">
+<div class="test-wrapper row view test-view">
+  <div class="test-list">
+    <div class="test-list-tools">
+<ul class="tools pull-left">
+<li><a href="#"><span class="font-size-14">Tests</span></a></li>
+</ul>
+<ul class="tools text-right">
+<li class="dropdown">
+<a href="#" class="dropdown-toggle" data-toggle="dropdown"><i class="fa fa-exclamation-circle"></i></a>
+<ul id="status-toggle" class="dropdown-menu dropdown-md p-v-0">
+<a class="dropdown-item" status="pass" href="#"><span>Pass</span><span class="status success"></span></a>
+<div class="dropdown-divider"></div>
+<a status="clear" class="dropdown-item" href="#"><span>Clear</span><span class="pull-right"><i class="fa fa-close"></i></span></a>
+</ul>
+</li>
+</ul>
+</div>    <div class="test-list-wrapper scrollable">
+      <ul class="test-list-item">
+        <li class="test-item"  status="pass" test-id="1"
+          author=""
+          tag=""
+          device="">
+          <div class="test-detail">
+            <p class="name">Prompt: Show me order details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock</p>
+            <p class="text-sm">
+              <span>1:53:39 PM</span> / <span>00:00:20:301</span>
+              <span class="badge pass-bg log float-right">Pass</span>
+            </p>
+          </div>
+          <div class="test-contents d-none">
+<div class="detail-head">
+<div class="p-v-10">
+<div class="info">
+<h5 class="test-status text-pass">Prompt: Show me order details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock</h5>
+<span class='badge badge-success'>08.11.2025 1:53:39 PM</span>
+<span class='badge badge-danger'>08.11.2025 1:54:00 PM</span>
+<span class='badge badge-default'>00:00:20:301</span>
+&middot; <span class='uri-anchor badge badge-default'>#test-id=1</span>
+<span class='badge badge-default pointer float-right ml-1 et'><i class="fa fa-chevron-down"></i></span>
+<span class='badge badge-default pointer float-right ct'><i class="fa fa-chevron-up"></i></span>
+</div>
+</div>
+</div><div class="detail-body mt-4">
+<table class="table table-sm">
+  <thead><tr><th class="status-col">Status</th><th class="timestamp-col">Timestamp</th><th class="details-col">Details</th></tr></thead>
+  <tbody>
+      <tr class="event-row">
+        <td><span class="badge log info-bg">Info</span></td>
+        <td>1:53:39 PM</td>
+        <td>
+          Prompt: Show me order details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log info-bg">Info</span></td>
+        <td>1:54:00 PM</td>
+        <td>
+          Raw Response:<br><pre>{"id":"webshop:0.5-c4ae29d2-2c58-46bc-8d0e-f75b444508ab","created":1754900640,"model":"webshop:0.5","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"content":"Here are the details for Order ID **788**, including customer information, shipping details, and articles with their stock availability:\n\n### Customer Details\n- **Name:** Patricia Montgomery\n- **Email:** patricia.montgomery@example.com\n- **Age:** 67\n- **Gender:** Female\n- **Shipping Address:** 9599 Main Street, Nottingham, B8I 0BH\n- **Order Total:** $371.98\n- **Shipping Cost:** $3.90\n- **Order Date:** November 14, 2024\n\n### Articles in Order\n| Article ID | Product Name                  | Price  | Quantity | Color            | Size | Current Stock Count | Description                               | Discount | Reduced Price |\n|------------|-------------------------------|--------|----------|-------------------|------|---------------------|-------------------------------------------|----------|---------------|\n| 2937       | Athletic Shoes Andiamo        | $101.70| 1        | Pale Violet Red    | XL   | 2                   | The stylish Athletic Shoes Andiamo is just what you need right now! | 10%      | $101.70       |\n| 7790       | Jumpsuit Nanzo               | $39.00 | 1        | Dim Gray           | M    | 8                   | The stylish Jumpsuit Nanzo is just what you need right now! | 40%      | $39.00        |\n| 10714      | Nailpolish Gabor             | $78.60 | 1        | Powder Blue        | S    | 8                   | The stylish Nailpolish Gabor is just what you need right now! | 40%      | $78.60        |\n| 12384      | Gym Bag Muneca               | $79.68 | 1        | Medium Slate Blue  | S    | 0 (Out of Stock)    | The stylish Gym Bag Muneca is just what you need right now! | 4%       | $79.68        |\n| 13535      | Skirt Bienchen               | $73.00 | 1        | Aquamarine         | M    | 4                   | The stylish Skirt Bienchen is just what you need right now! | None     | None          |\n\n### Stock Availability\n- **Out of Stock Articles:**\n  - **Gym Bag Muneca** (Current Stock Count: 0)\n\n- **Low Stock Articles:**\n  - **Athletic Shoes Andiamo** (Current Stock Count: 2)\n\nPlease let me know if you need further assistance!","role":"assistant"}}],"object":"chat.completion","usage":{"response_token/s":62.17,"prompt_token/s":75.9,"total_duration":4883583458,"load_duration":1334875,"prompt_eval_count":26,"prompt_tokens":26,"prompt_eval_duration":342546000,"eval_count":282,"completion_tokens":282,"eval_duration":4535599000,"approximate_total":"0h0m4s","total_tokens":308,"completion_tokens_details":{"reasoning_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}</pre>
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log info-bg">Info</span></td>
+        <td>1:54:00 PM</td>
+        <td>
+          Parsed Content:<br><pre>Here are the details for Order ID **788**, including customer information, shipping details, and articles with their stock availability:
+
+### Customer Details
+- **Name:** Patricia Montgomery
+- **Email:** patricia.montgomery@example.com
+- **Age:** 67
+- **Gender:** Female
+- **Shipping Address:** 9599 Main Street, Nottingham, B8I 0BH
+- **Order Total:** $371.98
+- **Shipping Cost:** $3.90
+- **Order Date:** November 14, 2024
+
+### Articles in Order
+| Article ID | Product Name                  | Price  | Quantity | Color            | Size | Current Stock Count | Description                               | Discount | Reduced Price |
+|------------|-------------------------------|--------|----------|-------------------|------|---------------------|-------------------------------------------|----------|---------------|
+| 2937       | Athletic Shoes Andiamo        | $101.70| 1        | Pale Violet Red    | XL   | 2                   | The stylish Athletic Shoes Andiamo is just what you need right now! | 10%      | $101.70       |
+| 7790       | Jumpsuit Nanzo               | $39.00 | 1        | Dim Gray           | M    | 8                   | The stylish Jumpsuit Nanzo is just what you need right now! | 40%      | $39.00        |
+| 10714      | Nailpolish Gabor             | $78.60 | 1        | Powder Blue        | S    | 8                   | The stylish Nailpolish Gabor is just what you need right now! | 40%      | $78.60        |
+| 12384      | Gym Bag Muneca               | $79.68 | 1        | Medium Slate Blue  | S    | 0 (Out of Stock)    | The stylish Gym Bag Muneca is just what you need right now! | 4%       | $79.68        |
+| 13535      | Skirt Bienchen               | $73.00 | 1        | Aquamarine         | M    | 4                   | The stylish Skirt Bienchen is just what you need right now! | None     | None          |
+
+### Stock Availability
+- **Out of Stock Articles:**
+  - **Gym Bag Muneca** (Current Stock Count: 0)
+
+- **Low Stock Articles:**
+  - **Athletic Shoes Andiamo** (Current Stock Count: 2)
+
+Please let me know if you need further assistance!</pre>
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log pass-bg">Pass</span></td>
+        <td>1:54:00 PM</td>
+        <td>
+          Found: **Patricia Montgomery**
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log pass-bg">Pass</span></td>
+        <td>1:54:00 PM</td>
+        <td>
+          Found: **patricia.montgomery@example.com**
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log pass-bg">Pass</span></td>
+        <td>1:54:00 PM</td>
+        <td>
+          Found: **Gym Bag Muneca**
+        </td>
+      </tr>
+  </tbody>
+</table>
+</div>
+          </div>
+        </li>
+        <li class="test-item"  status="pass" test-id="2"
+          author=""
+          tag=""
+          device="">
+          <div class="test-detail">
+            <p class="name">Prompt: Plot a bar chart comparing revenue and order count for December 2024 sales revenue by day</p>
+            <p class="text-sm">
+              <span>1:54:00 PM</span> / <span>00:00:24:954</span>
+              <span class="badge pass-bg log float-right">Pass</span>
+            </p>
+          </div>
+          <div class="test-contents d-none">
+<div class="detail-head">
+<div class="p-v-10">
+<div class="info">
+<h5 class="test-status text-pass">Prompt: Plot a bar chart comparing revenue and order count for December 2024 sales revenue by day</h5>
+<span class='badge badge-success'>08.11.2025 1:54:00 PM</span>
+<span class='badge badge-danger'>08.11.2025 1:54:25 PM</span>
+<span class='badge badge-default'>00:00:24:954</span>
+&middot; <span class='uri-anchor badge badge-default'>#test-id=2</span>
+<span class='badge badge-default pointer float-right ml-1 et'><i class="fa fa-chevron-down"></i></span>
+<span class='badge badge-default pointer float-right ct'><i class="fa fa-chevron-up"></i></span>
+</div>
+</div>
+</div><div class="detail-body mt-4">
+<table class="table table-sm">
+  <thead><tr><th class="status-col">Status</th><th class="timestamp-col">Timestamp</th><th class="details-col">Details</th></tr></thead>
+  <tbody>
+      <tr class="event-row">
+        <td><span class="badge log info-bg">Info</span></td>
+        <td>1:54:00 PM</td>
+        <td>
+          Prompt: Plot a bar chart comparing revenue and order count for December 2024 sales revenue by day
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log info-bg">Info</span></td>
+        <td>1:54:25 PM</td>
+        <td>
+          Raw Response:<br><pre>{"id":"webshop:0.5-5f734a0c-260c-4a90-b302-371086584d9c","created":1754900665,"model":"webshop:0.5","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"content":"Here is the bar chart comparing revenue and order count for December 2024 sales by day:\n\n![Revenue and Order Count Comparison for December 2024](/static/charts/chart_d7576135-b7e7-4fc5-9f96-20f72e8251a8.png)\n\nIf you have any further questions or need additional information, feel free to ask!","role":"assistant"}}],"object":"chat.completion","usage":{"response_token/s":62.17,"prompt_token/s":75.9,"total_duration":4883583458,"load_duration":1334875,"prompt_eval_count":26,"prompt_tokens":26,"prompt_eval_duration":342546000,"eval_count":282,"completion_tokens":282,"eval_duration":4535599000,"approximate_total":"0h0m4s","total_tokens":308,"completion_tokens_details":{"reasoning_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}</pre>
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log info-bg">Info</span></td>
+        <td>1:54:25 PM</td>
+        <td>
+          Parsed Content:<br><pre>Here is the bar chart comparing revenue and order count for December 2024 sales by day:
+
+![Revenue and Order Count Comparison for December 2024](/static/charts/chart_d7576135-b7e7-4fc5-9f96-20f72e8251a8.png)
+
+If you have any further questions or need additional information, feel free to ask!</pre>
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log pass-bg">Pass</span></td>
+        <td>1:54:25 PM</td>
+        <td>
+          Found: **chart**
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log pass-bg">Pass</span></td>
+        <td>1:54:25 PM</td>
+        <td>
+          Found: **bar**
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log pass-bg">Pass</span></td>
+        <td>1:54:25 PM</td>
+        <td>
+          Found: **Revenue**
+        </td>
+      </tr>
+  </tbody>
+</table>
+</div>
+          </div>
+        </li>
+        <li class="test-item"  status="pass" test-id="3"
+          author=""
+          tag=""
+          device="">
+          <div class="test-detail">
+            <p class="name">Prompt: Compose a well-formatted American-style business email with a quote for existing customer Enni Kivi for articles 1139 and 3876, apply discounts and shipping as per policies, include the total, shipping, and discount in the quote. Use a single table to show all the articles, subtotal, discount, shipping and total; Add a summary section with total before discount, total discount ($ and %), subtotal, shipping and total.</p>
+            <p class="text-sm">
+              <span>1:54:25 PM</span> / <span>00:00:12:856</span>
+              <span class="badge pass-bg log float-right">Pass</span>
+            </p>
+          </div>
+          <div class="test-contents d-none">
+<div class="detail-head">
+<div class="p-v-10">
+<div class="info">
+<h5 class="test-status text-pass">Prompt: Compose a well-formatted American-style business email with a quote for existing customer Enni Kivi for articles 1139 and 3876, apply discounts and shipping as per policies, include the total, shipping, and discount in the quote. Use a single table to show all the articles, subtotal, discount, shipping and total; Add a summary section with total before discount, total discount ($ and %), subtotal, shipping and total.</h5>
+<span class='badge badge-success'>08.11.2025 1:54:25 PM</span>
+<span class='badge badge-danger'>08.11.2025 1:54:37 PM</span>
+<span class='badge badge-default'>00:00:12:856</span>
+&middot; <span class='uri-anchor badge badge-default'>#test-id=3</span>
+<span class='badge badge-default pointer float-right ml-1 et'><i class="fa fa-chevron-down"></i></span>
+<span class='badge badge-default pointer float-right ct'><i class="fa fa-chevron-up"></i></span>
+</div>
+</div>
+</div><div class="detail-body mt-4">
+<table class="table table-sm">
+  <thead><tr><th class="status-col">Status</th><th class="timestamp-col">Timestamp</th><th class="details-col">Details</th></tr></thead>
+  <tbody>
+      <tr class="event-row">
+        <td><span class="badge log info-bg">Info</span></td>
+        <td>1:54:25 PM</td>
+        <td>
+          Prompt: Compose a well-formatted American-style business email with a quote for existing customer Enni Kivi for articles 1139 and 3876, apply discounts and shipping as per policies, include the total, shipping, and discount in the quote. Use a single table to show all the articles, subtotal, discount, shipping and total; Add a summary section with total before discount, total discount ($ and %), subtotal, shipping and total.
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log info-bg">Info</span></td>
+        <td>1:54:37 PM</td>
+        <td>
+          Raw Response:<br><pre>{"id":"webshop:0.5-06970baf-2fbb-4f7e-b56a-9bb8eade8adf","created":1754900678,"model":"webshop:0.5","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"content":"Here is the well-formatted email quote for the existing customer Enni Kivi, including all requested details:\n\n---\n\n**Subject:** Quote for Your Recent Inquiry\n\n**Dear Enni Kivi,**\n\nThank you for your interest in our products! Below is the quote for the articles you inquired about:\n\n| Article Name      | Color       | Size | Price ($) | Discount (%) | Reduced Price ($) | Quantity | Total ($) |\n|-------------------|-------------|------|-----------|--------------|-------------------|----------|-----------|\n| Hoodie Dexel      | Rosybrown   | S    | 61.00     | 17           | 50.63             | 1        | 50.63     |\n| Capris Panka      | Cadetblue   | L    | 101.00    | 36           | 64.64             | 1        | 64.64     |\n| **Subtotal**      |             |      |           |              |                   |          | **115.27** |\n| **Total Discount**|             |      |           |              |                   |          | **$45.09 (39.11%)** |\n| **Shipping**      |             |      |           |              |                   |          | **$19.90** |\n| **Total Amount**  |             |      |           |              |                   |          | **$135.17** |\n\n### Summary\n- **Total Before Discount:** $180.36\n- **Total Discount:** $45.09 (39.11%)\n- **Subtotal:** $115.27\n- **Shipping:** $19.90\n- **Total Amount:** $135.17\n\nIf you have any questions or need further assistance, please feel free to reach out. We look forward to serving you!\n\nBest regards,  \nFred  \n\nAutonomous Customer Specialist  \nWebShop  \nfred@webshop.com  \n\n--- \n\nPlease review the email draft, and let me know if you would like to make any changes or if you would like me to send it!","role":"assistant"}}],"object":"chat.completion","usage":{"response_token/s":62.17,"prompt_token/s":75.9,"total_duration":4883583458,"load_duration":1334875,"prompt_eval_count":26,"prompt_tokens":26,"prompt_eval_duration":342546000,"eval_count":282,"completion_tokens":282,"eval_duration":4535599000,"approximate_total":"0h0m4s","total_tokens":308,"completion_tokens_details":{"reasoning_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}</pre>
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log info-bg">Info</span></td>
+        <td>1:54:37 PM</td>
+        <td>
+          Parsed Content:<br><pre>Here is the well-formatted email quote for the existing customer Enni Kivi, including all requested details:
+
+---
+
+**Subject:** Quote for Your Recent Inquiry
+
+**Dear Enni Kivi,**
+
+Thank you for your interest in our products! Below is the quote for the articles you inquired about:
+
+| Article Name      | Color       | Size | Price ($) | Discount (%) | Reduced Price ($) | Quantity | Total ($) |
+|-------------------|-------------|------|-----------|--------------|-------------------|----------|-----------|
+| Hoodie Dexel      | Rosybrown   | S    | 61.00     | 17           | 50.63             | 1        | 50.63     |
+| Capris Panka      | Cadetblue   | L    | 101.00    | 36           | 64.64             | 1        | 64.64     |
+| **Subtotal**      |             |      |           |              |                   |          | **115.27** |
+| **Total Discount**|             |      |           |              |                   |          | **$45.09 (39.11%)** |
+| **Shipping**      |             |      |           |              |                   |          | **$19.90** |
+| **Total Amount**  |             |      |           |              |                   |          | **$135.17** |
+
+### Summary
+- **Total Before Discount:** $180.36
+- **Total Discount:** $45.09 (39.11%)
+- **Subtotal:** $115.27
+- **Shipping:** $19.90
+- **Total Amount:** $135.17
+
+If you have any questions or need further assistance, please feel free to reach out. We look forward to serving you!
+
+Best regards,  
+Fred  
+
+Autonomous Customer Specialist  
+WebShop  
+fred@webshop.com  
+
+--- 
+
+Please review the email draft, and let me know if you would like to make any changes or if you would like me to send it!</pre>
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log pass-bg">Pass</span></td>
+        <td>1:54:37 PM</td>
+        <td>
+          Found: **Enni Kivi**
+        </td>
+      </tr>
+      <tr class="event-row">
+        <td><span class="badge log pass-bg">Pass</span></td>
+        <td>1:54:37 PM</td>
+        <td>
+          Found: **fred@webshop.com**
+        </td>
+      </tr>
+  </tbody>
+</table>
+</div>
+          </div>
+        </li>
+      </ul>
+    </div>
+  </div>
+<div class="test-content scrollable">
+<div class="test-content-tools">
+<ul><li><a class="back-to-test" href="#"><i class="fa fa-arrow-left"></i></a></li></ul>
+</div>
+<div class="test-content-detail"><div class="detail-body"></div></div>
+</div></div>
+<div class="container-fluid p-4 view dashboard-view">
+<div class="row">
+<div class="col-md-3">
+<div class="card"><div class="card-body">
+<p class="m-b-0">Started</p>
+<h3>Aug 11, 2025 01:53:39 PM</h3>
+</div></div>
+</div>
+<div class="col-md-3">
+<div class="card"><div class="card-body">
+<p class="m-b-0">Ended</p>
+<h3>Aug 11, 2025 01:54:37 PM</h3>
+</div></div>
+</div>
+<div class="col-md-3">
+<div class="card"><div class="card-body">
+<p class="m-b-0 text-pass">Tests Passed</p>
+<h3>3</h3>
+</div></div>
+</div>
+<div class="col-md-3">
+<div class="card"><div class="card-body">
+<p class="m-b-0 text-fail">Tests Failed</p>
+<h3>0</h3>
+</div></div>
+</div>
+</div>
+<div class="row">
+<div class="col-md-6">
+<div class="card">
+<div class="card-header">
+<h6 class="card-title">Tests</h6>
+</div>
+<div class="card-body">
+<div class="">
+<canvas id='parent-analysis' width='115' height='90'></canvas>
+</div>
+</div>
+<div class="card-footer">
+<div><small data-tooltip='100%'>
+<b>3</b> tests passed
+</small>
+</div>
+<div>
+<small data-tooltip='0%'><b>0</b> tests failed,
+<b>0</b> skipped, <b data-tooltip='0%'>0</b> others
+</small>
+</div>
+</div>
+</div>
+</div>
+<div class="col-md-6">
+<div class="card">
+<div class="card-header">
+<h6 class="card-title">Log events</h6>
+</div>
+<div class="card-body">
+<div class="">
+<canvas id='events-analysis' width='115' height='90'></canvas>
+</div>
+</div>
+<div class="card-footer">
+<div><small data-tooltip='47%'><b>8</b> events passed</small></div>
+<div>
+<small data-tooltip='0%'><b>0</b> events failed,
+<b data-tooltip='%'>9</b> others
+</small>
+</div>
+</div>
+</div>
+</div>
+</div>
+<div class="row"><div class="col-md-12">
+<div class="card"><div class="card-header"><p>Timeline</p></div>
+<div class="card-body pt-0"><div>
+<canvas id="timeline" height="120"></canvas>
+</div></div>
+</div>
+</div></div>
+<script>
+var timeline = {
+"Prompt: Show me order details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock":20.301,"Prompt: Plot a bar chart comparing revenue and order count for December 2024 sales revenue by day":24.954,"Prompt: Compose a well-formatted American-style business email with a quote for existing customer Enni Kivi for articles 1139 and 3876, apply discounts and shipping as per policies, include the total, shipping, and discount in the quote. Use a single table to show all the articles, subtotal, discount, shipping and total; Add a summary section with total before discount, total discount ($ and %), subtotal, shipping and total.":12.856
+};
+</script>
+<div class="row">
+</div>
+</div>
+<script>
+var statusGroup = {
+parentCount: 5,
+passParent: 3,
+failParent: 0,
+warningParent: 0,
+skipParent: 0,
+childCount: 5,
+passChild: 0,
+failChild: 0,
+warningChild: 0,
+skipChild: 0,
+infoChild: 0,
+grandChildCount: 5,
+passGrandChild: 0,
+failGrandChild: 0,
+warningGrandChild: 0,
+skipGrandChild: 0,
+infoGrandChild: 0,
+eventsCount: 5,
+passEvents: 8,
+failEvents: 0,
+warningEvents: 0,
+skipEvents: 0,
+infoEvents: 9
+};
+</script>        </div>
+      </div>
+    </div>
+  </div>
+<script src="https://cdn.jsdelivr.net/gh/extent-framework/extent-github-cdn@d6562a79075e061305ccfdb82f01e5e195e2d307/spark/js/spark-script.js"></script>
+<script type="text/javascript"></script></body>
+</html>
