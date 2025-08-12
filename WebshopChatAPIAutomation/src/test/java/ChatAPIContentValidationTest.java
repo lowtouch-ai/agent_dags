@@ -66,8 +66,6 @@ public class ChatAPIContentValidationTest {
         ExtentTest test = extent.createTest("Prompt: " + message);
         testReport.set(test);
         test.info("Prompt: " + message);
-        System.out.println("url: "+ API_URL);
-        System.out.println("Token: "+ BEARER_TOKEN);
 
         // Create JSON payload
         JsonObject messageObj = new JsonObject();
