@@ -42,6 +42,7 @@ with DAG(
     run_mvn_test = BashOperator(
         task_id='run_mvn_test',
         bash_command=(
+            'rm -f /tmp/mvn_failed.flag && '  # remove old failure flag
             f'cd /appz/home/airflow/dags/agent_dags/WebshopChatAPIAutomation && '
             f'API_TOKEN="{api_token}" API_URL="{api_url}" mvn test '
             f'|| (echo "Maven tests failed" && touch /tmp/mvn_failed.flag); exit 0'
