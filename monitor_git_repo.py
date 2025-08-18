@@ -24,8 +24,8 @@ default_args = {
 }
 
 # Processed files tracking file
-PROCESSED_FILES_PATH = "/tmp/processed_dsx_files_sample_4.json"
-IN_PROGRESS_FILES_PATH = "/tmp/in_progress_dsx_files_sample_2.json"
+PROCESSED_FILES_PATH = "/tmp/processed_dsx_files.json"
+IN_PROGRESS_FILES_PATH = "/tmp/in_progress_dsx_files.json"
 
 
 def load_in_progress_files():
