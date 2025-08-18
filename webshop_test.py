@@ -26,7 +26,7 @@ default_args = {
 def slack_alert(**context):
     """Send Slack alert if mvn test failed"""
     if os.path.exists("/tmp/mvn_failed.flag"):
-        msg = f":x: Maven tests failed in DAG *{context['dag'].dag_id}*, Task *{context['task'].task_id}*"
+        msg = f":x: Test failed in DAG *{context['dag'].dag_id}*"
         requests.post(slack_webhook, json={"text": msg})
     else:
         print("No Maven failures detected, skipping Slack alert.")
