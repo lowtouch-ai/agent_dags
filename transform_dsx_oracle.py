@@ -12,6 +12,7 @@ from ollama import Client  # Assuming ollama for AI agent
 from urllib.parse import urlparse
 import tempfile
 import shutil
+import textwrap  # Add this import at the top, after other imports
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,59 +30,59 @@ OLLAMA_HOST = Variable.get("OLLAMA_HOST", "http://agentomatic:8000/")
 AI_MODEL = "Neteeza2Oracle:0.3"
 
 # Processed files tracking file
-PROCESSED_FILES_PATH = "/tmp/processed_dsx_files_sample_4.json"
-IN_PROGRESS_FILES_PATH = "/tmp/in_progress_dsx_files_sample_2.json"
+PROCESSED_FILES_PATH = "/tmp/processed_dsx_files.json"
+IN_PROGRESS_FILES_PATH = "/tmp/in_progress_dsx_files.json"
 
 def get_section_indentation(section):
-    """Extract the indentation pattern from the original section."""
-    lines = section.split('\n')
+    """Extract the minimum indentation level from all non-empty lines in the section."""
+    lines = section.splitlines()
+    indents = []
     for line in lines:
-        if line.strip() and not line.strip().startswith('BEGIN') and not line.strip().startswith('END'):
-            # Find the first non-empty line that's not BEGIN/END
+        if line.strip():  # Only consider non-empty lines
             stripped = line.lstrip()
-            if stripped:
-                logging.debug(f"Indentation found: '{line[:len(line) - len(stripped)]}'")
-                return line[:len(line) - len(stripped)]  # Return the leading whitespace
-    return ""  # Default to no indentation
+            indent = line[:len(line) - len(stripped)]
+            indents.append(indent)
+    if not indents:
+        logging.debug("No indentation found in section, returning empty string")
+        return ""
+    min_indent = min(indents, key=len)  # Use the smallest indentation level
+    logging.debug(f"Minimum indentation found: '{min_indent}'")
+    return min_indent
 
+# Replace the entire preserve_indentation function
 def preserve_indentation(original_section, transformed_section):
-    """Preserve the original indentation in the transformed section, preferring line-by-line matching."""
-    original_lines = original_section.split('\n')
-    transformed_lines = transformed_section.split('\n')
+    """Preserve the exact indentation structure of the original section in the transformed section."""
+    original_lines = original_section.splitlines()
+    transformed_lines = textwrap.dedent(transformed_section).splitlines()
     
-    if len(original_lines) == len(transformed_lines):
-        preserved_lines = []
-        for o_line, t_line in zip(original_lines, transformed_lines):
-            if not t_line.strip():
-                preserved_lines.append(t_line)
-                continue
-            # Get original leading whitespace
-            leading = o_line[:len(o_line) - len(o_line.lstrip())]
-            # Strip transformed line and add original leading
-            stripped_t = t_line.lstrip()
-            preserved_lines.append(leading + stripped_t)
-        return '\n'.join(preserved_lines)
-    else:
-        logging.warning(f"Line count mismatch in section: original {len(original_lines)}, transformed {len(transformed_lines)}. Falling back to uniform indentation.")
-        # Fallback to uniform indentation
-        uniform_indent = get_section_indentation(original_section)
-        if not uniform_indent:
-            return transformed_section
-        lines = transformed_section.split('\n')
-        preserved_lines = []
-        for line in lines:
-            if line.strip():
-                if line.strip().startswith('BEGIN') or line.strip().startswith('END'):
-                    preserved_lines.append(line)
-                else:
-                    stripped_line = line.lstrip()
-                    if stripped_line:
-                        preserved_lines.append(uniform_indent + stripped_line)
-                    else:
-                        preserved_lines.append(line)
-            else:
-                preserved_lines.append(line)
-        return '\n'.join(preserved_lines)
+    if not original_lines or not transformed_lines:
+        logging.warning("Empty original or transformed section, returning transformed section as-is")
+        return transformed_section
+    
+    # Get indentation for each line in the original section
+    original_indents = []
+    for line in original_lines:
+        if line.strip():
+            stripped = line.lstrip()
+            indent = line[:len(line) - len(stripped)]
+            original_indents.append(indent)
+        else:
+            original_indents.append("")  # Preserve empty lines with no indentation
+    
+    # Apply original indentation to transformed lines
+    result_lines = []
+    for i, trans_line in enumerate(transformed_lines):
+        # Use the corresponding original indentation, or fallback to minimum indentation
+        indent = original_indents[i] if i < len(original_indents) else get_section_indentation(original_section)
+        if trans_line.strip():  # Only indent non-empty lines
+            result_lines.append(indent + trans_line.lstrip())
+        else:
+            result_lines.append("")  # Preserve empty lines
+    
+    # Ensure the result ends with a newline
+    result = "\n".join(result_lines).rstrip() + "\n"
+    logging.debug(f"Preserved indentation for section:\n{result}")
+    return result
 
 
 
@@ -186,12 +187,14 @@ def transform_dsx_file(ti, **context):
                 return
             dsjob_content = dsjob_match.group(0)
             
-            job_begin_match = re.match(r'BEGIN DSJOB\s*(.*?)\s*BEGIN DSRECORD', dsjob_content, re.DOTALL | re.MULTILINE)
-            job_begin = "BEGIN DSJOB\n" + (job_begin_match.group(1).strip() + "\n" if job_begin_match else "")
+            job_begin_match = re.match(r'(BEGIN DSJOB\s*.*?)\s*BEGIN DSRECORD', dsjob_content, re.DOTALL | re.MULTILINE)
+            job_begin = job_begin_match.group(1).rstrip() + "\n" if job_begin_match else "BEGIN DSJOB\n"
+            job_begin = preserve_indentation(job_begin, job_begin)  # Apply indentation preservation
             
-            record_pattern = r'BEGIN DSRECORD.*?END DSRECORD'
+            record_pattern = r'\s*BEGIN DSRECORD.*?END DSRECORD'
             records = re.findall(record_pattern, dsjob_content, re.DOTALL | re.MULTILINE)
-            sections = [rec.strip() + "\n" for rec in records if rec.strip()]
+            # sections = [rec.strip() + "\n" for rec in records if rec.strip()]
+            sections = [rec.lstrip('\n') for rec in records if rec.strip()]
             
             if not sections:
                 logging.warning(f"No DSRECORD sections found in {dsx_filename}, skipping")
