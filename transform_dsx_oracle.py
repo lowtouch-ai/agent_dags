@@ -80,7 +80,7 @@ def preserve_indentation(original_section, transformed_section):
             result_lines.append("")  # Preserve empty lines
     
     # Ensure the result ends with a newline
-    result = "\n".join(result_lines).rstrip() + "\n"
+    result = "\n".join(result_lines).rstrip()
     logging.debug(f"Preserved indentation for section:\n{result}")
     return result
 
@@ -193,8 +193,7 @@ def transform_dsx_file(ti, **context):
             
             record_pattern = r'\s*BEGIN DSRECORD.*?END DSRECORD'
             records = re.findall(record_pattern, dsjob_content, re.DOTALL | re.MULTILINE)
-            # sections = [rec.strip() + "\n" for rec in records if rec.strip()]
-            sections = [rec.lstrip('\n') for rec in records if rec.strip()]
+            sections = [rec.rstrip('\n') for rec in records if rec.strip()]
             
             if not sections:
                 logging.warning(f"No DSRECORD sections found in {dsx_filename}, skipping")
@@ -204,32 +203,101 @@ def transform_dsx_file(ti, **context):
             
             # Process sections
             processed_sections = []
+            total_subrecords = 0
+            xml_subrecords_processed = 0
+            
             for idx, section in enumerate(sections, 1):
-                prompt = f"Transform this Netezza DSX section to Oracle form. Return ONLY the transformed DSX section without any additional text, explanations, or wrappers:\n\n{section}"
-                response = get_ai_response(prompt)
+                # Change the subrecord_pattern to use [ \t]* instead of \s* for both leading and trailing to avoid consuming newlines
+                subrecord_pattern = r'([ \t]*BEGIN DSSUBRECORD.*?END DSSUBRECORD[ \t]*)'
+                subrecords = re.findall(subrecord_pattern, section, re.DOTALL | re.MULTILINE)
+                total_subrecords += len(subrecords)
                 
-                # Clean the response to extract only the DSRECORD block
-                dsrecord_match = re.search(r'BEGIN DSRECORD.*?END DSRECORD', response, re.DOTALL | re.MULTILINE | re.IGNORECASE)
-                if dsrecord_match:
-                    cleaned = dsrecord_match.group(0).strip() + "\n"
-                else:
-                    logging.warning(f"Could not extract DSRECORD from response for section {idx} in {dsx_filename}, using full response")
-                    cleaned = response.strip() + "\n"
-                indentation_preserved = preserve_indentation(section, cleaned)
-                processed_sections.append(indentation_preserved)
-                ti.xcom_push(key=f"transformed_record_{dsx_filename}_{idx}", value=indentation_preserved)
+                # Split section around subrecords to preserve surrounding content
+                parts = re.split(subrecord_pattern, section, flags=re.DOTALL | re.MULTILINE)
+                processed_parts = []
+                
+                subrecord_idx = 0
+                for i, part in enumerate(parts):
+                    if subrecord_idx < len(subrecords) and part == subrecords[subrecord_idx]:
+                        # This is a DSSUBRECORD
+                        subrecord = part
+                        value_match = re.search(r'Name "XMLProperties"\s*Value =\+=\+=([\s\S]*?)=\+=\+=', subrecord, re.DOTALL)
+                        if value_match:
+                            xml_subrecords_processed += 1
+                            prompt = f"Transform this Netezza DSX subrecord to Oracle form. Return ONLY the transformed DSSUBRECORD without any additional text, explanations, or wrappers:\n\n{subrecord}"
+                            response = get_ai_response(prompt)
+                            
+                            dsrecord_match = re.search(r'BEGIN DSSUBRECORD.*?END DSSUBRECORD', response, re.DOTALL | re.MULTILINE | re.IGNORECASE)
+                            if dsrecord_match:
+                                cleaned = dsrecord_match.group(0).rstrip()
+                            else:
+                                logging.warning(f"Could not extract DSSUBRECORD from response for subrecord {subrecord_idx + 1} in section {idx} of {dsx_filename}, using full response")
+                                cleaned = response.rstrip()
+                            indentation_preserved = preserve_indentation(subrecord, cleaned)
+                            processed_parts.append(indentation_preserved.rstrip())
+                        else:
+                            # Non-XMLProperties subrecord, preserve as-is
+                            processed_parts.append(subrecord.rstrip())
+                        subrecord_idx += 1
+                    else:
+                        # Non-subrecord content, preserve indentation
+                        if i > 0 and subrecord_idx > 0 and i < len(parts) - 1:
+                            # This is content following a DSSUBRECORD
+                            original_lines = part.splitlines()
+                            result_lines = []
+                            for line in original_lines:
+                                if line.strip():
+                                    stripped = line.lstrip()
+                                    indent = line[:len(line) - len(stripped)]
+                                    result_lines.append(indent + stripped)
+                                else:
+                                    result_lines.append(line)
+                            processed_parts.append("\n".join(result_lines) + ("\n" if part.endswith("\n") else ""))
+                        else:
+                            processed_parts.append(part.rstrip('\n') + "\n" if part.strip() else part)
+                
+                # Reconstruct the section
+                section_content = "".join(processed_parts).rstrip() + "\n"
+                if 'NetezzaConnectorPX' in section_content:
+                    # StageType replacement
+                    section_content = re.sub(r'^(\s*)StageType "NetezzaConnectorPX"$', r'\1StageType "OracleConnectorPX"', section_content, flags=re.MULTILINE)
+                    
+                    # ConnectorName subrecord replacement
+                    section_content = re.sub(r'(\s*)(BEGIN DSSUBRECORD)\s*\n(\s*)(Name "ConnectorName")\s*\n(\s*)(Value )"NetezzaConnector"\s*\n(\s*)(END DSSUBRECORD)', r'\1\2\n\3\4\n\5\6"OracleConnector"\n\7\8', section_content, flags=re.MULTILINE)
+                    
+                    # VariantName subrecord replacement
+                    section_content = re.sub(r'(\s*)(BEGIN DSSUBRECORD)\s*\n(\s*)(Name "VariantName")\s*\n(\s*)(Value )"4.5"\s*\n(\s*)(END DSSUBRECORD)', r'\1\2\n\3\4\n\5\6"1.5"\n\7\8', section_content, flags=re.MULTILINE)
+                    
+                    # VariantLibrary subrecord replacement
+                    section_content = re.sub(r'(\s*)(BEGIN DSSUBRECORD)\s*\n(\s*)(Name "VariantLibrary")\s*\n(\s*)(Value )"ccnz"\s*\n(\s*)(END DSSUBRECORD)', r'\1\2\n\3\4\n\5\6"ccora"\n\7\8', section_content, flags=re.MULTILINE)
+                    
+                    # VariantVersion subrecord replacement
+                    section_content = re.sub(r'(\s*)(BEGIN DSSUBRECORD)\s*\n(\s*)(Name "VariantVersion")\s*\n(\s*)(Value )"1.0"\s*\n(\s*)(END DSSUBRECORD)', r'\1\2\n\3\4\n\5\6"1.1"\n\7\8', section_content, flags=re.MULTILINE)
+                    
+                    # SupportedVariants subrecord replacement
+                    section_content = re.sub(r'(\s*)(BEGIN DSSUBRECORD)\s*\n(\s*)(Name "SupportedVariants")\s*\n(\s*)(Value )"V1;4.5::ccnz"\s*\n(\s*)(END DSSUBRECORD)', r'\1\2\n\3\4\n\5\6"V0;1.5::ccora"\n\7\8', section_content, flags=re.MULTILINE)
+                    
+                    # SupportedVariantsLibraries subrecord replacement
+                    section_content = re.sub(r'(\s*)(BEGIN DSSUBRECORD)\s*\n(\s*)(Name "SupportedVariantsLibraries")\s*\n(\s*)(Value )"ccnz"\s*\n(\s*)(END DSSUBRECORD)', r'\1\2\n\3\4\n\5\6"ccora"\n\7\8', section_content, flags=re.MULTILINE)
+                    
+                    # SupportedVariantsVersions subrecord replacement
+                    section_content = re.sub(r'(\s*)(BEGIN DSSUBRECORD)\s*\n(\s*)(Name "SupportedVariantsVersions")\s*\n(\s*)(Value )"1.0"\s*\n(\s*)(END DSSUBRECORD)', r'\1\2\n\3\4\n\5\6"1.1"\n\7\8', section_content, flags=re.MULTILINE)
+                processed_sections.append(section_content)
+                ti.xcom_push(key=f"transformed_record_{dsx_filename}_{idx}", value=section_content)
                 logging.info(f"Processed section {idx}/{len(sections)} for {dsx_filename}")
             
-            # Merge sections
+            logging.info(f"Out of {total_subrecords} subrecords, {xml_subrecords_processed} subrecords had XMLProperties")
+            ti.xcom_push(key="xml_subrecords_processed", value=xml_subrecords_processed)
+            ti.xcom_push(key="total_subrecords", value=total_subrecords)
+            
             merged_content = dsx_header + job_begin + "".join(processed_sections) + job_end
             
-            # Save transformed file with same filename
             transformed_path = os.path.join(repo_path, poc_dir, dsx_filename)
             with open(transformed_path, 'w', encoding='utf-8') as f:
                 f.write(merged_content)
             
             ti.xcom_push(key="transformed_path", value=transformed_path)
-            ti.xcom_push(key="repo_name", value= repo_name)
+            ti.xcom_push(key="repo_name", value=repo_name)
             ti.xcom_push(key="git_url", value=git_url)
             ti.xcom_push(key="dsx_filename", value=dsx_filename)
             logging.info(f"Transformed DSX file saved at {transformed_path}")
