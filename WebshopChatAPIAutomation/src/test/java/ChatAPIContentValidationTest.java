@@ -42,7 +42,7 @@ public class ChatAPIContentValidationTest {
                 new String[]{
                     "Patricia Montgomery",
                     "patricia.montgomery@example.com",
-                    "Bag Muneca"
+                    "Gym Bag Muneca"
                 }
             },
             {
