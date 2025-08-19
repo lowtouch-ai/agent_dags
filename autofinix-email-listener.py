@@ -31,8 +31,8 @@ def authenticate_gmail():
         service = build("gmail", "v1", credentials=creds)
         profile = service.users().getProfile(userId="me").execute()
         logged_in_email = profile.get("emailAddress", "")
-        if logged_in_email.lower() != ODOO_FROM_ADDRESS.lower():
-            raise ValueError(f"Wrong Gmail account! Expected {ODOO_FROM_ADDRESS}, but got {logged_in_email}")
+        if logged_in_email.lower() != AUTOFINIX_FROM_ADDRESS.lower():
+            raise ValueError(f"Wrong Gmail account! Expected {AUTOFINIX_FROM_ADDRESS}, but got {logged_in_email}")
         logging.info(f"Authenticated Gmail account: {logged_in_email}")
         return service
     except Exception as e:
