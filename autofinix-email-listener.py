@@ -26,14 +26,18 @@ GMAIL_CREDENTIALS = Variable.get("AUTOFINIX_GMAIL_CREDENTIALS")
 LAST_PROCESSED_EMAIL_FILE = "/appz/cache/last_processed_email.json"
 
 def authenticate_gmail():
-    creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
-    service = build("gmail", "v1", credentials=creds)
-    profile = service.users().getProfile(userId="me").execute()
-    logged_in_email = profile.get("emailAddress", "")
-    if logged_in_email.lower() != AUTOFINIX_FROM_ADDRESS.lower():
-        raise ValueError(f"Wrong Gmail account! Expected {AUTOFINIX_FROM_ADDRESS}, but got {logged_in_email}")
-    logging.info(f"Authenticated Gmail Account: {logged_in_email}")
-    return service
+    try:
+        creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
+        service = build("gmail", "v1", credentials=creds)
+        profile = service.users().getProfile(userId="me").execute()
+        logged_in_email = profile.get("emailAddress", "")
+        if logged_in_email.lower() != ODOO_FROM_ADDRESS.lower():
+            raise ValueError(f"Wrong Gmail account! Expected {ODOO_FROM_ADDRESS}, but got {logged_in_email}")
+        logging.info(f"Authenticated Gmail account: {logged_in_email}")
+        return service
+    except Exception as e:
+        logging.error(f"Failed to authenticate Gmail: {str(e)}")
+        return None
 
 def get_last_checked_timestamp():
     if os.path.exists(LAST_PROCESSED_EMAIL_FILE):
