@@ -113,7 +113,7 @@ def get_email_thread(service, email_data):
 
 def get_ai_response(prompt, images=None, conversation_history=None):
     try:
-        logging.info(f"Query received: {prompt}")
+        logging.debug(f"Query received: {prompt}")
         
         if not prompt or not isinstance(prompt, str):
             return "<html><body>Invalid input provided. Please enter a valid query.</body></html>"
