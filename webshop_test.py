@@ -14,6 +14,7 @@ ist = pendulum.timezone("Asia/Kolkata")
 api_token = Variable.get("API_TOKEN")
 api_url = Variable.get("API_URL")
 slack_webhook = Variable.get("SLACK_WEBHOOK_URL")  # add webhook as Airflow Variable
+server_name = Variable.get("SERVER") 
 
 default_args = {
     'owner': 'airflow',
@@ -26,7 +27,7 @@ default_args = {
 def slack_alert(**context):
     """Send Slack alert if mvn test failed"""
     if os.path.exists("/tmp/mvn_failed.flag"):
-        msg = f":x: Test failed in DAG *{context['dag'].dag_id}*"
+        msg = f":x: Test failed in DAG *{context['dag'].dag_id}* in SERVER {server_name}"
         requests.post(slack_webhook, json={"text": msg})
     else:
         print("No Maven failures detected, skipping Slack alert.")
