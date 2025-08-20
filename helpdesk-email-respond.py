@@ -211,7 +211,7 @@ def step_1_process_email(ti, **context):
             soup = BeautifulSoup(email_content, "html.parser")
             email_content = soup.get_text(separator=" ", strip=True)
         thread_history += f"Email {idx} (From: {email_from}, Date: {email_date}):\n{email_content}\n\n"
-    
+    logging.info(f"Email thread history: {thread_history}...")
     current_content = email_data.get("content", "").strip()
     if current_content:
         soup = BeautifulSoup(current_content, "html.parser")
@@ -225,7 +225,7 @@ def step_1_process_email(ti, **context):
                 attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
         thread_history += f"\n{attachment_content}" if attachment_content else ""
     
-    prompt = f"extract the content from the image and review the content and suggest fixes Content: \n{thread_history}"
+    prompt = f"extract the content from the image and review the content and suggest fixes. Content: \n{thread_history}"
     
     response = get_ai_response(prompt, images=image_attachments if image_attachments else None)
     
@@ -243,13 +243,8 @@ def step_2_compose_email(ti, **context):
     history = ti.xcom_pull(key="conversation_history")
     
     prompt = """
-        Compose a professional and human-like business email in American English, written in the tone of a L1 support agent, with the following requirements:
-        The email must include:
-        - A clear introductory line acknowledging the user issue and thanking them for their patience.
-        - A natural explanation of the issue based on the AI response, ensuring it is easy to understand and not overly technical.
-        - A concise summary of how to resolve the issue, using simple language and avoiding jargon.
-        - I the issue can be resolved by the the agent the the agent should excalate the issue to the L2 support team and create a ticket in the system.
-        - A polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
+        Compose a professional and human-like business email in American English, written in the tone of a L1 support agent, with the above content.
+        The email should be having a polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
         Use only clean, valid HTML for the email body without any section headers. Avoid technical or template-style formatting and placeholders. The email should read as if it was personally written.
         Return only the HTML body, and nothing else.
     """
