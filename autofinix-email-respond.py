@@ -43,7 +43,7 @@ def authenticate_gmail():
         return service
     except Exception as e:
         logging.error(f"Failed to authenticate Gmail: {str(e)}")
-        return None
+        raise ValueError(f"Gmail authentication failed: {str(e)}")
 
 def decode_email_payload(msg):
     try:
@@ -134,7 +134,7 @@ def get_ai_response(prompt, images=None, conversation_history=None):
         messages.append(user_message)
 
         response = client.chat(
-            model='autofinix:0.3',  # Updated to AutoFinix-specific model
+            model='autofinix:0.3',
             messages=messages,
             stream=False
         )
@@ -169,6 +169,7 @@ def get_ai_response(prompt, images=None, conversation_history=None):
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
         logging.debug(f"Preparing email to {recipient} with subject: {subject}")
+        logging.debug(f"Email body: {body[:200]}...")
         msg = MIMEMultipart()
         msg["From"] = f"AutoFinix via lowtouch.ai <{AUTOFINIX_FROM_ADDRESS}>"
         msg["To"] = recipient
@@ -184,19 +185,18 @@ def send_email(service, recipient, subject, body, in_reply_to, references):
         logging.error(f"Failed to send email: {str(e)}")
         return None
 
-def step_1_process_email(ti, **context):
-    """Step 1: Process email to extract loan-related prompt (EMI schedule or loan statement)"""
+def step_1_execute_thread_history(ti, **context):
+    """Step 1: Execute email thread history to extract loan-related information."""
     email_data = context['dag_run'].conf.get("email_data", {})
     
     service = authenticate_gmail()
     if not service:
         logging.error("Gmail authentication failed, aborting.")
-        return "Gmail authentication failed"
+        raise ValueError("Gmail authentication failed")
     
     email_thread = get_email_thread(service, email_data)
     image_attachments = []
     
-    # Check for attachments (optional for loan queries)
     if email_data.get("attachments"):
         logging.info(f"Number of attachments: {len(email_data['attachments'])}")
         for attachment in email_data["attachments"]:
@@ -204,7 +204,6 @@ def step_1_process_email(ti, **context):
                 image_attachments.append(attachment["base64_content"])
                 logging.info(f"Found base64 image attachment: {attachment['filename']}")
     
-    # Build thread history
     thread_history = ""
     for idx, email in enumerate(email_thread, 1):
         email_content = email.get("content", "").strip()
@@ -215,14 +214,12 @@ def step_1_process_email(ti, **context):
             email_content = soup.get_text(separator=" ", strip=True)
         thread_history += f"Email {idx} (From: {email_from}, Date: {email_date}):\n{email_content}\n\n"
     
-    # Process current email content
     current_content = email_data.get("content", "").strip()
     if current_content:
         soup = BeautifulSoup(current_content, "html.parser")
         current_content = soup.get_text(separator=" ", strip=True)
     thread_history += f"Current Email (From: {email_data['headers'].get('From', 'Unknown')}):\n{current_content}\n"
     
-    # Handle attachments (if any)
     if email_data.get("attachments"):
         attachment_content = ""
         for attachment in email_data["attachments"]:
@@ -230,55 +227,108 @@ def step_1_process_email(ti, **context):
                 attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
         thread_history += f"\n{attachment_content}" if attachment_content else ""
     
-    # If no attachments, focus on parsing the email body for loan-related prompts
-    if not image_attachments:
-        logging.info("No attachments found, parsing email body for loan-related prompt")
-    prompt = f"{thread_history}"
-
+    prompt = f"""Analyze the following email thread and extract the loan-related information requested (e.g., EMI schedule or loan statement). Provide the extracted information in plain text, including the request type (e.g., 'EMI schedule', 'loan statement') and specific details like loan ID, amount, etc., if available.
+    Thread history:
+    {thread_history}"""
+    
     response = get_ai_response(prompt, images=image_attachments if image_attachments else None)
     
     ti.xcom_push(key="step_1_prompt", value=prompt)
     ti.xcom_push(key="step_1_response", value=response)
     ti.xcom_push(key="conversation_history", value=[{"prompt": prompt, "response": response}])
+    ti.xcom_push(key="sender_email", value=email_data["headers"].get("From", ""))
     
-    logging.info(f"Step 1 completed: {response[:200]}...")
+    logging.info(f"Step 1 completed: Extracted thread history - {response[:200]}...")
     return response
 
-def step_2_compose_email(ti, **context):
-    """Step 2: Compose a professional banking email response"""
+def step_2_validate_and_provide_info(ti, **context):
+    """Step 2: Validate customer details and provide information only if they match."""
     history = ti.xcom_pull(key="conversation_history")
-    response_json = ti.xcom_pull(key="step_1_response")
+    extracted_info = ti.xcom_pull(key="step_1_response")
+    sender_email = ti.xcom_pull(key="sender_email")
     
-    prompt = f"""Compose a professional and human-like business email in American English, written in the tone of a senior Customer Success Manager, to provide the customer with the requested {response_json}.
-        The email must include:
-        - A clear introductory line acknowledging the request for the {response_json}, followed by a short sentence confirming the information is provided below.
-        - A concise summary of the loan details (Loan ID, Loan Amount, Interest Rate, Loan Start Date, Loan Term, Status) in paragraph or bullet format. Use placeholder values for unavailable data (e.g., Loan Amount: $10,000, Interest Rate: 5%, etc.).
-        - For EMI schedule: A table **with borders** including columns (Payment Number, Due Date, Principal, Interest, Total Payment, Remaining Balance).
-        - For loan statement: A table **with borders** including columns (Date, Transaction Type, Amount, Balance).
-        - A naturally worded sentence confirming the information has been retrieved successfully.
-        - A polite closing paragraph offering further assistance, mentioning the contact email autofinix-agent@lowtouch.ai, and signed with 'Customer Support Team, AutoFinix'.
-        Use only clean, valid HTML for the email body without any section headers or placeholders (e.g., no '[Loan ID]'). The email should read as if it was personally written.
-        Return only the HTML body."""
-
+    prompt = f"""Validate the customer details for the email sender ({sender_email}) against the extracted loan-related information:
+    {extracted_info}
+    
+    Steps:
+    1. Retrieve customer information using the email address ({sender_email}).
+    2. Check if the customer ID from the retrieved information matches the details in the {extracted_info} (e.g., loan ID, account details).
+    3. If the details do not match, return exactly: "False"
+    4. If the details match, provide the requested information in a professional plain text format, including the relevant loan details (e.g., EMI schedule or loan statement)."""
+    
     response = get_ai_response(prompt, conversation_history=history)
-    # Clean the HTML response
-    cleaned_response = re.sub(r'```html\n|```', '', response).strip()
     
-    if not cleaned_response.strip().startswith('<!DOCTYPE') and not cleaned_response.strip().startswith('<html'):
-        if not cleaned_response.strip().startswith('<'):
-            cleaned_response = f"<html><body>{cleaned_response}</body></html>"
+    access_denied_message = "False"
+    is_valid = access_denied_message.lower() not in response.lower()
     
     history.append({"prompt": prompt, "response": response})
     ti.xcom_push(key="step_2_prompt", value=prompt)
     ti.xcom_push(key="step_2_response", value=response)
     ti.xcom_push(key="conversation_history", value=history)
-    ti.xcom_push(key="final_html_content", value=cleaned_response)
+    ti.xcom_push(key="is_valid", value=is_valid)
+    ti.xcom_push(key="final_response", value=response)
     
-    logging.info(f"Step 2 completed: {response[:200]}...")
+    if not is_valid:
+        logging.warning("Customer validation failed. Access denied response generated.")
+    else:
+        logging.info(f"Step 2 completed: Validated and provided info - {response[:200]}...")
+    
     return response
 
-def step_3_send_email(ti, **context):
-    """Step 3: Send the final email"""
+def step_3_compose_email(ti, **context):
+    """Step 3: Compose a professional banking email response."""
+    history = ti.xcom_pull(key="conversation_history")
+    is_valid = ti.xcom_pull(key="is_valid")
+    step_1_response = ti.xcom_pull(key="step_1_response")
+    step_2_response = ti.xcom_pull(key="step_2_response")
+
+    logging.debug(f"Step 3: is_valid={is_valid}, step_1_response={step_1_response[:200]}..., step_2_response={step_2_response[:200]}...")
+
+    if not is_valid:
+        # Use only the access denied message from step 2
+        cleaned_response = """<html><body>
+        <p>We regret to inform you that you do not have access to the requested information. Please contact our support team at <a href="mailto:autofinix-agent@lowtouch.ai">autofinix-agent@lowtouch.ai</a> for assistance.</p>
+        <p>Thank you,<br>Customer Support Team, AutoFinix</p>
+        </body></html>"""
+        history.append({"prompt": "Validation failed: access denied", "response": cleaned_response})
+        ti.xcom_push(key="step_3_prompt", value="Validation failed: access denied")
+        ti.xcom_push(key="step_3_response", value=cleaned_response)
+        ti.xcom_push(key="conversation_history", value=history)
+        ti.xcom_push(key="final_html_content", value=cleaned_response)
+        logging.info("Step 3 completed: Access denied email prepared.")
+        return cleaned_response
+
+    # If valid, compose using the extracted info from step 1
+    prompt = f"""Compose a professional business email in American English, written in the tone of a senior Customer Success Manager, to provide the customer with the requested information:
+    {step_1_response}
+
+    The email must include:
+    - An introductory sentence acknowledging the customer's request (e.g., EMI schedule or loan statement).
+    - A brief sentence stating the information is provided below.
+    - If the response includes tabular data, present it using clean HTML table formatting with proper borders.
+    - A natural sentence confirming the successful retrieval of the requested information.
+    - A polite closing paragraph offering further assistance, including the contact email autofinix-agent@lowtouch.ai, and signed with 'Customer Support Team, AutoFinix'.
+    - Use clean, valid HTML for the email body, avoiding section headers or placeholders (e.g., no 'Loan ID'). The email should feel personal and professionally written.
+    - Return only the HTML body content."""
+    
+    response = get_ai_response(prompt, conversation_history=history)
+    cleaned_response = re.sub(r'```html\n|```', '', response).strip()
+
+    if not cleaned_response.strip().startswith('<!DOCTYPE') and not cleaned_response.strip().startswith('<html'):
+        if not cleaned_response.strip().startswith('<'):
+            cleaned_response = f"<html><body>{cleaned_response}</body></html>"
+
+    history.append({"prompt": prompt, "response": response})
+    ti.xcom_push(key="step_3_prompt", value=prompt)
+    ti.xcom_push(key="step_3_response", value=response)
+    ti.xcom_push(key="conversation_history", value=history)
+    ti.xcom_push(key="final_html_content", value=cleaned_response)
+
+    logging.info(f"Step 3 completed: Composed email - {cleaned_response[:200]}...")
+    return cleaned_response
+
+def step_4_send_email(ti, **context):
+    """Step 4: Send the final email."""
     try:
         email_data = context['dag_run'].conf.get("email_data", {})
         if not email_data:
@@ -286,6 +336,14 @@ def step_3_send_email(ti, **context):
             return "No email data available"
         
         final_html_content = ti.xcom_pull(key="final_html_content")
+        is_valid = ti.xcom_pull(key="is_valid")
+        step_1_response = ti.xcom_pull(key="step_1_response")
+        step_2_response = ti.xcom_pull(key="step_2_response")
+        
+        logging.debug(f"Step 4: final_html_content={final_html_content[:200]}..., is_valid={is_valid}")
+        logging.debug(f"Step 4: step_1_response={step_1_response[:200]}...")
+        logging.debug(f"Step 4: step_2_response={step_2_response[:200]}...")
+        
         if not final_html_content:
             logging.error("No final HTML content found from previous steps")
             return "Error: No content to send"
@@ -307,13 +365,15 @@ def step_3_send_email(ti, **context):
         
         if result:
             logging.info(f"Email sent successfully to {sender_email}")
+            if not is_valid:
+                logging.info("Sent access denied email.")
             return f"Email sent successfully to {sender_email}"
         else:
             logging.error("Failed to send email")
             return "Failed to send email"
             
     except Exception as e:
-        logging.error(f"Error in step_3_send_email: {str(e)}")
+        logging.error(f"Error in step_4_send_email: {str(e)}")
         return f"Error sending email: {str(e)}"
 
 readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'email_responder.md')
@@ -334,21 +394,27 @@ with DAG(
 ) as dag:
     
     task_1 = PythonOperator(
-        task_id="step_1_process_email",
-        python_callable=step_1_process_email,
+        task_id="step_1_execute_thread_history",
+        python_callable=step_1_execute_thread_history,
         provide_context=True
     )
     
     task_2 = PythonOperator(
-        task_id="step_2_compose_email",
-        python_callable=step_2_compose_email,
+        task_id="step_2_validate_and_provide_info",
+        python_callable=step_2_validate_and_provide_info,
         provide_context=True
     )
     
     task_3 = PythonOperator(
-        task_id="step_3_send_email",
-        python_callable=step_3_send_email,
+        task_id="step_3_compose_email",
+        python_callable=step_3_compose_email,
         provide_context=True
     )
     
-    task_1 >> task_2 >> task_3
+    task_4 = PythonOperator(
+        task_id="step_4_send_email",
+        python_callable=step_4_send_email,
+        provide_context=True
+    )
+    
+    task_1 >> task_2 >> task_3 >> task_4
