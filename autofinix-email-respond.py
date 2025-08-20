@@ -233,7 +233,7 @@ def step_1_process_email(ti, **context):
     # If no attachments, focus on parsing the email body for loan-related prompts
     if not image_attachments:
         logging.info("No attachments found, parsing email body for loan-related prompt")
-     prompt = f"{thread_history}"
+    prompt = f"{thread_history}"
 
     response = get_ai_response(prompt, images=image_attachments if image_attachments else None)
     
