@@ -33,7 +33,7 @@ OLLAMA_HOST = "http://agentomatic:8000/"
 
 def authenticate_gmail():
     try:
-        creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
+        creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
         service = build("gmail", "v1", credentials=creds)
         profile = service.users().getProfile(userId="me").execute()
         logged_in_email = profile.get("emailAddress", "")
