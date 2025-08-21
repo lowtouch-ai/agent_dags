@@ -309,7 +309,7 @@ def step_3_compose_email(ti, **context):
     - A natural sentence confirming the successful retrieval of the requested information.
     - A polite closing paragraph offering further assistance, including the contact email autofinix-agent@lowtouch.ai, and signed with 'Customer Support Team, AutoFinix'.
     - Use clean, valid HTML for the email body, avoiding section headers or placeholders (e.g., no 'Loan ID'). The email should feel personal and professionally written.
-    - Return only the HTML body content."""
+    - Provide only the HTML draft of the email, with no introductory or concluding sentences outside the HTML content."""
     
     response = get_ai_response(prompt, conversation_history=history)
     cleaned_response = re.sub(r'```html\n|```', '', response).strip()
