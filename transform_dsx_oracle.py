@@ -152,7 +152,7 @@ def transform_dsx_file(ti, **context):
         
         # Retrieve GitHub token and base URL
         gh_token = Variable.get("GITHUB_TOKEN")
-        base_git_url = Variable.get("DSX_GIT_URL", "https://github.com/hemanth-ak7/datastage-jobs.git")
+        base_git_url = Variable.get("DSX_GIT_URL", "https://github.com/lowtouch-ai/datastage-jobs.git")
         
         # Remove '.git' from the URL if present and construct authenticated URL
         base_git_url = base_git_url.rstrip('.git')
