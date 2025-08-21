@@ -108,7 +108,7 @@ def save_in_progress_files(in_progress_files):
 
 def get_ai_response(prompt):
     try:
-        logging.info(f"Calling AI agent with prompt: {prompt}...")
+        logging.info(f"Calling AI agent with prompt: {prompt[:50]}...")
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'Neteeza2Oracle'})
         response = client.chat(
             model=AI_MODEL,
@@ -116,7 +116,7 @@ def get_ai_response(prompt):
             stream=False
         )
         ai_content = response.get('message', {}).get('content', "").strip()
-        logging.info(f"AI agent response: {ai_content[:200]}...")
+        logging.info(f"AI agent response: {ai_content[:50]}...")
         if not ai_content:
             raise ValueError("Empty response from AI agent")
         return ai_content
@@ -174,8 +174,27 @@ def transform_dsx_file(ti, **context):
                 raise FileNotFoundError(f"DSX file not found: {dsx_path}")
             
             # Read DSX content
-            with open(dsx_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
+            with open(dsx_path, 'rb') as f:
+                raw_content = f.read()
+            # Detect predominant line ending
+            crlf_count = raw_content.count(b'\r\n')
+            cr_count = raw_content.count(b'\r') - crlf_count
+            lf_count = raw_content.count(b'\n') - crlf_count
+            if crlf_count > lf_count and crlf_count > cr_count:
+                line_ending = '\r\n'
+            elif cr_count > lf_count and cr_count > crlf_count:
+                line_ending = '\r'
+            else:
+                line_ending = '\n'
+            logging.info(f"Detected line ending for {dsx_filename}: {repr(line_ending)}")
+
+            # Decode and normalize to '\n' for internal processing
+            content = raw_content.decode('utf-8', errors='ignore')
+            if line_ending == '\r\n':
+                content = content.replace('\r\n', '\n')
+            elif line_ending == '\r':
+                content = content.replace('\r', '\n')
+            
             
             # Split DSX content
             header_match = re.search(r'BEGIN HEADER.*?END HEADER', content, re.DOTALL | re.MULTILINE)
@@ -293,7 +312,7 @@ def transform_dsx_file(ti, **context):
             merged_content = dsx_header + job_begin + "".join(processed_sections) + job_end
             
             transformed_path = os.path.join(repo_path, poc_dir, dsx_filename)
-            with open(transformed_path, 'w', encoding='utf-8') as f:
+            with open(transformed_path, 'w', encoding='utf-8', newline=line_ending) as f:
                 f.write(merged_content)
             
             ti.xcom_push(key="transformed_path", value=transformed_path)
