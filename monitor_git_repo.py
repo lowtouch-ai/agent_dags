@@ -24,8 +24,8 @@ default_args = {
 }
 
 # Processed files tracking file
-PROCESSED_FILES_PATH = "/tmp/processed_dsx_files.json"
-IN_PROGRESS_FILES_PATH = "/tmp/in_progress_dsx_files.json"
+PROCESSED_FILES_PATH = Variable.get("DSX_PROCESSED_FILES_PATH", "/tmp/processed_dsx_files.json")
+IN_PROGRESS_FILES_PATH = Variable.get("DSX_IN_PROGRESS_FILES_PATH", "/tmp/in_progress_dsx_files.json")
 
 
 def load_in_progress_files():
@@ -72,6 +72,7 @@ def save_processed_files(processed_files):
 def list_unprocessed_dsx_files(ti, **context):
     try:
         git_url = Variable.get("DSX_GIT_URL", "https://github.com/lowtouch-ai/datastage-jobs.git")
+        source_branch = Variable.get("DSX_SOURCE_BRANCH", "main")  # New variable for source branch
         poc_dir = "jobs/POC"
         
         # Parse repo name from git_url
@@ -82,9 +83,9 @@ def list_unprocessed_dsx_files(ti, **context):
         g = Github(gh_token)
         gh_repo = g.get_repo(repo_name)
         
-        contents = gh_repo.get_contents(poc_dir)
+        contents = gh_repo.get_contents(poc_dir, ref=source_branch)  # Specify branch
         dsx_files = [c.name for c in contents if c.name.endswith('.dsx')]
-        logging.info(f"Found {len(dsx_files)} DSX files in {poc_dir}")
+        logging.info(f"Found {len(dsx_files)} DSX files in {poc_dir} on branch {source_branch}")
         
         if not dsx_files:
             raise ValueError(f"No .dsx files found in {poc_dir}")
@@ -121,7 +122,7 @@ def branch_function(**kwargs):
         return "no_files_task"
 
 def trigger_transform_tasks(**kwargs):
-    """Trigger 'dsx_transform_file' for each unprocessed file."""
+    """Trigger 'netexa-dsx-oracle-process-file' for each unprocessed file."""
     ti = kwargs['ti']
     unprocessed_files = ti.xcom_pull(task_ids="list_unprocessed_dsx_files", key="unprocessed_files")
     logging.info(f"Retrieved {len(unprocessed_files) if unprocessed_files else 0} unprocessed files from XCom.")
@@ -140,7 +141,7 @@ def trigger_transform_tasks(**kwargs):
         logging.info(f"Triggering Transform DAG for file: {file}")
         trigger_task = TriggerDagRunOperator(
             task_id=task_id,
-            trigger_dag_id="dsx_transform_file",
+            trigger_dag_id="netexa-dsx-oracle-process-file",
             conf={"dsx_filename": file},
         )
         trigger_task.execute(context=kwargs)
@@ -150,7 +151,7 @@ def no_files_found(**kwargs):
     logging.info("No new DSX files found to process.")
 
 with DAG(
-    "dsx_monitor_github",
+    "netexa-dsx-oracle-monitor-github",
     default_args=default_args,
     schedule_interval=timedelta(minutes=5),
     catchup=False,
