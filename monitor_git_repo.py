@@ -122,7 +122,7 @@ def branch_function(**kwargs):
         return "no_files_task"
 
 def trigger_transform_tasks(**kwargs):
-    """Trigger 'netexa-dsx-oracle-process-file' for each unprocessed file."""
+    """Trigger 'netexa_dsx_oracle_process_file' for each unprocessed file."""
     ti = kwargs['ti']
     unprocessed_files = ti.xcom_pull(task_ids="list_unprocessed_dsx_files", key="unprocessed_files")
     logging.info(f"Retrieved {len(unprocessed_files) if unprocessed_files else 0} unprocessed files from XCom.")
@@ -141,7 +141,7 @@ def trigger_transform_tasks(**kwargs):
         logging.info(f"Triggering Transform DAG for file: {file}")
         trigger_task = TriggerDagRunOperator(
             task_id=task_id,
-            trigger_dag_id="netexa-dsx-oracle-process-file",
+            trigger_dag_id="netexa_dsx_oracle_process_file",
             conf={"dsx_filename": file},
         )
         trigger_task.execute(context=kwargs)
@@ -151,7 +151,7 @@ def no_files_found(**kwargs):
     logging.info("No new DSX files found to process.")
 
 with DAG(
-    "netexa-dsx-oracle-monitor-github",
+    "netexa_dsx_oracle_monitor_github",
     default_args=default_args,
     schedule_interval=timedelta(minutes=5),
     catchup=False,
