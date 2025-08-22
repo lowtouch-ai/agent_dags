@@ -305,7 +305,11 @@ def step_3_compose_email(ti, **context):
     The email must include:
     - An introductory sentence acknowledging the customer's request (e.g., EMI schedule or loan statement).
     - A brief sentence stating the information is provided below.
-    - If the response includes tabular data, present it using clean HTML table formatting with proper borders.
+    - when displaying loan statement include loan repayment (EMI no., Amount paid, payment date, payment mode, payment status) and loan disbursement details (disbursement id, amount, date) as two different Horizontal row-based table with headers formatting with proper borders. Also add a heading with loan id, customer name and loan product. do not include any other details.
+    - When displaying EMI schedule include EMI no., Due date, Amount,  Outstanding amount and payment status as a clean HTML Horizontal row-based table with headers formatting with proper borders. 
+    - When displaying loan repayment statement include Repayment ID, EMI Number, Amount ($), Payment Date, Payment Mode, Payment Status as a clean HTML Horizontal row-based table with headers formatting with proper borders.
+    - If the response includes tabular data, present it using clean HTML Horizontal row-based table with headers formatting with proper borders.
+    - Ensure that all amount fields (e.g., Loan Amount, Processing Fee, EMI Amount, Outstanding Amount) include the proper currency symbol (e.g., $).
     - A natural sentence confirming the successful retrieval of the requested information.
     - A polite closing paragraph offering further assistance, including the contact email autofinix-agent@lowtouch.ai, and signed with 'Customer Support Team, AutoFinix'.
     - Use clean, valid HTML for the email body, avoiding section headers or placeholders (e.g., no 'Loan ID'). The email should feel personal and professionally written.
