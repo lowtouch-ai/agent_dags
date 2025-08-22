@@ -18,7 +18,7 @@ import textwrap  # Add this import at the top, after other imports
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 default_args = {
-    "owner": "your_team",
+    "owner": "lowtouch_ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2024, 1, 1),
     "retries": 1,
@@ -411,3 +411,4 @@ with DAG(
     )
     
     transform_task >> create_pr_task
+
