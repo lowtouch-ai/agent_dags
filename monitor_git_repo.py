@@ -16,7 +16,7 @@ from filelock import FileLock  # Requires filelock package
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 default_args = {
-    "owner": "your_team",
+    "owner": "lowtouch_ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2024, 1, 1),
     "retries": 1,
@@ -185,3 +185,4 @@ with DAG(
     # Set task dependencies
     list_files_task >> branch_task
     branch_task >> [trigger_transform_task, no_files_task]
+
