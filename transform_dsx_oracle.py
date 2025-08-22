@@ -30,8 +30,8 @@ OLLAMA_HOST = Variable.get("OLLAMA_HOST", "http://agentomatic:8000/")
 AI_MODEL = "Neteeza2Oracle:0.3"
 
 # Processed files tracking file
-PROCESSED_FILES_PATH = "/tmp/processed_dsx_files.json"
-IN_PROGRESS_FILES_PATH = "/tmp/in_progress_dsx_files.json"
+PROCESSED_FILES_PATH = Variable.get("DSX_PROCESSED_FILES_PATH", "/tmp/processed_dsx_files.json")
+IN_PROGRESS_FILES_PATH = Variable.get("DSX_IN_PROGRESS_FILES_PATH", "/tmp/in_progress_dsx_files.json")
 
 def get_section_indentation(section):
     """Extract the minimum indentation level from all non-empty lines in the section."""
@@ -153,6 +153,7 @@ def transform_dsx_file(ti, **context):
         # Retrieve GitHub token and base URL
         gh_token = Variable.get("GITHUB_TOKEN")
         base_git_url = Variable.get("DSX_GIT_URL", "https://github.com/lowtouch-ai/datastage-jobs.git")
+        source_branch = Variable.get("DSX_SOURCE_BRANCH", "main")
         
         # Remove '.git' from the URL if present and construct authenticated URL
         base_git_url = base_git_url.rstrip('.git')
@@ -166,7 +167,7 @@ def transform_dsx_file(ti, **context):
         repo_path = tempfile.mkdtemp(prefix="dsx_transform_")
         ti.xcom_push(key="repo_path", value=repo_path)
         try:
-            repo = git.Repo.clone_from(git_url, repo_path)
+            repo = git.Repo.clone_from(git_url, repo_path, branch=source_branch)
             
             dsx_path = os.path.join(repo_path, poc_dir, dsx_filename)
             
@@ -337,7 +338,7 @@ def create_pr(ti, **context):
         repo_name = ti.xcom_pull(key="repo_name")
         dsx_filename = ti.xcom_pull(key="dsx_filename")
         gh_token = Variable.get("GITHUB_TOKEN")
-        
+        source_branch = Variable.get("DSX_SOURCE_BRANCH", "main")
         # Load processed files
         processed_files = load_processed_files()
         in_progress_files = load_in_progress_files()
@@ -363,7 +364,7 @@ def create_pr(ti, **context):
             title=f"Transformed DSX: {dsx_filename}",
             body=f"Automated transformation of {dsx_filename} from Netezza to Oracle using AI agent.",
             head=branch_name,
-            base="main"
+            base=source_branch
         )
         
         logging.info(f"Created PR #{pr.number} for {dsx_filename} in branch {branch_name}")
@@ -390,7 +391,7 @@ def create_pr(ti, **context):
         raise
 
 with DAG(
-    "dsx_transform_file",
+    "netexa_dsx_oracle_process_file",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
