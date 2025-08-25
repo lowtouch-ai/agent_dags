@@ -74,7 +74,7 @@ def get_email_thread(service, email_data):
     try:
         thread_id = email_data.get("threadId")
         message_id = email_data["headers"].get("Message-ID", "")
-        
+        logging.info(f"Email data body is: {json.dumps(email_data, indent=2)}")
         if not thread_id:
             query_result = service.users().messages().list(userId="me", q=f"rfc822msgid:{message_id}").execute()
             messages = query_result.get("messages", [])
@@ -225,7 +225,15 @@ def step_1_process_email(ti, **context):
                 attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
         thread_history += f"\n{attachment_content}" if attachment_content else ""
     
-    prompt = f"extract the content from the image and review the content and suggest fixes. Content: \n{thread_history}"
+    prompt = f"""extract the content from the image and review the content and suggest fixes. Content: \n{thread_history}
+    # outptu format:
+    # Analysis of the Problem
+    ..
+    # Possible Root Causes
+    ..
+    # Suggested Solution Steps
+    ...
+    """
     
     response = get_ai_response(prompt, images=image_attachments if image_attachments else None)
     
@@ -247,7 +255,8 @@ def step_2_compose_email(ti, **context):
         The email should be having a polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
         Use only clean, valid HTML for the email body without any section headers. Avoid technical or template-style formatting and placeholders. The email should read as if it was personally written.
         Return only the HTML body, and nothing else.
-    """
+        
+        """
     
     response = get_ai_response(prompt, conversation_history=history)
     # Clean the HTML response
