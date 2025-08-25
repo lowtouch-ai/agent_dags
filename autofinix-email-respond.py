@@ -302,7 +302,7 @@ def step_3_compose_email(ti, **context):
     prompt = f"""Compose a professional business email in American English, written in the tone of a senior Customer Success Manager, to provide the customer with the requested information:
     {step_1_response}
 
-   The email must include:
+    The email must include:
     - An introductory sentence acknowledging the customer's request (e.g., EMI schedule or loan statement).
     - A brief sentence stating the information is provided below.
     - If the user asks for the loan statement for a loan id, retrieve the loan disbursement and loan repayment tool and loan details. From the retrieved details display loan repayment (EMI no., Amount paid, payment date, payment mode, payment status) and loan disbursement details (disbursement id, amount, date) as two different Horizontal row-based table with headers formatting with proper borders. Also add a heading with loan id, customer name and loan product. do not include any other details. Display amount along with currency for e.g, $80 and the amount should be comma seperated as per standards. If any of the table not found or is null do not show that table details.
