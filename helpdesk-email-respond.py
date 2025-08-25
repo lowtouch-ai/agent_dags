@@ -251,11 +251,11 @@ def step_2_compose_email(ti, **context):
     history = ti.xcom_pull(key="conversation_history")
     
     prompt = """
-        Compose a professional and human-like business email in American English, written in the tone of a L1 support agent, with the above content.
+        Compose a professional and human-like business email in American English, written in the tone of a L1 support agent, with the above content. With analysis of the problem, possible root causes, and suggested solution steps.
+        The email should be concise, clear, and easy to understand for a non-technical audience
         The email should be having a polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
         Use only clean, valid HTML for the email body without any section headers. Avoid technical or template-style formatting and placeholders. The email should read as if it was personally written.
         Return only the HTML body, and nothing else.
-        
         """
     
     response = get_ai_response(prompt, conversation_history=history)
@@ -315,7 +315,7 @@ def step_3_send_email(ti, **context):
         logging.error(f"Error in step_5_send_email: {str(e)}")
         return f"Error sending email: {str(e)}"
 
-readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'email_responder.md')
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'helpdesk_email_responder.md')
 readme_content = ""
 try:
     with open(readme_path, 'r') as file:
