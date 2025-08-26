@@ -229,7 +229,7 @@ def step_1_process_email(ti, **context):
     # Your task
     - extract the content from the image and review the content and provide the report in the bellow ourtput format. user query: \n{thread_history}
     - Compose a professional and human-like business email in American English, written in the tone of a L1 support agent,analysis of the problem, possible root causes, and suggested solution steps.
-    - DO NOT ESCALATE THE TICKET TO HIGHER LEVEL SUPPORT.
+    - **DO NOT ESCALATE THE ISSUE TO L2 SUPPORT.** Provide a thorough analysis and actionable steps to resolve the issue at the L1 level.
        
         - The email should be concise, clear, and easy to understand for a non-technical audience
         - The email should be having a polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
