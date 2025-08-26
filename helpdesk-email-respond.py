@@ -225,29 +225,26 @@ def step_1_process_email(ti, **context):
                 attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
         thread_history += f"\n{attachment_content}" if attachment_content else ""
     
-    prompt = f"""extract the content from the image and review the content and suggest fixes. user query: \n{thread_history}
-    Compose a professional and human-like business email in American English, written in the tone of a L1 support agent,analysis of the problem, possible root causes, and suggested solution steps.
-        - replace sender_name with the actual sender's name from the email thread.
+    prompt = f"""
+    # Your task
+    - extract the content from the image and review the content and provide the report in the bellow ourtput format. user query: \n{thread_history}
+    - Compose a professional and human-like business email in American English, written in the tone of a L1 support agent,analysis of the problem, possible root causes, and suggested solution steps.
+    - DO NOT ESCALATE THE TICKET TO HIGHER LEVEL SUPPORT.
+       
         - The email should be concise, clear, and easy to understand for a non-technical audience
         - The email should be having a polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
         - Use only clean, valid HTML for the email body without any section headers. Avoid technical or template-style formatting and placeholders. The email should read as if it was personally written.
         - Return only the HTML body, and nothing else.
         - strictluy use the following outptut format, do not deviate from this
-        # **outptut format**
+    # **outptut format**
         ```html
         <!DOCTYPE html>
         <html lang="en">
         <head>
             <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            
             <title>Problem Analysis Email</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; }}
-                .container {{ max-width: 600px; margin: auto; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }}
-                h1 {{ color: #333; }}
-                p {{ margin-bottom: 10px; }}
-                .footer {{ margin-top: 20px; font-size: 0.9em; color: #555; }}
-            </style>
+            
         </head>
         <body>
             <div class="container">
