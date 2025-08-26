@@ -251,11 +251,70 @@ def step_2_compose_email(ti, **context):
     history = ti.xcom_pull(key="conversation_history")
     
     prompt = """
-        Compose a professional and human-like business email in American English, written in the tone of a L1 support agent, with the above content. With analysis of the problem, possible root causes, and suggested solution steps.
-        The email should be concise, clear, and easy to understand for a non-technical audience
-        The email should be having a polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
-        Use only clean, valid HTML for the email body without any section headers. Avoid technical or template-style formatting and placeholders. The email should read as if it was personally written.
-        Return only the HTML body, and nothing else.
+        Compose a professional and human-like business email in American English, written in the tone of a L1 support agent, with the above content with analysis of the problem, possible root causes, and suggested solution steps.
+        - replace sender_name with the actual sender's name from the email thread.
+        - The email should be concise, clear, and easy to understand for a non-technical audience
+        - The email should be having a polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
+        - Use only clean, valid HTML for the email body without any section headers. Avoid technical or template-style formatting and placeholders. The email should read as if it was personally written.
+        - Return only the HTML body, and nothing else.
+        # output format:
+        ```html
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Problem Analysis Email</title>
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    max-width: 600px;
+                    margin: 0 auto;
+                    padding: 20px;
+                }
+                h1, h2 {
+                    color: #005555;
+                }
+                .container {
+                    background-color: #f9f9f9;
+                    padding: 20px;
+                    border-radius: 5px;
+                }
+                .footer {
+                    margin-top: 20px;
+                    font-size: 0.9em;
+                    color: #777;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Problem Analysis Report</h1>
+                <p>Dear sender_name,</p>
+                <p>Please find below the detailed analysis of the issue, including potential root causes and suggested steps for resolution.</p>
+
+                <h2>Analysis of the Problem</h2>
+                <p>...</p>
+
+                <h2>Possible Root Causes</h2>
+                <p>...</p>
+
+                <h2>Suggested Solution Steps</h2>
+                <p>...</p>
+
+                <p>Thank you for your attention to this matter. Please let me know if you need further details or assistance in implementing the suggested solutions.</p>
+
+                <div class="footer">
+                    <p>Best regards,</p>
+                    <p>Your Name</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        ```
+        
         """
     
     response = get_ai_response(prompt, conversation_history=history)
