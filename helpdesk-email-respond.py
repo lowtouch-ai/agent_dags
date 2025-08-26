@@ -252,7 +252,13 @@ def step_2_compose_email(ti, **context):
     
     prompt = """
         Compose a professional and human-like business email in American English, written in the tone of a L1 support agent, with the above content with analysis of the problem, possible root causes, and suggested solution steps.
+        - replace sender_name with the actual sender's name from the email thread.
+        - The email should be concise, clear, and easy to understand for a non-technical audience
+        - The email should be having a polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
+        - Use only clean, valid HTML for the email body without any section headers. Avoid technical or template-style formatting and placeholders. The email should read as if it was personally written.
+        - Return only the HTML body, and nothing else.
         # output format:
+        ```html
         <!DOCTYPE html>
         <html lang="en">
         <head>
@@ -307,11 +313,8 @@ def step_2_compose_email(ti, **context):
             </div>
         </body>
         </html>
-        - replace sender_name with the actual sender's name from the email thread.
-        The email should be concise, clear, and easy to understand for a non-technical audience
-        The email should be having a polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
-        Use only clean, valid HTML for the email body without any section headers. Avoid technical or template-style formatting and placeholders. The email should read as if it was personally written.
-        Return only the HTML body, and nothing else.
+        ```
+        
         """
     
     response = get_ai_response(prompt, conversation_history=history)
