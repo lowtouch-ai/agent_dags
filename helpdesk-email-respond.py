@@ -285,7 +285,7 @@ def step_1_process_email(ti, **context):
         if not cleaned_response.strip().startswith('<'):
             cleaned_response = f"<html><body>{cleaned_response}</body></html>"
     
-    ti.xcom_push(key="conversation_history", value=history)
+    # ti.xcom_push(key="conversation_history", value=history)
     ti.xcom_push(key="final_html_content", value=cleaned_response)
     
     logging.info(f"Step 1 completed: {response[:200]}...")
