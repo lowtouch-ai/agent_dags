@@ -248,7 +248,7 @@ def step_1_process_email(ti, **context):
         </head>
         <body>
             <div class="container">
-                <h1>Problem Analysis Report</h1>
+                
                 <p>Dear sender_name,</p>
                 <p>Please find below the detailed analysis of the issue, including potential root causes and suggested steps for resolution.</p>
 
