@@ -225,41 +225,15 @@ def step_1_process_email(ti, **context):
                 attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
         thread_history += f"\n{attachment_content}" if attachment_content else ""
     
-    prompt = f"""extract the content from the image and review the content and suggest fixes. Content: \n{thread_history}
-    # outptu format:
-    # Analysis of the Problem
-    ..
-    # Possible Root Causes
-    ..
-    # Suggested Solution Steps
-    ...
-    """
-    
-    response = get_ai_response(prompt, images=image_attachments if image_attachments else None)
-    
-    ti.xcom_push(key="step_1_prompt", value=prompt)
-    ti.xcom_push(key="step_1_response", value=response)
-    ti.xcom_push(key="conversation_history", value=[{"prompt": prompt, "response": response}])
-    
-    logging.info(f"Step 1 completed: {response[:200]}...")
-    return response
-
-
-
-def step_2_compose_email(ti, **context):
-    """Step 3: Compose email based on the AI response"""
-    history = ti.xcom_pull(key="conversation_history")
-    
-    prompt = """
-     
-        Compose a professional and human-like business email in American English, written in the tone of a L1 support agent, with the above content with analysis of the problem, possible root causes, and suggested solution steps.
+    prompt = f"""extract the content from the image and review the content and suggest fixes. user query: \n{thread_history}
+    Compose a professional and human-like business email in American English, written in the tone of a L1 support agent,analysis of the problem, possible root causes, and suggested solution steps.
         - replace sender_name with the actual sender's name from the email thread.
         - The email should be concise, clear, and easy to understand for a non-technical audience
         - The email should be having a polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
         - Use only clean, valid HTML for the email body without any section headers. Avoid technical or template-style formatting and placeholders. The email should read as if it was personally written.
         - Return only the HTML body, and nothing else.
         - strictluy use the following outptut format, do not deviate from this
-        **outptut format**
+        # **outptut format**
         ```html
         <!DOCTYPE html>
         <html lang="en">
@@ -315,10 +289,11 @@ def step_2_compose_email(ti, **context):
             </div>
         </body>
         </html>
-        ```
-        """
+    """
     
-    response = get_ai_response(prompt, conversation_history=history)
+    response = get_ai_response(prompt, images=image_attachments if image_attachments else None)
+    
+    # response = get_ai_response(prompt, conversation_history=history)
     # Clean the HTML response
     cleaned_response = re.sub(r'```html\n|```', '', response).strip()
     
@@ -326,17 +301,15 @@ def step_2_compose_email(ti, **context):
         if not cleaned_response.strip().startswith('<'):
             cleaned_response = f"<html><body>{cleaned_response}</body></html>"
     
-    history.append({"prompt": prompt, "response": response})
-    ti.xcom_push(key="step_3_prompt", value=prompt)
-    ti.xcom_push(key="step_3_response", value=response)
     ti.xcom_push(key="conversation_history", value=history)
     ti.xcom_push(key="final_html_content", value=cleaned_response)
     
-    logging.info(f"Step 3 completed: {response[:200]}...")
+    logging.info(f"Step 1 completed: {response[:200]}...")
     return response
 
 
-def step_3_send_email(ti, **context):
+
+def step_2_send_email(ti, **context):
     """Step 5: Send the final email"""
     try:
         email_data = context['dag_run'].conf.get("email_data", {})
@@ -400,16 +373,12 @@ with DAG(
 
     
     task_2 = PythonOperator(
-        task_id="step_2_compose_email",
-        python_callable=step_2_compose_email,
+        task_id="step_2_send_email",
+        python_callable=step_2_send_email,
         provide_context=True
     )
     
     
-    task_3 = PythonOperator(
-        task_id="step_3_send_email",
-        python_callable=step_3_send_email,
-        provide_context=True
-    )
     
-    task_1 >> task_2 >> task_3 
+    
+    task_1 >> task_2 
