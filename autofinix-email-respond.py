@@ -229,7 +229,9 @@ def step_1_execute_thread_history(ti, **context):
     
     prompt = f"""Analyze the following email thread and extract the loan-related information requested (e.g., EMI schedule or loan statement). Provide the extracted information in plain text, including the request type (e.g., 'EMI schedule', 'loan statement') and specific details like loan ID, amount, etc., if available.
     Thread history:
-    {thread_history}"""
+    {thread_history}
+    Parse the correct loan id from users query.
+    Pass the extracted loan id to the API tool."""
     
     response = get_ai_response(prompt, images=image_attachments if image_attachments else None)
     
@@ -247,19 +249,52 @@ def step_2_validate_and_provide_info(ti, **context):
     extracted_info = ti.xcom_pull(key="step_1_response")
     sender_email = ti.xcom_pull(key="sender_email")
     
-    prompt = f"""Validate the customer details for the email sender ({sender_email}) against the extracted loan-related information:
-    {extracted_info}
-    
-    Steps:
-    1. Retrieve customer information using the email address ({sender_email}).
-    2. Check if the customer ID from the retrieved information matches the details in the {extracted_info} (e.g., loan ID, account details).
-    3. If the details do not match, return exactly: "False"
-    4. If the details match, provide the requested information in a professional plain text format, including the relevant loan details (e.g., EMI schedule or loan statement)."""
+    # Improved validation prompt with clearer instructions
+    prompt = f"""You are a banking validation system. Your task is to validate customer access to loan information.
+
+Customer requesting information: {sender_email}
+Requested loan information from Step 1: {extracted_info}
+
+VALIDATION STEPS:
+1. Use the provided tools to retrieve customer information for email: {sender_email}
+2. Extract the customer name and loan details from the retrieved information
+3. Compare the retrieved customer information with the loan request details
+4. IMPORTANT: Respond with EXACTLY one of these two options:
+
+Option A - If validation PASSES (customer is authorized):
+Respond with: VALIDATION_PASSED
+Then provide the requested loan information in a clean format.
+
+Option B - If validation FAILS (customer is NOT authorized):
+Respond with: VALIDATION_FAILED
+
+Do not include any other text, explanations, or HTML formatting in your response."""
     
     response = get_ai_response(prompt, conversation_history=history)
     
-    access_denied_message = "False"
-    is_valid = access_denied_message.lower() not in response.lower()
+    # Improved validation logic
+    response_text = response.strip().lower()
+    # Remove HTML tags if present
+    soup = BeautifulSoup(response, "html.parser")
+    clean_response = soup.get_text(separator=" ", strip=True).lower()
+    
+    logging.debug(f"Validation response: {response}")
+    logging.debug(f"Clean response: {clean_response}")
+    
+    # Check for validation status
+    is_valid = "validation_passed" in clean_response
+    validation_failed = "validation_failed" in clean_response
+    
+    if validation_failed:
+        is_valid = False
+        logging.warning("Validation explicitly failed")
+    elif not is_valid and "false" in clean_response:
+        is_valid = False
+        logging.warning("Validation failed - found 'false' in response")
+    elif not is_valid:
+        # If no clear validation status, assume failed for security
+        is_valid = False
+        logging.warning("No clear validation status - defaulting to failed for security")
     
     history.append({"prompt": prompt, "response": response})
     ti.xcom_push(key="step_2_prompt", value=prompt)
@@ -285,11 +320,23 @@ def step_3_compose_email(ti, **context):
     logging.debug(f"Step 3: is_valid={is_valid}, step_1_response={step_1_response[:200]}..., step_2_response={step_2_response[:200]}...")
 
     if not is_valid:
-        # Use only the access denied message from step 2
+        # Access denied email
         cleaned_response = """<html><body>
-        <p>We regret to inform you that you do not have access to the requested information. Please contact our support team at <a href="mailto:autofinix-agent@lowtouch.ai">autofinix-agent@lowtouch.ai</a> for assistance.</p>
-        <p>Thank you,<br>Customer Support Team, AutoFinix</p>
+        <p>Dear Valued Customer,</p>
+        <p>Thank you for contacting AutoFinix regarding your loan information request.</p>
+        <p>We regret to inform you that we cannot provide the requested information at this time. This could be due to:</p>
+        <ul>
+            <li>Insufficient verification of your identity</li>
+            <li>The loan information requested may not be associated with your account</li>
+            <li>Additional security verification may be required</li>
+        </ul>
+        <p>For your security and privacy, please contact our support team directly at <a href="mailto:autofinix-agent@lowtouch.ai">autofinix-agent@lowtouch.ai</a> or visit our nearest branch office for assistance.</p>
+        <p>We apologize for any inconvenience and appreciate your understanding.</p>
+        <p>Best regards,<br>
+        Customer Support Team<br>
+        AutoFinix</p>
         </body></html>"""
+        
         history.append({"prompt": "Validation failed: access denied", "response": cleaned_response})
         ti.xcom_push(key="step_3_prompt", value="Validation failed: access denied")
         ti.xcom_push(key="step_3_response", value=cleaned_response)
@@ -298,25 +345,35 @@ def step_3_compose_email(ti, **context):
         logging.info("Step 3 completed: Access denied email prepared.")
         return cleaned_response
 
-    # If valid, compose using the extracted info from step 1
-    prompt = f"""Compose a professional business email in American English, written in the tone of a senior Customer Success Manager, to provide the customer with the requested information:
-    {step_1_response}
+    # If valid, compose using the information from step 2
+    prompt = f"""Compose a professional business email in American English, written in the tone of a senior Customer Success Manager, to provide the customer with the requested loan information.
 
-    The email must include:
-    - An introductory sentence acknowledging the customer's request (e.g., EMI schedule or loan statement).
-    - A brief sentence stating the information is provided below.
-    - If the user asks for the loan statement for a loan id, retrieve the loan disbursement and loan repayment tool and loan details. From the retrieved details display loan repayment (EMI no., Amount paid, payment date, payment mode, payment status) and loan disbursement details (disbursement id, amount, date) as two different Horizontal row-based table with headers formatting with proper borders. Also add a heading with loan id, customer name and loan product. do not include any other details. Display amount along with currency for e.g, $80 and the amount should be comma seperated as per standards. If any of the table not found or is null do not show that table details.
-    - If user asks for EMI scheduled for a loan id  include EMI no., Due date, Amount,  Outstanding amount and payment status as a clean  Horizontal row-based table with headers formatting with proper borders. Display amount along with currency for e.g, $80.  The amount should be comma seperated as per standards. Do not include any other details. 
-    - If the user asks for loan repayment statement for a loan id  include Repayment ID, EMI Number, Amount ($), Payment Date, Payment Mode, Payment Status as a clean HTML Horizontal row-based table with headers formatting with proper borders. Display amount along with currency for e.g, $80.  The amount should be comma seperated as per standards.
-    - If the response includes tabular data, present it using clean Horizontal row-based table with headers formatting with proper borders.
-    - A natural sentence confirming the successful retrieval of the requested information.
-    - A polite closing paragraph offering further assistance, including the contact email autofinix-agent@lowtouch.ai, and signed with 'Customer Support Team, AutoFinix'.
-    - Use clean, valid HTML for the email body, avoiding section headers or placeholders (e.g., no 'Loan ID'). The email should feel personal and professionally written.
-    - Provide only the HTML draft of the email, with no introductory or concluding sentences outside the HTML content."""
+Use the validated information from Step 2: {step_2_response}
+
+The email must include:
+- A professional greeting addressing the customer
+- An acknowledgment of their specific request (EMI schedule, loan statement, etc.)
+- The requested information presented clearly:
+  * If loan statement requested: Display loan repayment and disbursement details in clean HTML table format
+  * If EMI schedule requested: Display EMI details in clean HTML table format  
+  * If repayment details requested: Display only repayment information in clean HTML table format
+- Use proper HTML table formatting with borders and headers
+- A closing paragraph offering further assistance
+- Professional signature: "Customer Support Team, AutoFinix"
+- Contact information: autofinix-agent@lowtouch.ai
+
+IMPORTANT: 
+- Provide ONLY the HTML email content
+- Do NOT include any introductory text outside the HTML
+- Ensure tables are properly formatted with borders and headers
+- Keep the tone professional but friendly"""
     
     response = get_ai_response(prompt, conversation_history=history)
+    
+    # Clean up the response
     cleaned_response = re.sub(r'```html\n|```', '', response).strip()
-
+    
+    # Ensure proper HTML structure
     if not cleaned_response.strip().startswith('<!DOCTYPE') and not cleaned_response.strip().startswith('<html'):
         if not cleaned_response.strip().startswith('<'):
             cleaned_response = f"<html><body>{cleaned_response}</body></html>"
@@ -340,12 +397,8 @@ def step_4_send_email(ti, **context):
         
         final_html_content = ti.xcom_pull(key="final_html_content")
         is_valid = ti.xcom_pull(key="is_valid")
-        step_1_response = ti.xcom_pull(key="step_1_response")
-        step_2_response = ti.xcom_pull(key="step_2_response")
         
         logging.debug(f"Step 4: final_html_content={final_html_content[:200]}..., is_valid={is_valid}")
-        logging.debug(f"Step 4: step_1_response={step_1_response[:200]}...")
-        logging.debug(f"Step 4: step_2_response={step_2_response[:200]}...")
         
         if not final_html_content:
             logging.error("No final HTML content found from previous steps")
@@ -367,10 +420,9 @@ def step_4_send_email(ti, **context):
         )
         
         if result:
-            logging.info(f"Email sent successfully to {sender_email}")
-            if not is_valid:
-                logging.info("Sent access denied email.")
-            return f"Email sent successfully to {sender_email}"
+            status_msg = "access denied" if not is_valid else "loan information"
+            logging.info(f"Email sent successfully to {sender_email} - {status_msg}")
+            return f"Email sent successfully to {sender_email} - {status_msg}"
         else:
             logging.error("Failed to send email")
             return "Failed to send email"
