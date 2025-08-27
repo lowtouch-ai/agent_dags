@@ -112,7 +112,7 @@ def get_email_thread(service, email_data):
         logging.error(f"Error retrieving email thread: {str(e)}")
         return []
 
-def get_ai_response(prompt, conversation_history=None, stream=True):
+def get_ai_response(prompt, conversation_history=None, stream=True,images=None):
     """Get AI response with conversation history context"""
     try:
         logging.debug(f"Query received: {prompt}")
@@ -130,9 +130,12 @@ def get_ai_response(prompt, conversation_history=None, stream=True):
             for history_item in conversation_history:
                 messages.append({"role": "user", "content": history_item["prompt"]})
                 messages.append({"role": "assistant", "content": history_item["response"]})
-        
+        user_message = {"role": "user", "content": prompt}
+        if images:
+            logging.info(f"Images provided: {len(images)}")
+            user_message["images"] = images
         # Add current prompt
-        messages.append({"role": "user", "content": prompt})
+        messages.append(user_message)
 
         response = client.chat(
             model='help-desk-agent:0.3',
