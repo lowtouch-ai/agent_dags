@@ -356,7 +356,7 @@ The email must include:
 - The requested information presented clearly:
   * If loan statement requested: Display loan repayment and disbursement details in clean HTML table format
   * If EMI schedule requested: Display EMI details in clean HTML table format  
-  * If repayment details requested: Display only repayment information in clean HTML table format
+  * If repayment details requested for a loan id: Only call the repayment tool for the loan id and get the result. Only show the repayment table.
 - Use proper HTML table formatting with borders and headers
 - A closing paragraph offering further assistance
 - Professional signature: "Customer Support Team, AutoFinix"
