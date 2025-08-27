@@ -263,7 +263,7 @@ def fetch_unread_emails(**kwargs):
     processed_message_ids = set()
     
     logging.info(f"Found {len(messages)} unread messages to process")
-    logging.info(f"Current thread contexts: {list(thread_context.keys())}")
+    logging.info(f"Current thread contexts: {thread_context}")
     
     for msg in messages:
         msg_id = msg["id"]
@@ -512,7 +512,7 @@ def trigger_continuation_dag(**kwargs):
         if not original_thread_id:
             logging.error(f"No matching thread context found for reply email {email['id']} with threadId={reply_thread_id}")
             logging.info(f"Reply email References: {reply_references}")
-            logging.info(f"Available thread_context keys: {list(thread_context.keys())}")
+            logging.info(f"Available thread_context keys: {thread_context}")
             # Fallback: Fetch thread history using reply_thread_id
             full_thread_history = get_email_thread(service, email)
             if full_thread_history:
