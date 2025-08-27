@@ -8,6 +8,7 @@ from airflow.operators.dummy import DummyOperator
 import base64
 import os
 import re
+from airflow.models import Variable
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
