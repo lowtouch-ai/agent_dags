@@ -121,8 +121,8 @@ def get_ai_response(prompt, conversation_history=None, stream=True):
         if not prompt or not isinstance(prompt, str):
             return "Invalid input provided. Please enter a valid query."
 
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
-        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'Lynx:3.0'")
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'help-desk-agent:0.3'})
+        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'help-desk-agent:0.3'")
 
         # Build messages array with conversation history
         messages = []
@@ -135,7 +135,7 @@ def get_ai_response(prompt, conversation_history=None, stream=True):
         messages.append({"role": "user", "content": prompt})
 
         response = client.chat(
-            model='Lynx:3.0',
+            model='help-desk-agent:0.3,
             messages=messages,
             stream=stream
         )
