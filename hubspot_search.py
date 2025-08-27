@@ -1307,7 +1307,7 @@ with DAG(
     schedule_interval=None,
     catchup=False,
     doc_md=readme_content,
-    tags=["hubspot", "meeting_minutes", "search"]
+    tags=["hubspot", "search", "entities"]
 ) as dag:
 
     fetch_thread_task = PythonOperator(
