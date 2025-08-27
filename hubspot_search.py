@@ -36,7 +36,7 @@ THREAD_CONTEXT_FILE = "/appz/cache/hubspot_thread_context.json"
 
 def authenticate_gmail():
     try:
-        creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
+        creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
         service = build("gmail", "v1", credentials=creds)
         profile = service.users().getProfile(userId="me").execute()
         logged_in_email = profile.get("emailAddress", "")
@@ -1316,7 +1316,7 @@ def trigger_continuation_dag(ti, **context):
     )
     logging.info("Successfully triggered hubspot_meeting_minutes_continue")
 
-readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'hubspot_search.md')
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'hubspot_search_entities.md')
 readme_content = "HubSpot Meeting Minutes Search and Confirmation DAG"
 try:
     with open(readme_path, 'r') as file:
@@ -1330,7 +1330,7 @@ with DAG(
     schedule_interval=None,
     catchup=False,
     doc_md=readme_content,
-    tags=["hubspot", "meeting_minutes", "search"]
+    tags=["hubspot", "search", "entities"]
 ) as dag:
 
     fetch_thread_task = PythonOperator(
