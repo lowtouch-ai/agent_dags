@@ -30,7 +30,7 @@ THREAD_CONTEXT_FILE = "/appz/cache/hubspot_thread_context.json"
 
 def authenticate_gmail():
     try:
-        creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
+        creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
         service = build("gmail", "v1", credentials=creds)
         profile = service.users().getProfile(userId="me").execute()
         logged_in_email = profile.get("emailAddress", "")
@@ -60,10 +60,23 @@ def update_last_checked_timestamp(timestamp):
 def get_thread_context():
     try:
         if os.path.exists(THREAD_CONTEXT_FILE):
+            if os.path.getsize(THREAD_CONTEXT_FILE) == 0:
+                logging.warning(f"Thread context file {THREAD_CONTEXT_FILE} is empty")
+                return {}
             with open(THREAD_CONTEXT_FILE, "r") as f:
-                return json.load(f)
+                data = json.load(f)
+                if not isinstance(data, dict):
+                    logging.error(f"Invalid thread context data: expected dict, got {type(data)}")
+                    return {}
+                return data
+        else:
+            logging.info(f"Thread context file {THREAD_CONTEXT_FILE} does not exist")
+            return {}
+    except json.JSONDecodeError:
+        logging.error(f"Corrupted JSON in {THREAD_CONTEXT_FILE}, returning empty dict")
+        return {}
     except Exception as e:
-        logging.error(f"Error reading {THREAD_CONTEXT_FILE}: {e}")
+        logging.error(f"Error reading {THREAD_CONTEXT_FILE}: {e}", exc_info=True)
         return {}
 
 def update_thread_context(thread_id, context_update):
@@ -258,12 +271,17 @@ def fetch_unread_emails(**kwargs):
     unread_emails = []
     max_timestamp = last_checked_timestamp
     thread_context = get_thread_context()
+    if thread_context is None:
+        logging.error("thread_context is None, initializing as empty dict")
+        thread_context = {}
+    logging.info(f"Thread context type: {type(thread_context)}, value: {thread_context}")
+    logging.info(f"Current thread contexts: {list(thread_context.keys())}")
     
     # FIX 3: Track processed message IDs to avoid duplicates within same run
     processed_message_ids = set()
     
     logging.info(f"Found {len(messages)} unread messages to process")
-    logging.info(f"Current thread contexts: {thread_context}")
+    logging.info(f"Current thread contexts: {list(thread_context.keys())}")
     
     for msg in messages:
         msg_id = msg["id"]
@@ -412,7 +430,6 @@ def update_last_checked_timestamp_safe(timestamp):
 
 
 def mark_message_as_read(service, message_id):
-    """Mark a processed message as read to prevent reprocessing"""
     try:
         service.users().messages().modify(
             userId='me',
@@ -469,7 +486,7 @@ def trigger_meeting_minutes(**kwargs):
         task_id = f"trigger_response_{email['id'].replace('-', '_')}"
         trigger_task = TriggerDagRunOperator(
             task_id=task_id,
-            trigger_dag_id="hubspot_search_entities",
+            trigger_dag_id="hubspot_meeting_minutes_search",
             conf={"email_data": email},
         )
         trigger_task.execute(context=kwargs)
@@ -512,7 +529,7 @@ def trigger_continuation_dag(**kwargs):
         if not original_thread_id:
             logging.error(f"No matching thread context found for reply email {email['id']} with threadId={reply_thread_id}")
             logging.info(f"Reply email References: {reply_references}")
-            logging.info(f"Available thread_context keys: {thread_context}")
+            logging.info(f"Available thread_context keys: {list(thread_context.keys())}")
             # Fallback: Fetch thread history using reply_thread_id
             full_thread_history = get_email_thread(service, email)
             if full_thread_history:
@@ -569,7 +586,7 @@ def trigger_continuation_dag(**kwargs):
         task_id = f"trigger_continuation_{email['id'].replace('-', '_')}"
         trigger_task = TriggerDagRunOperator(
             task_id=task_id,
-            trigger_dag_id="hubspot_create_objects",
+            trigger_dag_id="hubspot_meeting_minutes_continue",
             conf=continuation_conf,
         )
         trigger_task.execute(context=kwargs)
