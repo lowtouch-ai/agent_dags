@@ -52,7 +52,18 @@ def get_thread_context():
     try:
         if os.path.exists(THREAD_CONTEXT_FILE):
             with open(THREAD_CONTEXT_FILE, "r") as f:
-                return json.load(f)
+                content = f.read().strip()
+                if content:  # Check if file is not empty
+                    return json.loads(content)
+                else:
+                    logging.warning(f"{THREAD_CONTEXT_FILE} is empty, returning empty dict")
+                    return {}
+        else:
+            logging.info(f"{THREAD_CONTEXT_FILE} does not exist, returning empty dict")
+            return {}
+    except json.JSONDecodeError as e:
+        logging.error(f"Invalid JSON in {THREAD_CONTEXT_FILE}: {e}")
+        return {}
     except Exception as e:
         logging.error(f"Error reading {THREAD_CONTEXT_FILE}: {e}")
         return {}
@@ -61,11 +72,15 @@ def update_thread_context(thread_id, context_data):
     os.makedirs(os.path.dirname(THREAD_CONTEXT_FILE), exist_ok=True)
     try:
         contexts = get_thread_context()
+        if contexts is None:
+            logging.warning(f"get_thread_context returned None, initializing empty dict")
+            contexts = {}
         contexts[thread_id] = context_data
         with open(THREAD_CONTEXT_FILE, "w") as f:
             json.dump(contexts, f)
     except Exception as e:
         logging.error(f"Error writing to {THREAD_CONTEXT_FILE}: {e}")
+        raise  # Re-raise to ensure the task fails and is retried
 
 def decode_email_payload(msg):
     try:
@@ -257,6 +272,7 @@ IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanati
 Steps to follow:
 1. Invoke get_all_owners to identify the deal owner (default to 'liji' and get the owner id from get_all_owners if not specified)
 2. Get the list of all available owners in tabular format
+3. If the owner is not specified default to "liji".
 
 Return this exact JSON structure:
 {{
@@ -314,7 +330,7 @@ IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanati
 Steps to follow:
 1. Invoke search_deals with deal name. If deal found display deal id, deal name, deal label name, deal amount, close date, deal owner name in results.
 2. If no deals found, extract potential details for new deals from the email content (e.g., deal name, amount, close date, deal owner).
-
+3. deal stage Label should be displayed as dealLabelName. For e.g, If the deal stage is "appointmentscheduled", the dealLabelName should be "Appointment Scheduled".
 Return this exact JSON structure:
 {{
     "deal_results": {{
@@ -665,14 +681,21 @@ def compile_search_results(ti, **context):
     ti.xcom_push(key="confirmation_needed", value=confirmation_needed)
 
     try:
-        update_thread_context(thread_id, {
+        contexts = get_thread_context()
+        if contexts is None:
+            logging.warning(f"get_thread_context returned None, initializing empty dict")
+            contexts = {}
+        contexts[thread_id] = {
             "search_results": search_results,
             "email_data": email_data,
             "thread_history": thread_history,
             "original_message_id": email_data["headers"].get("Message-ID", ""),
             "references": email_data["headers"].get("References", "")
-        })
-        stored_context = get_thread_context().get(thread_id, {})
+        }
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+        stored_context = contexts.get(thread_id, {})
         if not stored_context.get("thread_history"):
             logging.error(f"Failed to store thread history for thread_id={thread_id}")
         else:
@@ -1285,7 +1308,7 @@ def trigger_continuation_dag(ti, **context):
     
     logging.info(f"Triggering hubspot_meeting_minutes_continue with conf: {trigger_conf}")
     trigger_dag(
-        dag_id="hubspot_meeting_minutes_continue",
+        dag_id="hubspot_create_objects",
         run_id=f"triggered_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         conf=trigger_conf,
         execution_date=None,

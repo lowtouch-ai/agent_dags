@@ -65,6 +65,7 @@ def get_thread_context():
                 return {}
             with open(THREAD_CONTEXT_FILE, "r") as f:
                 data = json.load(f)
+                logging.info(f"Loaded thread context for {data} threads")
                 if not isinstance(data, dict):
                     logging.error(f"Invalid thread context data: expected dict, got {type(data)}")
                     return {}
