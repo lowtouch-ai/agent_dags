@@ -135,7 +135,7 @@ def get_ai_response(prompt, conversation_history=None, stream=True):
         messages.append({"role": "user", "content": prompt})
 
         response = client.chat(
-            model='help-desk-agent:0.3,
+            model='help-desk-agent:0.3',
             messages=messages,
             stream=stream
         )
