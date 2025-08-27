@@ -112,58 +112,58 @@ def get_email_thread(service, email_data):
         logging.error(f"Error retrieving email thread: {str(e)}")
         return []
 
-def get_ai_response(prompt, images=None, conversation_history=None):
+def get_ai_response(prompt, conversation_history=None, stream=True):
+    """Get AI response with conversation history context"""
     try:
         logging.debug(f"Query received: {prompt}")
         
+        # Validate input
         if not prompt or not isinstance(prompt, str):
-            return "<html><body>Invalid input provided. Please enter a valid query.</body></html>"
+            return "Invalid input provided. Please enter a valid query."
 
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'help-desk-agent'})
-        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'help-desk-agent:0.3'")
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'webshop-email-respond'})
+        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'Lynx:3.0'")
 
+        # Build messages array with conversation history
         messages = []
         if conversation_history:
             for history_item in conversation_history:
                 messages.append({"role": "user", "content": history_item["prompt"]})
                 messages.append({"role": "assistant", "content": history_item["response"]})
         
-        user_message = {"role": "user", "content": prompt}
-        if images:
-            logging.info(f"Images provided: {len(images)}")
-            user_message["images"] = images
-        messages.append(user_message)
+        # Add current prompt
+        messages.append({"role": "user", "content": prompt})
 
         response = client.chat(
-            model='help-desk-agent:0.3',
+            model='Lynx:3.0',
             messages=messages,
-            stream=False
+            stream=stream
         )
         logging.info(f"Raw response from agent: {str(response)[:500]}...")
 
-        if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
-            logging.error("Response lacks expected 'message.content' structure")
-            return "<html><body>Invalid response format from AI. Please try again later.</body></html>"
-        
-        ai_content = response.message.content
+        # Handle response based on streaming mode
+        if stream:
+            # For streaming, iterate over chunks
+            ai_content = ""
+            for chunk in response:
+                if hasattr(chunk, 'message') and hasattr(chunk, 'message') and hasattr(chunk.message, 'content'):
+                    ai_content += chunk.message.content
+                else:
+                    logging.error("Chunk lacks expected 'message.content' structure")
+                    return "Invalid response format from AI stream. Please try again later."
+        else:
+            # For non-streaming, access response directly
+            if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
+                logging.error("Response lacks expected 'message.content' structure")
+                return "Invalid response format from AI. Please try again later."
+            ai_content = response.message.content
+
         logging.info(f"Full message content from agent: {ai_content[:500]}...")
-
-    
-
-        ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
-        if not ai_content.strip():
-            logging.warning("AI returned empty content")
-            return "<html><body>No response generated. Please try again later.</body></html>"
-
-        if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html'):
-            logging.warning("Response doesn't appear to be proper HTML, wrapping it")
-            ai_content = f"<html><body>{ai_content}</body></html>"
-
         return ai_content.strip()
 
     except Exception as e:
         logging.error(f"Error in get_ai_response: {str(e)}")
-        return f"<html><body>An error occurred while processing your request: {str(e)}</body></html>"
+        return f"An error occurred while processing your request: {str(e)}"
 
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
@@ -270,6 +270,7 @@ def step_1_process_email(ti, **context):
             </div>
         </body>
         </html>
+        ```
     """
     
     response = get_ai_response(prompt, images=image_attachments if image_attachments else None)
