@@ -469,7 +469,7 @@ def trigger_meeting_minutes(**kwargs):
         task_id = f"trigger_response_{email['id'].replace('-', '_')}"
         trigger_task = TriggerDagRunOperator(
             task_id=task_id,
-            trigger_dag_id="hubspot_meeting_minutes_search",
+            trigger_dag_id="hubspot_search_entities",
             conf={"email_data": email},
         )
         trigger_task.execute(context=kwargs)
@@ -569,7 +569,7 @@ def trigger_continuation_dag(**kwargs):
         task_id = f"trigger_continuation_{email['id'].replace('-', '_')}"
         trigger_task = TriggerDagRunOperator(
             task_id=task_id,
-            trigger_dag_id="hubspot_meeting_minutes_continue",
+            trigger_dag_id="hubspot_create_objects",
             conf=continuation_conf,
         )
         trigger_task.execute(context=kwargs)

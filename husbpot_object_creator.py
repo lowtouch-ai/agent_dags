@@ -1504,11 +1504,11 @@ def branch_to_creation_tasks(ti, **context):
     return tasks_to_execute
 
 with DAG(
-    "hubspot_meeting_minutes_continue",
+    "hubspot_create_objects",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
-    tags=["hubspot", "meeting_minutes", "continue"]
+    tags=["hubspot", "create", "objects"]
 ) as dag:
 
     start_task = DummyOperator(task_id="start_workflow")

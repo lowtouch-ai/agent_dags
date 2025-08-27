@@ -1293,7 +1293,7 @@ def trigger_continuation_dag(ti, **context):
     )
     logging.info("Successfully triggered hubspot_meeting_minutes_continue")
 
-readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'hubspot_meeting_minutes_search.md')
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'hubspot_search_entities.md')
 readme_content = "HubSpot Meeting Minutes Search and Confirmation DAG"
 try:
     with open(readme_path, 'r') as file:
@@ -1302,12 +1302,12 @@ except FileNotFoundError:
     pass
 
 with DAG(
-    "hubspot_meeting_minutes_search",
+    "hubspot_search_entities",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
     doc_md=readme_content,
-    tags=["hubspot", "meeting_minutes", "search"]
+    tags=["hubspot", "search", "entities"]
 ) as dag:
 
     fetch_thread_task = PythonOperator(
