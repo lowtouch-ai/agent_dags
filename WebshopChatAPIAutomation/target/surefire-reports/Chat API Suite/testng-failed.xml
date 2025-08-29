@@ -5,9 +5,9 @@
     <classes>
       <class name="ChatAPIContentValidationTest">
         <methods>
-          <include name="testChatAPIResponseValidation" invocation-numbers="0 1 2"/>
+          <include name="testChatAPIResponseValidation" invocation-numbers="0"/>
           <include name="setupReport"/>
-          <include name="flushReport"/>
+          <include name="flushReportAndWriteFailures"/>
         </methods>
       </class> <!-- ChatAPIContentValidationTest -->
     </classes>
