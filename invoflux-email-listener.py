@@ -108,74 +108,109 @@ def image_to_base64(image_path: str) -> str:
         return ""
 
 def fetch_unread_emails(**kwargs):
-    """Fetch unread emails and their attachments after the last processed email timestamp."""
+    """Fetch unread emails and include the entire conversation (thread) with attachments."""
     service = authenticate_gmail()
     last_checked_timestamp = get_last_checked_timestamp()
     query = f"is:unread after:{last_checked_timestamp // 1000}"
     logging.info(f"Fetching emails with query: {query}")
-    results = service.users().messages().list(userId="me", labelIds=["INBOX"], q=query).execute()
+
+    results = service.users().messages().list(
+        userId="me", labelIds=["INBOX"], q=query
+    ).execute()
     messages = results.get("messages", [])
-    logging.info(f"Found {len(messages)} unread emails since last checked timestamp: {last_checked_timestamp}")
-    
-    unread_emails = []
+    logging.info(f"Found {len(messages)} unread emails since {last_checked_timestamp}")
+
+    unread_threads = []
     max_timestamp = last_checked_timestamp
     os.makedirs(ATTACHMENT_DIR, exist_ok=True)
 
     for msg in messages:
-        msg_data = service.users().messages().get(userId="me", id=msg["id"], format="full").execute()
-        headers = {header["name"]: header["value"] for header in msg_data["payload"]["headers"]}
-        sender = headers.get("From", "").lower()
-        timestamp = int(msg_data["internalDate"])
-        if "no-reply" in sender or timestamp <= last_checked_timestamp:
-            logging.info(f"Skipping email from {sender} (timestamp: {timestamp})")
-            continue
-        body = msg_data.get("snippet", "")
-        attachments = []
-        if "parts" in msg_data["payload"]:
-            for part in msg_data["payload"].get("parts", []):
-                if part.get("filename") and part.get("body", {}).get("attachmentId"):
-                    attachment_id = part["body"]["attachmentId"]
-                    attachment_data = service.users().messages().attachments().get(
-                        userId="me", messageId=msg["id"], id=attachment_id
-                    ).execute()
-                    file_data = base64.urlsafe_b64decode(attachment_data["data"].encode("UTF-8"))
-                    filename = part["filename"]
-                    mime_type = part.get("mimeType", "application/octet-stream")
-                    attachment_path = os.path.join(ATTACHMENT_DIR, f"{msg['id']}_{filename}")
-                    with open(attachment_path, "wb") as f:
-                        f.write(file_data)
-                    extracted_content = {}
-                    base64_content = ""
-                    if mime_type == "application/pdf":
-                        extracted_content = pdf_to_markdown(attachment_path)
-                        logging.info(f"Extracted content from PDF {filename}: {extracted_content['content'][:100]}...")
-                    elif mime_type in ["image/png", "image/jpeg", "image/jpg"]:
-                        base64_content = image_to_base64(attachment_path)
-                        logging.info(f"Converted image {filename} to base64")
-                    attachments.append({
-                        "filename": filename,
-                        "mime_type": mime_type,
-                        "path": attachment_path,
-                        "extracted_content": extracted_content,
-                        "base64_content": base64_content
-                    })
-                    logging.info(f"Saved attachment: {filename} at {attachment_path}")
-        email_object = {
-            "id": msg["id"],
-            "threadId": msg_data.get("threadId"),
-            "headers": headers,
-            "content": body,
-            "timestamp": timestamp,
-            "attachments": attachments
-        }
-        logging.info(f"Adding unread email with {len(attachments)} attachments: {email_object}")
-        unread_emails.append(email_object)
-        if timestamp > max_timestamp:
-            max_timestamp = timestamp
-    if unread_emails:
+        # Fetch the single unread email (to get its threadId)
+        msg_data = service.users().messages().get(
+            userId="me", id=msg["id"], format="full"
+        ).execute()
+        thread_id = msg_data.get("threadId")
+
+        # Fetch the entire thread
+        thread_data = service.users().threads().get(
+            userId="me", id=thread_id, format="full"
+        ).execute()
+
+        thread_messages = []
+        for thread_msg in thread_data.get("messages", []):
+            headers = {h["name"]: h["value"] for h in thread_msg["payload"]["headers"]}
+            sender = headers.get("From", "").lower()
+            timestamp = int(thread_msg["internalDate"])
+            if "no-reply" in sender:
+                continue
+
+            body = thread_msg.get("snippet", "")
+            attachments = []
+
+            if "parts" in thread_msg["payload"]:
+                for part in thread_msg["payload"].get("parts", []):
+                    if part.get("filename") and part.get("body", {}).get("attachmentId"):
+                        attachment_id = part["body"]["attachmentId"]
+                        attachment_data = service.users().messages().attachments().get(
+                            userId="me",
+                            messageId=thread_msg["id"],
+                            id=attachment_id,
+                        ).execute()
+                        file_data = base64.urlsafe_b64decode(
+                            attachment_data["data"].encode("UTF-8")
+                        )
+
+                        filename = part["filename"]
+                        mime_type = part.get("mimeType", "application/octet-stream")
+                        attachment_path = os.path.join(
+                            ATTACHMENT_DIR, f"{thread_msg['id']}_{filename}"
+                        )
+                        with open(attachment_path, "wb") as f:
+                            f.write(file_data)
+
+                        extracted_content = {}
+                        base64_content = ""
+                        if mime_type == "application/pdf":
+                            extracted_content = pdf_to_markdown(attachment_path)
+                        elif mime_type in ["image/png", "image/jpeg", "image/jpg"]:
+                            base64_content = image_to_base64(attachment_path)
+
+                        attachments.append(
+                            {
+                                "filename": filename,
+                                "mime_type": mime_type,
+                                "path": attachment_path,
+                                "extracted_content": extracted_content,
+                                "base64_content": base64_content,
+                            }
+                        )
+
+            thread_messages.append(
+                {
+                    "id": thread_msg["id"],
+                    "headers": headers,
+                    "content": body,
+                    "timestamp": timestamp,
+                    "attachments": attachments,
+                }
+            )
+
+            if timestamp > max_timestamp:
+                max_timestamp = timestamp
+
+        # Build thread object
+        thread_object = {"threadId": thread_id, "messages": thread_messages}
+        unread_threads.append(thread_object)
+        logging.info(
+            f"Added thread {thread_id} with {len(thread_messages)} messages to processing queue"
+        )
+
+    if unread_threads:
         update_last_checked_timestamp(max_timestamp)
-    kwargs['ti'].xcom_push(key="unread_emails", value=unread_emails)
-    return unread_emails
+
+    kwargs["ti"].xcom_push(key="unread_emails", value=unread_threads)
+    return unread_threads
+
 
 def branch_function(**kwargs):
     """Decide which task to execute based on the presence of unread emails."""
