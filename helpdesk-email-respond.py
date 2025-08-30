@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import re
+from email.message import EmailMessage  # Add this import
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
