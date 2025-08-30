@@ -69,7 +69,7 @@ public class ChatAPIContentValidationTest {
                 }
             },
             {
-                "Plot a bar chart comparing revenue and order count for December 2024 sales revenue by day",
+                "Plot a bar3 chart comparing revenue and order count for December 2024 sales revenue by day",
                 new String[]{
                     "chart", "bar", "Revenue"
                 }
