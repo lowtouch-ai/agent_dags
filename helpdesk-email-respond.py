@@ -254,23 +254,28 @@ def step_1_process_email(ti, **context):
     if attachment_content:
         current_content += f"\n{attachment_content}"
     intent_prompt = f"""
-    Get the user intent for the following content:\n{current_content} if the user intnet is to get help with an issue, return the json data with the following format:\n{{\"intent\": \"get_help\"}}\n if the inetent is to escalate the issue to L2 support, return the json data with the following format:\n{{\"intent\": \"escalate_to_l2\"}}\n if the intent is to get more information about the issue, return the json data with the following format:\n{{\"intent\": \"get_more_info\"}}\n if the intent is to close the issue, return the json data with the following format:\n{{\"intent\": \"close_issue\"}}"""
+    Get the user intent for the following content:\n{current_content} if the user intnet is to get help with an issue, return the json data with the following format:\n{{\"intent\": \"get_help\"}}\n if the inetent is to escalate the issue to L2 support, return the json data with the following format:\n{{\"intent\": \"escalate_to_l2\"}}\n if the intent is to get more information about the issue, return the json data with the following format:\n{{\"intent\": \"get_more_info\"}}\n if the intent is to close the issue, return the json data with the following format:\n{{\"intent\": \"close_issue\"}}
+    ## output format
+        ```json
+        {{
+        "intent": "<get_help/escalate_to_l2/get_more_info>",
+        }}
+        ```
+    """
     intent_response = get_ai_response(intent_prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
-    intent="get_help"
+    intent=None
     try:
         match = re.search(r'\{.*\}', intent_response, re.DOTALL)
-        status = None
         if match:
             result_json = json.loads(match.group())
             intent = result_json.get("intent", "")
-        if intent and status.lower() == "failure":
-            logging.error(f"Step 6a failed: {intent_response}")
             # raise Exception(f"step_1a_validate_feature_file failed: {response}")
     except Exception as e:
         logging.error(f"Error parsing validation response: {str(e)}")
 
     prompt= f"User query: \n{current_content}"
-    if intent.lower() == "escalate_to_l2":
+    
+    if intnet and  intent.lower() == "escalate_to_l2":
         prompt = f"""
         The user has requested to escalate the issue to L2 support. So 
         - User query: \n{current_content}
@@ -279,7 +284,7 @@ def step_1_process_email(ti, **context):
         escalate the issue to L2 support without asking for conformation. Extract the relavent information from the email and if more information is needed, ask the user for more information. If the user has provided enough information, escalate the issue to L2 support. 
         """
     # Construct the prompt for AI
-    if intent.lower() == "get_help":
+    if intent and intent.lower() == "get_help":
         prompt = f"""
         # Your task
         - Extract the content from the provided conversation and attachments, review the content, and provide a report in the output format below.
