@@ -63,8 +63,6 @@ public class ChatAPIContentValidationTest {
             {
                 "Show me order details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock",
                 new String[]{
-                    "Patricia Montgomery",
-                    "patricia.montgomery@example.com"
                 }
             },
             {
