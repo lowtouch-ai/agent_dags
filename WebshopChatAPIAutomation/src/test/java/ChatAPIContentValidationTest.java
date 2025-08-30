@@ -61,21 +61,21 @@ public class ChatAPIContentValidationTest {
     public Object[][] getMessagePayloads() {
         return new Object[][]{
             {
-                "Show me rorder details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock",
+                "Show me order details of 788, including stock55 availability and customer details, and highlight the articles that are low or out of stock",
                 new String[]{
 					"Patricia Montgomery",
                     "patricia.montgomery@example.com",
-					"gym bag munica"
+					"gym bag muneca"
                 }
             },
             {
-                "Plot a bar charted comparing revenue and order count for December 2024 sales revenue by day",
+                "Plot a bar chart comparing revenue and order count for December 20244 sales revenue by day",
                 new String[]{
                     "chart", "bar", "Revenue"
                 }
             },
             {
-                "Compose a well-formatted American-style business email with a quote for existing customer Enni Kivi for articles 1139 and 3876, apply discounts and shipping as per policies, include the total, shipping, and discount in the quote. Use a single table to show all the articles, subtotal, discount, shipping and total; Add a summary section with total before discount, total discount ($ and %), subtotal, shipping and total.",
+                "Compose a well-formatted American-style business email with a quote for existing customer Enni Kivi for articles 1139gh and 3876, apply discounts and shipping as per policies, include the total, shipping, and discount in the quote. Use a single table to show all the articles, subtotal, discount, shipping and total; Add a summary section with total before discount, total discount ($ and %), subtotal, shipping and total.",
                 new String[]{
                     "Enni Kivi", "fred@webshop.com"
                 }
