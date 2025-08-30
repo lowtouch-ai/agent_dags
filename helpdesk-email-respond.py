@@ -144,7 +144,7 @@ def get_email_thread(service, email_data, from_address):
             })
 
         logging.info(f"Retrieved complete thread with {len(conversation)} messages")
-        logging.debug(f"Full converastion {conversation}")
+        logging.info(f"Full converastion {conversation}")
         return conversation
         
     except Exception as e:
