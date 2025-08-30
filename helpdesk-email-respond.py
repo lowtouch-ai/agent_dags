@@ -95,32 +95,57 @@ def get_email_thread(service, email_data, from_address):
             content = decode_email_payload(msg)
             headers = {header["name"]: header["value"] for header in email_data.get("payload", {}).get("headers", [])}
             sender = headers.get("From", "").lower()
-            role = "user" if sender != from_address.lower() else "response"
+            role = "user" if sender != from_address.lower() else "assistant"
             return [{"role": role, "content": content.strip()}] if content.strip() else []
 
         thread = service.users().threads().get(userId="me", id=thread_id).execute()
         conversation = []
+        
+        # Process all messages in chronological order
+        messages_with_dates = []
         for msg in thread.get("messages", []):
             raw_msg = base64.urlsafe_b64decode(msg["raw"]) if "raw" in msg else None
             if not raw_msg:
                 raw_message = service.users().messages().get(userId="me", id=msg["id"], format="raw").execute()
                 raw_msg = base64.urlsafe_b64decode(raw_message["raw"])
+            
             email_msg = message_from_bytes(raw_msg)
             headers = {header["name"]: header["value"] for header in msg.get("payload", {}).get("headers", [])}
             content = decode_email_payload(email_msg)
+            
             if not content.strip():
                 continue
+                
             sender = headers.get("From", "").lower()
             role = "user" if sender != from_address.lower() else "assistant"
-            conversation.append({
+            
+            # Get the date for sorting
+            date_str = headers.get("Date", "")
+            
+            messages_with_dates.append({
                 "role": role,
-                "content": content.strip()
+                "content": content.strip(),
+                "date": date_str,
+                "message_id": headers.get("Message-ID", "")
             })
 
-        # Sort by date to ensure chronological order
-        conversation.sort(key=lambda x: headers.get("Date", ""), reverse=False)
-        logging.debug(f"Retrieved thread with {len(conversation)} messages")
+        # Sort by date to ensure chronological order (oldest first)
+        try:
+            from email.utils import parsedate_to_datetime
+            messages_with_dates.sort(key=lambda x: parsedate_to_datetime(x["date"]) if x["date"] else datetime.min)
+        except Exception as e:
+            logging.warning(f"Error sorting by date, using original order: {str(e)}")
+        
+        # Convert back to conversation format
+        for msg in messages_with_dates:
+            conversation.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+
+        logging.info(f"Retrieved complete thread with {len(conversation)} messages")
         return conversation
+        
     except Exception as e:
         logging.error(f"Error retrieving email thread: {str(e)}")
         return []
@@ -208,11 +233,10 @@ def step_1_process_email(ti, **context):
         logging.error("Gmail authentication failed, aborting.")
         return "Gmail authentication failed"
     
-    # Retrieve the email thread with user/response roles
-    email_thread = get_email_thread(service, email_data, HELPDESK_FROM_ADDRESS)
+    # Retrieve the COMPLETE email thread with all historical messages
+    complete_email_thread = get_email_thread(service, email_data, HELPDESK_FROM_ADDRESS)
     image_attachments = []
     
-
     from_header = email_data["headers"].get("From", "Unknown <unknown@example.com>")
     sender_name = "Unknown"
     sender_email = "unknown@example.com"
@@ -222,8 +246,7 @@ def step_1_process_email(ti, **context):
         sender_email = name_email_match.group(2).strip()
     elif re.match(r'^.*?@.*?$', from_header):
         sender_email = from_header.strip()
-        sender_name = sender_email.split('@')[0]  # Fallback: use email prefix as name
-
+        sender_name = sender_email.split('@')[0]
 
     # Collect image attachments
     if email_data.get("attachments"):
@@ -240,11 +263,22 @@ def step_1_process_email(ti, **context):
             if "extracted_content" in attachment and "content" in attachment["extracted_content"]:
                 attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
     
-    # Prepare conversation history (previous emails) and current content
-    conversation_history = email_thread[:-1] if email_thread else []  # All but the last message
-    current_content = email_thread[-1]["content"] if email_thread else email_data.get("content", "").strip()
-    logging.info(f"Current content is {current_content}")
-    logging.info(f"Conversation history is {conversation_history}")
+    # CHANGED: Use ALL messages except the current one as conversation history
+    # This gives us the complete conversation context from the beginning
+    if len(complete_email_thread) > 1:
+        conversation_history = complete_email_thread[:-1]  # All previous messages
+        current_content = complete_email_thread[-1]["content"]  # Current message
+    else:
+        conversation_history = []  # No previous conversation
+        current_content = complete_email_thread[0]["content"] if complete_email_thread else email_data.get("content", "").strip()
+    
+    logging.info(f"Complete conversation history contains {len(conversation_history)} messages")
+    logging.info(f"Current content: {current_content[:200]}...")
+    
+    # Log conversation history for debugging (first few messages)
+    for i, msg in enumerate(conversation_history[:3]):  # Show first 3 for brevity
+        logging.info(f"History message {i+1}: Role={msg['role']}, Content={msg['content'][:100]}...")
+    
     # Clean current content if it exists
     if current_content:
         soup = BeautifulSoup(current_content, "html.parser")
@@ -253,8 +287,10 @@ def step_1_process_email(ti, **context):
     # Append attachment content to the current content (prompt)
     if attachment_content:
         current_content += f"\n{attachment_content}"
+    
+    # Intent detection (same as before)
     intent_prompt = f"""
-    Get the user intent for the following content:\n{current_content} if the user intent is to get help with an issue, return the json data with the following format:\n{{\"intent\": \"get_help\"}}\n if the inetent is to escalate the issue to L2 support, return the json data with the following format:\n{{\"intent\": \"escalate_to_l2\"}}\n if the intent is to get more information about the issue, return the json data with the following format:\n{{\"intent\": \"get_more_info\"}}\n if the intent is to close the issue, return the json data with the following format:\n{{\"intent\": \"close_issue\"}}
+    Get the user intent for the following content:\n{current_content} if the user intent is to get help with an issue, return the json data with the following format:\n{{"intent": "get_help"}}\n if the inetent is to escalate the issue to L2 support, return the json data with the following format:\n{{"intent": "escalate_to_l2"}}\n if the intent is to get more information about the issue, return the json data with the following format:\n{{"intent": "get_more_info"}}\n if the intent is to close the issue, return the json data with the following format:\n{{"intent": "close_issue"}}
     ## output format
         ```json
         {{
@@ -262,36 +298,42 @@ def step_1_process_email(ti, **context):
         }}
         ```
     """
+    
+    # CHANGED: Pass the COMPLETE conversation history to intent detection as well
     intent_response = get_ai_response(prompt=intent_prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
-    intent=None
+    intent = None
     try:
         match = re.search(r'\{.*\}', intent_response, re.DOTALL)
         if match:
             result_json = json.loads(match.group())
             intent = result_json.get("intent", "")
-            logging.info(f"intent is {intent}")
-            # raise Exception(f"step_1a_validate_feature_file failed: {response}")
+            logging.info(f"Detected intent: {intent}")
     except Exception as e:
         logging.error(f"Error parsing validation response: {str(e)}")
 
-    prompt= f"User query: \n{current_content}"
+    prompt = f"User query: \n{current_content}"
     
-    if intent and  intent.lower() == "escalate_to_l2":
-        prompt = f"""
-        The user has requested to escalate the issue to L2 support. So 
+    if intent and intent.lower() == "escalate_to_l2":
+        logging.info("Intent: Escalating to L2 support")
+        prompt = f"""  
         - User query: \n{current_content}
         - Sender Name: {sender_name}
         - Sender Email: {sender_email}
-        escalate the issue to L2 support without asking for conformation. Extract the relavent information from the email and if more information is needed, ask the user for more information. If the user has provided enough information, escalate the issue to L2 support. 
+        - Full conversation context is available in the conversation history
+        Escalate the issue to L2 support (No need for conformation). Extract the relavent information from the email thread and if more information is needed, ask the user for more information. If the user has provided enough information, escalate the issue to L2 support. 
+        ## output format
+        - the output should be in html 
         """
-    # Construct the prompt for AI
-    if intent and intent.lower() == "get_help":
+        
+    elif intent and intent.lower() == "get_help":
         prompt = f"""
         # Your task
-        - Extract the content from the provided conversation and attachments, review the content, and provide a report in the output format below.
+        - Extract the content from the provided conversation and attachments, review the COMPLETE conversation history, and provide a report in the output format below.
         - User query: \n{current_content}
+        - You have access to the complete conversation history from the beginning of this thread
         - Compose a professional and human-like business email in American English, written in the tone of an L1 support agent, including analysis of the problem, possible root causes, and suggested solution steps.
         - **DO NOT ESCALATE THE ISSUE TO L2 SUPPORT.** Provide a thorough analysis and actionable steps to resolve the issue at the L1 level.
+        - Reference previous conversations and attempts if mentioned in the history
         - The email should be concise, clear, and easy to understand for a non-technical audience.
         - The email should include a polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
         - Use only clean, valid HTML for the email body without any section headers in the content (except as specified in the format). Avoid technical or template-style formatting and placeholders. The email should read as if it was personally written.
@@ -308,7 +350,7 @@ def step_1_process_email(ti, **context):
         </head>
         <body>
             <div class="container">
-                <p>Dear sender_name,</p>
+                <p>Dear {sender_name},</p>
                 <p>Please find below the detailed analysis of the issue, including potential root causes and suggested steps for resolution.</p>
                 <h2>Analysis of the Problem</h2>
                 <p>...</p>
@@ -329,11 +371,13 @@ def step_1_process_email(ti, **context):
         """
     else:
         prompt = f"""
-        - Extract the content from the provided conversation and attachments, review the content, and provide a report in the output format below.
+        - Extract the content from the provided conversation and attachments, review the COMPLETE conversation history, and provide a report in the output format below.
         - User query: \n{current_content}
+        - You have access to the complete conversation history from the beginning of this thread
         - Compose a professional and human-like business email in American English, written in the tone of an L1 support agent
         """
-    # Get AI response with conversation history
+    
+    # CHANGED: Pass the COMPLETE conversation history to the AI agent
     response = get_ai_response(prompt=prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
     
     # Clean the HTML response
@@ -346,7 +390,7 @@ def step_1_process_email(ti, **context):
     # Push the cleaned response to XCom
     ti.xcom_push(key="final_html_content", value=cleaned_response)
     
-    logging.info(f"Step 1 completed: {cleaned_response[:200]}...")
+    logging.info(f"Step 1 completed with full conversation history: {cleaned_response[:200]}...")
     return cleaned_response
 
 
