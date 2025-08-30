@@ -262,13 +262,14 @@ def step_1_process_email(ti, **context):
         }}
         ```
     """
-    intent_response = get_ai_response(intent_prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
+    intent_response = get_ai_response(prompt=intent_prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
     intent=None
     try:
         match = re.search(r'\{.*\}', intent_response, re.DOTALL)
         if match:
             result_json = json.loads(match.group())
             intent = result_json.get("intent", "")
+            logging.info(f"intent is {intent}")
             # raise Exception(f"step_1a_validate_feature_file failed: {response}")
     except Exception as e:
         logging.error(f"Error parsing validation response: {str(e)}")
@@ -333,7 +334,7 @@ def step_1_process_email(ti, **context):
         - Compose a professional and human-like business email in American English, written in the tone of an L1 support agent
         """
     # Get AI response with conversation history
-    response = get_ai_response(prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
+    response = get_ai_response(prompt=prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
     
     # Clean the HTML response
     cleaned_response = re.sub(r'```html\n|```', '', response).strip()
