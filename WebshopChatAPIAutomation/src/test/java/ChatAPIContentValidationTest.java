@@ -65,11 +65,11 @@ public class ChatAPIContentValidationTest {
                 new String[]{
                     "Patricia Montgomery",
                     "patricia.montgomery@example.com",
-                    "Gym Bag Mune"
+                    "Gym Bag Muneca"
                 }
             },
             {
-                "Plot a bar chart comparing revenue and order count for December 2024 sales revenue by day",
+                "Plot a bar cha comparing revenue and order count for December 2024 sales revenue by day",
                 new String[]{
                     "chart", "bar", "Revenue"
                 }
