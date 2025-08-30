@@ -61,7 +61,7 @@ public class ChatAPIContentValidationTest {
     public Object[][] getMessagePayloads() {
         return new Object[][]{
             {
-                "Show me order details of 7888, including stock availability and customer details, and highlight the articles that are low or out of stock",
+                "Show me rorder details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock",
                 new String[]{
 					"Patricia Montgomery",
                     "patricia.montgomery@example.com",
@@ -69,9 +69,9 @@ public class ChatAPIContentValidationTest {
                 }
             },
             {
-                "Plot a bar chart comparing revenue and order count for December 2024 sales revenue by day",
+                "Plot a bar charted comparing revenue and order count for December 2024 sales revenue by day",
                 new String[]{
-                    "chart", "bar2", "Revenue"
+                    "chart", "bar", "Revenue"
                 }
             },
             {
