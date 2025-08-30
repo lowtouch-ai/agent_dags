@@ -111,7 +111,7 @@ def get_email_thread(service, email_data, from_address):
             if not content.strip():
                 continue
             sender = headers.get("From", "").lower()
-            role = "user" if sender != from_address.lower() else "response"
+            role = "user" if sender != from_address.lower() else "assistant"
             conversation.append({
                 "role": role,
                 "content": content.strip()
@@ -138,11 +138,11 @@ def get_ai_response(prompt, conversation_history=None, stream=True,images=None):
         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'help-desk-agent:0.3'")
 
         # Build messages array with conversation history
-        messages = []
-        if conversation_history:
-            for history_item in conversation_history:
-                messages.append({"role": "user", "content": history_item["prompt"]})
-                messages.append({"role": "assistant", "content": history_item["response"]})
+        messages = conversation_history if conversation_history else []
+        # if conversation_history:
+        #     for history_item in conversation_history:
+        #         messages.append({"role": "user", "content": history_item["prompt"]})
+        #         messages.append({"role": "assistant", "content": history_item["response"]})
         user_message = {"role": "user", "content": prompt}
         if images:
             logging.info(f"Images provided: {len(images)}")
