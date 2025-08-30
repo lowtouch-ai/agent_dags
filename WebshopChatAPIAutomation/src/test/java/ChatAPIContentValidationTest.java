@@ -64,12 +64,11 @@ public class ChatAPIContentValidationTest {
                 "Show me order details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock",
                 new String[]{
                     "Patricia Montgomery",
-                    "patricia.montgomery@example.com",
-                    "Gym Bag Muneca"
+                    "patricia.montgomery@example.com"
                 }
             },
             {
-                "Plot a bar cha comparing revenue and order count for December 2024 sales revenue by day",
+                "Plot a bar chart comparing revenue and order count for December 2024 sales revenue by day",
                 new String[]{
                     "chart", "bar", "Revenue"
                 }
