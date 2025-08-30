@@ -100,7 +100,7 @@ def get_email_thread(service, email_data, from_address):
 
         thread = service.users().threads().get(userId="me", id=thread_id).execute()
         conversation = []
-        
+        logging.info(f"Retrieved thread with ID: {thread_id} containing {len(thread.get('messages', []))} messages messages are {len(thread.get('messages', []))}")
         # Process all messages in chronological order
         messages_with_dates = []
         for msg in thread.get("messages", []):
