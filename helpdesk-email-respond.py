@@ -256,7 +256,7 @@ def step_1_process_email(ti, **context):
     intent_prompt = f"""
     Get the user intent for the following content:\n{current_content} if the user intnet is to get help with an issue, return the json data with the following format:\n{{\"intent\": \"get_help\"}}\n if the inetent is to escalate the issue to L2 support, return the json data with the following format:\n{{\"intent\": \"escalate_to_l2\"}}\n if the intent is to get more information about the issue, return the json data with the following format:\n{{\"intent\": \"get_more_info\"}}\n if the intent is to close the issue, return the json data with the following format:\n{{\"intent\": \"close_issue\"}}"""
     intent_response = get_ai_response(intent_prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
-    
+    intent="get_help"
     try:
         match = re.search(r'\{.*\}', intent_response, re.DOTALL)
         status = None
