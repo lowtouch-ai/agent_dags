@@ -111,7 +111,7 @@ def get_email_thread(service, email_data, from_address):
             if not content.strip():
                 continue
             sender = headers.get("From", "").lower()
-            role = "user" if sender != from_address.lower() else "response"
+            role = "user" if sender != from_address.lower() else "assistant"
             conversation.append({
                 "role": role,
                 "content": content.strip()
@@ -138,11 +138,11 @@ def get_ai_response(prompt, conversation_history=None, stream=True,images=None):
         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'help-desk-agent:0.3'")
 
         # Build messages array with conversation history
-        messages = []
-        if conversation_history:
-            for history_item in conversation_history:
-                messages.append({"role": "user", "content": history_item["prompt"]})
-                messages.append({"role": "assistant", "content": history_item["response"]})
+        messages = conversation_history if conversation_history else []
+        # if conversation_history:
+        #     for history_item in conversation_history:
+        #         messages.append({"role": "user", "content": history_item["prompt"]})
+        #         messages.append({"role": "assistant", "content": history_item["response"]})
         user_message = {"role": "user", "content": prompt}
         if images:
             logging.info(f"Images provided: {len(images)}")
@@ -262,13 +262,14 @@ def step_1_process_email(ti, **context):
         }}
         ```
     """
-    intent_response = get_ai_response(intent_prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
+    intent_response = get_ai_response(prompt=intent_prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
     intent=None
     try:
         match = re.search(r'\{.*\}', intent_response, re.DOTALL)
         if match:
             result_json = json.loads(match.group())
             intent = result_json.get("intent", "")
+            logging.info(f"intent is {intent}")
             # raise Exception(f"step_1a_validate_feature_file failed: {response}")
     except Exception as e:
         logging.error(f"Error parsing validation response: {str(e)}")
@@ -333,7 +334,7 @@ def step_1_process_email(ti, **context):
         - Compose a professional and human-like business email in American English, written in the tone of an L1 support agent
         """
     # Get AI response with conversation history
-    response = get_ai_response(prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
+    response = get_ai_response(prompt=prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
     
     # Clean the HTML response
     cleaned_response = re.sub(r'```html\n|```', '', response).strip()
