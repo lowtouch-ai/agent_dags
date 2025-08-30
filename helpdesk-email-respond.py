@@ -46,53 +46,59 @@ def authenticate_gmail():
         logging.error(f"Failed to authenticate Gmail: {str(e)}")
         return None
 
-def decode_email_payload(msg):
+def decode_email_payload(email_msg: EmailMessage) -> str:
+    """Decode the email payload to extract the text content."""
     try:
-        if msg.is_multipart():
-            for part in msg.walk():
+        if email_msg.is_multipart():
+            for part in email_msg.walk():
                 content_type = part.get_content_type()
-                if content_type in ["text/plain", "text/html"]:
+                if content_type == "text/plain" or content_type == "text/html":
                     try:
-                        body = part.get_payload(decode=True).decode()
-                        return body
-                    except UnicodeDecodeError:
-                        body = part.get_payload(decode=True).decode('latin-1')
-                        return body
+                        content = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                        if content_type == "text/html":
+                            soup = BeautifulSoup(content, "html.parser")
+                            content = soup.get_text(separator=" ", strip=True)
+                        return content.strip()
+                    except Exception as e:
+                        logging.warning(f"Error decoding part: {str(e)}")
+                        continue
         else:
-            try:
-                body = msg.get_payload(decode=True).decode()
-                return body
-            except UnicodeDecodeError:
-                body = part.get_payload(decode=True).decode('latin-1')
-                return body
+            content = email_msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+            if email_msg.get_content_type() == "text/html":
+                soup = BeautifulSoup(content, "html.parser")
+                content = soup.get_text(separator=" ", strip=True)
+            return content.strip()
         return ""
     except Exception as e:
         logging.error(f"Error decoding email payload: {str(e)}")
         return ""
 
-def get_email_thread(service, email_data):
+def get_email_thread(service, email_data, from_address):
+    """Retrieve and format the email thread as a conversation list with user and response roles."""
     try:
         thread_id = email_data.get("threadId")
         message_id = email_data["headers"].get("Message-ID", "")
-        logging.info(f"Email data body is: {json.dumps(email_data, indent=2)}")
+        logging.info(f"Processing email thread for message ID: {message_id}")
+
         if not thread_id:
             query_result = service.users().messages().list(userId="me", q=f"rfc822msgid:{message_id}").execute()
             messages = query_result.get("messages", [])
             if messages:
                 message = service.users().messages().get(userId="me", id=messages[0]["id"]).execute()
                 thread_id = message.get("threadId")
-        
+
         if not thread_id:
             logging.warning(f"No thread ID found for message ID {message_id}. Treating as a single email.")
             raw_message = service.users().messages().get(userId="me", id=email_data["id"], format="raw").execute()
             msg = message_from_bytes(base64.urlsafe_b64decode(raw_message["raw"]))
-            return [{
-                "headers": {header["name"]: header["value"] for header in email_data.get("payload", {}).get("headers", [])},
-                "content": decode_email_payload(msg)
-            }]
+            content = decode_email_payload(msg)
+            headers = {header["name"]: header["value"] for header in email_data.get("payload", {}).get("headers", [])}
+            sender = headers.get("From", "").lower()
+            role = "user" if sender != from_address.lower() else "response"
+            return [{"role": role, "content": content.strip()}] if content.strip() else []
 
         thread = service.users().threads().get(userId="me", id=thread_id).execute()
-        email_thread = []
+        conversation = []
         for msg in thread.get("messages", []):
             raw_msg = base64.urlsafe_b64decode(msg["raw"]) if "raw" in msg else None
             if not raw_msg:
@@ -101,13 +107,19 @@ def get_email_thread(service, email_data):
             email_msg = message_from_bytes(raw_msg)
             headers = {header["name"]: header["value"] for header in msg.get("payload", {}).get("headers", [])}
             content = decode_email_payload(email_msg)
-            email_thread.append({
-                "headers": headers,
+            if not content.strip():
+                continue
+            sender = headers.get("From", "").lower()
+            role = "user" if sender != from_address.lower() else "response"
+            conversation.append({
+                "role": role,
                 "content": content.strip()
             })
-        email_thread.sort(key=lambda x: x["headers"].get("Date", ""), reverse=False)
-        logging.debug(f"Retrieved thread with {len(email_thread)} messages")
-        return email_thread
+
+        # Sort by date to ensure chronological order
+        conversation.sort(key=lambda x: headers.get("Date", ""), reverse=False)
+        logging.debug(f"Retrieved thread with {len(conversation)} messages")
+        return conversation
     except Exception as e:
         logging.error(f"Error retrieving email thread: {str(e)}")
         return []
@@ -187,7 +199,7 @@ def send_email(service, recipient, subject, body, in_reply_to, references):
         return None
 
 def step_1_process_email(ti, **context):
-    """Step 1: Process message from email with image attachment"""
+    """Step 1: Process message from email with image attachment and send conversation history."""
     email_data = context['dag_run'].conf.get("email_data", {})
     
     service = authenticate_gmail()
@@ -195,9 +207,24 @@ def step_1_process_email(ti, **context):
         logging.error("Gmail authentication failed, aborting.")
         return "Gmail authentication failed"
     
-    email_thread = get_email_thread(service, email_data)
+    # Retrieve the email thread with user/response roles
+    email_thread = get_email_thread(service, email_data, HELPDESK_FROM_ADDRESS)
     image_attachments = []
     
+
+    from_header = email_data["headers"].get("From", "Unknown <unknown@example.com>")
+    sender_name = "Unknown"
+    sender_email = "unknown@example.com"
+    name_email_match = re.match(r'^(.*?)\s*<(.*?@.*?)>$', from_header)
+    if name_email_match:
+        sender_name = name_email_match.group(1).strip() or "Unknown"
+        sender_email = name_email_match.group(2).strip()
+    elif re.match(r'^.*?@.*?$', from_header):
+        sender_email = from_header.strip()
+        sender_name = sender_email.split('@')[0]  # Fallback: use email prefix as name
+
+
+    # Collect image attachments
     if email_data.get("attachments"):
         logging.info(f"Number of attachments: {len(email_data['attachments'])}")
         for attachment in email_data["attachments"]:
@@ -205,80 +232,103 @@ def step_1_process_email(ti, **context):
                 image_attachments.append(attachment["base64_content"])
                 logging.info(f"Found base64 image attachment: {attachment['filename']}")
     
-    thread_history = ""
-    for idx, email in enumerate(email_thread, 1):
-        email_content = email.get("content", "").strip()
-        email_from = email["headers"].get("From", "Unknown")
-        email_date = email["headers"].get("Date", "Unknown date")
-        if email_content:
-            soup = BeautifulSoup(email_content, "html.parser")
-            email_content = soup.get_text(separator=" ", strip=True)
-        thread_history += f"Email {idx} (From: {email_from}, Date: {email_date}):\n{email_content}\n\n"
-    logging.info(f"Email thread history: {thread_history}...")
-    current_content = email_data.get("content", "").strip()
-    if current_content:
-        soup = BeautifulSoup(current_content, "html.parser")
-        current_content = soup.get_text(separator=" ", strip=True)
-    thread_history += f"Current Email (From: {email_data['headers'].get('From', 'Unknown')}):\n{current_content}\n"
-    
+    # Extract attachment content (e.g., from PDFs)
+    attachment_content = ""
     if email_data.get("attachments"):
-        attachment_content = ""
         for attachment in email_data["attachments"]:
             if "extracted_content" in attachment and "content" in attachment["extracted_content"]:
                 attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
-        thread_history += f"\n{attachment_content}" if attachment_content else ""
     
-    prompt = f"""
-    # Your task
-    - extract the content from the image and review the content and provide the report in the bellow ourtput format. user query: \n{thread_history}
-    - Compose a professional and human-like business email in American English, written in the tone of a L1 support agent,analysis of the problem, possible root causes, and suggested solution steps.
-    - **DO NOT ESCALATE THE ISSUE TO L2 SUPPORT.** Provide a thorough analysis and actionable steps to resolve the issue at the L1 level.
-       
-        - The email should be concise, clear, and easy to understand for a non-technical audience
-        - The email should be having a polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
-        - Use only clean, valid HTML for the email body without any section headers. Avoid technical or template-style formatting and placeholders. The email should read as if it was personally written.
+    # Prepare conversation history (previous emails) and current content
+    conversation_history = email_thread[:-1] if email_thread else []  # All but the last message
+    current_content = email_thread[-1]["content"] if email_thread else email_data.get("content", "").strip()
+    logging.info(f"Current content is {current_content}")
+    logging.info(f"Conversation history is {conversation_history}")
+    # Clean current content if it exists
+    if current_content:
+        soup = BeautifulSoup(current_content, "html.parser")
+        current_content = soup.get_text(separator=" ", strip=True)
+    
+    # Append attachment content to the current content (prompt)
+    if attachment_content:
+        current_content += f"\n{attachment_content}"
+    intent_prompt = f"""
+    Get the user intent for the following content:\n{current_content} if the user intnet is to get help with an issue, return the json data with the following format:\n{{\"intent\": \"get_help\"}}\n if the inetent is to escalate the issue to L2 support, return the json data with the following format:\n{{\"intent\": \"escalate_to_l2\"}}\n if the intent is to get more information about the issue, return the json data with the following format:\n{{\"intent\": \"get_more_info\"}}\n if the intent is to close the issue, return the json data with the following format:\n{{\"intent\": \"close_issue\"}}"""
+    intent_response = get_ai_response(prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
+    
+    try:
+        match = re.search(r'\{.*\}', intent_response, re.DOTALL)
+        status = None
+        if match:
+            result_json = json.loads(match.group())
+            intent = result_json.get("intent", "")
+        if intent and status.lower() == "failure":
+            logging.error(f"Step 6a failed: {intent_response}")
+            # raise Exception(f"step_1a_validate_feature_file failed: {response}")
+    except Exception as e:
+        logging.error(f"Error parsing validation response: {str(e)}")
+
+
+    if intent.lower() == "escalate_to_l2":
+        prompt = f"""
+        The user has requested to escalate the issue to L2 support. So 
+        - User query: \n{current_content}
+        - Sender Name: {sender_name}
+        - Sender Email: {sender_email}
+        escalate the issue to L2 support without asking for conformation. Extract the relavent information from the email and if more information is needed, ask the user for more information. If the user has provided enough information, escalate the issue to L2 support. 
+        """
+    # Construct the prompt for AI
+    if intent.lower() == "get_help":
+        prompt = f"""
+        # Your task
+        - Extract the content from the provided conversation and attachments, review the content, and provide a report in the output format below.
+        - User query: \n{current_content}
+        - Compose a professional and human-like business email in American English, written in the tone of an L1 support agent, including analysis of the problem, possible root causes, and suggested solution steps.
+        - **DO NOT ESCALATE THE ISSUE TO L2 SUPPORT.** Provide a thorough analysis and actionable steps to resolve the issue at the L1 level.
+        - The email should be concise, clear, and easy to understand for a non-technical audience.
+        - The email should include a polite closing paragraph offering further assistance, mentioning the contact email helpdeskagent-9228@lowtouch.ai.
+        - Use only clean, valid HTML for the email body without any section headers in the content (except as specified in the format). Avoid technical or template-style formatting and placeholders. The email should read as if it was personally written.
         - Return only the HTML body, and nothing else.
-        - strictluy use the following outptut format, do not deviate from this
-    # **outptut format**
+        - Strictly use the following output format, do not deviate from this.
+
+        # **output format**
         ```html
         <!DOCTYPE html>
         <html lang="en">
         <head>
             <meta charset="UTF-8">
-            
             <title>Problem Analysis Email</title>
-            
         </head>
         <body>
             <div class="container">
-                
                 <p>Dear sender_name,</p>
                 <p>Please find below the detailed analysis of the issue, including potential root causes and suggested steps for resolution.</p>
-
                 <h2>Analysis of the Problem</h2>
                 <p>...</p>
-
                 <h2>Possible Root Causes</h2>
                 <p>...</p>
-
                 <h2>Suggested Solution Steps</h2>
                 <p>...</p>
-
                 <p>Thank you for your attention to this matter. Please let me know if you need further details or assistance in implementing the suggested solutions.</p>
-
                 <div class="footer">
                     <p>Best regards,</p>
-                    <p>Help desk suport</p>
+                    <p>Help Desk Support</p>
+                    <p>Contact: <a href="mailto:helpdeskagent-9228@lowtouch.ai">helpdeskagent-9228@lowtouch.ai</a></p>
                 </div>
             </div>
         </body>
         </html>
         ```
-    """
+        """
+    else:
+        prompt = f"""
+        - Extract the content from the provided conversation and attachments, review the content, and provide a report in the output format below.
+        - User query: \n{current_content}
+        - Compose a professional and human-like business email in American English, written in the tone of an L1 support agent
+        """
+    # Get AI response with conversation history
+    response = get_ai_response(prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
     
-    response = get_ai_response(prompt, images=image_attachments if image_attachments else None)
-    
-    # response = get_ai_response(prompt, conversation_history=history)
     # Clean the HTML response
     cleaned_response = re.sub(r'```html\n|```', '', response).strip()
     
@@ -286,11 +336,11 @@ def step_1_process_email(ti, **context):
         if not cleaned_response.strip().startswith('<'):
             cleaned_response = f"<html><body>{cleaned_response}</body></html>"
     
-    # ti.xcom_push(key="conversation_history", value=history)
+    # Push the cleaned response to XCom
     ti.xcom_push(key="final_html_content", value=cleaned_response)
     
-    logging.info(f"Step 1 completed: {response[:200]}...")
-    return response
+    logging.info(f"Step 1 completed: {cleaned_response[:200]}...")
+    return cleaned_response
 
 
 
