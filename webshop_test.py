@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import pendulum
 import requests
 import os
+import re
 
 # Set IST timezone
 ist = pendulum.timezone("Asia/Kolkata")
@@ -14,7 +15,7 @@ ist = pendulum.timezone("Asia/Kolkata")
 api_token = Variable.get("API_TOKEN")
 api_url = Variable.get("API_URL")
 slack_webhook = Variable.get("SLACK_WEBHOOK_URL")  # add webhook as Airflow Variable
-server_name = Variable.get("SERVER") 
+server_name = Variable.get("SERVER")  
 
 default_args = {
     'owner': 'airflow',
@@ -27,7 +28,29 @@ default_args = {
 def slack_alert(**context):
     """Send Slack alert if mvn test failed"""
     if os.path.exists("/tmp/mvn_failed.flag"):
-        msg = f":x: Test failed in DAG *{context['dag'].dag_id}* in SERVER {server_name}"
+        failed_prompts = []
+        reports_dir = "/appz/home/airflow/dags/agent_dags/WebshopChatAPIAutomation"
+        try:
+            for f in os.listdir(reports_dir):
+                if f.startswith("failed_tests_") and f.endswith(".txt"):
+                    with open(os.path.join(reports_dir, f), "r", encoding="utf-8", errors="ignore") as fh:
+                        content = fh.read()
+                        matches = re.findall(r"Prompt FAILED:\s*(.*)", content)
+                        if matches:
+                            failed_prompts.extend(matches)
+                    break  # only check latest file
+        except Exception as e:
+            failed_prompts = [f"Could not parse failed prompt ({e})"]
+
+        if failed_prompts:
+            failed_text = "\n• " + "\n• ".join(failed_prompts)
+        else:
+            failed_text = "Unknown"
+
+        msg = (
+            f":x: Test failed in DAG *{context['dag'].dag_id}* in SERVER {server_name}\n"
+            f"*Failed Prompts:*{failed_text}"
+        )
         requests.post(slack_webhook, json={"text": msg})
     else:
         print("No Maven failures detected, skipping Slack alert.")
