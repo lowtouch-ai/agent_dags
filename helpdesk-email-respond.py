@@ -201,7 +201,7 @@ def send_email(service, recipient, subject, body, in_reply_to, references):
 
 def step_1_process_email(ti, **context):
     """Step 1: Process message from email with image attachment and send conversation history."""
-    email_data = context['dag_run'].conf.get("thread_data", {})
+    email_data = context['dag_run'].conf.get("email_data", {})
     
     service = authenticate_gmail()
     if not service:
