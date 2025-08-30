@@ -53,7 +53,7 @@ with DAG(
     slack_notify = PythonOperator(
         task_id="slack_notify",
         python_callable=slack_alert,
-        provide_context=True,
+        provide_context=False,
     )
 
     run_mvn_test >> slack_notify
