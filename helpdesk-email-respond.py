@@ -254,7 +254,7 @@ def step_1_process_email(ti, **context):
     if attachment_content:
         current_content += f"\n{attachment_content}"
     intent_prompt = f"""
-    Get the user intent for the following content:\n{current_content} if the user intnet is to get help with an issue, return the json data with the following format:\n{{\"intent\": \"get_help\"}}\n if the inetent is to escalate the issue to L2 support, return the json data with the following format:\n{{\"intent\": \"escalate_to_l2\"}}\n if the intent is to get more information about the issue, return the json data with the following format:\n{{\"intent\": \"get_more_info\"}}\n if the intent is to close the issue, return the json data with the following format:\n{{\"intent\": \"close_issue\"}}
+    Get the user intent for the following content:\n{current_content} if the user intent is to get help with an issue, return the json data with the following format:\n{{\"intent\": \"get_help\"}}\n if the inetent is to escalate the issue to L2 support, return the json data with the following format:\n{{\"intent\": \"escalate_to_l2\"}}\n if the intent is to get more information about the issue, return the json data with the following format:\n{{\"intent\": \"get_more_info\"}}\n if the intent is to close the issue, return the json data with the following format:\n{{\"intent\": \"close_issue\"}}
     ## output format
         ```json
         {{
@@ -275,7 +275,7 @@ def step_1_process_email(ti, **context):
 
     prompt= f"User query: \n{current_content}"
     
-    if intnet and  intent.lower() == "escalate_to_l2":
+    if intent and  intent.lower() == "escalate_to_l2":
         prompt = f"""
         The user has requested to escalate the issue to L2 support. So 
         - User query: \n{current_content}
