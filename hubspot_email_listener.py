@@ -257,10 +257,10 @@ def fetch_unread_emails(**kwargs):
 
     # FIX 2: Add more specific query to avoid edge cases
     query = f"is:unread after:{last_checked_seconds}"
-
+    
     logging.info(f"Using query: {query}")
     logging.info(f"Last checked timestamp: {last_checked_timestamp} (converted: {last_checked_seconds})")
-
+    
     try:
         results = service.users().messages().list(userId="me", labelIds=["INBOX"], q=query).execute()
         messages = results.get("messages", [])
@@ -268,7 +268,7 @@ def fetch_unread_emails(**kwargs):
         logging.error(f"Error fetching messages: {e}")
         kwargs['ti'].xcom_push(key="unread_emails", value=[])
         return []
-
+    
     unread_emails = []
     max_timestamp = last_checked_timestamp
     thread_context = get_thread_context()
@@ -277,49 +277,49 @@ def fetch_unread_emails(**kwargs):
         thread_context = {}
     logging.info(f"Thread context type: {type(thread_context)}, value: {thread_context}")
     logging.info(f"Current thread contexts: {list(thread_context.keys())}")
-
+    
     # FIX 3: Track processed message IDs to avoid duplicates within same run
     processed_message_ids = set()
-
+    
     logging.info(f"Found {len(messages)} unread messages to process")
     logging.info(f"Current thread contexts: {list(thread_context.keys())}")
-
+    
     for msg in messages:
         msg_id = msg["id"]
-
+        
         # FIX 4: Skip if already processed in this run
         if msg_id in processed_message_ids:
             logging.info(f"Skipping already processed message in this run: {msg_id}")
             continue
-
+            
         try:
             msg_data = service.users().messages().get(userId="me", id=msg_id).execute()
         except Exception as e:
             logging.error(f"Error fetching message {msg_id}: {e}")
             continue
-
+            
         headers = {h["name"]: h["value"] for h in msg_data["payload"]["headers"]}
         sender = headers.get("From", "").lower()
         timestamp = int(msg_data["internalDate"])
         thread_id = msg_data.get("threadId", "")
-
+        
         logging.info(f"Processing message ID: {msg_id}, From: {sender}, Timestamp: {timestamp}, Thread ID: {thread_id}")
-
+        
         # FIX 5: More precise timestamp filtering to prevent reprocessing
         if timestamp <= last_checked_timestamp:
             logging.info(f"Skipping message {msg_id} - timestamp {timestamp} <= last_checked {last_checked_timestamp}")
             continue
-
+        
         # Skip no-reply emails and old emails
         if "no-reply" in sender:
             logging.info(f"Skipping no-reply email from: {sender}")
             continue
-
+        
         # Skip emails from our own bot to avoid loops
         if sender == HUBSPOT_FROM_ADDRESS.lower():
             logging.info(f"Skipping email from bot itself: {sender}")
             continue
-
+            
         email_object = {
             "id": msg_id,
             "threadId": thread_id,
@@ -327,34 +327,34 @@ def fetch_unread_emails(**kwargs):
             "content": msg_data.get("snippet", ""),
             "timestamp": timestamp
         }
-
+        
         # Reply detection logic (keeping the existing sophisticated logic)
         is_reply = False
         thread_context_data = {}
-
+        
         if thread_id:
             thread_context_data = thread_context.get(thread_id, {})
-
+            
             # Check email headers for reply indicators
             subject = headers.get("Subject", "")
             in_reply_to = headers.get("In-Reply-To", "")
             references = headers.get("References", "")
-
+            
             # Multiple ways to detect replies
             is_subject_reply = subject.lower().startswith("re:")
             has_reply_headers = bool(in_reply_to or references)
-
+            
             # Context-based detection
             has_confirmation_sent = thread_context_data.get("confirmation_sent", False)
             is_awaiting_reply = thread_context_data.get("awaiting_reply", False)
-
+            
             # Reply detection logic
             context_based_reply = has_confirmation_sent and is_awaiting_reply and (is_subject_reply or has_reply_headers)
             stored_context_reply = (is_subject_reply or has_reply_headers) and thread_id in thread_context
             fallback_header_reply = is_subject_reply or has_reply_headers
-
+            
             is_reply = context_based_reply or stored_context_reply or fallback_header_reply
-
+            
             logging.info(f"Thread {thread_id} analysis:")
             logging.info(f"  - has_confirmation_sent: {has_confirmation_sent}")
             logging.info(f"  - is_awaiting_reply: {is_awaiting_reply}")
@@ -363,17 +363,17 @@ def fetch_unread_emails(**kwargs):
             logging.info(f"  - FINAL is_reply: {is_reply}")
         else:
             logging.info(f"No thread_id for message {msg_id}")
-
+        
         email_object["is_reply"] = is_reply
         email_object["thread_context"] = thread_context_data
-
+        
         unread_emails.append(email_object)
         processed_message_ids.add(msg_id)  # FIX 6: Track processed IDs
-
+        
         # FIX 7: Update max_timestamp properly
         if timestamp > max_timestamp:
             max_timestamp = timestamp
-
+            
     # FIX 8: Always update timestamp, even if no new emails (prevents stuck state)
     if messages:  # Only update if there were messages to process
         # Add small buffer to prevent boundary issues
@@ -382,10 +382,10 @@ def fetch_unread_emails(**kwargs):
         logging.info(f"Updated last checked timestamp to: {update_timestamp}")
     else:
         logging.info("No messages found, timestamp unchanged")
-
+        
     kwargs['ti'].xcom_push(key="unread_emails", value=unread_emails)
     logging.info(f"Final results: {len(unread_emails)} unread emails, {sum(1 for e in unread_emails if e['is_reply'])} are replies")
-
+    
     return unread_emails
 
 
@@ -414,14 +414,14 @@ def update_last_checked_timestamp_safe(timestamp):
         if not timestamp or timestamp <= 0:
             logging.error(f"Invalid timestamp provided: {timestamp}")
             return False
-
+            
         # Ensure timestamp is reasonable (not too far in future)
         import time
         current_time = int(time.time() * 1000)
         if timestamp > current_time + 3600000:  # More than 1 hour in future
             logging.warning(f"Timestamp {timestamp} seems too far in future, using current time")
             timestamp = current_time
-
+            
         update_last_checked_timestamp(timestamp)
         logging.info(f"Successfully updated timestamp to: {timestamp}")
         return True
@@ -446,31 +446,31 @@ def mark_message_as_read(service, message_id):
 def branch_function(**kwargs):
     ti = kwargs['ti']
     unread_emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="unread_emails")
-
+    
     if not unread_emails:
         logging.info("No unread emails found, proceeding to no_email_found_task.")
         return "no_email_found_task"
-
+    
     # Separate replies from new emails
     replies = [email for email in unread_emails if email.get("is_reply", False)]
     new_emails = [email for email in unread_emails if not email.get("is_reply", False)]
-
+    
     logging.info(f"Email classification: {len(replies)} replies, {len(new_emails)} new emails")
-
+    
     # Process replies first - they have higher priority
     if replies:
         logging.info(f"Found {len(replies)} replies, triggering continuation DAG")
         # Store only replies for processing
         ti.xcom_push(key="reply_emails", value=replies)
         return "trigger_continuation_dag"
-
+    
     # If no replies, process new meeting minutes requests
     if new_emails:
         logging.info(f"Found {len(new_emails)} new emails, proceeding to trigger meeting minutes tasks")
         # Store only new emails for processing
         ti.xcom_push(key="new_emails", value=new_emails)
         return "trigger_meeting_minutes"
-
+    
     logging.info("No actionable emails found, proceeding to no_email_found_task")
     return "no_email_found_task"
 
@@ -478,11 +478,11 @@ def trigger_meeting_minutes(**kwargs):
     ti = kwargs['ti']
     # Get new emails from branch function
     new_emails = ti.xcom_pull(task_ids="branch_task", key="new_emails") or []
-
+    
     if not new_emails:
         logging.info("No new emails to process for meeting minutes")
         return
-
+    
     for email in new_emails:
         task_id = f"trigger_response_{email['id'].replace('-', '_')}"
         trigger_task = TriggerDagRunOperator(
@@ -491,14 +491,14 @@ def trigger_meeting_minutes(**kwargs):
             conf={"email_data": email},
         )
         trigger_task.execute(context=kwargs)
-
+    
     logging.info(f"Triggered meeting minutes search for {len(new_emails)} new emails")
 
 def trigger_continuation_dag(**kwargs):
     ti = kwargs['ti']
     reply_emails = ti.xcom_pull(task_ids="branch_task", key="reply_emails") or []
     unread_emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="unread_emails") or []
-
+    
     if not reply_emails:
         logging.info("No reply emails to process for continuation")
         return
@@ -509,12 +509,12 @@ def trigger_continuation_dag(**kwargs):
         return
 
     thread_context = get_thread_context()
-
+    
     for email in reply_emails:
         reply_thread_id = email["threadId"]
         reply_message_id = email["headers"].get("Message-ID", "")
         reply_references = email["headers"].get("References", "")
-
+        
         # Find the original thread_id by matching References or Message-ID
         original_thread_id = None
         for thread_id, context in thread_context.items():
@@ -526,7 +526,7 @@ def trigger_continuation_dag(**kwargs):
                (reply_message_id and reply_message_id in stored_references):
                 original_thread_id = thread_id
                 break
-
+        
         if not original_thread_id:
             logging.error(f"No matching thread context found for reply email {email['id']} with threadId={reply_thread_id}")
             logging.info(f"Reply email References: {reply_references}")
@@ -539,21 +539,21 @@ def trigger_continuation_dag(**kwargs):
             else:
                 logging.error(f"Failed to fetch thread history for reply email {email['id']}")
                 continue
-
+        
         logging.info(f"Matched reply email {email['id']} to original thread_id={original_thread_id} (reply threadId={reply_thread_id})")
-
+        
         # Retrieve stored context for the original thread_id
         stored_context = thread_context.get(original_thread_id, {})
         if not stored_context:
             logging.error(f"No stored context found for original thread_id={original_thread_id}")
             continue
-
+        
         # Retrieve thread history
         full_thread_history = stored_context.get("thread_history", [])
         if not full_thread_history:
             logging.info(f"No stored thread history for thread {original_thread_id}, fetching from Gmail API")
             full_thread_history = get_email_thread(service, email)
-
+        
         if not full_thread_history:
             logging.error(f"Failed to fetch thread history for thread {original_thread_id}")
             continue
@@ -591,7 +591,7 @@ def trigger_continuation_dag(**kwargs):
             conf=continuation_conf,
         )
         trigger_task.execute(context=kwargs)
-
+        
         logging.info(f"Triggered continuation DAG for thread {original_thread_id}")
 
     logging.info(f"Triggered continuation for {len(reply_emails)} reply emails")
