@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import re
+from email.message import EmailMessage  # Add this import
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
@@ -14,6 +15,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import os
+from email.utils import parsedate_to_datetime
 
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,6 +30,8 @@ default_args = {
 
 ODOO_FROM_ADDRESS = Variable.get("INVOFLUX_FROM_ADDRESS")
 GMAIL_CREDENTIALS = Variable.get("INVOFLUX_GMAIL_CREDENTIALS")
+LAST_PROCESSED_EMAIL_FILE = "/appz/cache/last_processed_email.json"
+ATTACHMENT_DIR = "/appz/data/attachments/"
 OLLAMA_HOST = "http://agentomatic:8000/"
 
 def authenticate_gmail():
@@ -68,44 +72,73 @@ def decode_email_payload(msg):
         logging.error(f"Error decoding email payload: {str(e)}")
         return ""
 
-def get_email_thread(service, email_data):
+def get_email_thread(service, email_data, from_address):
+    """Retrieve and format the email thread as a conversation list with user and response roles."""
     try:
         thread_id = email_data.get("threadId")
         message_id = email_data["headers"].get("Message-ID", "")
-        
+        logging.info(f"Processing email thread for message ID: {message_id}")
+
         if not thread_id:
             query_result = service.users().messages().list(userId="me", q=f"rfc822msgid:{message_id}").execute()
             messages = query_result.get("messages", [])
             if messages:
                 message = service.users().messages().get(userId="me", id=messages[0]["id"]).execute()
                 thread_id = message.get("threadId")
-        
+
         if not thread_id:
             logging.warning(f"No thread ID found for message ID {message_id}. Treating as a single email.")
             raw_message = service.users().messages().get(userId="me", id=email_data["id"], format="raw").execute()
             msg = message_from_bytes(base64.urlsafe_b64decode(raw_message["raw"]))
-            return [{
-                "headers": {header["name"]: header["value"] for header in email_data.get("payload", {}).get("headers", [])},
-                "content": decode_email_payload(msg)
-            }]
+            content = decode_email_payload(msg)
+            headers = {header["name"]: header["value"] for header in email_data.get("payload", {}).get("headers", [])}
+            sender = headers.get("From", "").lower()
+            role = "user" if sender != from_address.lower() else "assistant"
+            return [{"role": role, "content": content.strip()}] if content.strip() else []
 
         thread = service.users().threads().get(userId="me", id=thread_id).execute()
-        email_thread = []
+        conversation = []
+        logging.info(f"Retrieved thread with ID: {thread_id} containing {len(thread.get('messages', []))} messages")
+        messages_with_dates = []
         for msg in thread.get("messages", []):
             raw_msg = base64.urlsafe_b64decode(msg["raw"]) if "raw" in msg else None
             if not raw_msg:
                 raw_message = service.users().messages().get(userId="me", id=msg["id"], format="raw").execute()
                 raw_msg = base64.urlsafe_b64decode(raw_message["raw"])
+            
             email_msg = message_from_bytes(raw_msg)
             headers = {header["name"]: header["value"] for header in msg.get("payload", {}).get("headers", [])}
             content = decode_email_payload(email_msg)
-            email_thread.append({
-                "headers": headers,
-                "content": content.strip()
+            
+            if not content.strip():
+                continue
+                
+            sender = headers.get("From", "").lower()
+            role = "user" if sender != from_address.lower() else "assistant"
+            date_str = headers.get("Date", "")
+            
+            messages_with_dates.append({
+                "role": role,
+                "content": content.strip(),
+                "date": date_str,
+                "message_id": headers.get("Message-ID", "")
             })
-        email_thread.sort(key=lambda x: x["headers"].get("Date", ""), reverse=False)
-        logging.debug(f"Retrieved thread with {len(email_thread)} messages")
-        return email_thread
+
+        try:
+            messages_with_dates.sort(key=lambda x: parsedate_to_datetime(x["date"]) if x["date"] else datetime.min)
+        except Exception as e:
+            logging.warning(f"Error sorting by date, using original order: {str(e)}")
+        
+        for msg in messages_with_dates:
+            conversation.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+
+        logging.info(f"Retrieved complete thread with {len(conversation)} messages")
+        logging.info(f"Full conversation {conversation}")
+        return conversation
+        
     except Exception as e:
         logging.error(f"Error retrieving email thread: {str(e)}")
         return []
@@ -123,8 +156,11 @@ def get_ai_response(prompt, images=None, conversation_history=None):
         messages = []
         if conversation_history:
             for history_item in conversation_history:
-                messages.append({"role": "user", "content": history_item["prompt"]})
-                messages.append({"role": "assistant", "content": history_item["response"]})
+                # Handle email thread history format
+                messages.append({
+                    "role": history_item["role"],
+                    "content": history_item["content"]
+                })
         
         user_message = {"role": "user", "content": prompt}
         if images:
@@ -192,9 +228,21 @@ def step_1_process_email(ti, **context):
         logging.error("Gmail authentication failed, aborting.")
         return "Gmail authentication failed"
     
-    email_thread = get_email_thread(service, email_data)
+    complete_email_thread = get_email_thread(service, email_data,ODOO_FROM_ADDRESS)
     image_attachments = []
     
+    from_header = email_data["headers"].get("From", "Unknown <unknown@example.com>")
+    sender_name = "Unknown"
+    sender_email = "unknown@example.com"
+    name_email_match = re.match(r'^(.*?)\s*<(.*?@.*?)>$', from_header)
+    if name_email_match:
+        sender_name = name_email_match.group(1).strip() or "Unknown"
+        sender_email = name_email_match.group(2).strip()
+    elif re.match(r'^.*?@.*?$', from_header):
+        sender_email = from_header.strip()
+        sender_name = sender_email.split('@')[0]
+
+    # Collect image attachments
     if email_data.get("attachments"):
         logging.info(f"Number of attachments: {len(email_data['attachments'])}")
         for attachment in email_data["attachments"]:
@@ -202,59 +250,75 @@ def step_1_process_email(ti, **context):
                 image_attachments.append(attachment["base64_content"])
                 logging.info(f"Found base64 image attachment: {attachment['filename']}")
     
-    thread_history = ""
-    for idx, email in enumerate(email_thread, 1):
-        email_content = email.get("content", "").strip()
-        email_from = email["headers"].get("From", "Unknown")
-        email_date = email["headers"].get("Date", "Unknown date")
-        if email_content:
-            soup = BeautifulSoup(email_content, "html.parser")
-            email_content = soup.get_text(separator=" ", strip=True)
-        thread_history += f"Email {idx} (From: {email_from}, Date: {email_date}):\n{email_content}\n\n"
-    
-    current_content = email_data.get("content", "").strip()
-    if current_content:
-        soup = BeautifulSoup(current_content, "html.parser")
-        current_content = soup.get_text(separator=" ", strip=True)
-    thread_history += f"Current Email (From: {email_data['headers'].get('From', 'Unknown')}):\n{current_content}\n"
-    
+    # Extract attachment content (e.g., from PDFs)
+    attachment_content = ""
     if email_data.get("attachments"):
-        attachment_content = ""
         for attachment in email_data["attachments"]:
             if "extracted_content" in attachment and "content" in attachment["extracted_content"]:
                 attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
-        thread_history += f"\n{attachment_content}" if attachment_content else ""
     
-    prompt = f"extract the invoice and prepare for system entry :\n\n{thread_history} \n\n Note : Here Extract the invoice details from the Image is enough and ask for confirmation"
+    # ADDED: Split thread into history and current content
+    if len(complete_email_thread) > 1:
+        conversation_history = complete_email_thread[:-1]  # All previous messages
+        current_content = complete_email_thread[-1]["content"]  # Current message
+    else:
+        conversation_history = []  # No previous conversation
+        current_content = complete_email_thread[0]["content"] if complete_email_thread else email_data.get("content", "").strip()
     
-    response = get_ai_response(prompt, images=image_attachments if image_attachments else None)
+    # ADDED: Log conversation history
+    logging.info(f"Complete conversation history contains {len(conversation_history)} messages")
+    logging.info(f"Current content: {current_content}...")
+    for i, msg in enumerate(conversation_history[:3]):  # Log first 3 for brevity
+        logging.info(f"History message {i+1}: Role={msg['role']}, Content={msg['content'][:100]}...")
     
+    # ADDED: Clean current content
+    if current_content:
+        soup = BeautifulSoup(current_content, "html.parser")
+        current_content = soup.get_text(separator=" ", strip=True)
+    
+    # ADDED: Append attachment content to current content
+    if attachment_content:
+        current_content += f"\n{attachment_content}"
+
+    logging.info(f"final current content: {current_content}")
+
+    prompt = f"Extract the invoice and prepare for system entry:\n\n{current_content}\n\nNote: Extract the invoice details from the image is enough and ask for confirmation"
+
+    logging.info(f"Final prompt to AI: {prompt}...")
+    
+    response = get_ai_response(prompt, images=image_attachments if image_attachments else None, conversation_history=conversation_history)
+
     ti.xcom_push(key="step_1_prompt", value=prompt)
     ti.xcom_push(key="step_1_response", value=response)
-    ti.xcom_push(key="conversation_history", value=[{"prompt": prompt, "response": response}])
+    ti.xcom_push(key="conversation_history", value=conversation_history + [{"role": "user", "content": prompt}, {"role": "assistant", "content": response}])
     
     logging.info(f"Step 1 completed: {response[:200]}...")
     return response
 
 def step_2_create_vendor_bill(ti, **context):
     """Step 2: Extract and prepare for system entry"""
-    history = ti.xcom_pull(key="conversation_history")
+    step_1_response = ti.xcom_pull(key="step_1_response")
     
     prompt = "Create the Vendor bill"
     
+    # Pass only the previous step's response as history
+    history = [{"role": "assistant", "content": step_1_response}] if step_1_response else []
     response = get_ai_response(prompt, conversation_history=history)
     
-    history.append({"prompt": prompt, "response": response})
+    # Append to history for consistency with downstream tasks
+    full_history = ti.xcom_pull(key="conversation_history") or []
+    full_history.append({"role": "user", "content": prompt})
+    full_history.append({"role": "assistant", "content": response})
     ti.xcom_push(key="step_2_prompt", value=prompt)
     ti.xcom_push(key="step_2_response", value=response)
-    ti.xcom_push(key="conversation_history", value=history)
+    ti.xcom_push(key="conversation_history", value=full_history)
     
     logging.info(f"Step 2 completed: {response[:200]}...")
     return response
 
 def step_3_compose_email(ti, **context):
     """Step 3: Create the vendor bill"""
-    history = ti.xcom_pull(key="conversation_history")
+    step_2_response = ti.xcom_pull(key="step_2_response")
     
     prompt = """
         Compose a professional and human-like business email in American English, written in the tone of a senior Customer Success Manager, to notify a vendor about the outcome of an invoice submission (Posted, Draft, or Failed).
@@ -271,7 +335,8 @@ def step_3_compose_email(ti, **context):
         Use only clean, valid HTML for the email body without any section headers (e.g., no 'Status-Based Message', 'Invoice Summary', or 'Validation Issues Identified'). Avoid technical or template-style formatting and placeholders (e.g., '[Invoice Number]'). The email should read as if it was personally written.
         Return only the HTML body, and nothing else.
     """
-    
+    # Pass only the previous step's response as history
+    history = [{"role": "assistant", "content": step_2_response}] if step_2_response else []
     response = get_ai_response(prompt, conversation_history=history)
     # Clean the HTML response
     cleaned_response = re.sub(r'```html\n|```', '', response).strip()
@@ -280,10 +345,13 @@ def step_3_compose_email(ti, **context):
         if not cleaned_response.strip().startswith('<'):
             cleaned_response = f"<html><body>{cleaned_response}</body></html>"
     
-    history.append({"prompt": prompt, "response": response})
+    # Append to history for consistency with downstream tasks
+    full_history = ti.xcom_pull(key="conversation_history") or []
+    full_history.append({"role": "user", "content": prompt})
+    full_history.append({"role": "assistant", "content": response})
     ti.xcom_push(key="step_3_prompt", value=prompt)
     ti.xcom_push(key="step_3_response", value=response)
-    ti.xcom_push(key="conversation_history", value=history)
+    ti.xcom_push(key="conversation_history", value=full_history)
     ti.xcom_push(key="final_html_content", value=cleaned_response)
     
     logging.info(f"Step 3 completed: {response[:200]}...")
