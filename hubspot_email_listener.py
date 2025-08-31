@@ -177,7 +177,7 @@ def get_email_thread(service, email_data):
             thread = thread_request.execute()
             messages = thread.get("messages", [])
             email_thread.extend(messages)
-
+            
             page_token = thread.get("nextPageToken")
             if not page_token:
                 break
@@ -207,7 +207,7 @@ def get_email_thread(service, email_data):
 
         # Sort by timestamp (ascending) to ensure correct conversation order
         processed_thread.sort(key=lambda x: x.get("timestamp", 0))
-
+        
         # Log thread details for debugging
         logging.info(f"Retrieved thread {thread_id} with {len(processed_thread)} messages")
         for idx, email in enumerate(processed_thread, 1):
@@ -249,9 +249,9 @@ def fetch_unread_emails(**kwargs):
         logging.error("Gmail authentication failed, skipping email fetch.")
         kwargs['ti'].xcom_push(key="unread_emails", value=[])
         return []
-
+    
     last_checked_timestamp = get_last_checked_timestamp()
-
+    
     # FIX 1: Use proper timestamp format for Gmail API (seconds, not milliseconds)
     last_checked_seconds = last_checked_timestamp // 1000 if last_checked_timestamp > 1000000000000 else last_checked_timestamp
 
