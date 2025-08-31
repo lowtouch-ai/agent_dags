@@ -254,7 +254,7 @@ def fetch_unread_emails(**kwargs):
     
     # FIX 1: Use proper timestamp format for Gmail API (seconds, not milliseconds)
     last_checked_seconds = last_checked_timestamp // 1000 if last_checked_timestamp > 1000000000000 else last_checked_timestamp
-
+    
     # FIX 2: Add more specific query to avoid edge cases
     query = f"is:unread after:{last_checked_seconds}"
     
