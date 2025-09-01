@@ -382,7 +382,7 @@ def step_1_process_email(ti, **context):
     response = get_ai_response(prompt=prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
     
     # Clean the HTML response
-    cleaned_response = re.sub(r'```html\n|```', '', response).strip()
+    cleaned_response = re.search(r'```html.*?\n(.*?)```', res, re.DOTALL)
     
     if not cleaned_response.strip().startswith('<!DOCTYPE') and not cleaned_response.strip().startswith('<html'):
         if not cleaned_response.strip().startswith('<'):
@@ -391,7 +391,7 @@ def step_1_process_email(ti, **context):
     # Push the cleaned response to XCom
     ti.xcom_push(key="final_html_content", value=cleaned_response)
     
-    logging.info(f"Step 1 completed with full conversation history: {cleaned_response[:200]}...")
+    # logging.info(f"Step 1 completed with full conversation history: {cleaned_response[:200]}...")
     return cleaned_response
 
 
