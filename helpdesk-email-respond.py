@@ -376,14 +376,24 @@ def step_1_process_email(ti, **context):
         - User query: \n{current_content}
         - You have access to the complete conversation history from the beginning of this thread
         - Compose a professional and human-like business email in American English, written in the tone of an L1 support agent
+         ## output format
+        - the output should be in html 
         """
     
     # CHANGED: Pass the COMPLETE conversation history to the AI agent
     response = get_ai_response(prompt=prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
     
     # Clean the HTML response
-    cleaned_response = re.search(r'```html.*?\n(.*?)```', response, re.DOTALL).group(1).strip()
-    
+    # Extract HTML block if present
+    match = re.search(r'```html.*?\n(.*?)```', response, re.DOTALL)
+    cleaned_response = ""
+    if match:
+        cleaned_response = match.group(1).strip()
+    else:
+        # No HTML code block found, use response directly
+        cleaned_response = response.strip()
+
+    # Ensure it has valid HTML tags, otherwise wrap it
     if not cleaned_response.strip().startswith('<!DOCTYPE') and not cleaned_response.strip().startswith('<html'):
         if not cleaned_response.strip().startswith('<'):
             cleaned_response = f"<html><body>{cleaned_response}</body></html>"
