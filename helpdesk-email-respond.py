@@ -386,6 +386,7 @@ def step_1_process_email(ti, **context):
     # Clean the HTML response
     # Extract HTML block if present
     match = re.search(r'```html.*?\n(.*?)```', response, re.DOTALL)
+    cleaned_response = ""
     if match:
         cleaned_response = match.group(1).strip()
     else:
