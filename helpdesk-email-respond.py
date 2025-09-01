@@ -291,7 +291,11 @@ def step_1_process_email(ti, **context):
     
     # Intent detection (same as before)
     intent_prompt = f"""
-    Get the user intent for the following content:\n{current_content} if the user intent is to get help with an issue, return the json data with the following format:\n{{"intent": "get_help"}}\n if the inetent is to escalate the issue to L2 support, return the json data with the following format:\n{{"intent": "escalate_to_l2"}}\n if the intent is to get more information about the issue, return the json data with the following format:\n{{"intent": "get_more_info"}}\n if the intent is to close the issue, return the json data with the following format:\n{{"intent": "close_issue"}}
+    Get the user intent for the following content:\n{current_content} 
+    * if the user intent is to get help with an issue, return the json data with the following format: {{"intent": "get_help"}} 
+    * if the inetent is to escalate the issue to L2 support, return the json data with the following format: {{"intent": "escalate_to_l2"}}
+    * if the intent is to get more information about an existing issue or any other tasks, return the json data with the following format:{{"intent": "get_more_info"}}
+
     ## output format
         ```json
         {{
