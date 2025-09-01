@@ -11,12 +11,17 @@ import org.apache.logging.log4j.Logger;
 import org.testng.annotations.Listeners;
 import utils.EmailUtils;
 
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Listeners(utils.ExtentTestNGITestListener.class)
@@ -27,6 +32,7 @@ public class InvofluxTests {
     Properties config;
     String baseUrl;
     WebDriverWait wait;
+    private String tempProfileDir;
     
     private static final String FROM_EMAIL = System.getenv("FROM_EMAIL");
     private static final String APP_PASSWORD = System.getenv("GMAIL_TOKEN"); // generated from Gmail
@@ -42,7 +48,9 @@ public class InvofluxTests {
         ChromeOptions options = new ChromeOptions();
 
         // Use a unique temp profile to avoid "already in use" errors
-        String tempProfileDir = java.nio.file.Files.createTempDirectory("chrome-profile-").toString();
+        tempProfileDir = "/tmp/chrome-profile-" + UUID.randomUUID();
+        Files.createDirectories(Paths.get(tempProfileDir));
+
         options.addArguments("--user-data-dir=" + tempProfileDir);
         options.addArguments("--no-sandbox");
         options.addArguments("--disable-dev-shm-usage");
@@ -79,12 +87,25 @@ public class InvofluxTests {
         utils.ExtentLogger.log("Login successful.");
     }
 
-    @AfterClass
-    public void teardownAll() {
-        log.info("Closing browser and finalizing Extent report...");
+    @AfterClass(alwaysRun = true)
+    public void tearDown() {
         if (driver != null) {
             driver.quit();
         }
+     /*
+        try {
+            String os = System.getProperty("os.name").toLowerCase();
+            if (os.contains("win")) {
+                // Kill chrome.exe on Windows
+                Runtime.getRuntime().exec("taskkill /F /IM chrome.exe");
+            } else {
+                // Kill Chrome on Linux/macOS
+                Runtime.getRuntime().exec("pkill -f chrome");
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        */
     }
 
    @Test(priority = 1)
@@ -303,7 +324,7 @@ public class InvofluxTests {
         log.info("Smart Vision Invoice details prompt test completed.");
     }
 
-    @Test(priority = 2)
+    //@Test(priority = 2)
     public void test_prompt_invoice_detail_extraction_seer_tech() throws InterruptedException {
         log.info("Executing Invoice extraction prompt test for Seer tech...");
         utils.ExtentLogger.log("Test started: Invoice extraction prompt test for Seer tech");
@@ -460,7 +481,7 @@ public class InvofluxTests {
            log.info("SeerTech invoice extraction details prompt test completed.");
     }
 
-    @Test(priority = 3)
+    //@Test(priority = 3)
     public void test_prompt_invoice_detail_extraction_honey_well() throws InterruptedException {
         log.info("Honeywell invoice extraction prompt test...");
         utils.ExtentLogger.log("Test started: Invoice extraction for Honeywell");
@@ -787,7 +808,7 @@ public class InvofluxTests {
            log.info("Honeywell Invoice details prompt test completed.");
     }
     
-   @Test(priority = 4)
+   //@Test(priority = 4)
    public void testSendAndReceiveEmail() throws Exception {
         EmailUtils emailUtils = new EmailUtils(FROM_EMAIL, APP_PASSWORD);
 

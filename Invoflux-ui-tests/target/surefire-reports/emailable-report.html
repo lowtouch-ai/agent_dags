@@ -9,35 +9,13 @@
 <table>
 <tr><th>Test</th><th># Passed</th><th># Skipped</th><th># Retried</th><th># Failed</th><th>Time (ms)</th><th>Included Groups</th><th>Excluded Groups</th></tr>
 <tr><th colspan="8">Surefire suite</th></tr>
-<tr><td><a href="#t0">Surefire test</a></td><td class="num">0</td><td class="num attn">4</td><td class="num">0</td><td class="num">0</td><td class="num">10,608</td><td></td><td></td></tr>
+<tr><td><a href="#t0">Surefire test</a></td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num attn">1</td><td class="num">44,074</td><td></td><td></td></tr>
 </table>
-<table id='summary'><thead><tr><th>Class</th><th>Method</th><th>Start</th><th>Time (ms)</th></tr></thead><tbody><tr><th colspan="4">Surefire suite</th></tr></tbody><tbody id="t0"><tr><th colspan="4">Surefire test &#8212; failed (configuration methods)</th></tr><tr class="failedeven"><td rowspan="1">InvofluxTests</td><td><a href="#m0">setupAll</a></td><td rowspan="1">1756692981229</td><td rowspan="1">10550</td></tr><tr><th colspan="4">Surefire test &#8212; skipped (configuration methods)</th></tr><tr class="skippedeven"><td rowspan="1">InvofluxTests</td><td><a href="#m1">teardownAll</a></td><td rowspan="1">1756692991813</td><td rowspan="1">0</td></tr><tr><th colspan="4">Surefire test &#8212; skipped</th></tr><tr class="skippedeven"><td rowspan="4">InvofluxTests</td><td><a href="#m2">testSendAndReceiveEmail</a></td><td rowspan="1">1756692991811</td><td rowspan="1">0</td></tr><tr class="skippedeven"><td><a href="#m3">test_prompt_invoice_detail_extraction_honey_well</a></td><td rowspan="1">1756692991811</td><td rowspan="1">0</td></tr><tr class="skippedeven"><td><a href="#m4">test_prompt_invoice_detail_extraction_seer_tech</a></td><td rowspan="1">1756692991802</td><td rowspan="1">0</td></tr><tr class="skippedeven"><td><a href="#m5">test_prompt_invoice_detail_extraction_smart_vision</a></td><td rowspan="1">1756692991795</td><td rowspan="1">0</td></tr></tbody>
+<table id='summary'><thead><tr><th>Class</th><th>Method</th><th>Start</th><th>Time (ms)</th></tr></thead><tbody><tr><th colspan="4">Surefire suite</th></tr></tbody><tbody id="t0"><tr><th colspan="4">Surefire test &#8212; failed</th></tr><tr class="failedeven"><td rowspan="1">InvofluxTests</td><td><a href="#m0">test_prompt_invoice_detail_extraction_smart_vision</a></td><td rowspan="1">1756714606670</td><td rowspan="1">27472</td></tr></tbody>
 </table>
-<h2>Surefire test</h2><h3 id="m0">InvofluxTests#setupAll</h3><table class="result"><tr><th>Exception</th></tr><tr><td><div class="stacktrace">java.lang.IllegalArgumentException: Keys to send should be a not null CharSequence
-	at org.openqa.selenium.remote.RemoteWebElement.sendKeys(RemoteWebElement.java:96)
-	at InvofluxTests.setupAll(InvofluxTests.java:70)
+<h2>Surefire test</h2><h3 id="m0">InvofluxTests#test_prompt_invoice_detail_extraction_smart_vision</h3><table class="result"><tr><th>Exception</th></tr><tr><td><div class="stacktrace">java.lang.AssertionError: Unit Price mismatch! Expected: &apos;59,062.50&apos; but Actual: 82,687.50 expected [true] but found [false]
+	at InvofluxTests.test_prompt_invoice_detail_extraction_smart_vision(InvofluxTests.java:236)
 	at java.base/java.util.ArrayList.forEach(ArrayList.java:1541)
-... Removed 30 stack frames</div></td></tr></table><p class="totop"><a href="#summary">back to summary</a></p>
-<h3 id="m1">InvofluxTests#teardownAll</h3><table class="result"><tr><th class="invisible"/></tr></table><p class="totop"><a href="#summary">back to summary</a></p>
-<h3 id="m2">InvofluxTests#testSendAndReceiveEmail</h3><table class="result"><tr><th>Exception</th></tr><tr><td><div class="stacktrace">java.lang.IllegalArgumentException: Keys to send should be a not null CharSequence
-	at org.openqa.selenium.remote.RemoteWebElement.sendKeys(RemoteWebElement.java:96)
-	at InvofluxTests.setupAll(InvofluxTests.java:70)
-	at java.base/java.util.ArrayList.forEach(ArrayList.java:1541)
-... Removed 30 stack frames</div></td></tr></table><p class="totop"><a href="#summary">back to summary</a></p>
-<h3 id="m3">InvofluxTests#test_prompt_invoice_detail_extraction_honey_well</h3><table class="result"><tr><th>Exception</th></tr><tr><td><div class="stacktrace">java.lang.IllegalArgumentException: Keys to send should be a not null CharSequence
-	at org.openqa.selenium.remote.RemoteWebElement.sendKeys(RemoteWebElement.java:96)
-	at InvofluxTests.setupAll(InvofluxTests.java:70)
-	at java.base/java.util.ArrayList.forEach(ArrayList.java:1541)
-... Removed 30 stack frames</div></td></tr></table><p class="totop"><a href="#summary">back to summary</a></p>
-<h3 id="m4">InvofluxTests#test_prompt_invoice_detail_extraction_seer_tech</h3><table class="result"><tr><th>Exception</th></tr><tr><td><div class="stacktrace">java.lang.IllegalArgumentException: Keys to send should be a not null CharSequence
-	at org.openqa.selenium.remote.RemoteWebElement.sendKeys(RemoteWebElement.java:96)
-	at InvofluxTests.setupAll(InvofluxTests.java:70)
-	at java.base/java.util.ArrayList.forEach(ArrayList.java:1541)
-... Removed 30 stack frames</div></td></tr></table><p class="totop"><a href="#summary">back to summary</a></p>
-<h3 id="m5">InvofluxTests#test_prompt_invoice_detail_extraction_smart_vision</h3><table class="result"><tr><th>Exception</th></tr><tr><td><div class="stacktrace">java.lang.IllegalArgumentException: Keys to send should be a not null CharSequence
-	at org.openqa.selenium.remote.RemoteWebElement.sendKeys(RemoteWebElement.java:96)
-	at InvofluxTests.setupAll(InvofluxTests.java:70)
-	at java.base/java.util.ArrayList.forEach(ArrayList.java:1541)
-... Removed 30 stack frames</div></td></tr></table><p class="totop"><a href="#summary">back to summary</a></p>
+... Removed 35 stack frames</div></td></tr></table><p class="totop"><a href="#summary">back to summary</a></p>
 </body>
 </html>
