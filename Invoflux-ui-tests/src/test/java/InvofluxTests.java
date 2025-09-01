@@ -1,5 +1,6 @@
 import org.openqa.selenium.*;
 import org.openqa.selenium.chrome.ChromeDriver;
+import org.openqa.selenium.chrome.ChromeOptions;
 import org.openqa.selenium.support.ui.ExpectedConditions;
 import org.openqa.selenium.support.ui.WebDriverWait;
 import org.testng.Assert;
@@ -38,7 +39,18 @@ public class InvofluxTests {
         FileInputStream fis = new FileInputStream("config.properties");
         config.load(fis);
 
-        driver = new ChromeDriver();
+        ChromeOptions options = new ChromeOptions();
+
+        // Use a unique temp profile to avoid "already in use" errors
+        String tempProfileDir = java.nio.file.Files.createTempDirectory("chrome-profile-").toString();
+        options.addArguments("--user-data-dir=" + tempProfileDir);
+        options.addArguments("--no-sandbox");
+        options.addArguments("--disable-dev-shm-usage");
+
+        // Uncomment if you want headless
+        // options.addArguments("--headless=new");
+
+        driver = new ChromeDriver(options);
         driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(10));
         driver.manage().window().maximize();
         wait = new WebDriverWait(driver, Duration.ofSeconds(60));

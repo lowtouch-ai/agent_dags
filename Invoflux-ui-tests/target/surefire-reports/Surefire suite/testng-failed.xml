@@ -5,6 +5,7 @@
     <classes>
       <class name="InvofluxTests">
         <methods>
+          <include name="test_prompt_invoice_detail_extraction_honey_well"/>
           <include name="test_prompt_invoice_detail_extraction_seer_tech"/>
           <include name="teardownAll"/>
           <include name="testSendAndReceiveEmail"/>
