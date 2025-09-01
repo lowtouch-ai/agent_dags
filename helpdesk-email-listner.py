@@ -221,7 +221,7 @@ with DAG("helpdesk_monitor_mailbox",
          schedule_interval=timedelta(minutes=1),
          catchup=False,
          doc_md=readme_content,
-         tags=["mailbox", "odoo", "monitor"]) as dag:
+         tags=["mailbox", "helpdesk", "monitor"]) as dag:
 
     fetch_emails_task = PythonOperator(
         task_id="fetch_unread_emails",
