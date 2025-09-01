@@ -382,7 +382,7 @@ def step_1_process_email(ti, **context):
     response = get_ai_response(prompt=prompt, conversation_history=conversation_history, images=image_attachments if image_attachments else None)
     
     # Clean the HTML response
-    cleaned_response = re.search(r'```html.*?\n(.*?)```', response, re.DOTALL)
+    cleaned_response = re.search(r'```html.*?\n(.*?)```', response, re.DOTALL).group(1).strip()
     
     if not cleaned_response.strip().startswith('<!DOCTYPE') and not cleaned_response.strip().startswith('<html'):
         if not cleaned_response.strip().startswith('<'):
