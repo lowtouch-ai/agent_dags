@@ -92,7 +92,7 @@ public class InvofluxTests {
         if (driver != null) {
             driver.quit();
         }
-     /*
+     
         try {
             String os = System.getProperty("os.name").toLowerCase();
             if (os.contains("win")) {
@@ -105,7 +105,7 @@ public class InvofluxTests {
         } catch (IOException e) {
             e.printStackTrace();
         }
-        */
+        
     }
 
    @Test(priority = 1)
