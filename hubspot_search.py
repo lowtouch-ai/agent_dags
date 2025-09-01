@@ -568,18 +568,21 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 def check_task_threshold(ti, **context):
     thread_content = ti.xcom_pull(key="thread_content")
     thread_id = ti.xcom_pull(key="thread_id")
-
+    owner_info = ti.xcom_pull(key="owner_info", default={})
+    task_owner_id = owner_info.get('task_owner_id', '159242778')
+    task_owner_name = owner_info.get('task_owner_name', 'liji')
     prompt = f"""You are a HubSpot API assistant. Check task volume thresholds based on this email thread.
 
 Email thread content:
 {thread_content}
-
+Validated Task Owner ID: {task_owner_id}
+Validated Task Owner Name: {task_owner_name}
 IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
 
 Steps to follow:
 1. Extract the due date specified for task.
-2. Invoke search_tasks with GTE and LTE set to that date.
-3. Count total task for the due date.
+2. Invoke search_tasks with GTE and LTE set to that date owner name set to {task_owner_name}
+3. Count total task for the due date for the specified owner.
 4. Check if task count exceeds threshold of {TASK_THRESHOLD} tasks per day.
 5. Generate warnings for dates that exceed the threshold.
 
@@ -589,6 +592,8 @@ Return this exact JSON structure:
         "dates_checked": [
             {{
                 "date": "YYYY-MM-DD",
+                "owner_id": "{task_owner_id}",
+                "owner_name": "{task_owner_name}",
                 "existing_task_count": 0,
                 "exceeds_threshold": false,
                 "warning": "High task volume: X tasks on YYYY-MM-DD" or null
@@ -689,14 +694,14 @@ IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanati
 
 Extract the following information:
 1. Notes - Any important discussion points, decisions made, or general notes
-2. Tasks - Action items with owner and due dates
+2. Tasks - Action items with owner and due dates. Next steps with owner and due dates.
 3. Meeting Details - If this is about a meeting, extract meeting information
 
 For tasks:
 - If a specific task owner is mentioned in the email and it matches an available owner from the validation, use that owner
 - If a specific task owner is mentioned but was invalid (not in available owners list), use the validated default task owner: {task_owner_name} (ID: {task_owner_id})
 - If no task owner is specified, use the validated default task owner: {task_owner_name} (ID: {task_owner_id})
-
+- If no due date is specified, use the date after three business date from current date.
 Return this exact JSON structure:
 {{
     "notes": [
@@ -875,6 +880,20 @@ def compose_confirmation_email(ti, **context):
         logging.info("No confirmation needed, proceeding to trigger next DAG.")
         return "No confirmation needed"
 
+    # Helper function to check if an entity has meaningful data
+    def has_meaningful_data(entity, required_fields):
+        """Check if entity has at least one non-empty required field"""
+        if not entity or not isinstance(entity, dict):
+            return False
+        return any(entity.get(field, "").strip() for field in required_fields)
+
+    # Helper function to filter meaningful entities
+    def filter_meaningful_entities(entities, required_fields):
+        """Filter out entities that don't have meaningful data"""
+        if not entities:
+            return []
+        return [entity for entity in entities if has_meaningful_data(entity, required_fields)]
+
     email_content = """
     <!DOCTYPE html>
     <html>
@@ -911,6 +930,7 @@ def compose_confirmation_email(ti, **context):
             <thead>
                 <tr>
                     <th>Date</th>
+                    <th>Owner Name</th>
                     <th>Existing Tasks</th>
                     <th>Threshold Status</th>
                     <th>Warning</th>
@@ -920,6 +940,7 @@ def compose_confirmation_email(ti, **context):
         """
         for date_info in dates_checked:
             date = date_info.get("date", "")
+            owner_name = date_info.get("owner_name", "")
             task_count = date_info.get("existing_task_count", 0)
             exceeds = "Exceeds" if date_info.get("exceeds_threshold") else "Within Limit"
             warning = date_info.get("warning") or "None"
@@ -927,6 +948,7 @@ def compose_confirmation_email(ti, **context):
             email_content += f"""
                 <tr>
                     <td>{date}</td>
+                    <td>{owner_name}</td>
                     <td>{task_count}</td>
                     <td>{exceeds}</td>
                     <td>{warning}</td>
@@ -1093,16 +1115,28 @@ def compose_confirmation_email(ti, **context):
         <hr>
         """
 
-    # Objects to be Created Section (only if there are new entities)
-    new_contacts = search_results.get("new_entity_details", {}).get("contacts", [])
-    new_companies = search_results.get("new_entity_details", {}).get("companies", [])
-    new_deals = search_results.get("new_entity_details", {}).get("deals", [])
+    # Objects to be Created Section (only if there are meaningful new entities)
+    raw_new_contacts = search_results.get("new_entity_details", {}).get("contacts", [])
+    raw_new_companies = search_results.get("new_entity_details", {}).get("companies", [])
+    raw_new_deals = search_results.get("new_entity_details", {}).get("deals", [])
     notes = search_results.get("new_entity_details", {}).get("notes", [])
     tasks = search_results.get("new_entity_details", {}).get("tasks", [])
     meeting_details = search_results.get("new_entity_details", {}).get("meeting_details", {})
 
-    # Check if there are any objects to be created
-    has_new_objects = bool(new_contacts or new_companies or new_deals or notes or tasks or meeting_details)
+    # Filter out empty/meaningless entities
+    new_contacts = filter_meaningful_entities(raw_new_contacts, ["firstname", "lastname", "email"])
+    new_companies = filter_meaningful_entities(raw_new_companies, ["name", "domain"])
+    new_deals = filter_meaningful_entities(raw_new_deals, ["dealName", "dealAmount"])
+    
+    # Filter meaningful notes and tasks
+    meaningful_notes = [note for note in notes if note.get("note_content", "").strip()]
+    meaningful_tasks = [task for task in tasks if task.get("task_details", "").strip()]
+    
+    # Check if meeting details has meaningful content
+    meaningful_meeting = bool(meeting_details and any(str(v).strip() for v in meeting_details.values() if v is not None))
+
+    # Check if there are any meaningful objects to be created
+    has_new_objects = bool(new_contacts or new_companies or new_deals or meaningful_notes or meaningful_tasks or meaningful_meeting)
 
     if has_new_objects:
         has_content_sections = True
@@ -1110,7 +1144,7 @@ def compose_confirmation_email(ti, **context):
         <h3>Objects to be Created</h3>
         """
 
-        # New Contacts (only if they exist)
+        # New Contacts (only if they exist and have meaningful data)
         if new_contacts:
             email_content += """
             <h4>New Contacts</h4>
@@ -1152,7 +1186,7 @@ def compose_confirmation_email(ti, **context):
             </table>
             """
 
-        # New Companies (only if they exist)
+        # New Companies (only if they exist and have meaningful data)
         if new_companies:
             email_content += """
             <h4>New Companies</h4>
@@ -1206,7 +1240,7 @@ def compose_confirmation_email(ti, **context):
             </table>
             """
 
-        # New Deals (only if they exist)
+        # New Deals (only if they exist and have meaningful data)
         if new_deals:
             email_content += """
             <h4>New Deals</h4>
@@ -1245,8 +1279,8 @@ def compose_confirmation_email(ti, **context):
             </table>
             """
 
-        # Notes (only if they exist)
-        if notes:
+        # Notes (only if they have meaningful content)
+        if meaningful_notes:
             email_content += """
             <h4>Notes</h4>
             <table>
@@ -1259,7 +1293,7 @@ def compose_confirmation_email(ti, **context):
                 <tbody>
             """
 
-            for note in notes:
+            for note in meaningful_notes:
                 note_content = note.get("note_content", "")
                 timestamp = note.get("timestamp", "")
 
@@ -1275,8 +1309,8 @@ def compose_confirmation_email(ti, **context):
             </table>
             """
 
-        # Tasks (only if they exist)
-        if tasks:
+        # Tasks (only if they have meaningful content)
+        if meaningful_tasks:
             email_content += """
             <h4>Tasks</h4>
             <table>
@@ -1291,7 +1325,7 @@ def compose_confirmation_email(ti, **context):
                 <tbody>
             """
 
-            for task in tasks:
+            for task in meaningful_tasks:
                 task_details = task.get("task_details", "")
                 task_owner_name = task.get("task_owner_name", "")
                 due_date = task.get("due_date", "")
@@ -1311,8 +1345,8 @@ def compose_confirmation_email(ti, **context):
             </table>
             """
 
-        # Meeting Details (only if meeting details exist)
-        if meeting_details and any(meeting_details.values()):
+        # Meeting Details (only if meaningful meeting details exist)
+        if meaningful_meeting:
             email_content += """
             <h4>Meeting Details</h4>
             <table>
@@ -1513,7 +1547,7 @@ def compose_confirmation_email(ti, **context):
     """
 
     ti.xcom_push(key="confirmation_email", value=email_content)
-    logging.info(f"Confirmation email composed with conditional sections. Content sections included: {has_content_sections}")
+    logging.info(f"Confirmation email composed with meaningful data filtering. Content sections included: {has_content_sections}")
     return email_content
 
 def send_confirmation_email(ti, **context):
