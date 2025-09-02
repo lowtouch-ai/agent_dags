@@ -45,19 +45,21 @@ public class InvofluxTests {
         FileInputStream fis = new FileInputStream("config.properties");
         config.load(fis);
 
+        Path tempProfile = Files.createTempDirectory("chrome-profile-");
         ChromeOptions options = new ChromeOptions();
+        options.addArguments("--user-data-dir=" + tempProfile.toString());
         options.addArguments("--no-sandbox");
         options.addArguments("--disable-dev-shm-usage");
         options.addArguments("--disable-gpu");
         options.addArguments("--remote-allow-origins=*");
-        options.addArguments("--disable-extensions");
-        options.addArguments("--disable-popup-blocking");
           
         // Optional: run in headless mode for CI
         options.addArguments("--headless=new");
 
         driver = new ChromeDriver(options);
         driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(10));
+        driver.manage().window().maximize();
+        wait = new WebDriverWait(driver, Duration.ofSeconds(60));
 
         //baseUrl = config.getProperty("base.url");
         baseUrl = System.getenv("BASE_URL");
@@ -89,6 +91,27 @@ public class InvofluxTests {
             driver.quit();
         }
 
+        // Kill leftover Chrome processes (Linux-safe)
+        try {
+            String os = System.getProperty("os.name").toLowerCase();
+            if (!os.contains("win")) {
+                Runtime.getRuntime().exec("pkill -f chrome");
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        // Clean up temp Chrome profile directory
+        if (tempProfileDir != null) {
+            try {
+                Files.walk(Paths.get(tempProfileDir))
+                    .sorted(Comparator.reverseOrder())
+                    .map(Path::toFile)
+                    .forEach(File::delete);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
     }
 
 
