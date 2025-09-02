@@ -45,13 +45,16 @@ public class InvofluxTests {
         FileInputStream fis = new FileInputStream("config.properties");
         config.load(fis);
 
-        Path tempProfile = Files.createTempDirectory("chrome-profile-");
         ChromeOptions options = new ChromeOptions();
-        options.addArguments("--user-data-dir=" + tempProfile.toString());
+        String userDataDir = "/tmp/chrome-user-data";
+        Files.createDirectories(Paths.get(userDataDir));
+        options.addArguments("--user-data-dir=" + userDataDir);
         options.addArguments("--no-sandbox");
         options.addArguments("--disable-dev-shm-usage");
         options.addArguments("--disable-gpu");
         options.addArguments("--remote-allow-origins=*");
+        options.addArguments("--disable-extensions");
+        options.addArguments("--disable-popup-blocking");
           
         // Optional: run in headless mode for CI
         options.addArguments("--headless=new");
