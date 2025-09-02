@@ -40,22 +40,12 @@ public class InvofluxTests {
     
 
     @BeforeClass
-    public void setupAll() throws IOException, InterruptedException {
+    public void setupAll() throws IOException {
         config = new Properties();
         FileInputStream fis = new FileInputStream("config.properties");
         config.load(fis);
 
-        try {
-                Runtime.getRuntime().exec("pkill -f chrome");
-                Thread.sleep(2000); // wait for processes to exit
-        } catch (IOException e) {
-                e.printStackTrace();
-        }
-
         ChromeOptions options = new ChromeOptions();
-        String userDataDir = "/tmp/chrome-user-data-" + System.currentTimeMillis();
-        Files.createDirectories(Paths.get(userDataDir));
-        options.addArguments("--user-data-dir=" + userDataDir);
         options.addArguments("--no-sandbox");
         options.addArguments("--disable-dev-shm-usage");
         options.addArguments("--disable-gpu");
@@ -68,8 +58,6 @@ public class InvofluxTests {
 
         driver = new ChromeDriver(options);
         driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(10));
-        driver.manage().window().maximize();
-        wait = new WebDriverWait(driver, Duration.ofSeconds(60));
 
         //baseUrl = config.getProperty("base.url");
         baseUrl = System.getenv("BASE_URL");
@@ -93,7 +81,6 @@ public class InvofluxTests {
 
         log.info("Login successful.");
         utils.ExtentLogger.log("Login successful.");
-        tempProfileDir = userDataDir;
     }
 
     @AfterClass(alwaysRun = true)
@@ -102,27 +89,6 @@ public class InvofluxTests {
             driver.quit();
         }
 
-        // Kill leftover Chrome processes (Linux-safe)
-        try {
-            String os = System.getProperty("os.name").toLowerCase();
-            if (!os.contains("win")) {
-                Runtime.getRuntime().exec("pkill -f chrome");
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-
-        // Clean up temp Chrome profile directory
-        if (tempProfileDir != null) {
-            try {
-                Files.walk(Paths.get(tempProfileDir))
-                    .sorted(Comparator.reverseOrder())
-                    .map(Path::toFile)
-                    .forEach(File::delete);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
     }
 
 
