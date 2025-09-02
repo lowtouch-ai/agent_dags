@@ -47,7 +47,7 @@ public class InvofluxTests {
 
         Path tempProfile = Files.createTempDirectory("chrome-profile-");
         ChromeOptions options = new ChromeOptions();
-        options.addArguments("--user-data-dir=" + tempProfile.toString());
+        // options.addArguments("--user-data-dir=" + tempProfile.toString());
         options.addArguments("--no-sandbox");
         options.addArguments("--disable-dev-shm-usage");
         options.addArguments("--disable-gpu");
