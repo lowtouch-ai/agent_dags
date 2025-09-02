@@ -45,28 +45,24 @@ public class InvofluxTests {
         FileInputStream fis = new FileInputStream("config.properties");
         config.load(fis);
 
+        Path tempProfile = Files.createTempDirectory("chrome-profile-");
         ChromeOptions options = new ChromeOptions();
-
-        tempProfileDir = "/tmp/chrome-profile-" + UUID.randomUUID();
-        Files.createDirectories(Paths.get(tempProfileDir));
-
-        options.addArguments("--user-data-dir=" + tempProfileDir);
-        options.addArguments("--profile-directory=Profile-" + UUID.randomUUID());
+        options.addArguments("--user-data-dir=" + tempProfile.toString());
         options.addArguments("--no-sandbox");
         options.addArguments("--disable-dev-shm-usage");
         options.addArguments("--disable-gpu");
         options.addArguments("--remote-allow-origins=*");
-        options.addArguments("--disable-extensions");
-        options.addArguments("--disable-popup-blocking");
-        // options.addArguments("--headless=new"); // if needed in CI
+          
+        // Optional: run in headless mode for CI
+        options.addArguments("--headless=new");
 
         driver = new ChromeDriver(options);
         driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(10));
         driver.manage().window().maximize();
         wait = new WebDriverWait(driver, Duration.ofSeconds(60));
 
-        baseUrl = config.getProperty("base.url");
-        //baseUrl = System.getenv("BASE_URL");
+        //baseUrl = config.getProperty("base.url");
+        baseUrl = System.getenv("BASE_URL");
         log.info("Launching browser and navigating to: " + baseUrl);
         driver.get(baseUrl);
 
@@ -74,11 +70,11 @@ public class InvofluxTests {
         utils.ExtentLogger.log("Navigating to login page");
 
         wait.until(ExpectedConditions.visibilityOfElementLocated(By.name("email")));
-        driver.findElement(By.name("email")).sendKeys(config.getProperty("login.email"));
-        driver.findElement(By.name("current-password")).sendKeys(config.getProperty("login.password"));
+        //driver.findElement(By.name("email")).sendKeys(config.getProperty("login.email"));
+        //driver.findElement(By.name("current-password")).sendKeys(config.getProperty("login.password"));
         
-        //driver.findElement(By.name("email")).sendKeys(System.getenv("LOGIN_EMAIL"));
-        //driver.findElement(By.name("current-password")).sendKeys(System.getenv("LOGIN_PASSWORD"));
+        driver.findElement(By.name("email")).sendKeys(System.getenv("LOGIN_EMAIL"));
+        driver.findElement(By.name("current-password")).sendKeys(System.getenv("LOGIN_PASSWORD"));
         
         driver.findElement(By.xpath("//button[contains(text(),'Sign in')]")).click();
 
@@ -335,7 +331,7 @@ public class InvofluxTests {
         log.info("Smart Vision Invoice details prompt test completed.");
     }
 
-    //@Test(priority = 2)
+    @Test(priority = 2)
     public void test_prompt_invoice_detail_extraction_seer_tech() throws InterruptedException {
         log.info("Executing Invoice extraction prompt test for Seer tech...");
         utils.ExtentLogger.log("Test started: Invoice extraction prompt test for Seer tech");
@@ -492,7 +488,7 @@ public class InvofluxTests {
            log.info("SeerTech invoice extraction details prompt test completed.");
     }
 
-    //@Test(priority = 3)
+    @Test(priority = 3)
     public void test_prompt_invoice_detail_extraction_honey_well() throws InterruptedException {
         log.info("Honeywell invoice extraction prompt test...");
         utils.ExtentLogger.log("Test started: Invoice extraction for Honeywell");
@@ -819,7 +815,7 @@ public class InvofluxTests {
            log.info("Honeywell Invoice details prompt test completed.");
     }
     
-   //@Test(priority = 4)
+   @Test(priority = 4)
    public void testSendAndReceiveEmail() throws Exception {
         EmailUtils emailUtils = new EmailUtils(FROM_EMAIL, APP_PASSWORD);
 
