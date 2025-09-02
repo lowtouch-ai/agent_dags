@@ -40,13 +40,20 @@ public class InvofluxTests {
     
 
     @BeforeClass
-    public void setupAll() throws IOException {
+    public void setupAll() throws IOException, InterruptedException {
         config = new Properties();
         FileInputStream fis = new FileInputStream("config.properties");
         config.load(fis);
 
+        try {
+                Runtime.getRuntime().exec("pkill -f chrome");
+                Thread.sleep(2000); // wait for processes to exit
+        } catch (IOException e) {
+                e.printStackTrace();
+        }
+
         ChromeOptions options = new ChromeOptions();
-        String userDataDir = "/tmp/chrome-user-data";
+        String userDataDir = "/tmp/chrome-user-data-" + System.currentTimeMillis();
         Files.createDirectories(Paths.get(userDataDir));
         options.addArguments("--user-data-dir=" + userDataDir);
         options.addArguments("--no-sandbox");
@@ -86,6 +93,7 @@ public class InvofluxTests {
 
         log.info("Login successful.");
         utils.ExtentLogger.log("Login successful.");
+        tempProfileDir = userDataDir;
     }
 
     @AfterClass(alwaysRun = true)
