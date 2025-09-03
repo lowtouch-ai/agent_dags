@@ -105,7 +105,7 @@ with DAG(
             f'LOGIN_PASSWORD="{login_password}" '
             f'BASE_URL="{base_url}" '
             f'FROM_EMAIL="{from_email}" '
-            f'APP_PASSWORD="{app_password}" '
+            f'GMAIL_TOKEN="{app_password}" '
             f'INVOFLUX_AGENT_EMAIL="{invoflux_agent_email}" '
             'mvn test || (echo "Invoflux tests failed" && touch /tmp/invoflux_failed.flag); exit 0'
         )
