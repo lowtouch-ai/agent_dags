@@ -16,7 +16,7 @@ login_email = Variable.get("LOGIN_EMAIL")
 login_password = Variable.get("LOGIN_PASSWORD")
 base_url = Variable.get("BASE_URL")
 from_email = Variable.get("FROM_EMAIL")
-app_password = Variable.get("APP_PASSWORD")
+app_password = Variable.get("GMAIL_TOKEN")
 invoflux_agent_email = Variable.get("INVOFLUX_AGENT_EMAIL")
 
 slack_webhook = Variable.get("SLACK_WEBHOOK_URL")
