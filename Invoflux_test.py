@@ -37,14 +37,21 @@ def slack_alert(**context):
         reports_dir = "/appz/home/airflow/dags/agent_dags/Invoflux-ui-tests/target/surefire-reports"
 
         try:
-            # Look inside all surefire reports for "FAILURES:"
             for f in os.listdir(reports_dir):
-                if f.endswith(".txt") or f.endswith(".xml"):
+                if f.endswith(".txt"):
                     with open(os.path.join(reports_dir, f), "r", encoding="utf-8", errors="ignore") as fh:
                         content = fh.read()
-                        matches = re.findall(r"InvofluxTests\.(\w+)", content)  # capture test names
-                        if matches:
-                            failed_tests.extend(matches)
+
+                        # Extract only the FAILED TESTS section
+                        failed_block = re.search(r"FAILED TESTS:(.*?)=", content, re.S)
+                        if failed_block:
+                            lines = failed_block.group(1).splitlines()
+                            for line in lines:
+                                line = line.strip()
+                                if line.startswith("X "):
+                                    test_name = line.replace("X ", "").strip()
+                                    failed_tests.append(test_name)
+
         except Exception as e:
             failed_tests = [f"Could not parse test report ({e})"]
 
@@ -60,6 +67,7 @@ def slack_alert(**context):
         requests.post(slack_webhook, json={"text": msg})
     else:
         print("No Invoflux failures detected, skipping Slack alert.")
+
 
 with DAG(
     dag_id='invoflux_run_tests_automation',
