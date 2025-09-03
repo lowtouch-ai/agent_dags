@@ -33,29 +33,41 @@ default_args = {
 def slack_alert(**context):
     """Send Slack alert if Invoflux tests failed"""
     if os.path.exists("/tmp/invoflux_failed.flag"):
-        failed_tests = []
+        failed_reasons = {}
         reports_dir = "/appz/home/airflow/dags/agent_dags/Invoflux-ui-tests/target/surefire-reports"
 
         try:
-            # Look inside all surefire reports for "FAILURES:"
+            # Look inside all surefire reports for failures
             for f in os.listdir(reports_dir):
-                if f.endswith(".txt") or f.endswith(".xml"):
-                    with open(os.path.join(reports_dir, f), "r", encoding="utf-8", errors="ignore") as fh:
-                        content = fh.read()
-                        matches = re.findall(r"InvofluxTests\.(\w+)", content)  # capture test names
-                        if matches:
-                            failed_tests.extend(matches)
+                if not f.endswith(".txt"):
+                    continue
+                with open(os.path.join(reports_dir, f), "r", encoding="utf-8", errors="ignore") as fh:
+                    content = fh.read()
+                    lines = content.splitlines()
+                    for i, line in enumerate(lines):
+                        if "Time elapsed:" in line and "<<< FAILURE!" in line:
+                            parts = line.split("  Time elapsed:")
+                            if len(parts) > 1:
+                                test_full = parts[0].strip()
+                                test_name = test_full.split('.')[-1]
+                                if i + 1 < len(lines):
+                                    error_line = lines[i + 1].strip()
+                                    if ':' in error_line:
+                                        _, msg = error_line.split(':', 1)
+                                        msg = msg.strip()
+                                        msg = re.sub(r"\s*expected \[true\] but found \[false\]$", "", msg)
+                                        failed_reasons[test_name] = msg
         except Exception as e:
-            failed_tests = [f"Could not parse test report ({e})"]
+            failed_reasons = {"Error": f"Could not parse test report ({e})"}
 
-        if failed_tests:
-            failed_text = "\n• " + "\n• ".join(set(failed_tests))
+        if failed_reasons:
+            failed_text = "\n".join([f"• {test}\n  {reason}" for test, reason in failed_reasons.items()])
         else:
             failed_text = "Unknown"
 
         msg = (
             f":x: Invoflux UI tests failed in DAG *{context['dag'].dag_id}* on SERVER {server_name}\n"
-            f"*Failed Tests:*{failed_text}"
+            f"*Failed Tests:*\n{failed_text}"
         )
         requests.post(slack_webhook, json={"text": msg})
     else:
