@@ -37,53 +37,34 @@ def slack_alert(**context):
         reports_dir = "/appz/home/airflow/dags/agent_dags/Invoflux-ui-tests/target/surefire-reports"
 
         try:
+            # Look inside all surefire reports for "FAILURES:"
             for f in os.listdir(reports_dir):
-                if f.endswith(".txt"):
+                if f.endswith(".txt") or f.endswith(".xml"):
                     with open(os.path.join(reports_dir, f), "r", encoding="utf-8", errors="ignore") as fh:
                         content = fh.read()
-
-                        # ✅ Extract from "[ERROR] Failures:" lines
-                        failure_lines = re.findall(
-                            r"\[ERROR\]\s+InvofluxTests\.(\w+)",  # captures test method name only
-                            content
-                        )
-                        failed_tests.extend(failure_lines)
-
-                        # ✅ Fallback: parse FAILED TESTS block
-                        failed_block = re.search(r"FAILED TESTS:(.*?)=", content, re.S)
-                        if failed_block:
-                            for line in failed_block.group(1).splitlines():
-                                if line.strip().startswith("X "):
-                                    failed_tests.append(line.replace("X ", "").strip())
-
+                        matches = re.findall(r"InvofluxTests\.(\w+)", content)  # capture test names
+                        if matches:
+                            failed_tests.extend(matches)
         except Exception as e:
             failed_tests = [f"Could not parse test report ({e})"]
 
-        failed_tests = sorted(set(failed_tests))  # deduplicate + sort
-
         if failed_tests:
-            failed_text = "\n• " + "\n• ".join(failed_tests)
+            failed_text = "\n• " + "\n• ".join(set(failed_tests))
         else:
             failed_text = "Unknown"
 
         msg = (
-            f":x: Invoflux UI tests failed in DAG *{context['dag'].dag_id}* "
-            f"on SERVER {server_name}\n"
+            f":x: Invoflux UI tests failed in DAG *{context['dag'].dag_id}* on SERVER {server_name}\n"
             f"*Failed Tests:*{failed_text}"
         )
         requests.post(slack_webhook, json={"text": msg})
     else:
         print("No Invoflux failures detected, skipping Slack alert.")
 
-
-
-
-
-
 with DAG(
-    dag_id='invoflux_run_tests_automation',
+    dag_id='invoflux_run_ui_tests',
     default_args=default_args,
-    schedule_interval='30 14 * * *',  # 14:30 IST
+    schedule_interval='0 15 * * *',  # 15:00 IST daily
     catchup=False,
     tags=['maven', 'automation', 'invoflux'],
 ) as dag:
