@@ -42,12 +42,15 @@ def slack_alert(**context):
                     with open(os.path.join(reports_dir, f), "r", encoding="utf-8", errors="ignore") as fh:
                         content = fh.read()
 
-                        # 1️⃣ Extract tests from "[ERROR] Failures:" section
-                        failure_lines = re.findall(r"\[ERROR\]\s+InvofluxTests\.(\S+)", content)
+                        # ✅ Extract test names from "[ERROR] Failures:" section
+                        failure_lines = re.findall(
+                            r"\[ERROR\]\s+InvofluxTests\.(\w+)",
+                            content
+                        )
                         if failure_lines:
                             failed_tests.extend(failure_lines)
 
-                        # 2️⃣ Extract from "FAILED TESTS:" block (as fallback)
+                        # ✅ As fallback, parse FAILED TESTS block
                         if not failed_tests:
                             failed_block = re.search(r"FAILED TESTS:(.*?)=", content, re.S)
                             if failed_block:
@@ -59,8 +62,7 @@ def slack_alert(**context):
         except Exception as e:
             failed_tests = [f"Could not parse test report ({e})"]
 
-        # Cleanup duplicates and sort
-        failed_tests = sorted(set(failed_tests))
+        failed_tests = sorted(set(failed_tests))  # deduplicate + sort
 
         if failed_tests:
             failed_text = "\n• " + "\n• ".join(failed_tests)
@@ -68,12 +70,14 @@ def slack_alert(**context):
             failed_text = "Unknown"
 
         msg = (
-            f":x: Invoflux UI tests failed in DAG *{context['dag'].dag_id}* on SERVER {server_name}\n"
+            f":x: Invoflux UI tests failed in DAG *{context['dag'].dag_id}* "
+            f"on SERVER {server_name}\n"
             f"*Failed Tests:*{failed_text}"
         )
         requests.post(slack_webhook, json={"text": msg})
     else:
         print("No Invoflux failures detected, skipping Slack alert.")
+
 
 
 
