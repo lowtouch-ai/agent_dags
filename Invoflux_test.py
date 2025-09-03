@@ -42,22 +42,19 @@ def slack_alert(**context):
                     with open(os.path.join(reports_dir, f), "r", encoding="utf-8", errors="ignore") as fh:
                         content = fh.read()
 
-                        # ✅ Extract test names from "[ERROR] Failures:" section
+                        # ✅ Extract from "[ERROR] Failures:" lines
                         failure_lines = re.findall(
-                            r"\[ERROR\]\s+InvofluxTests\.(\w+)",
+                            r"\[ERROR\]\s+InvofluxTests\.(\w+)",  # captures test method name only
                             content
                         )
-                        if failure_lines:
-                            failed_tests.extend(failure_lines)
+                        failed_tests.extend(failure_lines)
 
-                        # ✅ As fallback, parse FAILED TESTS block
-                        if not failed_tests:
-                            failed_block = re.search(r"FAILED TESTS:(.*?)=", content, re.S)
-                            if failed_block:
-                                lines = failed_block.group(1).splitlines()
-                                for line in lines:
-                                    if line.strip().startswith("X "):
-                                        failed_tests.append(line.replace("X ", "").strip())
+                        # ✅ Fallback: parse FAILED TESTS block
+                        failed_block = re.search(r"FAILED TESTS:(.*?)=", content, re.S)
+                        if failed_block:
+                            for line in failed_block.group(1).splitlines():
+                                if line.strip().startswith("X "):
+                                    failed_tests.append(line.replace("X ", "").strip())
 
         except Exception as e:
             failed_tests = [f"Could not parse test report ({e})"]
@@ -77,6 +74,7 @@ def slack_alert(**context):
         requests.post(slack_webhook, json={"text": msg})
     else:
         print("No Invoflux failures detected, skipping Slack alert.")
+
 
 
 
