@@ -42,12 +42,12 @@ def slack_alert(**context):
                     with open(os.path.join(reports_dir, f), "r", encoding="utf-8", errors="ignore") as fh:
                         content = fh.read()
 
-                        # 1️⃣ Look for the [ERROR] Failures: block
-                        failure_block = re.findall(r"\[ERROR\]\s+InvofluxTests\.(\S+)", content)
-                        if failure_block:
-                            failed_tests.extend(failure_block)
+                        # 1️⃣ Extract tests from "[ERROR] Failures:" section
+                        failure_lines = re.findall(r"\[ERROR\]\s+InvofluxTests\.(\S+)", content)
+                        if failure_lines:
+                            failed_tests.extend(failure_lines)
 
-                        # 2️⃣ Fallback: look for "FAILED TESTS:" block (if present)
+                        # 2️⃣ Extract from "FAILED TESTS:" block (as fallback)
                         if not failed_tests:
                             failed_block = re.search(r"FAILED TESTS:(.*?)=", content, re.S)
                             if failed_block:
@@ -59,8 +59,11 @@ def slack_alert(**context):
         except Exception as e:
             failed_tests = [f"Could not parse test report ({e})"]
 
+        # Cleanup duplicates and sort
+        failed_tests = sorted(set(failed_tests))
+
         if failed_tests:
-            failed_text = "\n• " + "\n• ".join(set(failed_tests))
+            failed_text = "\n• " + "\n• ".join(failed_tests)
         else:
             failed_text = "Unknown"
 
@@ -71,6 +74,7 @@ def slack_alert(**context):
         requests.post(slack_webhook, json={"text": msg})
     else:
         print("No Invoflux failures detected, skipping Slack alert.")
+
 
 
 
