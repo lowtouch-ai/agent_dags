@@ -214,7 +214,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
 def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
         msg = MIMEMultipart()
-        msg["From"] = f"HubSpot Workflow <{HUBSPOT_FROM_ADDRESS}>"
+        msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
         msg["To"] = recipient
         msg["Subject"] = subject
         msg["In-Reply-To"] = in_reply_to
@@ -240,6 +240,7 @@ def analyze_user_response(ti, **context):
             "error_message": "No thread_id provided in dag_run.conf",
             "next_steps": ["Provide a valid thread_id"],
             "entities_to_create": {},
+            "entities_to_update": {},
             "user_intent": "ERROR",
             "confidence_level": "low"
         }
@@ -265,6 +266,7 @@ def analyze_user_response(ti, **context):
             "error_message": "Gmail authentication failed",
             "next_steps": ["Retry authentication"],
             "entities_to_create": {},
+            "entities_to_update": {},
             "selected_entities": search_results.get("selected_entities", {}),
             "user_intent": "ERROR",
             "confidence_level": "low"
@@ -282,6 +284,7 @@ def analyze_user_response(ti, **context):
                 "error_message": "Failed to fetch thread history",
                 "next_steps": ["Verify thread_id and Gmail API access"],
                 "entities_to_create": {},
+                "entities_to_update": {},
                 "selected_entities": search_results.get("selected_entities", {}),
                 "user_intent": "ERROR",
                 "confidence_level": "low"
@@ -289,22 +292,21 @@ def analyze_user_response(ti, **context):
             ti.xcom_push(key="analysis_results", value=results)
             return results
 
-    new_entity_details = search_results.get("new_entity_details", {})
-    entities_to_create = {
-        "contacts": new_entity_details.get("contacts", []),
-        "companies": new_entity_details.get("companies", []),
-        "deals": new_entity_details.get("deals", []),
-        "meetings": [new_entity_details.get("meeting_details", {})] if new_entity_details.get("meeting_details") else [],
-        "notes": new_entity_details.get("notes", []),
-        "tasks": new_entity_details.get("tasks", [])
+    # Normalize original entities
+    original_entities_normalized = {
+        "contacts": search_results.get("new_entity_details", {}).get("contacts", []),
+        "companies": search_results.get("new_entity_details", {}).get("companies", []),
+        "deals": search_results.get("new_entity_details", {}).get("deals", []),
+        "meetings": [search_results.get("new_entity_details", {}).get("meeting_details", {})] if search_results.get("new_entity_details", {}).get("meeting_details") else [],
+        "notes": search_results.get("new_entity_details", {}).get("notes", []),
+        "tasks": search_results.get("new_entity_details", {}).get("tasks", [])
     }
 
-    # Extract selected entities from search results
     selected_entities = {
-    "contacts": search_results.get("contact_results", {}).get("results", []),
-    "companies": search_results.get("company_results", {}).get("results", []),
-    "deals": search_results.get("deal_results", {}).get("results", []),
-}
+        "contacts": search_results.get("contact_results", {}).get("results", []),
+        "companies": search_results.get("company_results", {}).get("results", []),
+        "deals": search_results.get("deal_results", {}).get("results", []),
+    }
 
     thread_content = ""
     bot_messages = []
@@ -344,7 +346,8 @@ def analyze_user_response(ti, **context):
             "status": "error",
             "error_message": "No valid thread content found. Unable to process.",
             "next_steps": ["Send a new email to restart the workflow"],
-            "entities_to_create": entities_to_create,
+            "entities_to_create": {},
+            "entities_to_update": {},
             "selected_entities": selected_entities,
             "user_intent": "ERROR",
             "confidence_level": "low"
@@ -352,48 +355,161 @@ def analyze_user_response(ti, **context):
         ti.xcom_push(key="analysis_results", value=results)
         return results
 
-    user_intent = "CREATE_NEW"
-    if "PROCEED WITH EXISTING" in latest_user_response.upper():
-        user_intent = "CONFIRM"
-    elif "CREATE NEW" in latest_user_response.upper():
-        user_intent = "CREATE_NEW"
-    elif any(keyword in latest_user_response.lower() for keyword in ["clarify", "more info", "question"]):
-        user_intent = "CLARIFY"
-    elif any(keyword in latest_user_response.lower() for keyword in ["modify", "change", "update", "correct"]):
-        user_intent = "MODIFY"
+    analysis_prompt = f"""
+Analyze this user response to determine their intent and extract any requested changes.
 
+ORIGINAL PROPOSED ENTITIES (these are suggestions for NEW creations only):
+{json.dumps(original_entities_normalized, indent=2)}
+
+EXISTING ENTITIES TO BE USED (prefer these over creating new unless user explicitly requests new ones):
+{json.dumps(selected_entities, indent=2)}
+
+FULL CONVERSATION THREAD:
+{thread_content}
+
+LATEST USER RESPONSE:
+{latest_user_response}
+
+Analyze the user's response and return a JSON object with:
+1. user_intent: "CONFIRM" (proceed, using existing where available), "MODIFY" (apply specific changes), "CREATE_NEW" (create all new, ignoring existing), "CLARIFY", or "CANCEL"
+2. confidence_level: "high", "medium", or "low"
+3. requested_changes: Object with ONLY specific modifications requested, per entity type (empty if no change for type). For each change, specify the entity index or id and the field changes.
+4. entities_to_create: Final NEW entities to create. Start from ORIGINAL PROPOSED ENTITIES, apply any requested_changes to the appropriate fields in each entity dict. Include all original unless user requests to remove.
+5. entities_to_update: Existing entities to update. For types with EXISTING ENTITIES, if changes requested for them, include the entity with id and the changes dict.
+6. reasoning: Brief explanation
+
+If the user confirms without changes, set entities_to_create to ORIGINAL PROPOSED for types without existing, apply no changes.
+For "MODIFY", apply changes to the relevant entities in entities_to_create or entities_to_update, and preserve unchanged entities.
+For "CREATE_NEW", set entities_to_create to ORIGINAL PROPOSED (or user specified new), ignore existing, apply changes.
+
+Return ONLY valid JSON:
+{{
+    "user_intent": "...",
+    "confidence_level": "...",
+    "requested_changes": {{
+        "contacts": [],
+        "companies": [], 
+        "deals": [],
+        "meetings": [],
+        "notes": [],
+        "tasks": []
+    }},
+    "entities_to_create": {{
+        "contacts": [],
+        "companies": [],
+        "deals": [],
+        "meetings": [],
+        "notes": [],
+        "tasks": []
+    }},
+    "entities_to_update": {{
+        "contacts": [{{ "id": "123", "changes": {{ "firstname": "new_value" }} }}],
+        "companies": [],
+        "deals": [],
+        "meetings": [],
+        "notes": [],
+        "tasks": []
+    }},
+    "reasoning": "..."
+}}
+"""
+
+    ai_analysis = get_ai_response(analysis_prompt, expect_json=True)
+    
+    try:
+        parsed_analysis = json.loads(ai_analysis)
+        user_intent = parsed_analysis.get("user_intent", "CONFIRM")
+        confidence_level = parsed_analysis.get("confidence_level", "medium")
+        requested_changes = parsed_analysis.get("requested_changes", {})
+        entities_to_create = parsed_analysis.get("entities_to_create", {})
+        entities_to_update = parsed_analysis.get("entities_to_update", {})
+        reasoning = parsed_analysis.get("reasoning", "")
+        
+        logging.info(f"AI Analysis Results:")
+        logging.info(f"User Intent: {user_intent}")
+        logging.info(f"Confidence: {confidence_level}")
+        logging.info(f"Reasoning: {reasoning}")
+        logging.info(f"Requested Changes: {json.dumps(requested_changes, indent=2)}")
+        logging.info(f"Entities to Create: {json.dumps(entities_to_create, indent=2)}")
+        logging.info(f"Entities to Update: {json.dumps(entities_to_update, indent=2)}")
+        
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to parse AI analysis: {e}")
+        logging.error(f"Raw AI response: {ai_analysis}")
+        # Fallback
+        user_intent = "CONFIRM"
+        if "PROCEED WITH EXISTING" in latest_user_response.upper():
+            user_intent = "CONFIRM"
+        elif "CREATE NEW" in latest_user_response.upper():
+            user_intent = "CREATE_NEW"
+        elif any(keyword in latest_user_response.lower() for keyword in ["modify", "change", "update", "correct"]):
+            user_intent = "MODIFY"
+        
+        entities_to_create = original_entities_normalized
+        entities_to_update = {}
+        confidence_level = "low"
+        requested_changes = {}
+        reasoning = "Fallback analysis due to AI parsing error"
+
+    # Safeguard: If "CONFIRM" or "MODIFY", ensure entities_to_create has original for types without existing
+    if user_intent in ["CONFIRM", "MODIFY"]:
+        for type_ in ['meetings', 'notes', 'tasks']:
+            if not entities_to_create.get(type_):
+                entities_to_create[type_] = original_entities_normalized.get(type_, [])
+        for type_ in ['contacts', 'companies', 'deals']:
+            if not selected_entities.get(type_):
+                if not entities_to_create.get(type_):
+                    entities_to_create[type_] = original_entities_normalized.get(type_, [])
+
+    # Determine tasks to execute
     tasks_to_execute = []
-    if entities_to_create["contacts"]:
+    if entities_to_create.get("contacts"):
         tasks_to_execute.append("create_contacts")
-    if entities_to_create["companies"]:
+    if entities_to_create.get("companies"):
         tasks_to_execute.append("create_companies")
-    if entities_to_create["deals"]:
+    if entities_to_create.get("deals"):
         tasks_to_execute.append("create_deals")
-    if entities_to_create["meetings"]:
+    if entities_to_create.get("meetings"):
         tasks_to_execute.append("create_meetings")
-    if entities_to_create["notes"]:
+    if entities_to_create.get("notes"):
         tasks_to_execute.append("create_notes")
-    if entities_to_create["tasks"]:
+    if entities_to_create.get("tasks"):
         tasks_to_execute.append("create_tasks")
 
+    if entities_to_update.get("contacts"):
+        tasks_to_execute.append("update_contacts")
+    if entities_to_update.get("companies"):
+        tasks_to_execute.append("update_companies")
+    if entities_to_update.get("deals"):
+        tasks_to_execute.append("update_deals")
+    if entities_to_update.get("meetings"):
+        tasks_to_execute.append("update_meetings")
+    if entities_to_update.get("notes"):
+        tasks_to_execute.append("update_notes")
+    if entities_to_update.get("tasks"):
+        tasks_to_execute.append("update_tasks")
+
     mandatory_tasks = ["create_associations", "compose_response_html", "send_final_email"]
+    
     results = {
         "status": "success",
         "error_message": None,
         "next_steps": list(set(tasks_to_execute + mandatory_tasks)),
         "entities_to_create": entities_to_create,
+        "entities_to_update": entities_to_update,
         "selected_entities": selected_entities,
         "user_intent": user_intent,
-        "confidence_level": "high" if user_intent in ["CONFIRM", "CREATE_NEW"] else "medium",
+        "confidence_level": confidence_level,
+        "requested_changes": requested_changes,
+        "ai_reasoning": reasoning,
         "thread_context_length": len(full_thread_history),
-        "bot_messages_count": len(bot_messages),
-        "user_messages_count": len(user_messages),
         "latest_response_length": len(latest_user_response),
         "analysis_timestamp": datetime.now().isoformat()
     }
 
     ti.xcom_push(key="analysis_results", value=results)
 
+    # Update thread context
     updated_context = thread_context.copy()
     updated_context.update({
         "analysis_results": results,
@@ -451,6 +567,8 @@ If error, set error message and include individual errors in the errors array.""
         ti.xcom_push(key="contacts_errors", value=errors)
 
         contexts = get_thread_context()
+        if thread_id not in contexts:
+            contexts[thread_id] = {}
         contexts[thread_id]["created_contacts"] = created
         contexts[thread_id]["contacts_errors"] = errors
         contexts[thread_id]["create_contacts_prompt"] = prompt
@@ -464,6 +582,8 @@ If error, set error message and include individual errors in the errors array.""
         ti.xcom_push(key="created_contacts", value=[])
         ti.xcom_push(key="contacts_errors", value=[str(e)])
         contexts = get_thread_context()
+        if thread_id not in contexts:
+            contexts[thread_id] = {}
         contexts[thread_id]["create_contacts_error"] = str(e)
         contexts[thread_id]["contacts_errors"] = [str(e)]
         with open(THREAD_CONTEXT_FILE, "w") as f:
@@ -491,7 +611,8 @@ IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
 1. For each company detail object, invoke create_company with the properties.
-2. Collect the created company id, company name, domain, state, city, country, phone, type and display in tabular format. If any details not found, show as blank in table.
+2. In the properties the `type` should be one of "PARTNER", "PROSPECT". If not specified, set to "PROSPECT".
+3. Collect the created company id, company name, domain, state, city, country, phone, type and display in tabular format. If any details not found, show as blank in table.
 
 Return JSON:
 {{
@@ -513,6 +634,8 @@ If error, set error message and include individual errors in the errors array.""
         ti.xcom_push(key="companies_errors", value=errors)
 
         contexts = get_thread_context()
+        if thread_id not in contexts:
+            contexts[thread_id] = {}
         contexts[thread_id]["created_companies"] = created
         contexts[thread_id]["companies_errors"] = errors
         contexts[thread_id]["create_companies_prompt"] = prompt
@@ -526,6 +649,8 @@ If error, set error message and include individual errors in the errors array.""
         ti.xcom_push(key="created_companies", value=[])
         ti.xcom_push(key="companies_errors", value=[str(e)])
         contexts = get_thread_context()
+        if thread_id not in contexts:
+            contexts[thread_id] = {}
         contexts[thread_id]["create_companies_error"] = str(e)
         contexts[thread_id]["companies_errors"] = [str(e)]
         with open(THREAD_CONTEXT_FILE, "w") as f:
@@ -575,6 +700,8 @@ If error, set error message and include individual errors in the errors array.""
         ti.xcom_push(key="deals_errors", value=errors)
 
         contexts = get_thread_context()
+        if thread_id not in contexts:
+            contexts[thread_id] = {}
         contexts[thread_id]["created_deals"] = created
         contexts[thread_id]["deals_errors"] = errors
         contexts[thread_id]["create_deals_prompt"] = prompt
@@ -588,6 +715,8 @@ If error, set error message and include individual errors in the errors array.""
         ti.xcom_push(key="created_deals", value=[])
         ti.xcom_push(key="deals_errors", value=[str(e)])
         contexts = get_thread_context()
+        if thread_id not in contexts:
+            contexts[thread_id] = {}
         contexts[thread_id]["create_deals_error"] = str(e)
         contexts[thread_id]["deals_errors"] = [str(e)]
         with open(THREAD_CONTEXT_FILE, "w") as f:
@@ -637,6 +766,8 @@ If error, set error message and include individual errors in the errors array.""
         ti.xcom_push(key="meetings_errors", value=errors)
 
         contexts = get_thread_context()
+        if thread_id not in contexts:
+            contexts[thread_id] = {}
         contexts[thread_id]["created_meetings"] = created
         contexts[thread_id]["meetings_errors"] = errors
         contexts[thread_id]["create_meetings_prompt"] = prompt
@@ -650,6 +781,8 @@ If error, set error message and include individual errors in the errors array.""
         ti.xcom_push(key="created_meetings", value=[])
         ti.xcom_push(key="meetings_errors", value=[str(e)])
         contexts = get_thread_context()
+        if thread_id not in contexts:
+            contexts[thread_id] = {}
         contexts[thread_id]["create_meetings_error"] = str(e)
         contexts[thread_id]["meetings_errors"] = [str(e)]
         with open(THREAD_CONTEXT_FILE, "w") as f:
@@ -781,6 +914,378 @@ If error, set error message and include individual errors in the errors array.""
 
     return created
 
+def update_contacts(ti, **context):
+    analysis_results = ti.xcom_pull(key="analysis_results")
+    thread_id = context['dag_run'].conf.get("thread_id")
+    to_update_contacts = analysis_results.get("entities_to_update", {}).get("contacts", [])
+
+    if not to_update_contacts:
+        logging.info("No contacts to update, skipping.")
+        ti.xcom_push(key="updated_contacts", value=[])
+        ti.xcom_push(key="contacts_update_errors", value=[])
+        return []
+
+    prompt = f"""Update contacts in HubSpot based on the provided details.
+
+Details to update:
+{json.dumps(to_update_contacts, indent=2)}
+
+IMPORTANT: Respond with ONLY a valid JSON object.
+
+Steps:
+1. For each contact, invoke update_contact with the id and changes.
+2. Collect the updated IDs and details in tabular format. If any details missing, leave it blank in table.
+
+Return JSON:
+{{
+    "updated_contacts": [{{"id": "123", "details": {{ "firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "..."}}}} ...],
+    "errors": ["Error message 1", "Error message 2"],
+    "error": null
+}}
+
+If error, set error message and include individual errors in the errors array."""
+
+    response = get_ai_response(prompt, expect_json=True)
+
+    try:
+        parsed = json.loads(response)
+        updated = parsed.get("updated_contacts", [])
+        errors = parsed.get("errors", [])
+
+        ti.xcom_push(key="updated_contacts", value=updated)
+        ti.xcom_push(key="contacts_update_errors", value=errors)
+
+        contexts = get_thread_context()
+        contexts[thread_id]["updated_contacts"] = updated
+        contexts[thread_id]["contacts_update_errors"] = errors
+        contexts[thread_id]["update_contacts_prompt"] = prompt
+        contexts[thread_id]["update_contacts_response"] = response
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+        logging.info(f"Updated {len(updated)} contacts with {len(errors)} errors")
+    except Exception as e:
+        logging.error(f"Error updating contacts: {e}")
+        ti.xcom_push(key="updated_contacts", value=[])
+        ti.xcom_push(key="contacts_update_errors", value=[str(e)])
+        contexts = get_thread_context()
+        contexts[thread_id]["update_contacts_error"] = str(e)
+        contexts[thread_id]["contacts_update_errors"] = [str(e)]
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+    return updated
+
+def update_companies(ti, **context):
+    analysis_results = ti.xcom_pull(key="analysis_results")
+    thread_id = context['dag_run'].conf.get("thread_id")
+    to_update_companies = analysis_results.get("entities_to_update", {}).get("companies", [])
+
+    if not to_update_companies:
+        logging.info("No companies to update, skipping.")
+        ti.xcom_push(key="updated_companies", value=[])
+        ti.xcom_push(key="companies_update_errors", value=[])
+        return []
+
+    prompt = f"""Update companies in HubSpot based on the provided details.
+
+Details to update:
+{json.dumps(to_update_companies, indent=2)}
+
+IMPORTANT: Respond with ONLY a valid JSON object.
+
+Steps:
+1. For each company, invoke update_company with the id and changes.
+2. Collect the updated company id, company name, domain, state, city, country, phone, type and display in tabular format. If any details not found, show as blank in table.
+
+Return JSON:
+{{
+    "updated_companies": [{{"id": "123", "details": {{ "name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}}} ...],
+    "errors": ["Error message 1", "Error message 2"],
+    "error": null
+}}
+
+If error, set error message and include individual errors in the errors array."""
+
+    response = get_ai_response(prompt, expect_json=True)
+
+    try:
+        parsed = json.loads(response)
+        updated = parsed.get("updated_companies", [])
+        errors = parsed.get("errors", [])
+
+        ti.xcom_push(key="updated_companies", value=updated)
+        ti.xcom_push(key="companies_update_errors", value=errors)
+
+        contexts = get_thread_context()
+        contexts[thread_id]["updated_companies"] = updated
+        contexts[thread_id]["companies_update_errors"] = errors
+        contexts[thread_id]["update_companies_prompt"] = prompt
+        contexts[thread_id]["update_companies_response"] = response
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+        logging.info(f"Updated {len(updated)} companies with {len(errors)} errors")
+    except Exception as e:
+        logging.error(f"Error updating companies: {e}")
+        ti.xcom_push(key="updated_companies", value=[])
+        ti.xcom_push(key="companies_update_errors", value=[str(e)])
+        contexts = get_thread_context()
+        contexts[thread_id]["update_companies_error"] = str(e)
+        contexts[thread_id]["companies_update_errors"] = [str(e)]
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+    return updated
+
+def update_deals(ti, **context):
+    analysis_results = ti.xcom_pull(key="analysis_results")
+    thread_id = context['dag_run'].conf.get("thread_id")
+    to_update_deals = analysis_results.get("entities_to_update", {}).get("deals", [])
+
+    if not to_update_deals:
+        logging.info("No deals to update, skipping.")
+        ti.xcom_push(key="updated_deals", value=[])
+        ti.xcom_push(key="deals_update_errors", value=[])
+        return []
+
+    prompt = f"""Update deals in HubSpot based on the provided details.
+
+Details to update:
+{json.dumps(to_update_deals, indent=2)}
+
+IMPORTANT: Respond with ONLY a valid JSON object.
+
+Steps:
+1. For each deal, invoke update_deal with the id and changes.
+2. Collect the updated deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
+
+Return JSON:
+{{
+    "updated_deals": [{{"id": "123", "details": {{ "dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}}} ...],
+    "errors": ["Error message 1", "Error message 2"],
+    "error": null
+}}
+
+If error, set error message and include individual errors in the errors array."""
+
+    response = get_ai_response(prompt, expect_json=True)
+
+    try:
+        parsed = json.loads(response)
+        updated = parsed.get("updated_deals", [])
+        errors = parsed.get("errors", [])
+
+        ti.xcom_push(key="updated_deals", value=updated)
+        ti.xcom_push(key="deals_update_errors", value=errors)
+
+        contexts = get_thread_context()
+        contexts[thread_id]["updated_deals"] = updated
+        contexts[thread_id]["deals_update_errors"] = errors
+        contexts[thread_id]["update_deals_prompt"] = prompt
+        contexts[thread_id]["update_deals_response"] = response
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+        logging.info(f"Updated {len(updated)} deals with {len(errors)} errors")
+    except Exception as e:
+        logging.error(f"Error updating deals: {e}")
+        ti.xcom_push(key="updated_deals", value=[])
+        ti.xcom_push(key="deals_update_errors", value=[str(e)])
+        contexts = get_thread_context()
+        contexts[thread_id]["update_deals_error"] = str(e)
+        contexts[thread_id]["deals_update_errors"] = [str(e)]
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+    return updated
+
+def update_meetings(ti, **context):
+    analysis_results = ti.xcom_pull(key="analysis_results")
+    thread_id = context['dag_run'].conf.get("thread_id")
+    to_update_meetings = analysis_results.get("entities_to_update", {}).get("meetings", [])
+
+    if not to_update_meetings:
+        logging.info("No meetings to update, skipping.")
+        ti.xcom_push(key="updated_meetings", value=[])
+        ti.xcom_push(key="meetings_update_errors", value=[])
+        return []
+
+    prompt = f"""Update meetings in HubSpot based on the provided details.
+
+Meeting details to update:
+{json.dumps(to_update_meetings, indent=2)}
+
+IMPORTANT: Respond with ONLY a valid JSON object.
+
+Steps:
+1. For each meeting, invoke update_meeting with the id and changes.
+2. Collect the updated ID, Title, Start Time (EST), End Time (EST), Location, Outcome in tabular format.
+3. Always use `hs_timestamp` in YYYY-MM-DDTHH:MM:SSZ format while updating meetings.
+Return JSON:
+{{
+    "updated_meetings": [{{"id": "123", "details": {{ "meeting_title": "...", "start_time": "...", "end_time": "...", "location": "...", "outcome": "...", "timestamp": "...", "attendees": [], "meeting_type": "..."}}}} ...],
+    "errors": ["Error message 1", "Error message 2"],
+    "error": null
+}}
+
+If error, set error message and include individual errors in the errors array."""
+
+    response = get_ai_response(prompt, expect_json=True)
+
+    try:
+        parsed = json.loads(response)
+        updated = parsed.get("updated_meetings", [])
+        errors = parsed.get("errors", [])
+
+        ti.xcom_push(key="updated_meetings", value=updated)
+        ti.xcom_push(key="meetings_update_errors", value=errors)
+
+        contexts = get_thread_context()
+        contexts[thread_id]["updated_meetings"] = updated
+        contexts[thread_id]["meetings_update_errors"] = errors
+        contexts[thread_id]["update_meetings_prompt"] = prompt
+        contexts[thread_id]["update_meetings_response"] = response
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+        logging.info(f"Updated {len(updated)} meetings with {len(errors)} errors")
+    except Exception as e:
+        logging.error(f"Error updating meetings: {e}")
+        ti.xcom_push(key="updated_meetings", value=[])
+        ti.xcom_push(key="meetings_update_errors", value=[str(e)])
+        contexts = get_thread_context()
+        contexts[thread_id]["update_meetings_error"] = str(e)
+        contexts[thread_id]["meetings_update_errors"] = [str(e)]
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+    return updated
+
+def update_notes(ti, **context):
+    analysis_results = ti.xcom_pull(key="analysis_results")
+    thread_id = context['dag_run'].conf.get("thread_id")
+    to_update_notes = analysis_results.get("entities_to_update", {}).get("notes", [])
+
+    if not to_update_notes:
+        logging.info("No notes to update, skipping.")
+        ti.xcom_push(key="updated_notes", value=[])
+        ti.xcom_push(key="notes_update_errors", value=[])
+        return []
+
+    prompt = f"""Update notes in HubSpot based on the provided details.
+
+Notes to update:
+{json.dumps(to_update_notes, indent=2)}
+
+IMPORTANT: Respond with ONLY a valid JSON object.
+
+Steps:
+1. For each note, invoke update_note with the id and changes.
+2. Collect the updated Note id, Note body, last modified date in tabular format.
+3. Always use `hs_timestamp` in YYYY-MM-DDTHH:MM:SSZ format while updating notes.
+Return JSON:
+{{
+    "updated_notes": [{{"id": "123", "details": {{ "note_content": "...", "timestamp": "..."}}}} ...],
+    "errors": ["Error message 1", "Error message 2"],
+    "error": null
+}}
+
+If error, set error message and include individual errors in the errors array."""
+
+    response = get_ai_response(prompt, expect_json=True)
+
+    try:
+        parsed = json.loads(response)
+        updated = parsed.get("updated_notes", [])
+        errors = parsed.get("errors", [])
+
+        ti.xcom_push(key="updated_notes", value=updated)
+        ti.xcom_push(key="notes_update_errors", value=errors)
+
+        contexts = get_thread_context()
+        contexts[thread_id]["updated_notes"] = updated
+        contexts[thread_id]["notes_update_errors"] = errors
+        contexts[thread_id]["update_notes_prompt"] = prompt
+        contexts[thread_id]["update_notes_response"] = response
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+        logging.info(f"Updated {len(updated)} notes with {len(errors)} errors")
+    except Exception as e:
+        logging.error(f"Error updating notes: {e}")
+        ti.xcom_push(key="updated_notes", value=[])
+        ti.xcom_push(key="notes_update_errors", value=[str(e)])
+        contexts = get_thread_context()
+        contexts[thread_id]["update_notes_error"] = str(e)
+        contexts[thread_id]["notes_update_errors"] = [str(e)]
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+    return updated
+
+def update_tasks(ti, **context):
+    analysis_results = ti.xcom_pull(key="analysis_results")
+    thread_id = context['dag_run'].conf.get("thread_id")
+    to_update_tasks = analysis_results.get("entities_to_update", {}).get("tasks", [])
+
+    if not to_update_tasks:
+        logging.info("No tasks to update, skipping.")
+        ti.xcom_push(key="updated_tasks", value=[])
+        ti.xcom_push(key="tasks_update_errors", value=[])
+        return []
+
+    prompt = f"""Update tasks in HubSpot based on the provided details.
+
+Tasks to update:
+{json.dumps(to_update_tasks, indent=2)}
+
+IMPORTANT: Respond with ONLY a valid JSON object.
+
+Steps:
+1. For each task, invoke update_task with id and changes.
+2. Collect the updated Task id, task body, last modified date, due date, task owner name in tabular format.
+3. Always use `hs_timestamp` in YYYY-MM-DDTHH:MM:SSZ format while updating tasks.
+Return JSON:
+{{
+    "updated_tasks": [{{"id": "123", "details": {{ "task_details": "...", "task_owner_name": "...", "task_owner_id": "...", "due_date": "...", "priority": "..."}}}} ...],
+    "errors": ["Error message 1", "Error message 2"],
+    "error": null
+}}
+
+If error, set error message and include individual errors in the errors array."""
+
+    response = get_ai_response(prompt, expect_json=True)
+
+    try:
+        parsed = json.loads(response)
+        updated = parsed.get("updated_tasks", [])
+        errors = parsed.get("errors", [])
+
+        ti.xcom_push(key="updated_tasks", value=updated)
+        ti.xcom_push(key="tasks_update_errors", value=errors)
+
+        contexts = get_thread_context()
+        contexts[thread_id]["updated_tasks"] = updated
+        contexts[thread_id]["tasks_update_errors"] = errors
+        contexts[thread_id]["update_tasks_prompt"] = prompt
+        contexts[thread_id]["update_tasks_response"] = response
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+        logging.info(f"Updated {len(updated)} tasks with {len(errors)} errors")
+    except Exception as e:
+        logging.error(f"Error updating tasks: {e}")
+        ti.xcom_push(key="updated_tasks", value=[])
+        ti.xcom_push(key="tasks_update_errors", value=[str(e)])
+        contexts = get_thread_context()
+        contexts[thread_id]["update_tasks_error"] = str(e)
+        contexts[thread_id]["tasks_update_errors"] = [str(e)]
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+    return updated
+
 def create_associations(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     thread_id = context['dag_run'].conf.get("thread_id")
@@ -795,33 +1300,28 @@ def create_associations(ti, **context):
     created_notes = ti.xcom_pull(key="created_notes", default=[])
     created_tasks = ti.xcom_pull(key="created_tasks", default=[])
 
-    # Debug: Log the entire search_results structure to understand the format
-    logging.info(f"Full search_results structure: {json.dumps(search_results, indent=2)}")
+    # Get updated entities (IDs remain the same)
+    updated_contacts = ti.xcom_pull(key="updated_contacts", default=[])
+    updated_companies = ti.xcom_pull(key="updated_companies", default=[])
+    updated_deals = ti.xcom_pull(key="updated_deals", default=[])
+    updated_meetings = ti.xcom_pull(key="updated_meetings", default=[])
+    updated_notes = ti.xcom_pull(key="updated_notes", default=[])
+    updated_tasks = ti.xcom_pull(key="updated_tasks", default=[])
 
-    # Extract existing entity IDs directly from search_results
-    existing_contact_ids = []
-    existing_company_ids = []
-    existing_deal_ids = []
+    # Extract existing entity IDs from search_results
+    existing_contact_ids = [str(contact.get("contactId")) for contact in search_results.get("contact_results", {}).get("results", []) if contact.get("contactId")]
+    existing_company_ids = [str(company.get("companyId")) for company in search_results.get("company_results", {}).get("results", []) if company.get("companyId")]
+    existing_deal_ids = [str(deal.get("dealId")) for deal in search_results.get("deal_results", {}).get("results", []) if deal.get("dealId")]
 
-    # Extract from contact_results
-    if "contact_results" in search_results and "results" in search_results["contact_results"]:
-        for contact in search_results["contact_results"]["results"]:
-            if isinstance(contact, dict) and contact.get("contactId"):
-                existing_contact_ids.append(str(contact["contactId"]))
+    # Get updated entity IDs (these should be used instead of existing when available)
+    updated_contact_ids = [c.get("id", "") for c in updated_contacts if c.get("id")]
+    updated_company_ids = [c.get("id", "") for c in updated_companies if c.get("id")]
+    updated_deal_ids = [d.get("id", "") for d in updated_deals if d.get("id")]
+    updated_meeting_ids = [m.get("id", "") for m in updated_meetings if m.get("id")]
+    updated_note_ids = [n.get("id", "") for n in updated_notes if n.get("id")]
+    updated_task_ids = [t.get("id", "") for t in updated_tasks if t.get("id")]
 
-    # Extract from company_results
-    if "company_results" in search_results and "results" in search_results["company_results"]:
-        for company in search_results["company_results"]["results"]:
-            if isinstance(company, dict) and company.get("companyId"):
-                existing_company_ids.append(str(company["companyId"]))
-
-    # Extract from deal_results (note: deals use 'dealId' not 'id')
-    if "deal_results" in search_results and "results" in search_results["deal_results"]:
-        for deal in search_results["deal_results"]["results"]:
-            if isinstance(deal, dict) and deal.get("dealId"):
-                existing_deal_ids.append(str(deal["dealId"]))
-
-    # Collect newly created entity IDs
+    # New IDs
     new_contact_ids = [c.get("id", "") for c in created_contacts if c.get("id")]
     new_company_ids = [c.get("id", "") for c in created_companies if c.get("id")]
     new_deal_ids = [d.get("id", "") for d in created_deals if d.get("id")]
@@ -829,39 +1329,43 @@ def create_associations(ti, **context):
     new_note_ids = [n.get("id", "") for n in created_notes if n.get("id")]
     new_task_ids = [t.get("id", "") for t in created_tasks if t.get("id")]
 
-    # Combine all IDs for association
-    all_entity_ids = {
-        "existing_contacts": existing_contact_ids,
-        "existing_companies": existing_company_ids,
-        "existing_deals": existing_deal_ids,
-        "new_contacts": new_contact_ids,
-        "new_companies": new_company_ids,
-        "new_deals": new_deal_ids,
-        "new_meetings": new_meeting_ids,
-        "new_notes": new_note_ids,
-        "new_tasks": new_task_ids
-    }
+    # Priority logic: Use new IDs first, then updated IDs, then existing IDs
+    # For contacts: new -> updated -> existing
+    final_contact_ids = new_contact_ids if new_contact_ids else (updated_contact_ids if updated_contact_ids else existing_contact_ids)
+    
+    # For companies: new -> updated -> existing  
+    final_company_ids = new_company_ids if new_company_ids else (updated_company_ids if updated_company_ids else existing_company_ids)
+    
+    # For deals: new -> updated -> existing
+    final_deal_ids = new_deal_ids if new_deal_ids else (updated_deal_ids if updated_deal_ids else existing_deal_ids)
+    
+    # For meetings, notes, tasks: new -> updated
+    final_meeting_ids = new_meeting_ids if new_meeting_ids else updated_meeting_ids
+    final_note_ids = new_note_ids if new_note_ids else updated_note_ids
+    final_task_ids = new_task_ids if new_task_ids else updated_task_ids
 
-    # Create a comprehensive list of all IDs for easier processing
-    all_contact_ids = existing_contact_ids + new_contact_ids
-    all_company_ids = existing_company_ids + new_company_ids
-    all_deal_ids = existing_deal_ids + new_deal_ids
+    # Combine all IDs for association tracking
+    all_entity_ids = {
+        "final_contacts": final_contact_ids,
+        "final_companies": final_company_ids,
+        "final_deals": final_deal_ids,
+        "final_meetings": final_meeting_ids,
+        "final_notes": final_note_ids,
+        "final_tasks": final_task_ids
+    }
 
     # Log the entity IDs to be associated
     logging.info(f"Associating entities for thread {thread_id}:")
-    logging.info(f"Existing Contact IDs from search: {existing_contact_ids}")
-    logging.info(f"Existing Company IDs from search: {existing_company_ids}")
-    logging.info(f"Existing Deal IDs from search: {existing_deal_ids}")
-    logging.info(f"New Contact IDs: {new_contact_ids}")
-    logging.info(f"New Company IDs: {new_company_ids}")
-    logging.info(f"New Deal IDs: {new_deal_ids}")
-    logging.info(f"Meeting IDs: {new_meeting_ids}")
-    logging.info(f"Note IDs: {new_note_ids}")
-    logging.info(f"Task IDs: {new_task_ids}")
+    logging.info(f"Final Contact IDs: {final_contact_ids}")
+    logging.info(f"Final Company IDs: {final_company_ids}")
+    logging.info(f"Final Deal IDs: {final_deal_ids}")
+    logging.info(f"Final Meeting IDs: {final_meeting_ids}")
+    logging.info(f"Final Note IDs: {final_note_ids}")
+    logging.info(f"Final Task IDs: {final_task_ids}")
 
     # Check if we have any entities to associate
-    total_entities = (len(all_contact_ids) + len(all_company_ids) + len(all_deal_ids) +
-                     len(new_meeting_ids) + len(new_note_ids) + len(new_task_ids))
+    total_entities = (len(final_contact_ids) + len(final_company_ids) + len(final_deal_ids) +
+                     len(final_meeting_ids) + len(final_note_ids) + len(final_task_ids))
 
     if total_entities == 0:
         logging.warning("No entities available to associate, creating empty associations list.")
@@ -874,24 +1378,57 @@ def create_associations(ti, **context):
             json.dump(contexts, f)
         return []
 
-    prompt = f"""Associate all entities in HubSpot - both existing and newly created entities must be linked together.
+    prompt = f"""Create associations between all available HubSpot entities using the specific JSON format required by the client API.
 
-EXISTING ENTITIES (from search results):
-- Contact IDs: {existing_contact_ids}
-- Company IDs: {existing_company_ids}
-- Deal IDs: {existing_deal_ids}
+AVAILABLE ENTITY IDS:
+- Contact IDs: {final_contact_ids}
+- Company IDs: {final_company_ids}  
+- Deal IDs: {final_deal_ids}
+- Meeting IDs: {final_meeting_ids}
+- Note IDs: {final_note_ids}
+- Task IDs: {final_task_ids}
 
-NEWLY CREATED ENTITIES:
-- Contact IDs: {new_contact_ids}
-- Company IDs: {new_company_ids}
-- Deal IDs: {new_deal_ids}
-- Meeting IDs: {new_meeting_ids}
-- Note IDs: {new_note_ids}
-- Task IDs: {new_task_ids}
+Create associations using this exact JSON structure for each association request:
+{{
+    "single": {{
+        "deal_id": "string",
+        "contact_id": "string", 
+        "company_id": "string",
+        "note_id": "string",
+        "task_id": "string",
+        "meeting_id": "string"
+    }}
+}}
+
+Rules:
+1. Each association request should include relevant entity IDs (leave as empty string "" if not applicable)
+2. Create logical associations (e.g., associate contacts with companies, deals with contacts/companies, notes/tasks/meetings with related entities)
+3. Use comma separation for multiple IDs in a field if needed. example: "contact_id": "123,456".
 
 Return JSON:
 {{
-    "associations_created": ["new-contact-123 to existing-company-456", "new-deal-789 to existing-contact-321", "existing-deal-654 to new-company-987", ...],
+    "association_requests": [
+        {{
+            "single": {{
+                "deal_id": "123",
+                "contact_id": "456", 
+                "company_id": "789",
+                "note_id": "",
+                "task_id": "",
+                "meeting_id": ""
+            }}
+        }},
+        {{
+            "single": {{
+                "deal_id": "",
+                "contact_id": "456",
+                "company_id": "789", 
+                "note_id": "101",
+                "task_id": "202",
+                "meeting_id": "303"
+            }}
+        }}
+    ],
     "errors": ["Error message 1", "Error message 2"],
     "error": null
 }}
@@ -902,17 +1439,17 @@ If error, set error message and include individual errors in the errors array.""
 
     try:
         parsed = json.loads(response)
-        associations = parsed.get("associations_created", [])
+        association_requests = parsed.get("association_requests", [])
         errors = parsed.get("errors", [])
 
         if parsed.get("error"):
             logging.warning(f"Association creation returned error: {parsed['error']}")
 
-        ti.xcom_push(key="associations_created", value=associations)
+        ti.xcom_push(key="associations_created", value=association_requests)
         ti.xcom_push(key="associations_errors", value=errors)
 
         contexts = get_thread_context()
-        contexts[thread_id]["associations_created"] = associations
+        contexts[thread_id]["associations_created"] = association_requests
         contexts[thread_id]["associations_errors"] = errors
         contexts[thread_id]["create_associations_prompt"] = prompt
         contexts[thread_id]["create_associations_response"] = response
@@ -920,7 +1457,7 @@ If error, set error message and include individual errors in the errors array.""
         with open(THREAD_CONTEXT_FILE, "w") as f:
             json.dump(contexts, f)
 
-        logging.info(f"Created {len(associations)} associations with {len(errors)} errors")
+        logging.info(f"Created {len(association_requests)} association requests with {len(errors)} errors")
     except Exception as e:
         logging.error(f"Error creating associations: {e}")
         ti.xcom_push(key="associations_created", value=[])
@@ -931,7 +1468,7 @@ If error, set error message and include individual errors in the errors array.""
         with open(THREAD_CONTEXT_FILE, "w") as f:
             json.dump(contexts, f)
 
-    return associations
+    return association_requests
 
 def compose_response_html(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
@@ -941,6 +1478,14 @@ def compose_response_html(ti, **context):
     created_meetings = ti.xcom_pull(key="created_meetings", default=[])
     created_notes = ti.xcom_pull(key="created_notes", default=[])
     created_tasks = ti.xcom_pull(key="created_tasks", default=[])
+
+    updated_contacts = ti.xcom_pull(key="updated_contacts", default=[])
+    updated_companies = ti.xcom_pull(key="updated_companies", default=[])
+    updated_deals = ti.xcom_pull(key="updated_deals", default=[])
+    updated_meetings = ti.xcom_pull(key="updated_meetings", default=[])
+    updated_notes = ti.xcom_pull(key="updated_notes", default=[])
+    updated_tasks = ti.xcom_pull(key="updated_tasks", default=[])
+
     associations_created = ti.xcom_pull(key="associations_created", default=[])
 
     thread_id = context['dag_run'].conf.get("thread_id")
@@ -967,14 +1512,14 @@ def compose_response_html(ti, **context):
     <body>
         <div class="greeting">
             <p>Hello,</p>
-            <p>The HubSpot meeting minutes workflow has been completed. Below is a summary of the actions taken based on your input and the email thread analysis.</p>
+            <p>I have completed the requested operations in HubSpot. Here is the summary:</p>
         </div>
     """
 
-    # Show existing/selected entities first
-    if existing_contacts:
+    # Show existing/selected entities first (unchanged or updated) only if data exists
+    if existing_contacts or updated_contacts:
         email_content += """
-        <h3>Existing Contacts Used</h3>
+        <h3>Contacts Used/Updated</h3>
         <table>
             <thead>
                 <tr>
@@ -985,6 +1530,7 @@ def compose_response_html(ti, **context):
                     <th>Phone Number</th>
                     <th>Address</th>
                     <th>Job Title</th>
+                    <th>Status</th>
                 </tr>
             </thead>
             <tbody>
@@ -1000,6 +1546,21 @@ def compose_response_html(ti, **context):
                     <td>{details.get("phone", "")}</td>
                     <td>{details.get("address", "")}</td>
                     <td>{details.get("jobtitle", "")}</td>
+                    <td>Existing</td>
+                </tr>
+            """
+        for contact in updated_contacts:
+            details = contact.get("details", {})
+            email_content += f"""
+                <tr>
+                    <td>{contact.get("id", "")}</td>
+                    <td>{details.get("firstname", "")}</td>
+                    <td>{details.get("lastname", "")}</td>
+                    <td>{details.get("email", "")}</td>
+                    <td>{details.get("phone", "")}</td>
+                    <td>{details.get("address", "")}</td>
+                    <td>{details.get("jobtitle", "")}</td>
+                    <td>Updated</td>
                 </tr>
             """
         email_content += """
@@ -1007,9 +1568,9 @@ def compose_response_html(ti, **context):
         </table>
         """
 
-    if existing_companies:
+    if existing_companies or updated_companies:
         email_content += """
-        <h3>Existing Companies Used</h3>
+        <h3>Companies Used/Updated</h3>
         <table>
             <thead>
                 <tr>
@@ -1024,6 +1585,7 @@ def compose_response_html(ti, **context):
                     <th>Phone</th>
                     <th>Description</th>
                     <th>Type</th>
+                    <th>Status</th>
                 </tr>
             </thead>
             <tbody>
@@ -1043,6 +1605,25 @@ def compose_response_html(ti, **context):
                     <td>{details.get("phone", "")}</td>
                     <td>{details.get("description", "")}</td>
                     <td>{details.get("type", "")}</td>
+                    <td>Existing</td>
+                </tr>
+            """
+        for company in updated_companies:
+            details = company.get("details", {})
+            email_content += f"""
+                <tr>
+                    <td>{company.get("id", "")}</td>
+                    <td>{details.get("name", "")}</td>
+                    <td>{details.get("domain", "")}</td>
+                    <td>{details.get("address", "")}</td>
+                    <td>{details.get("city", "")}</td>
+                    <td>{details.get("state", "")}</td>
+                    <td>{details.get("zip", "")}</td>
+                    <td>{details.get("country", "")}</td>
+                    <td>{details.get("phone", "")}</td>
+                    <td>{details.get("description", "")}</td>
+                    <td>{details.get("type", "")}</td>
+                    <td>Updated</td>
                 </tr>
             """
         email_content += """
@@ -1050,9 +1631,9 @@ def compose_response_html(ti, **context):
         </table>
         """
 
-    if existing_deals:
+    if existing_deals or updated_deals:
         email_content += """
-        <h3>Existing Deals Used</h3>
+        <h3>Deals Used/Updated</h3>
         <table>
             <thead>
                 <tr>
@@ -1062,6 +1643,7 @@ def compose_response_html(ti, **context):
                     <th>Deal Amount</th>
                     <th>Close Date</th>
                     <th>Deal Owner Name</th>
+                    <th>Status</th>
                 </tr>
             </thead>
             <tbody>
@@ -1076,6 +1658,20 @@ def compose_response_html(ti, **context):
                     <td>{details.get("dealAmount", "")}</td>
                     <td>{details.get("closeDate", "")}</td>
                     <td>{details.get("dealOwnerName", "")}</td>
+                    <td>Existing</td>
+                </tr>
+            """
+        for deal in updated_deals:
+            details = deal.get("details", {})
+            email_content += f"""
+                <tr>
+                    <td>{deal.get("id", "")}</td>
+                    <td>{details.get("dealName", "")}</td>
+                    <td>{details.get("dealLabelName", "")}</td>
+                    <td>{details.get("dealAmount", "")}</td>
+                    <td>{details.get("closeDate", "")}</td>
+                    <td>{details.get("dealOwnerName", "")}</td>
+                    <td>Updated</td>
                 </tr>
             """
         email_content += """
@@ -1083,7 +1679,7 @@ def compose_response_html(ti, **context):
         </table>
         """
 
-    # Show newly created entities
+    # Show newly created entities only if data exists
     if created_contacts:
         email_content += """
         <h3>Newly Created Contacts</h3>
@@ -1195,9 +1791,9 @@ def compose_response_html(ti, **context):
         </table>
         """
 
-    if created_meetings:
+    if created_meetings or updated_meetings:
         email_content += """
-        <h3>Created Meetings</h3>
+        <h3>Meetings Created/Updated</h3>
         <table>
             <thead>
                 <tr>
@@ -1209,6 +1805,7 @@ def compose_response_html(ti, **context):
                     <th>Outcome</th>
                     <th>Timestamp</th>
                     <th>Attendees</th>
+                    <th>Status</th>
                 </tr>
             </thead>
             <tbody>
@@ -1226,6 +1823,23 @@ def compose_response_html(ti, **context):
                     <td>{details.get("outcome", "")}</td>
                     <td>{details.get("timestamp", "")}</td>
                     <td>{attendees}</td>
+                    <td>Created</td>
+                </tr>
+            """
+        for meeting in updated_meetings:
+            details = meeting.get("details", {})
+            attendees = ", ".join(details.get("attendees", []))
+            email_content += f"""
+                <tr>
+                    <td>{meeting.get("id", "")}</td>
+                    <td>{details.get("meeting_title", "")}</td>
+                    <td>{details.get("start_time", "")}</td>
+                    <td>{details.get("end_time", "")}</td>
+                    <td>{details.get("location", "")}</td>
+                    <td>{details.get("outcome", "")}</td>
+                    <td>{details.get("timestamp", "")}</td>
+                    <td>{attendees}</td>
+                    <td>Updated</td>
                 </tr>
             """
         email_content += """
@@ -1233,15 +1847,16 @@ def compose_response_html(ti, **context):
         </table>
         """
 
-    if created_notes:
+    if created_notes or updated_notes:
         email_content += """
-        <h3>Created Notes</h3>
+        <h3>Notes Created/Updated</h3>
         <table>
             <thead>
                 <tr>
                     <th>ID</th>
                     <th>Note Content</th>
                     <th>Timestamp</th>
+                    <th>Status</th>
                 </tr>
             </thead>
             <tbody>
@@ -1253,6 +1868,17 @@ def compose_response_html(ti, **context):
                     <td>{note.get("id", "")}</td>
                     <td>{details.get("note_content", "")}</td>
                     <td>{details.get("timestamp", "")}</td>
+                    <td>Created</td>
+                </tr>
+            """
+        for note in updated_notes:
+            details = note.get("details", {})
+            email_content += f"""
+                <tr>
+                    <td>{note.get("id", "")}</td>
+                    <td>{details.get("note_content", "")}</td>
+                    <td>{details.get("timestamp", "")}</td>
+                    <td>Updated</td>
                 </tr>
             """
         email_content += """
@@ -1260,9 +1886,9 @@ def compose_response_html(ti, **context):
         </table>
         """
 
-    if created_tasks:
+    if created_tasks or updated_tasks:
         email_content += """
-        <h3>Created Tasks</h3>
+        <h3>Tasks Created/Updated</h3>
         <table>
             <thead>
                 <tr>
@@ -1271,6 +1897,7 @@ def compose_response_html(ti, **context):
                     <th>Owner Name</th>
                     <th>Due Date</th>
                     <th>Priority</th>
+                    <th>Status</th>
                 </tr>
             </thead>
             <tbody>
@@ -1284,6 +1911,19 @@ def compose_response_html(ti, **context):
                     <td>{details.get("task_owner_name", "")}</td>
                     <td>{details.get("due_date", "")}</td>
                     <td>{details.get("priority", "")}</td>
+                    <td>Created</td>
+                </tr>
+            """
+        for task in updated_tasks:
+            details = task.get("details", {})
+            email_content += f"""
+                <tr>
+                    <td>{task.get("id", "")}</td>
+                    <td>{details.get("task_details", "")}</td>
+                    <td>{details.get("task_owner_name", "")}</td>
+                    <td>{details.get("due_date", "")}</td>
+                    <td>{details.get("priority", "")}</td>
+                    <td>Updated</td>
                 </tr>
             """
         email_content += """
@@ -1293,9 +1933,9 @@ def compose_response_html(ti, **context):
 
     email_content += """
         <div class="closing">
-            <p>Thank you for using the HubSpot Workflow Agent. If you have any further questions or need additional assistance, please reply to this email.</p>
+            <p>Please let me know if any adjustments or corrections are needed.</p>
             <p>Best regards,<br>
-            HubSpot Workflow Agent<br>
+            HubSpot Agent<br>
             hubspot-agent-9201@lowtouch.ai</p>
         </div>
     </body>
@@ -1441,6 +2081,42 @@ with DAG(
         provide_context=True
     )
 
+    update_contacts_task = PythonOperator(
+        task_id="update_contacts",
+        python_callable=update_contacts,
+        provide_context=True
+    )
+
+    update_companies_task = PythonOperator(
+        task_id="update_companies",
+        python_callable=update_companies,
+        provide_context=True
+    )
+
+    update_deals_task = PythonOperator(
+        task_id="update_deals",
+        python_callable=update_deals,
+        provide_context=True
+    )
+
+    update_meetings_task = PythonOperator(
+        task_id="update_meetings",
+        python_callable=update_meetings,
+        provide_context=True
+    )
+
+    update_notes_task = PythonOperator(
+        task_id="update_notes",
+        python_callable=update_notes,
+        provide_context=True
+    )
+
+    update_tasks_task = PythonOperator(
+        task_id="update_tasks",
+        python_callable=update_tasks,
+        provide_context=True
+    )
+
     create_associations_task = PythonOperator(
         task_id="create_associations",
         python_callable=create_associations,
@@ -1475,7 +2151,13 @@ with DAG(
         "create_deals": create_deals_task,
         "create_meetings": create_meetings_task,
         "create_notes": create_notes_task,
-        "create_tasks": create_tasks_task
+        "create_tasks": create_tasks_task,
+        "update_contacts": update_contacts_task,
+        "update_companies": update_companies_task,
+        "update_deals": update_deals_task,
+        "update_meetings": update_meetings_task,
+        "update_notes": update_notes_task,
+        "update_tasks": update_tasks_task
     }
 
     branch_task >> [task for task in creation_tasks.values()]
