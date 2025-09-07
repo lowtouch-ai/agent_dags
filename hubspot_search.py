@@ -1050,7 +1050,7 @@ def compose_confirmation_email(ti, **context):
     </head>
     <body>
         <div class="greeting">
-            <p>Hello {user_name},</p>
+            <p>Hello,</p>
             <p>I reviewed your request and prepared the following summary of the actions to be taken in HubSpot:</p>
         </div>
     """
