@@ -518,7 +518,7 @@ Email thread content:
 IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
 
 Steps to follow:
-1. Invoke search_contacts with contacts firstname, lastname. If contact found display ALL the contact details in results.
+1. Always invoke search_contacts with both firstname, lastname. If contact found display all the contact details in results.
 2. If no contacts found, extract potential details for new contacts from the email content.
 
 Return this exact JSON structure:
@@ -597,11 +597,11 @@ IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanati
 
 Steps to follow:
 1. Parse the company details along with type wether PARTNER or PROSPECT.
-1. Invoke search_companies with company name. If company found display ALL company details in results.
+1. Invoke search_companies with company name and domain. If company found display all company details in results.
 2. If companies found, check if the company is a partner (use relevant properties or functions).
 3. If no companies found, extract potential details for new companies from the email content.
 4. `type` should be one of  "PARTNER" OR "PROSPECT". If not specified, default to "PROSPECT".
-
+5. Never parse the same company details to be created again if it already exists in results.
 Return this exact JSON structure:
 {{
     "company_results": {{
@@ -1033,27 +1033,28 @@ def compose_confirmation_email(ti, **context):
         if not entities:
             return []
         return [entity for entity in entities if has_meaningful_data(entity, required_fields)]
-
-    email_content = """
+    from_email = email_data["headers"].get("From", "")
+    email_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <style>
-            table { border-collapse: collapse; width: 100%; margin: 20px 0; }
-            th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-            th { background-color: #f2f2f2; font-weight: bold; }
-            h3 { color: #333; margin-top: 30px; margin-bottom: 15px; }
-            .greeting { margin-bottom: 20px; }
-            .closing { margin-top: 30px; }
-            .warning { background-color: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 10px; border-radius: 5px; margin: 10px 0; }
+            table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
+            th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
+            th {{ background-color: #f2f2f2; font-weight: bold; }}
+            h3 {{ color: #333; margin-top: 30px; margin-bottom: 15px; }}
+            .greeting {{ margin-bottom: 20px; }}
+            .closing {{ margin-top: 30px; }}
+            .warning {{ background-color: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 10px; border-radius: 5px; margin: 10px 0; }}
         </style>
     </head>
     <body>
         <div class="greeting">
-            <p>Hello,</p>
+            <p>Hello, {from_email}</p>
             <p>I reviewed your request and prepared the following summary of the actions to be taken in HubSpot:</p>
         </div>
     """
+
 
     # Check if any content sections will be displayed
     has_content_sections = False
