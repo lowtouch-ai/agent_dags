@@ -36,7 +36,7 @@ THREAD_CONTEXT_FILE = "/appz/cache/hubspot_thread_context.json"
 
 def authenticate_gmail():
     try:
-        creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
+        creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
         service = build("gmail", "v1", credentials=creds)
         profile = service.users().getProfile(userId="me").execute()
         logged_in_email = profile.get("emailAddress", "")
@@ -62,10 +62,18 @@ def update_thread_context(thread_id, context_data):
     try:
         contexts = get_thread_context()
         contexts[thread_id] = context_data
+        # Validate JSON before writing
+        json_string = json.dumps(contexts, indent=2)
+        json.loads(json_string)  # Ensure it’s valid JSON
         with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
+            f.write(json_string)
+        logging.info(f"Updated thread context for thread_id={thread_id}")
+    except json.JSONDecodeError as e:
+        logging.error(f"Invalid JSON format when writing to {THREAD_CONTEXT_FILE}: {e}")
+        raise
     except Exception as e:
         logging.error(f"Error writing to {THREAD_CONTEXT_FILE}: {e}")
+        raise
 
 def decode_email_payload(msg):
     try:
@@ -819,7 +827,7 @@ Return JSON:
     "error": null
 }}
 
-If error, set error message and include individual errors in the errors array."""
+If error, set error message and include individual errors in the errors array."""  # Existing prompt
 
     response = get_ai_response(prompt, expect_json=True)
 
@@ -832,6 +840,9 @@ If error, set error message and include individual errors in the errors array.""
         ti.xcom_push(key="notes_errors", value=errors)
 
         contexts = get_thread_context()
+        # Initialize thread_id in contexts if it doesn’t exist
+        if thread_id not in contexts:
+            contexts[thread_id] = {}
         contexts[thread_id]["created_notes"] = created
         contexts[thread_id]["notes_errors"] = errors
         contexts[thread_id]["create_notes_prompt"] = prompt
@@ -845,6 +856,9 @@ If error, set error message and include individual errors in the errors array.""
         ti.xcom_push(key="created_notes", value=[])
         ti.xcom_push(key="notes_errors", value=[str(e)])
         contexts = get_thread_context()
+        # Initialize thread_id in contexts if it doesn’t exist
+        if thread_id not in contexts:
+            contexts[thread_id] = {}
         contexts[thread_id]["create_notes_error"] = str(e)
         contexts[thread_id]["notes_errors"] = [str(e)]
         with open(THREAD_CONTEXT_FILE, "w") as f:
@@ -1489,30 +1503,31 @@ def compose_response_html(ti, **context):
     associations_created = ti.xcom_pull(key="associations_created", default=[])
 
     thread_id = context['dag_run'].conf.get("thread_id")
+    email_data = context['dag_run'].conf.get("email_data", {})
+    user_response_email = context['dag_run'].conf.get("user_response_email", email_data)
     selected_entities = analysis_results.get("selected_entities", {"contacts": [], "companies": [], "deals": []})
     existing_contacts = selected_entities.get("contacts", [])
     existing_companies = selected_entities.get("companies", [])
     existing_deals = selected_entities.get("deals", [])
-
-    email_content = """
+    from_sender = user_response_email.get("headers", {}).get("From", email_data.get("headers", {}).get("From", ""))
+    email_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <style>
-            table { border-collapse: collapse; width: 100%; margin: 20px 0; }
-            th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-            th { background-color: #f2f2f2; font-weight: bold; }
-            h3 { color: #333; margin-top: 30px; margin-bottom: 15px; }
-            .greeting { margin-bottom: 20px; }
-            .closing { margin-top: 30px; }
-            .error-section { background-color: #ffebee; padding: 15px; margin: 20px 0; border-left: 4px solid #f44336; }
-            .error-title { color: #d32f2f; font-weight: bold; margin-bottom: 10px; }
+            table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
+            th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
+            th {{ background-color: #f2f2f2; font-weight: bold; }}
+            h3 {{ color: #333; margin-top: 30px; margin-bottom: 15px; }}
+            .greeting {{ margin-bottom: 20px; }}
+            .closing {{ margin-top: 30px; }}
+            .warning {{ background-color: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 10px; border-radius: 5px; margin: 10px 0; }}
         </style>
     </head>
     <body>
         <div class="greeting">
-            <p>Hello,</p>
-            <p>I have completed the requested operations in HubSpot. Here is the summary:</p>
+            <p>Hello, {from_sender}</p>
+            <p>I reviewed your request and prepared the following summary of the actions to be taken in HubSpot:</p>
         </div>
     """
 
