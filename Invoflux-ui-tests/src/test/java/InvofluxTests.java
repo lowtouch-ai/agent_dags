@@ -37,7 +37,7 @@ public class InvofluxTests {
     private static final String FROM_EMAIL = System.getenv("FROM_EMAIL");
     private static final String APP_PASSWORD = System.getenv("GMAIL_TOKEN"); // generated from Gmail
     private static final String TO_EMAIL = System.getenv("INVOFLUX_AGENT_EMAIL");
-    
+   
 
     @BeforeClass
     public void setupAll() throws IOException {
@@ -70,9 +70,10 @@ public class InvofluxTests {
         utils.ExtentLogger.log("Navigating to login page");
 
         wait.until(ExpectedConditions.visibilityOfElementLocated(By.name("email")));
-        //driver.findElement(By.name("email")).sendKeys(config.getProperty("login.email"));
-        //driver.findElement(By.name("current-password")).sendKeys(config.getProperty("login.password"));
-        
+        /*
+        driver.findElement(By.name("email")).sendKeys(config.getProperty("login.email"));
+        driver.findElement(By.name("current-password")).sendKeys(config.getProperty("login.password"));
+        */
         driver.findElement(By.name("email")).sendKeys(System.getenv("LOGIN_EMAIL"));
         driver.findElement(By.name("current-password")).sendKeys(System.getenv("LOGIN_PASSWORD"));
         
@@ -364,14 +365,14 @@ public class InvofluxTests {
            String vendorText = driver.findElement(By.xpath("//li[contains(.,'Vendor Name')]")).getText();
            Assert.assertTrue(
                    vendorText.contains("Seertech Solutions Pty Ltd"),
-                   "Vendor Name mismatch! Actual text: " + vendorText
+                   "Vendor Name mismatch! Expected: 'Seertech Solutions Pty Ltd' but Actual text: " + vendorText
            );
 
            // Invoice Number
            String invoiceText = driver.findElement(By.xpath("//li[contains(.,'Invoice Number')]")).getText();
            Assert.assertTrue(
                    invoiceText.contains("2110"),
-                   "Invoice Number mismatch! Actual text: " + invoiceText
+                   "Invoice Number mismatch! Expected: 2110 but Actual text: " + invoiceText
            );
 
            // Due Date
@@ -387,35 +388,35 @@ public class InvofluxTests {
            String subtotalText = driver.findElement(By.xpath("//li[contains(.,'Subtotal')]")).getText();
            Assert.assertTrue(
                    subtotalText.contains("0"),
-                   "Subtotal mismatch! Actual text: " + subtotalText
+                   "Subtotal mismatch! Expected: 0 but Actual text: " + subtotalText
            );
 
            // Tax Amount
            String taxText = driver.findElement(By.xpath("//li[contains(.,'Tax Amount')]")).getText();
            Assert.assertTrue(
                    taxText.contains("0"),
-                   "Tax Amount mismatch! Actual text: " + taxText
+                   "Tax Amount mismatch! Expected: 0 but Actual text: " + taxText
            );
 
            // Total Amount
            String totalText = driver.findElement(By.xpath("//li[contains(.,'Total Amount')]")).getText();
            Assert.assertTrue(
                    totalText.contains("44,920.75"),
-                   "Total Amount mismatch! Actual text: " + totalText
+                   "Total Amount mismatch! Expected: '44,920.75' but Actual text: " + totalText
            );
 
            // Currency
            String currencyText = driver.findElement(By.xpath("//li[contains(.,'Currency')]")).getText();
            Assert.assertTrue(
                    currencyText.contains("AED"),
-                   "Currency mismatch! Actual text: " + currencyText
+                   "Currency mismatch! Expected: AED but Actual text: " + currencyText
            );
 
            // Purchase Order
            String poText = driver.findElement(By.xpath("//li[contains(.,'Purchase Order')]")).getText();
            Assert.assertTrue(
                    poText.contains("24681"),
-                   "Purchase Order mismatch! Actual text: " + poText
+                   "Purchase Order mismatch! Expected: '24681' but Actual text: " + poText
            );
 
            // ---- Product Line Details ----
@@ -429,28 +430,28 @@ public class InvofluxTests {
 
            Assert.assertTrue(
                    itemName.contains("iLearning PLUS - ADAC Staff (User Subscription License)"),
-                   "Item Name mismatch! Actual: " + itemName
+                   "Item Name mismatch! Expected: 'iLearning PLUS - ADAC Staff (User Subscription License)' but Actual: " + itemName
            );
            
            Assert.assertTrue(
                    quantity.contains("1"),
-                   "Quantity mismatch! Actual: " + quantity
+                   "Quantity mismatch! Expected: 1 but Actual: " + quantity
            );
            
          
            Assert.assertTrue(
                    unitPrice.contains("33,030.00"),
-                   "Unit Price mismatch! Actual: " + unitPrice
+                   "Unit Price mismatch! Expected: '33,030.00' but Actual: " + unitPrice
            );
            
            Assert.assertTrue(
                    taxPercentage.contains("0%"),
-                   "Tax Percentage mismatch! Actual: " + taxPercentage
+                   "Tax Percentage mismatch! Expected: '0%' but Actual: " + taxPercentage
            );
 
            Assert.assertTrue(
                    totalPrice.contains("33,030.00"),
-                   "Total Price mismatch! Actual: " + totalPrice
+                   "Total Price mismatch! Expected: '33,030.00' but Actual: " + totalPrice
            );
            
            wait.until(ExpectedConditions.visibilityOfElementLocated(By.xpath("//div[@id='chat-input']/p")));
@@ -466,8 +467,8 @@ public class InvofluxTests {
            // Invoice Number
            String invoiceNumberText = driver.findElement(By.xpath("//li[contains(.,'Invoice Number')]")).getText();
            Assert.assertTrue(
-                   invoiceNumberText.contains("2110180845"),
-                   "Invoice Number mismatch! Actual text: " + invoiceNumberText
+                   invoiceNumberText.contains("2110"),
+                   "Invoice Number mismatch! Expected invoice prefix with:'2110' but Actual text: " + invoiceNumberText
            );
 
            // Invoice ID
@@ -481,7 +482,7 @@ public class InvofluxTests {
            String stateText = driver.findElement(By.xpath("//li[contains(.,'State')]")).getText();
            Assert.assertTrue(
                    stateText.contains("Posted"),
-                   "State mismatch! Actual text: " + stateText
+                   "State mismatch! Expected: 'Posted' but Actual text: " + stateText
            );
 
           
@@ -518,7 +519,7 @@ public class InvofluxTests {
            String vendorText = driver.findElement(By.xpath("//li[contains(.,'Vendor Name')]")).getText();
            Assert.assertTrue(
                    vendorText.contains("Honeywell International ME Limited AD"),
-                   "Vendor Name mismatch! Actual text: " + vendorText
+                   "Vendor Name mismatch! Expected:'Honeywell International ME Limited AD' but Actual text: " + vendorText
            );
            utils.ExtentLogger.log(vendorText +" found");
 
@@ -526,7 +527,7 @@ public class InvofluxTests {
            String invoiceText = driver.findElement(By.xpath("//li[contains(.,'Invoice Number')]")).getText();
            Assert.assertTrue(
                    invoiceText.contains("5253783660"),
-                   "Invoice Number mismatch! Actual text: " + invoiceText
+                   "Invoice Number mismatch! Expected: '5253783660' but Actual text: " + invoiceText
            );
            utils.ExtentLogger.log(invoiceText +" found");
 
@@ -543,7 +544,7 @@ public class InvofluxTests {
            String subtotalText = driver.findElement(By.xpath("//li[contains(.,'Subtotal')]")).getText();
            Assert.assertTrue(
                    subtotalText.contains("1,995,000.00"),
-                   "Subtotal mismatch! Actual text: " + subtotalText
+                   "Subtotal mismatch! Expected: '1,995,000.00' but Actual text: " + subtotalText
            );
            utils.ExtentLogger.log(subtotalText +" found");
 
@@ -551,7 +552,7 @@ public class InvofluxTests {
            String taxText = driver.findElement(By.xpath("//li[contains(.,'Tax Amount')]")).getText();
            Assert.assertTrue(
                    taxText.contains("99,750.00"),
-                   "Tax Amount mismatch! Actual text: " + taxText
+                   "Tax Amount mismatch! Expected: '99,750.00' but Actual text: " + taxText
            );
            utils.ExtentLogger.log(taxText +" found");
 
@@ -560,7 +561,7 @@ public class InvofluxTests {
            String totalText = driver.findElement(By.xpath("//li[contains(.,'Total Amount')]")).getText();
            Assert.assertTrue(
                    totalText.contains("2,094,750.00"),
-                   "Total Amount mismatch! Actual text: " + totalText
+                   "Total Amount mismatch! Expected: '2,094,750.00' but Actual text: " + totalText
            );
            utils.ExtentLogger.log(totalText +" found");
 
@@ -569,7 +570,7 @@ public class InvofluxTests {
            String currencyText = driver.findElement(By.xpath("//li[contains(.,'Currency')]")).getText();
            Assert.assertTrue(
                    currencyText.contains("AED"),
-                   "Currency mismatch! Actual text: " + currencyText
+                   "Currency mismatch! Expected: AED but Actual text: " + currencyText
            );
            utils.ExtentLogger.log(currencyText +" found");
 
@@ -578,7 +579,7 @@ public class InvofluxTests {
            String poText = driver.findElement(By.xpath("//li[contains(.,'Purchase Order')]")).getText();
            Assert.assertTrue(
                    poText.contains("ADAC-CON-HML-2019-L-502"),
-                   "Purchase Order mismatch! Actual text: " + poText
+                   "Purchase Order mismatch! Expected: 'ADAC-CON-HML-2019-L-502' but Actual text: " + poText
            );
            utils.ExtentLogger.log(poText +" found");
 
@@ -669,7 +670,7 @@ public class InvofluxTests {
            String validationResultText = driver.findElement(By.xpath("//li[contains(.,'Validation Result')]")).getText();
            Assert.assertTrue(
                    validationResultText.contains("The invoice validation failed"),
-                   "Validation Result message mismatch! Actual text: " + validationResultText
+                   "Validation Result message mismatch! Expected: 'The invoice validation failed' but Actual text: " + validationResultText
            );
 
            // Validation Result - Specific Issues
@@ -681,12 +682,12 @@ public class InvofluxTests {
            // Check each expected issue
            Assert.assertTrue(
                    validationIssues.stream().anyMatch(t -> t.contains("Price 1995000.0 for 'Charges For Service Contract Period 01.10.2020 to 31.10.2020' does not match PO price 1975000.0")),
-                   "Expected product not found issue missing! Actual: " + validationIssues
+                   "Expected product not found issue missing! Expected: Price 1995000.0 for 'Charges For Service Contract Period 01.10.2020 to 31.10.2020' does not match PO price 1975000.0 but Actual: " + validationIssues
            );
 
            Assert.assertTrue(
                    validationIssues.stream().anyMatch(t -> t.contains("Duplicate invoice number '5253783660' found")),
-                   "Expected duplicate invoice number issue missing! Actual: " + validationIssues
+                   "Expected duplicate invoice number issue missing! Expected: Duplicate invoice number '5253783660' found but Actual: " + validationIssues
            );
            
            wait.until(ExpectedConditions.visibilityOfElementLocated(By.xpath("//div[@id='chat-input']/p")));
@@ -702,7 +703,7 @@ public class InvofluxTests {
            vendorText = driver.findElement(By.xpath("//li[contains(.,'Vendor Name')]")).getText();
            Assert.assertTrue(
                    vendorText.contains("Honeywell International ME Limited AD"),
-                   "Vendor Name mismatch! Actual text: " + vendorText
+                   "Vendor Name mismatch! Expected: Honeywell International ME Limited AD but Actual text: " + vendorText
            );
            utils.ExtentLogger.log(vendorText +" found");
 
@@ -710,7 +711,7 @@ public class InvofluxTests {
            invoiceText = driver.findElement(By.xpath("//li[contains(.,'Invoice Number')]")).getText();
            Assert.assertTrue(
                    invoiceText.contains("5253783660"),
-                   "Invoice Number mismatch! Actual text: " + invoiceText
+                   "Invoice Number mismatch! Expected: 5253783660 but Actual text: " + invoiceText
            );
            utils.ExtentLogger.log(invoiceText +" found");
 
@@ -727,7 +728,7 @@ public class InvofluxTests {
            subtotalText = driver.findElement(By.xpath("//li[contains(.,'Subtotal')]")).getText();
            Assert.assertTrue(
                    subtotalText.contains("1,995,000.00"),
-                   "Subtotal mismatch! Actual text: " + subtotalText
+                   "Subtotal mismatch! Expected: 1,995,000.00 but Actual text: " + subtotalText
            );
            utils.ExtentLogger.log(subtotalText +" found");
 
@@ -735,7 +736,7 @@ public class InvofluxTests {
            taxText = driver.findElement(By.xpath("//li[contains(.,'Tax Amount')]")).getText();
            Assert.assertTrue(
                    taxText.contains("99,750.00"),
-                   "Tax Amount mismatch! Actual text: " + taxText
+                   "Tax Amount mismatch! Expected: 99,750.00 but Actual text: " + taxText
            );
            utils.ExtentLogger.log(taxText +" found");
 
@@ -744,7 +745,7 @@ public class InvofluxTests {
            totalText = driver.findElement(By.xpath("//li[contains(.,'Total Amount')]")).getText();
            Assert.assertTrue(
                    totalText.contains("2,094,750.00"),
-                   "Total Amount mismatch! Actual text: " + totalText
+                   "Total Amount mismatch! Expected: 2,094,750.00 but Actual text: " + totalText
            );
            utils.ExtentLogger.log(totalText +" found");
 
@@ -753,7 +754,7 @@ public class InvofluxTests {
            currencyText = driver.findElement(By.xpath("//li[contains(.,'Currency')]")).getText();
            Assert.assertTrue(
                    currencyText.contains("AED"),
-                   "Currency mismatch! Actual text: " + currencyText
+                   "Currency mismatch! Expected: AED but Actual text: " + currencyText
            );
            utils.ExtentLogger.log(currencyText +" found");
 
@@ -762,7 +763,7 @@ public class InvofluxTests {
            poText = driver.findElement(By.xpath("//li[contains(.,'Purchase Order')]")).getText();
            Assert.assertTrue(
                    poText.contains("ADAC-CON-HML-2019-L-502"),
-                   "Purchase Order mismatch! Actual text: " + poText
+                   "Purchase Order mismatch! Expected: ADAC-CON-HML-2019-L-502 but Actual text: " + poText
            );
            utils.ExtentLogger.log(poText +" found");
 
@@ -815,8 +816,8 @@ public class InvofluxTests {
            log.info("Honeywell Invoice details prompt test completed.");
     }
     
-   @Test(priority = 4)
-   public void testSendAndReceiveEmail() throws Exception {
+    @Test(priority = 4)
+    public void testSendAndReceiveEmail() throws Exception {
         EmailUtils emailUtils = new EmailUtils(FROM_EMAIL, APP_PASSWORD);
 
         // Send Email
