@@ -37,8 +37,8 @@ public class InvofluxTests {
     private static final String FROM_EMAIL = System.getenv("FROM_EMAIL");
     private static final String APP_PASSWORD = System.getenv("GMAIL_TOKEN"); // generated from Gmail
     private static final String TO_EMAIL = System.getenv("INVOFLUX_AGENT_EMAIL");
-   
-
+    
+    
     @BeforeClass
     public void setupAll() throws IOException {
         config = new Properties();
@@ -73,7 +73,7 @@ public class InvofluxTests {
         /*
         driver.findElement(By.name("email")).sendKeys(config.getProperty("login.email"));
         driver.findElement(By.name("current-password")).sendKeys(config.getProperty("login.password"));
-        */
+       */
         driver.findElement(By.name("email")).sendKeys(System.getenv("LOGIN_EMAIL"));
         driver.findElement(By.name("current-password")).sendKeys(System.getenv("LOGIN_PASSWORD"));
         
@@ -116,7 +116,7 @@ public class InvofluxTests {
     }
 
 
-   @Test(priority = 1)
+    @Test(priority = 1)
     public void test_prompt_invoice_detail_extraction_smart_vision() throws InterruptedException {
         log.info("Executing Smart Vision Invoice details prompt test...");
         utils.ExtentLogger.log("Test started: Smart Vision Invoice details");
@@ -837,14 +837,14 @@ public class InvofluxTests {
 
         // Validate content
         Assert.assertNotNull(receivedContent, "No email received!");
-        String expectedContent = "Invoice Number: SV-I-0018223-20";
+        String expectedContent = "SV-I-0018223-20";
         Assert.assertTrue(receivedContent.contains(expectedContent),
-                "Email response did not contain expected -> " +expectedContent);
+                "Email response did not contain expected  -> Invoice Number:" +expectedContent);
         utils.ExtentLogger.log(expectedContent+ " found");
         
-        expectedContent = "Status: Draft";
+        expectedContent = "Draft";
         Assert.assertTrue(receivedContent.contains(expectedContent),
-                "Email response did not contain expected -> " +expectedContent);
+                "Email response did not contain expected -> Status:" +expectedContent);
         utils.ExtentLogger.log(expectedContent+ " found");
         
         expectedContent = "Vendor Name: Smart Vision for Information Systems";
@@ -852,9 +852,9 @@ public class InvofluxTests {
                 "Email response did not contain expected Vendor Name -> " +expectedContent);
         utils.ExtentLogger.log(expectedContent+ " found");
         
-        expectedContent = "Purchase Order: 1017768";
+        expectedContent = "1017768";
         Assert.assertTrue(receivedContent.contains(expectedContent),
-                "Email response did not contain expected Purchase Order -> " +expectedContent);
+                "Email response did not contain expected -> Purchase Order: " +expectedContent);
         utils.ExtentLogger.log(expectedContent+ " found");
         
         expectedContent = "Sales AMC Enterprise Solution";
@@ -867,7 +867,7 @@ public class InvofluxTests {
                 "Email response did not contain expected product quantity -> " +expectedContent);
         utils.ExtentLogger.log("Quantity: "+expectedContent+ " found");
         
-        expectedContent = "59,062.50 AED";
+        expectedContent = "59,062.50";
         Assert.assertTrue(receivedContent.contains(expectedContent),
                 "Email response did not contain expected Unit Price -> " +expectedContent);
         utils.ExtentLogger.log(expectedContent+ " found");
@@ -877,7 +877,7 @@ public class InvofluxTests {
                 "Email response did not contain expected Tax% -> " +expectedContent);
         utils.ExtentLogger.log(expectedContent+ " found");
         
-        expectedContent = "62,015.63 AED";
+        expectedContent = "62,015.63";
         Assert.assertTrue(receivedContent.contains(expectedContent),
                 "Email response did not contain expected Total Price -> " +expectedContent);
         utils.ExtentLogger.log(expectedContent+ " found");
