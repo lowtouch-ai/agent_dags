@@ -38,8 +38,7 @@ def slack_alert(context):
 
     message = {
         "text": (
-            f":x: *Airflow Task Failed! in *"
-            f"*Server:* {SERVER_NAME}\n"
+            f":x:*Airflow Task Failed in Server* {SERVER_NAME}\n"
             f"*DAG:* {dag_id}\n"
             f"*Task:* {task_id}\n"
             f"*Run ID:* {run_id}"
