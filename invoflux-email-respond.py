@@ -319,9 +319,17 @@ def step_2_create_vendor_bill(ti, **context):
 def step_3_compose_email(ti, **context):
     """Step 3: Create the vendor bill"""
     step_2_response = ti.xcom_pull(key="step_2_response")
+    sender_name = context['dag_run'].conf.get("email_data", {}).get("headers", {}).get("From", "Valued Customer")
+    name_email_match = re.match(r'^(.*?)\s*<(.*?@.*?)>$', sender_name)
+    if name_email_match:
+        sender_name = name_email_match.group(1).strip() or "Valued Customer"
+    else:
+        sender_name = "Valued Customer"
+    logging.info(f"Sender name extracted: {sender_name}")
     
-    prompt = """
+    prompt = f"""
         Compose a professional and human-like business email in American English, written in the tone of a senior Customer Success Manager, to notify a vendor about the outcome of an invoice submission (Posted, Draft, or Failed).
+        Address the email to the vendor using their name: '{sender_name}'.
         The email must include:
         - A clear introductory line acknowledging the invoice receipt with the invoice number and vendor name (if available), followed by a short sentence stating the current status of the invoice (Posted, Draft, or Failed).
         - A natural explanation of the status outcome (including Invoice Number and, for Draft or Failed, specific issues like price mismatch, missing PO, unreadable file, duplicate invoice, or unrecognized product in a bulleted list).
