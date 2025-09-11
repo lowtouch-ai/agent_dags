@@ -2,15 +2,62 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.utils.trigger_rule import TriggerRule
 from airflow.models import Variable
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 import xml.etree.ElementTree as ET
 import logging
 from airflow.api.common.trigger_dag import trigger_dag as trigger_dag_func
+import json
 
 # Define Airflow Variables with default values
 SITEMAP_URL = Variable.get("lowtouch_sitemap_url", default_var="https://www.lowtouch.ai/sitemap_index.xml")
 UUID = Variable.get("lowtouch_uuid", default_var="febe553a-e665-4000-9cf4-b6ab84b0560f")
+SLACK_WEBHOOK_URL = Variable.get("SLACK_WEBHOOK_URL", default_var=None)
+SERVER_NAME = Variable.get("SERVER", default_var="UNKNOWN")
+
+# Slack alert function
+def slack_alert(context):
+    webhook_url = SLACK_WEBHOOK_URL
+    if not webhook_url:
+        logging.error("Slack webhook URL not found in Airflow Variables")
+        return
+
+    dag_id = context.get("dag_run").dag_id
+    task_id = context.get("task_instance").task_id
+    run_id = context.get("dag_run").run_id
+
+    # Pull extra info from XCom
+    ti = context.get("task_instance")
+    failed_url = ti.xcom_pull(task_ids=task_id, key="failed_url")
+    error_message = ti.xcom_pull(task_ids=task_id, key="error_message")
+
+    if failed_url and error_message:
+        extra_info = f"\n*Failed URL:* {failed_url}\n*Error:* {error_message}"
+    else:
+        extra_info = ""
+
+    message = {
+        "text": (
+            f":x: *Airflow Task Failed! in *"
+            f"*Server:* {SERVER_NAME}\n"
+            f"*DAG:* {dag_id}\n"
+            f"*Task:* {task_id}\n"
+            f"*Run ID:* {run_id}"
+            f"{extra_info}"
+        )
+    }
+
+    try:
+        requests.post(
+            webhook_url,
+            data=json.dumps(message),
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        logging.info("Slack alert sent")
+    except Exception as e:
+        logging.error(f"Failed to send Slack alert: {e}")
+
 
 # Parent DAG
 default_args = {
@@ -19,6 +66,8 @@ default_args = {
     'email_on_failure': False,
     'email_on_retry': False,
     'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+    'on_failure_callback': slack_alert,  # Added Slack alert
 }
 
 with DAG(
@@ -131,6 +180,12 @@ with DAG(
         
         except Exception as e:
             logging.error(f"Failed to process HTML {url}: {e}")
+
+            # Push extra info into XCom for Slack
+            ti = context["ti"]
+            ti.xcom_push(key="failed_url", value=url)
+            ti.xcom_push(key="error_message", value=str(e))
+
             raise
 
     upload_task = PythonOperator(
