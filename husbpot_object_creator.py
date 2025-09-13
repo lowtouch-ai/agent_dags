@@ -1687,8 +1687,7 @@ def create_associations(ti, **context):
             json.dump(contexts, f)
         return []
 
-    prompt = f"""Create associations between all available HubSpot entities.
-
+    prompt = f"""Always invoke create_multi_association to create associations between HubSpot entities. use the below available ids.
 AVAILABLE ENTITY IDS:
 - Contact IDs: {final_contact_ids}
 - Company IDs: {final_company_ids}  
@@ -1697,7 +1696,7 @@ AVAILABLE ENTITY IDS:
 - Note IDs: {final_note_ids}
 - Task IDs: {final_task_ids}
 
-Invoke create_multi_association using the below format for each association request:
+ use the below format for each association request:
 {{
     "single": {{
         "deal_id": "string",
@@ -1711,7 +1710,6 @@ Invoke create_multi_association using the below format for each association requ
 
 Rules:
 1. Each association request should include relevant entity IDs (leave as empty string "" if not applicable)
-2. Create logical associations (e.g., associate contacts with companies, deals with contacts/companies, notes/tasks/meetings with related entities)
 3. Use comma separation for multiple IDs in a field if needed. example: "contact_id": "123,456".
 
 Return JSON:
