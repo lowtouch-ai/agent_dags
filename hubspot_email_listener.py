@@ -564,9 +564,10 @@ def trigger_continuation_dag(**kwargs):
             logging.info(f"Thread {original_thread_id} Email {idx}: message_id={msg['message_id']}, from={msg['headers'].get('From', 'Unknown')}, timestamp={msg['timestamp']}, content_preview={msg['content'][:100]}...")
 
         # Prepare configuration for continuation DAG
-        continuation_conf = {
+            continuation_conf = {
             "email_data": email,
             "search_results": stored_context.get("search_results", {}),
+            "create_results": stored_context.get("create_results", {}),  # Optional: include if exists
             "thread_id": original_thread_id,
             "full_thread_history": full_thread_history,
             "original_confirmation_email": stored_context.get("confirmation_email", ""),
