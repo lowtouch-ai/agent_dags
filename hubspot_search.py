@@ -209,29 +209,18 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
         else:
             return f"<html><body>Error processing AI request: {str(e)}</body></html>"
 
-def send_email(service, recipient, subject, body, in_reply_to, references, cc=None):
+def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
         msg = MIMEMultipart()
         msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
         msg["To"] = recipient
-        if cc:
-            # Clean Cc: Remove bot's own email if present, and ensure it's a string
-            cc_list = [email.strip() for email in cc.split(',') if email.strip().lower() != HUBSPOT_FROM_ADDRESS.lower()]
-            cleaned_cc = ', '.join(cc_list)
-            if cleaned_cc:
-                msg["Cc"] = cleaned_cc
-                logging.info(f"Including Cc in email: {cleaned_cc}")
-            else:
-                logging.info("Cc provided but empty after cleaning, skipping.")
-        else:
-            logging.info("No Cc provided, sending to single recipient.")
         msg["Subject"] = subject
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = references
         msg.attach(MIMEText(body, "html"))
         raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
         result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
-        logging.info(f"Email sent to {recipient} (Cc: {cc if cc else 'None'})")
+        logging.info(f"Email sent to {recipient}")
         return result
     except Exception as e:
         logging.error(f"Failed to send email: {e}")
@@ -283,8 +272,8 @@ IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanati
 
 Analyze the content and determine:
 1. Are deals mentioned, discussed, or need to be created?. Deals are only created if the client is interested to move forward.
-2. Parse the contact name, if found then contacts need to be processed. 
-3. Are companies mentioned, discussed, or need to be created?. If company is being specified then it needs to be processed even if not explicitly asked to proceesed.
+2. Are contacts mentioned, discussed, or need to be created?.
+3. Are companies mentioned, discussed, or need to be created?
 4. Do we need to create notes. Notes are created only if there is a discussion held with the client.
 5. Do we need to create tasks. Tasks are created only if there is a follow-up action required with the client.
 6. Do we need to create meetings. Meetings are created only if a meeting was held and meeting details are given. example date, time, duration, timezone etc.
@@ -457,7 +446,6 @@ Steps to follow:
 3. deal stage Label should be displayed as dealLabelName. For e.g, If the deal stage is "appointmentscheduled", the dealLabelName should be "Appointment Scheduled".
 4. Always use deal name convention for new deals.
 5. Always return the validated deal owner for new deals.
-6. Always parse another new deal if the user requests to open a second deal even if one exists. For e.g, If you find a existing deal for the same company and the user wants to open a second deal then only parse the details.
 Return this exact JSON structure:
 {{
     "deal_results": {{
@@ -529,147 +517,37 @@ Email thread content:
 
 IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
 
-Steps to follow (execute in order):
-1. Extract potential contact names from the thread. Apply these exclusion rules:
-   - EXCLUDE deal owners mentioned with "assign to", "owner", or similar assignment language
-   - EXCLUDE internal team members, senders, or system users (e.g., skip "From: John Doe <john@company.com>")
-   - EXCLUDE names that are clearly role/department indicators in parentheses like "(Ops)", "(Finance)", "(IT)"
-   - INCLUDE actual contact names that appear to be external stakeholders or clients
-   
-   For valid contacts:
-   - Parse contact names and handle role indicators properly:
-     * "Neha (Ops)" → firstname="Neha", lastname="" (ignore the role indicator)
-     * "Riya (Finance)" → firstname="Riya", lastname="" (ignore the role indicator)
-     * "John Smith" → firstname="John", lastname="Smith"
-   - Split names into firstname/lastname:
-     * Single word (e.g., "Neha"): firstname="Neha", lastname="" (empty string)
-     * Two+ words (e.g., "Neha Khan" or "Riya Priya Sharma"): firstname=first word ("Neha" or "Riya"), lastname=rest joined ("Khan" or "Priya Sharma")
-     * Multiple contacts: List separately, e.g., [{{"firstname": "Neha", "lastname": "Khan"}}, {{"firstname": "Riya", "lastname": ""}}]
-   - If no valid contact names found after exclusions, skip to step 6.
+Steps to follow:
+1. Always invoke search_contacts with both firstname, lastname. If contact found display all the contact details in results.
+2. If no contacts found, extract potential details for new contacts from the email content.
 
-2. For each extracted name, decide search criteria:
-   - If lastname is non-empty: Use 'both' template (exact match on both fields)
-   - If lastname is empty: Use 'firstname_only' template (search on firstname only)
-   - Output one decision per contact in reasoning_summary.
-
-3. Always invoke HubSpot search_contacts API for each contact using the chosen template. Use EQ operator for exact matches (better precision than CONTAINS_TOKEN). Assume API returns matching contacts or empty if none.
-   - Both template example (replace {{{{extracted_firstname}}}} and {{{{extracted_lastname}}}}):
-     {{{{
-         "filterGroups": [
-             {{{{
-                 "filters": [
-                     {{{{
-                         "propertyName": "firstname",
-                         "operator": "EQ",
-                         "value": "{{{{extracted_firstname}}}}"
-                     }}}},
-                     {{{{
-                         "propertyName": "lastname", 
-                         "operator": "EQ",
-                         "value": "{{{{extracted_lastname}}}}"
-                     }}}}
-                 ]
-             }}}}
-         ],
-         "properties": [
-             "hs_object_id",
-             "firstname", 
-             "lastname",
-             "email",
-             "phone",
-             "jobtitle",
-             "createdate",
-             "lastmodifieddate"
-         ],
-         "sorts": [
-             {{{{
-                 "propertyName": "lastmodifieddate",
-                 "direction": "DESCENDING"
-             }}}}
-         ],
-         "limit": 10,
-         "after": null
-     }}}}
-   - Firstname_only template example (replace {{{{extracted_firstname}}}}):
-     {{{{
-         "filterGroups": [
-             {{{{
-                 "filters": [
-                     {{{{
-                         "propertyName": "firstname",
-                         "operator": "CONTAINS_TOKEN",
-                         "value": "{{{{extracted_firstname}}}}"
-                     }}}}
-                 ]
-             }}}}
-         ],
-         "properties": [
-             "hs_object_id",
-             "firstname", 
-             "lastname",
-             "email",
-             "phone",
-             "jobtitle",
-             "createdate",
-             "lastmodifieddate"
-         ],
-         "sorts": [
-             {{{{
-                 "propertyName": "lastmodifieddate",
-                 "direction": "DESCENDING"
-             }}}}
-         ],
-         "limit": 10,
-         "after": null
-     }}}}
-
-4. For each simulated search:
-   - If matches found (up to 10): Populate contact_results with details from the "API response". Use exact fields; set missing to "".
-   - Total = number of unique results across all searches.
-   - Deduplicate by hs_object_id.
-
-5. If no matches for any contact: Move those to new_contacts, extracting proposed details (firstname/lastname from step 1, email/phone/jobtitle/address from thread context like signatures). For contacts with role indicators, populate jobtitle appropriately (e.g., if "(Ops)" was mentioned, set jobtitle to operations-related role). Fill ALL fields; use "" for missing.
-
-6. If no contacts extracted: Set contact_results total=0, results=[], new_contacts=[].
-
-Return this exact JSON structure (include reasoning_summary for internal logging; ignore it in processing):
-{{{{
-    "reasoning_summary": {{{{
-        "extracted_names": [
-            {{"firstname": "example_first", "lastname": "example_last", "template_used": "both|firstname_only", "num_results": 1}}
-        ],
-        "excluded_names": [
-            {{"name": "Amy Thomas", "reason": "deal_owner"}},
-            {{"name": "role_indicator", "reason": "department_tag"}}
-        ],
-        "total_extracted": 2,
-        "search_notes": "Brief notes on decisions, e.g., 'Used firstname_only for Olivia as no lastname found, excluded Amy Thomas as deal owner'"
-    }}}},
-    "contact_results": {{{{
+Return this exact JSON structure:
+{{
+    "contact_results": {{
         "total": 0,
         "results": [
-            {{{{
-                "contactId": "hs_object_id",
+            {{
+                "contactId": "contact_id",
                 "firstname": "first_name",
                 "lastname": "last_name",
                 "email": "email_address",
                 "phone": "phone_number",
                 "address": "full_address",
                 "jobtitle": "job_title"
-            }}}}
+            }}
         ]
-    }}}},
+    }},
     "new_contacts": [
-        {{{{
+        {{
             "firstname": "proposed_first_name",
             "lastname": "proposed_last_name",
             "email": "proposed_email",
             "phone": "proposed_phone",
             "address": "proposed_address",
             "jobtitle": "proposed_job_title"
-        }}}}
+        }}
     ]
-}}}}
+}}
 
 Fill in ALL fields for each contact. Use empty string "" for missing values.
 
@@ -718,8 +596,9 @@ Email thread content:
 IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
 
 Steps to follow:
-1. Parse the company name.
-2. Invoke search_companies with company name . If company found display all company details in results along with company type wether `PARTNER` or `PROSPECT`.
+1. Parse the company details along with type wether PARTNER or PROSPECT.
+1. Invoke search_companies with company name and domain. If company found display all company details in results.
+2. If companies found, check if the company is a partner (use relevant properties or functions).
 3. If no companies found, extract potential details for new companies from the email content.
 4. `type` should be one of  "PARTNER" OR "PROSPECT". If not specified, default to "PROSPECT".
 5. Never parse the same company details to be created again if it already exists in results.
@@ -938,7 +817,7 @@ def parse_notes_tasks_meeting(ti, **context):
     if should_parse_tasks:
         parsing_instructions.append("2. Tasks - Action items with owner and due dates. Next steps with owner and due dates. Adding up the entities in hubspot is not considered as a task.")
     if should_parse_meetings:
-        parsing_instructions.append("3. Meeting Details - Meeting title, start time, end time, location, outcome, timestamp, attendees.")
+        parsing_instructions.append("3. Meeting Details - If this is about a meeting, extract meeting information")
 
     prompt = f"""You are a HubSpot API assistant. Analyze this email thread to extract the following based on the analysis flags:
 
@@ -952,10 +831,7 @@ PARSING INSTRUCTIONS (only parse what's listed below):
 {chr(10).join(parsing_instructions)}
 
 IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
-For notes (only if note parsing is enabled):
-- Extract any important discussion points, decisions made, or general notes.
-For meetings (only if meeting parsing is enabled):
-- Extract meeting title, start time, end time, location, outcome, timestamp, attendees, meeting type, and meeting status.
+
 For tasks (only if task parsing is enabled):
 - If a specific task owner is mentioned in the email and it matches an available owner from the validation, use that owner
 - If a specific task owner is mentioned but was invalid (not in available owners list), use the validated default task owner: {task_owner_name} (ID: {task_owner_id})
@@ -1174,7 +1050,7 @@ def compose_confirmation_email(ti, **context):
     </head>
     <body>
         <div class="greeting">
-            <p>Hello {from_email},</p>
+            <p>Hello, {from_email}</p>
             <p>I reviewed your request and prepared the following summary of the actions to be taken in HubSpot:</p>
         </div>
     """
@@ -1878,11 +1754,7 @@ def send_confirmation_email(ti, **context):
 
     subject = f"Re: {email_data['headers'].get('Subject', 'Meeting Minutes Request')}"
 
-    # Extract Cc from the incoming email's headers (for multi-user/reply-all support)
-    cc = email_data["headers"].get("Cc", "")
-    logging.info(f"Extracted Cc from incoming email: {cc}")
-
-    result = send_email(service, sender_email, subject, confirmation_email, original_message_id, references, cc=cc)
+    result = send_email(service, sender_email, subject, confirmation_email, original_message_id, references)
     if result:
         logging.info(f"Confirmation email sent to {sender_email}")
 
