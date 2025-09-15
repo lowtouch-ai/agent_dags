@@ -1687,7 +1687,7 @@ def create_associations(ti, **context):
             json.dump(contexts, f)
         return []
 
-    prompt = f"""Always invoke `create_multi_association` tool  to create associations between HubSpot entities. use the below available ids.
+    prompt = f"""Always associate the `AVAILABLE ENTITY IDS` by using `create_multi_association` tool.
 AVAILABLE ENTITY IDS:
 - Contact IDs: {final_contact_ids}
 - Company IDs: {final_company_ids}  
@@ -1696,6 +1696,7 @@ AVAILABLE ENTITY IDS:
 - Note IDs: {final_note_ids}
 - Task IDs: {final_task_ids}
 
+You can only associate enitites by calling the tool : `create_multi_association`.
  use the below format for each association request:
 {{
     "single": {{
