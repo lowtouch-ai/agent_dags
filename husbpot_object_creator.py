@@ -1584,6 +1584,11 @@ def create_associations(ti, **context):
         logging.error("No analysis_results found in XCom. Cannot proceed with associations.")
         ti.xcom_push(key="associations_created", value=[])
         ti.xcom_push(key="associations_errors", value=["Missing analysis_results"])
+        contexts = get_thread_context()
+        contexts[thread_id]["associations_created"] = []
+        contexts[thread_id]["associations_errors"] = ["Missing analysis_results"]
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
         return []
 
     # Get newly created entities
@@ -1602,16 +1607,16 @@ def create_associations(ti, **context):
     updated_notes = ti.xcom_pull(key="updated_notes", default=[])
     updated_tasks = ti.xcom_pull(key="updated_tasks", default=[])
 
-    # NEW: Use filtered selected_entities from analysis_results instead of raw search_results
+    # Use filtered selected_entities from analysis_results
     selected_entities = analysis_results.get("selected_entities", {})
     logging.info(f"Using filtered selected_entities from analysis: {json.dumps(selected_entities, indent=2)}")
 
-    # Extract existing entity IDs from selected_entities (filtered by user selection)
+    # Extract existing entity IDs from selected_entities
     existing_contact_ids = [str(contact.get("contactId")) for contact in selected_entities.get("contacts", []) if contact.get("contactId")]
     existing_company_ids = [str(company.get("companyId")) for company in selected_entities.get("companies", []) if company.get("companyId")]
     existing_deal_ids = [str(deal.get("dealId")) for deal in selected_entities.get("deals", []) if deal.get("dealId")]
 
-    # Fallback to raw search_results ONLY if selected_entities is empty (edge case)
+    # Fallback to raw search_results if selected_entities is empty
     if not existing_contact_ids:
         existing_contact_ids = [str(contact.get("contactId")) for contact in search_results.get("contact_results", {}).get("results", []) if contact.get("contactId")]
         logging.warning("selected_entities had no contacts; falling back to raw search_results")
@@ -1622,7 +1627,7 @@ def create_associations(ti, **context):
         existing_deal_ids = [str(deal.get("dealId")) for deal in search_results.get("deal_results", {}).get("results", []) if deal.get("dealId")]
         logging.warning("selected_entities had no deals; falling back to raw search_results")
 
-    # Get updated entity IDs (these should be used instead of existing when available)
+    # Get updated entity IDs
     updated_contact_ids = [c.get("id", "") for c in updated_contacts if c.get("id")]
     updated_company_ids = [c.get("id", "") for c in updated_companies if c.get("id")]
     updated_deal_ids = [d.get("id", "") for d in updated_deals if d.get("id")]
@@ -1639,16 +1644,9 @@ def create_associations(ti, **context):
     new_task_ids = [t.get("id", "") for t in created_tasks if t.get("id")]
 
     # Priority logic: Use new IDs first, then updated IDs, then selected existing IDs
-    # For contacts: new -> updated -> selected existing
     final_contact_ids = new_contact_ids if new_contact_ids else (updated_contact_ids if updated_contact_ids else existing_contact_ids)
-    
-    # For companies: new -> updated -> selected existing  
     final_company_ids = new_company_ids if new_company_ids else (updated_company_ids if updated_company_ids else existing_company_ids)
-    
-    # For deals: new -> updated -> selected existing
     final_deal_ids = new_deal_ids if new_deal_ids else (updated_deal_ids if updated_deal_ids else existing_deal_ids)
-    
-    # For meetings, notes, tasks: new -> updated
     final_meeting_ids = new_meeting_ids if new_meeting_ids else updated_meeting_ids
     final_note_ids = new_note_ids if new_note_ids else updated_note_ids
     final_task_ids = new_task_ids if new_task_ids else updated_task_ids
@@ -1674,7 +1672,7 @@ def create_associations(ti, **context):
 
     # Check if we have any entities to associate
     total_entities = (len(final_contact_ids) + len(final_company_ids) + len(final_deal_ids) +
-                     len(final_meeting_ids) + len(final_note_ids) + len(final_task_ids))
+                      len(final_meeting_ids) + len(final_note_ids) + len(final_task_ids))
 
     if total_entities == 0:
         logging.warning("No entities available to associate, creating empty associations list.")
@@ -1696,8 +1694,8 @@ AVAILABLE ENTITY IDS:
 - Note IDs: {final_note_ids}
 - Task IDs: {final_task_ids}
 
-You can only associate enitites by calling the tool : `create_multi_association`.
- use the below format for each association request:
+You can only associate entities by calling the tool: `create_multi_association`.
+Use the below format for each association request:
 {{
     "single": {{
         "deal_id": "string",
@@ -1711,7 +1709,7 @@ You can only associate enitites by calling the tool : `create_multi_association`
 
 Rules:
 1. Each association request should include relevant entity IDs (leave as empty string "" if not applicable)
-3. Use comma separation for multiple IDs in a field if needed. example: "contact_id": "123,456".
+2. Use comma separation for multiple IDs in a field if needed. example: "contact_id": "123,456".
 
 Return JSON:
 {{
@@ -1744,14 +1742,22 @@ Return JSON:
 If error, set error message and include individual errors in the errors array."""
 
     response = get_ai_response(prompt, expect_json=True)
+    association_requests = []  # Initialize to avoid UnboundLocalError
 
     try:
-        parsed = json.loads(response)
-        association_requests = parsed.get("association_requests", [])
-        errors = parsed.get("errors", [])
-
-        if parsed.get("error"):
-            logging.warning(f"Association creation returned error: {parsed['error']}")
+        # Log raw response for debugging
+        logging.info(f"Raw AI response: {response}")
+        # Validate response before parsing
+        if not response or response.strip() == "":
+            raise ValueError("Empty response from AI service")
+        if response.strip().startswith(('<', '[', '{')):
+            parsed = json.loads(response)
+            association_requests = parsed.get("association_requests", [])
+            errors = parsed.get("errors", [])
+            if parsed.get("error"):
+                logging.warning(f"Association creation returned error: {parsed['error']}")
+        else:
+            raise ValueError(f"Invalid JSON response: {response[:100]}...")
 
         ti.xcom_push(key="associations_created", value=association_requests)
         ti.xcom_push(key="associations_errors", value=errors)
@@ -1767,12 +1773,13 @@ If error, set error message and include individual errors in the errors array.""
 
         logging.info(f"Created {len(association_requests)} association requests with {len(errors)} errors")
     except Exception as e:
-        logging.error(f"Error creating associations: {e}")
+        error_msg = f"Error creating associations: {str(e)}"
+        logging.error(error_msg)
         ti.xcom_push(key="associations_created", value=[])
-        ti.xcom_push(key="associations_errors", value=[str(e)])
+        ti.xcom_push(key="associations_errors", value=[error_msg])
         contexts = get_thread_context()
-        contexts[thread_id]["create_associations_error"] = str(e)
-        contexts[thread_id]["associations_errors"] = [str(e)]
+        contexts[thread_id]["create_associations_error"] = error_msg
+        contexts[thread_id]["associations_errors"] = [error_msg]
         with open(THREAD_CONTEXT_FILE, "w") as f:
             json.dump(contexts, f)
 
