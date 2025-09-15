@@ -126,7 +126,19 @@ with DAG(
         uuid = data['uuid']
         parent_run_id = ti.dag_run.run_id
         
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        
         for i, url in enumerate(urls):
+            try:
+                # Check if URL is valid (status 200)
+                head_response = requests.head(url, headers=headers, allow_redirects=True)
+                if head_response.status_code != 200:
+                    logging.warning(f"Skipping invalid URL: {url} (status: {head_response.status_code})")
+                    continue
+            except Exception as e:
+                logging.error(f"Failed to check URL {url}: {e}")
+                continue
+            
             # Generate unique run_id for each child DAG run
             child_run_id = f"triggered__{parent_run_id}_{i}"
             logging.info(f"Triggering lowtouch_html_to_vector for URL: {url} with run_id: {child_run_id}")
