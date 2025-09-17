@@ -150,7 +150,7 @@ def get_ai_response(prompt, images=None, conversation_history=None):
         if not prompt or not isinstance(prompt, str):
             return "<html><body>Invalid input provided. Please enter a valid query.</body></html>"
 
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'Invoflux-email'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'InvoFlux'})
         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'InvoFlux:0.3'")
 
         messages = []
@@ -169,7 +169,7 @@ def get_ai_response(prompt, images=None, conversation_history=None):
         messages.append(user_message)
 
         response = client.chat(
-            model='invoflux-email:0.3',
+            model='InvoFlux:0.3',
             messages=messages,
             stream=False
         )
@@ -318,7 +318,9 @@ def step_2_create_vendor_bill(ti, **context):
 
 def step_3_compose_email(ti, **context):
     """Step 3: Create the vendor bill"""
+    step_1_response = ti.xcom_pull(key="step_1_response")
     step_2_response = ti.xcom_pull(key="step_2_response")
+    content_appended = step_1_response + "\n\n" + step_2_response if step_1_response and step_2_response else step_1_response or step_2_response or ""
     sender_name = context['dag_run'].conf.get("email_data", {}).get("headers", {}).get("From", "Valued Customer")
     name_email_match = re.match(r'^(.*?)\s*<(.*?@.*?)>$', sender_name)
     if name_email_match:
@@ -328,23 +330,28 @@ def step_3_compose_email(ti, **context):
     logging.info(f"Sender name extracted: {sender_name}")
     
     prompt = f"""
-        Compose a professional and human-like business email in American English, written in the tone of a senior Customer Success Manager, to notify a vendor about the outcome of an invoice submission (Posted, Draft, or Failed).
+        Compose a professional and human-like business email in American English, written in the tone of a senior Customer Success Manager, to notify a vendor about the outcome of an invoice submission (Posted, Draft, Failed, or Duplicate).
         Address the email to the vendor using their name: '{sender_name}'.
         The email must include:
-        - A clear introductory line acknowledging the invoice receipt with the invoice number and vendor name (if available), followed by a short sentence stating the current status of the invoice (Posted, Draft, or Failed).
-        - A natural explanation of the status outcome (including Invoice Number and, for Draft or Failed, specific issues like price mismatch, missing PO, unreadable file, duplicate invoice, or unrecognized product in a bulleted list).
-        - A concise summary of invoice details (Invoice Number, Invoice Date, Due Date, Internal Invoice ID, Status, Vendor Name if available, Purchase Order if available, Currency, Subtotal, Tax with rate if available, Total Amount) in paragraph or bullet format.
+        - A clear introductory line acknowledging the invoice receipt with the invoice number and vendor name (if available), followed by a short sentence stating the current status of the invoice (Posted, Draft, Failed, or Duplicate).
+        - A natural explanation of the status outcome (including Invoice Number and, for Draft, Failed, or Duplicate, specific issues like price mismatch, missing PO, unreadable file, duplicate invoice, or unrecognized product in a bulleted list).
+        - For Duplicate invoices:
+            - If the existing invoice is Posted, state that a duplicate was detected and no new bill was created, referencing the existing posted invoice details.
+            - If the existing invoice is Draft, state that a duplicate was detected and no new bill was created, referencing the existing draft invoice details and any validation issues (excluding the duplicate detection message).
+        - A concise summary of invoice details (Invoice Number, Invoice Date, Due Date, Internal Invoice ID, Status, Vendor Name if available, Purchase Order if available, Currency, Subtotal, Tax with rate if available, Total Amount) in bullet format. For Duplicate invoices, label as 'Existing Invoice Details' (Posted) or 'Existing Draft Invoice Details' (Draft).
         - A product line item table **with borders** (including Item Description, Quantity, Unit Price, Tax, Total Price), placed immediately after the invoice summary.
-        - If the invoice status is Draft or Failed, include a short, natural-language paragraph below the product table briefly summarizing the **validation issues**.
+        - If the invoice status is Draft, Failed, or Duplicate (Draft), include a short, natural-language paragraph below the product table briefly summarizing the **validation issues**.
         - A naturally worded sentence or short paragraph explaining the next steps based on the invoice status:
             - For **Posted**, confirm the invoice has been successfully entered into the payment cycle.
             - For **Draft** or **Failed**, kindly request corrections and resubmission to invoflux-agent-8013@lowtouch.ai.
+            - For **Duplicate (Posted)**, suggest reviewing the posted invoice and contacting support if needed.
+            - For **Duplicate (Draft)**, suggest reviewing the draft invoice, correcting details, or uploading a revised invoice to invoflux-agent-8013@lowtouch.ai.
         - A polite closing paragraph offering further assistance, mentioning the contact email invoflux-agent-8013@lowtouch.ai, and signed with 'Invoice Processing Team, InvoFlux'.
         Use only clean, valid HTML for the email body without any section headers (e.g., no 'Status-Based Message', 'Invoice Summary', or 'Validation Issues Identified'). Avoid technical or template-style formatting and placeholders (e.g., '[Invoice Number]'). The email should read as if it was personally written.
         Return only the HTML body, and nothing else.
     """
     # Pass only the previous step's response as history
-    history = [{"role": "assistant", "content": step_2_response}] if step_2_response else []
+    history = [{"role": "assistant", "content": content_appended}] if content_appended else []
     response = get_ai_response(prompt, conversation_history=history)
     # Clean the HTML response
     cleaned_response = re.sub(r'```html\n|```', '', response).strip()
@@ -357,6 +364,7 @@ def step_3_compose_email(ti, **context):
     full_history = ti.xcom_pull(key="conversation_history") or []
     full_history.append({"role": "user", "content": prompt})
     full_history.append({"role": "assistant", "content": response})
+    ti.xcom_push(key="email content", value=content_appended)
     ti.xcom_push(key="step_3_prompt", value=prompt)
     ti.xcom_push(key="step_3_response", value=response)
     ti.xcom_push(key="conversation_history", value=full_history)
