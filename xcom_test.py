@@ -1,22 +1,15 @@
 from airflow import DAG
+from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
-from typing import cast
 from airflow.models.xcom_arg import XComArg
+from typing import cast
 
-def return_date(**kwargs):
+def return_date_str():
     return "20250916"
 
-def return_with_xcomarg(**kwargs):
-    #  Returns dict containing XComArg, not JSON serializable
-    get_date_task = kwargs["dag"].get_task("get_date_str")
-    return {
-        "file_name": cast(str, XComArg(get_date_task, key="return_value")),
-        "folder_path": "rimes/idx",
-    }
-
 with DAG(
-    dag_id="xcomarg_error_dag_repro",
+    dag_id="xcomarg_json_error_repro",
     start_date=days_ago(1),
     schedule_interval=None,
     catchup=False,
@@ -24,13 +17,16 @@ with DAG(
 
     get_date_str_task = PythonOperator(
         task_id="get_date_str",
-        python_callable=return_date,
+        python_callable=return_date_str,
     )
 
-    bad_task = PythonOperator(
+    # ✅ This runs fine but produces invalid XCom JSON in UI
+    bad_task = EmptyOperator(
         task_id="bad_task",
-        python_callable=return_with_xcomarg,
-        provide_context=True,
+        params={
+            "file_name": cast(str, XComArg(get_date_str_task, key="return_value")),
+            "folder_path": "rimes/idx",
+        },
     )
 
     get_date_str_task >> bad_task
