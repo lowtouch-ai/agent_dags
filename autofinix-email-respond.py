@@ -269,6 +269,11 @@ REQUIRED OUTPUT FORMAT:
         Repayment Statement Table
         LOAN ID	REPAYMENT DATE	AMOUNT PAID	PAYMENT MODE	STATUS
         No records found
+- If user asks for EMI schedule provide it in below output :
+    EMI Schedule Table 
+    | EMI NO. | DUE DATE | EMI AMOUNT | OUTSTANDING AMOUNT | PAYMENT STATUS |
+    - if no records found:
+        No records found
 - Loan ID: [exact loan ID from request]
 - API Response: [exact data returned from API tools, or "No records found"]
 
