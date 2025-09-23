@@ -209,11 +209,40 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
         else:
             return f"<html><body>Error processing AI request: {str(e)}</body></html>"
 
-def send_email(service, recipient, subject, body, in_reply_to, references, cc=None):
+def parse_email_addresses(address_string):
+    """Parse email addresses from To/Cc/Bcc header strings"""
+    if not address_string:
+        return []
+    
+    # Split by comma and clean up each address
+    addresses = []
+    for addr in address_string.split(','):
+        addr = addr.strip()
+        if addr:
+            addresses.append(addr)
+    return addresses
+
+def extract_all_recipients(email_data):
+    """Extract all recipients from To, Cc, and Bcc headers"""
+    headers = email_data.get("headers", {})
+    
+    to_recipients = parse_email_addresses(headers.get("To", ""))
+    cc_recipients = parse_email_addresses(headers.get("Cc", ""))
+    bcc_recipients = parse_email_addresses(headers.get("Bcc", ""))
+    
+    return {
+        "to": to_recipients,
+        "cc": cc_recipients,
+        "bcc": bcc_recipients
+    }
+
+def send_email(service, recipient, subject, body, in_reply_to, references, cc=None, bcc=None):
+    """Updated send_email function with BCC support"""
     try:
         msg = MIMEMultipart()
         msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
         msg["To"] = recipient
+        
         if cc:
             # Clean Cc: Remove bot's own email if present, and ensure it's a string
             cc_list = [email.strip() for email in cc.split(',') if email.strip().lower() != HUBSPOT_FROM_ADDRESS.lower()]
@@ -224,19 +253,34 @@ def send_email(service, recipient, subject, body, in_reply_to, references, cc=No
             else:
                 logging.info("Cc provided but empty after cleaning, skipping.")
         else:
-            logging.info("No Cc provided, sending to single recipient.")
+            logging.info("No Cc provided.")
+            
+        if bcc:
+            # Clean Bcc: Remove bot's own email if present
+            bcc_list = [email.strip() for email in bcc.split(',') if email.strip().lower() != HUBSPOT_FROM_ADDRESS.lower()]
+            cleaned_bcc = ', '.join(bcc_list)
+            if cleaned_bcc:
+                msg["Bcc"] = cleaned_bcc
+                logging.info(f"Including Bcc in email: {cleaned_bcc}")
+            else:
+                logging.info("Bcc provided but empty after cleaning, skipping.")
+        else:
+            logging.info("No Bcc provided.")
+            
         msg["Subject"] = subject
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = references
         msg.attach(MIMEText(body, "html"))
+        
         raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
         result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
-        logging.info(f"Email sent to {recipient} (Cc: {cc if cc else 'None'})")
+        logging.info(f"Email sent to {recipient} (Cc: {cc if cc else 'None'}, Bcc: {bcc if bcc else 'None'})")
         return result
     except Exception as e:
         logging.error(f"Failed to send email: {e}")
         return None
 
+    
 def fetch_thread(ti, **context):
     email_data = context['dag_run'].conf.get("email_data", {})
 
@@ -1854,7 +1898,10 @@ def compose_confirmation_email(ti, **context):
     logging.info(f"Confirmation email composed with conditional section display. Content sections included: {has_content_sections}")
     return email_content
 
+
+
 def send_confirmation_email(ti, **context):
+    """Updated send_confirmation_email with multi-recipient support"""
     email_data = ti.xcom_pull(key="email_data")
     confirmation_email = ti.xcom_pull(key="confirmation_email")
     confirmation_needed = ti.xcom_pull(key="confirmation_needed", default=False)
@@ -1869,6 +1916,10 @@ def send_confirmation_email(ti, **context):
         logging.error("Gmail authentication failed, cannot send confirmation email.")
         return "Gmail authentication failed"
 
+    # Extract all recipients from original email
+    all_recipients = extract_all_recipients(email_data)
+    
+    # Get the sender (who will be the primary recipient)
     sender_email = email_data["headers"].get("From", "")
     original_message_id = email_data["headers"].get("Message-ID", "")
     references = email_data["headers"].get("References", "")
@@ -1878,13 +1929,45 @@ def send_confirmation_email(ti, **context):
 
     subject = f"Re: {email_data['headers'].get('Subject', 'Meeting Minutes Request')}"
 
-    # Extract Cc from the incoming email's headers (for multi-user/reply-all support)
-    cc = email_data["headers"].get("Cc", "")
-    logging.info(f"Extracted Cc from incoming email: {cc}")
+    # Prepare recipients for reply-all functionality
+    # Primary recipient is the sender
+    primary_recipient = sender_email
+    
+    # For Cc: Include all original To recipients (except sender) + all original Cc recipients
+    cc_recipients = []
+    
+    # Add all original To recipients except the sender and bot
+    for to_addr in all_recipients["to"]:
+        if (to_addr.lower() != sender_email.lower() and 
+            HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower()):
+            cc_recipients.append(to_addr)
+    
+    # Add all original Cc recipients except bot
+    for cc_addr in all_recipients["cc"]:
+        if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and 
+            cc_addr not in cc_recipients):  # Avoid duplicates
+            cc_recipients.append(cc_addr)
+    
+    # For Bcc: Include all original Bcc recipients (Gmail API allows this)
+    bcc_recipients = []
+    for bcc_addr in all_recipients["bcc"]:
+        if HUBSPOT_FROM_ADDRESS.lower() not in bcc_addr.lower():
+            bcc_recipients.append(bcc_addr)
 
-    result = send_email(service, sender_email, subject, confirmation_email, original_message_id, references, cc=cc)
+    # Convert lists to comma-separated strings
+    cc_string = ', '.join(cc_recipients) if cc_recipients else None
+    bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
+
+    logging.info(f"Sending confirmation email:")
+    logging.info(f"Primary recipient: {primary_recipient}")
+    logging.info(f"Cc recipients: {cc_string}")
+    logging.info(f"Bcc recipients: {bcc_string}")
+
+    result = send_email(service, primary_recipient, subject, confirmation_email, 
+                       original_message_id, references, cc=cc_string, bcc=bcc_string)
+    
     if result:
-        logging.info(f"Confirmation email sent to {sender_email}")
+        logging.info(f"Confirmation email sent to all recipients")
 
         confirmation_thread_id = result.get("threadId", thread_id)
         confirmation_message_id = result.get("id", "")
@@ -1902,7 +1985,8 @@ def send_confirmation_email(ti, **context):
             "confirmation_message_id": confirmation_message_id,
             "confirmation_thread_id": confirmation_thread_id,
             "references": references,
-            "sender_email": sender_email
+            "sender_email": sender_email,
+            "all_recipients": all_recipients  # Store for future replies
         }
 
         update_thread_context(thread_id, updated_context)
@@ -1911,19 +1995,9 @@ def send_confirmation_email(ti, **context):
             logging.info(f"Copied context to new thread_id={confirmation_thread_id}")
 
         logging.info(f"Thread context updated for thread {thread_id}")
-        logging.info(f"Context flags: confirmation_sent=True, awaiting_reply=True")
-
-        try:
-            contexts = get_thread_context()
-            if thread_id in contexts:
-                logging.info(f"Verified thread context stored: {json.dumps(contexts[thread_id], indent=2)}")
-            else:
-                logging.error(f"Thread context not found after update!")
-        except Exception as e:
-            logging.error(f"Error verifying thread context: {e}")
-
     else:
         logging.error("Failed to send confirmation email")
+    
     return result
 
 def decide_trigger(ti, **context):

@@ -219,11 +219,42 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
             return json.dumps({"error": str(e)})
         return f"<html><body>Error processing AI request: {str(e)}</body></html>"
 
-def send_email(service, recipient, subject, body, in_reply_to, references, cc=None):
+import re
+
+def parse_email_addresses(address_string):
+    """Parse email addresses from To/Cc/Bcc header strings"""
+    if not address_string:
+        return []
+    
+    # Split by comma and clean up each address
+    addresses = []
+    for addr in address_string.split(','):
+        addr = addr.strip()
+        if addr:
+            addresses.append(addr)
+    return addresses
+
+def extract_all_recipients(email_data):
+    """Extract all recipients from To, Cc, and Bcc headers"""
+    headers = email_data.get("headers", {})
+    
+    to_recipients = parse_email_addresses(headers.get("To", ""))
+    cc_recipients = parse_email_addresses(headers.get("Cc", ""))
+    bcc_recipients = parse_email_addresses(headers.get("Bcc", ""))
+    
+    return {
+        "to": to_recipients,
+        "cc": cc_recipients,
+        "bcc": bcc_recipients
+    }
+
+def send_email(service, recipient, subject, body, in_reply_to, references, cc=None, bcc=None):
+    """Updated send_email function with BCC support"""
     try:
         msg = MIMEMultipart()
         msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
         msg["To"] = recipient
+        
         if cc:
             # Clean Cc: Remove bot's own email if present, and ensure it's a string
             cc_list = [email.strip() for email in cc.split(',') if email.strip().lower() != HUBSPOT_FROM_ADDRESS.lower()]
@@ -234,18 +265,32 @@ def send_email(service, recipient, subject, body, in_reply_to, references, cc=No
             else:
                 logging.info("Cc provided but empty after cleaning, skipping.")
         else:
-            logging.info("No Cc provided, sending to single recipient.")
+            logging.info("No Cc provided.")
+            
+        if bcc:
+            # Clean Bcc: Remove bot's own email if present
+            bcc_list = [email.strip() for email in bcc.split(',') if email.strip().lower() != HUBSPOT_FROM_ADDRESS.lower()]
+            cleaned_bcc = ', '.join(bcc_list)
+            if cleaned_bcc:
+                msg["Bcc"] = cleaned_bcc
+                logging.info(f"Including Bcc in email: {cleaned_bcc}")
+            else:
+                logging.info("Bcc provided but empty after cleaning, skipping.")
+        else:
+            logging.info("No Bcc provided.")
+            
         msg["Subject"] = subject
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = references
         msg.attach(MIMEText(body, "html"))
+        
         raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
         result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
-        logging.info(f"Email sent to {recipient} (Cc: {cc if cc else 'None'})")
+        logging.info(f"Email sent to {recipient} (Cc: {cc if cc else 'None'}, Bcc: {bcc if bcc else 'None'})")
         return result
     except Exception as e:
         logging.error(f"Failed to send email: {e}")
-        return None # Raise exception to trigger retry in send_final_email
+        return None
 
 def analyze_user_response(ti, **context):
     conf = context["dag_run"].conf
@@ -2396,6 +2441,7 @@ def compose_response_html(ti, **context):
     return email_content
 
 def send_final_email(ti, **context):
+    """Updated send_final_email with multi-recipient support"""
     email_data = context['dag_run'].conf.get("email_data", {})
     user_response_email = context['dag_run'].conf.get("user_response_email", email_data)
     response_html = ti.xcom_pull(key="response_html")
@@ -2410,6 +2456,15 @@ def send_final_email(ti, **context):
             json.dump(contexts, f)
         raise ValueError("Gmail authentication failed")
 
+    # Get thread context to retrieve all_recipients from confirmation email
+    thread_context = get_thread_context().get(thread_id, {})
+    stored_all_recipients = thread_context.get("all_recipients", {})
+    
+    # If no stored recipients, extract from current user response
+    if not stored_all_recipients:
+        stored_all_recipients = extract_all_recipients(user_response_email)
+
+    # Get sender from user response
     sender_email = user_response_email["headers"].get("From", "")
     original_subject = user_response_email['headers'].get('Subject', 'Meeting Minutes Request')
 
@@ -2421,16 +2476,66 @@ def send_final_email(ti, **context):
     in_reply_to = user_response_email["headers"].get("Message-ID", "")
     references = user_response_email["headers"].get("References", "")
 
-    # Extract Cc from the incoming user response email's headers (for multi-user/reply-all support)
-    cc = user_response_email["headers"].get("Cc", "")
-    logging.info(f"Extracted Cc from user response email: {cc}")
+    # Prepare recipients for reply-all functionality
+    primary_recipient = sender_email
+    
+    # For Cc: Include recipients from user response + stored recipients
+    current_recipients = extract_all_recipients(user_response_email)
+    cc_recipients = []
+    
+    # Add current Cc recipients
+    for cc_addr in current_recipients["cc"]:
+        if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and 
+            cc_addr not in cc_recipients):
+            cc_recipients.append(cc_addr)
+    
+    # Add current To recipients (except sender and bot)
+    for to_addr in current_recipients["to"]:
+        if (to_addr.lower() != sender_email.lower() and 
+            HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower() and
+            to_addr not in cc_recipients):
+            cc_recipients.append(to_addr)
+    
+    # Add original recipients from stored context if they're not already included
+    for to_addr in stored_all_recipients.get("to", []):
+        if (to_addr.lower() != sender_email.lower() and 
+            HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower() and
+            to_addr not in cc_recipients):
+            cc_recipients.append(to_addr)
+    
+    for cc_addr in stored_all_recipients.get("cc", []):
+        if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and 
+            cc_addr not in cc_recipients):
+            cc_recipients.append(cc_addr)
+
+    # For Bcc: Include current + stored Bcc recipients
+    bcc_recipients = []
+    for bcc_addr in current_recipients.get("bcc", []):
+        if (HUBSPOT_FROM_ADDRESS.lower() not in bcc_addr.lower() and
+            bcc_addr not in bcc_recipients):
+            bcc_recipients.append(bcc_addr)
+    
+    for bcc_addr in stored_all_recipients.get("bcc", []):
+        if (HUBSPOT_FROM_ADDRESS.lower() not in bcc_addr.lower() and
+            bcc_addr not in bcc_recipients):
+            bcc_recipients.append(bcc_addr)
+
+    # Convert to strings
+    cc_string = ', '.join(cc_recipients) if cc_recipients else None
+    bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
+
+    logging.info(f"Sending final email:")
+    logging.info(f"Primary recipient: {primary_recipient}")
+    logging.info(f"Cc recipients: {cc_string}")
+    logging.info(f"Bcc recipients: {bcc_string}")
 
     retries = 3
     for attempt in range(retries):
         try:
-            result = send_email(service, sender_email, subject, response_html, in_reply_to, references, cc=cc)
+            result = send_email(service, primary_recipient, subject, response_html, 
+                              in_reply_to, references, cc=cc_string, bcc=bcc_string)
             if result:
-                logging.info(f"Final workflow completion email sent to {sender_email}")
+                logging.info(f"Final workflow completion email sent to all recipients")
                 contexts = get_thread_context()
                 contexts[thread_id].update({
                     "final_email_sent": True,
@@ -2441,13 +2546,13 @@ def send_final_email(ti, **context):
                     json.dump(contexts, f)
                 return result
             else:
-                logging.error(f"Attempt {attempt+1} failed to send email to {sender_email}")
+                logging.error(f"Attempt {attempt+1} failed to send email")
         except Exception as e:
             logging.error(f"Attempt {attempt+1} failed to send email: {e}")
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
             else:
-                logging.error(f"Failed to send final email to {sender_email} after {retries} attempts")
+                logging.error(f"Failed to send final email after {retries} attempts")
                 contexts = get_thread_context()
                 contexts[thread_id]["final_email_error"] = f"Failed to send final email: {str(e)}"
                 with open(THREAD_CONTEXT_FILE, "w") as f:
@@ -2455,7 +2560,6 @@ def send_final_email(ti, **context):
                 raise
 
     return None
-
 def branch_to_creation_tasks(ti, **context):
     analysis_results = ti.xcom_pull(task_ids='analyze_user_response', key='analysis_results')
     mandatory_tasks = ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
