@@ -502,6 +502,12 @@ Steps to follow:
 4. Always use deal name convention for new deals.
 5. Always return the validated deal owner for new deals.
 6. Always parse another new deal if the user requests to open a second deal even if one exists. For e.g, If you find a existing deal for the same company and the user wants to open a second deal then only parse the details.
+7. Important Instruction for choosing name for new deals, follow these naming conventions:
+   - Extract the Client Name from the email content (e.g., the company or individual being sold to).
+   - Determine if it's a direct deal (no partner involved) or a partner deal (a partner or intermediary is mentioned in the deal process).
+   - If it is a direct deal, name it as <Client Name>-<Deal Name>.
+   - If it is a partner deal, name it as <Partner Name>-<Client Name>-<Deal Name>.
+   - If the Deal Name is specified in the email content, use that. If not, create a concise Deal Name based on the deal's description (e.g., product, service, or project being discussed).
 Return this exact JSON structure:
 {{
     "deal_results": {{
