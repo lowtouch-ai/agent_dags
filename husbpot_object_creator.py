@@ -876,6 +876,16 @@ def create_deals(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     thread_id = context['dag_run'].conf.get("thread_id")
     to_create_deals = analysis_results.get("entities_to_create", {}).get("deals", [])
+    
+    # Get the latest user response from the context
+    full_thread_history = context['dag_run'].conf.get("full_thread_history", [])
+    latest_user_response = ""
+    for email in reversed(full_thread_history):
+        if not email.get('from_bot', True):  # Find latest non-bot email
+            if email.get("content"):
+                soup = BeautifulSoup(email.get("content", ""), "html.parser")
+                latest_user_response = soup.get_text(separator=" ", strip=True)
+                break
 
     if not to_create_deals:
         logging.info("No deals to create, skipping.")
@@ -883,20 +893,43 @@ def create_deals(ti, **context):
         ti.xcom_push(key="deals_errors", value=[])
         return []
 
-    prompt = f"""Create deals in HubSpot based on the provided details.
+    prompt = f"""Create deals in HubSpot based on the provided details and the user's response.
+
+Latest User Response:
+{latest_user_response}
 
 Details to create:
 {json.dumps(to_create_deals, indent=2)}
 
 IMPORTANT: Respond with ONLY a valid JSON object.
 
+Critical Deal Naming Rules:
+1. Extract Client Name from latest user response or available details
+2. Determine if it's a direct deal or partner deal from context
+3. For direct deals: format as "<Client Name>-<Deal Name>"
+4. For partner deals: format as "<Partner Name>-<Client Name>-<Deal Name>"
+5. If Deal Name not specified, create descriptive name based on product/service mentioned
+6. Never use generic names - must reflect actual client/partner and deal purpose
+7. Preserve any specific deal amount, close date, or stage information provided
+
 Steps:
-1. For each deal detail object, invoke create_deal with the properties.
-2. Collect the created deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
+1. Analyze user response to extract client/partner names and deal details
+2. Apply naming convention strictly for each deal
+3. For each deal, invoke create_deal with the properties
+4. Collect created deal id, properly formatted deal name, label name, amount, close date, owner
 
 Return JSON:
 {{
-    "created_deals": [{{"id": "123", "details": {{ "dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}}} ...],
+    "created_deals": [{{
+        "id": "123", 
+        "details": {{ 
+            "dealName": "ClientName-DealPurpose",  // or "PartnerName-ClientName-DealPurpose"
+            "dealLabelName": "...",
+            "dealAmount": "...",
+            "closeDate": "...",
+            "dealOwnerName": "..."
+        }}
+    }}],
     "errors": ["Error message 1", "Error message 2"],
     "error": null
 }}
@@ -909,6 +942,14 @@ If error, set error message and include individual errors in the errors array.""
         parsed = json.loads(response)
         created = parsed.get("created_deals", [])
         errors = parsed.get("errors", [])
+
+        # Validate deal names follow convention
+        for deal in created:
+            deal_name = deal.get("details", {}).get("dealName", "")
+            if not deal_name or deal_name.count("-") < 1:
+                error_msg = f"Deal {deal.get('id', 'unknown')} has invalid name format: {deal_name}"
+                logging.error(error_msg)
+                errors.append(error_msg)
 
         ti.xcom_push(key="created_deals", value=created)
         ti.xcom_push(key="deals_errors", value=errors)
@@ -924,15 +965,19 @@ If error, set error message and include individual errors in the errors array.""
             json.dump(contexts, f)
 
         logging.info(f"Created {len(created)} deals with {len(errors)} errors")
+        for deal in created:
+            logging.info(f"Created deal: {deal.get('details', {}).get('dealName', 'Unknown')}")
+            
     except Exception as e:
-        logging.error(f"Error creating deals: {e}")
+        error_msg = f"Error creating deals: {str(e)}"
+        logging.error(error_msg)
         ti.xcom_push(key="created_deals", value=[])
-        ti.xcom_push(key="deals_errors", value=[str(e)])
+        ti.xcom_push(key="deals_errors", value=[error_msg])
         contexts = get_thread_context()
         if thread_id not in contexts:
             contexts[thread_id] = {}
-        contexts[thread_id]["create_deals_error"] = str(e)
-        contexts[thread_id]["deals_errors"] = [str(e)]
+        contexts[thread_id]["create_deals_error"] = error_msg
+        contexts[thread_id]["deals_errors"] = [error_msg]
         with open(THREAD_CONTEXT_FILE, "w") as f:
             json.dump(contexts, f)
 
