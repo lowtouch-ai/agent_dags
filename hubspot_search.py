@@ -209,6 +209,8 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
         else:
             return f"<html><body>Error processing AI request: {str(e)}</body></html>"
 
+import re
+
 def parse_email_addresses(address_string):
     """Parse email addresses from To/Cc/Bcc header strings"""
     if not address_string:
@@ -328,7 +330,7 @@ IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanati
 Analyze the content and determine:
 1. Are deals mentioned, discussed, or need to be created?. Deals are only created if the client is interested to move forward.
 2. Parse the contact name, if found then contacts need to be processed. 
-3. Are companies mentioned, discussed, or need to be created?. If company is being specified then it needs to be processed even if not explicitly asked to proceesed.
+3. Are companies mentioned, discussed, or need to be created?. If company is being specified then it needs to be processed even if not explicitly asked to proceesed. Even if the companies are already created or associated then also it needs to be processed.
 4. Do we need to create notes. Notes are created only if there is a discussion held with the client.
 5. Do we need to create tasks. Tasks are created only if there is a follow-up action required with the client.
 6. Do we need to create meetings. Meetings are created only if a meeting was held and meeting details are given. example date, time, duration, timezone etc.
@@ -388,7 +390,7 @@ def determine_owner(ti, **context):
     thread_content = ti.xcom_pull(key="thread_content")
     thread_id = ti.xcom_pull(key="thread_id")
 
-    prompt = f"""You are a HubSpot API assistant. Analyze this email thread to identify the deal owner and task owner.
+    prompt = f"""You are a HubSpot API assistant. Analyze this email thread to identify the deal owner and task owners.
 
 Email thread content:
 {thread_content}
@@ -397,43 +399,45 @@ IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanati
 
 Steps:
 
-1. Parse the Deal Owner and Task Owner
-2. Invoke get_all_owners Tool
+1. Parse the Deal Owner and Task Owners from the email thread.
+2. Invoke get_all_owners Tool to retrieve the list of available owners.
 3. Parse and validate the deal owner against the available owners list:
-
     - If deal owner is NOT specified at all:
         - Default to: "liji"
         - Message: "No deal owner specified, so assigning to default owner liji."
-
     - If deal owner IS specified but NOT found in available owners list:
-        - If no match found, default to: "liji"
+        - Default to: "liji"
         - Message: "The specified deal owner '[parsed_owner]' is not valid, so assigning to default owner liji."
-
     - If deal owner IS specified and IS found in available owners list:
         - Use the matched owner (with correct casing from the available owners list)
         - Message: "Deal owner specified as [matched_owner_name]"
+4. Parse and validate each task owner against the available owners list:
+    - Identify all tasks and their respective owners from the email content.
+    - For each task owner:
+        - If task owner is NOT specified for a task:
+            - Default to: "liji"
+            - Message: "No task owner specified for task [task_index], so assigning to default owner liji."
+        - If task owner IS specified but NOT found in available owners list:
+            - Default to: "liji"
+            - Message: "The specified task owner '[parsed_owner]' for task [task_index] is not valid, so assigning to default owner liji."
+        - If task owner IS specified and IS found in available owners list:
+            - Use the matched owner (with correct casing from the available owners list)
+            - Message: "Task owner for task [task_index] specified as [matched_owner_name]"
+5. Return a list of task owners with their validation details.
 
-4. Parse and validate the task owner against the available owners list:
-
-    - If task owner is NOT specified at all:
-        - Default to: "liji"
-        - Message: "No task owner specified, so assigning to default owner liji."
-
-    - If task owner IS specified but NOT found in available owners list:
-        - If no match found, default to: "liji"
-        - Message: "The specified task owner '[parsed_owner]' is not valid, so assigning to default owner liji."
-
-    - If task owner IS specified and IS found in available owners list:
-        - Use the matched owner (with correct casing from the available owners list)
-        - Message: "Task owner specified as [matched_owner_name]"
 Return this exact JSON structure:
 {{
     "deal_owner_id": "159242778",
     "deal_owner_name": "liji",
     "deal_owner_message": "No deal owner specified, so assigning to default owner liji." OR "The specified deal owner is not valid, so assigning to default owner liji." OR "Deal owner specified as [name]",
-    "task_owner_id": "159242778",
-    "task_owner_name": "liji",
-    "task_owner_message": "No task owner specified, so assigning to default owner liji." OR "The specified task owner is not valid, so assigning to default owner liji." OR "Task owner specified as [name]",
+    "task_owners": [
+        {{
+            "task_index": 1,
+            "task_owner_id": "159242778",
+            "task_owner_name": "liji",
+            "task_owner_message": "No task owner specified for task [task_index], so assigning to default owner liji." OR "The specified task owner is not valid for task [task_index], so assigning to default owner liji." OR "Task owner for task [task_index] specified as [name]"
+        }}
+    ],
     "all_owners_table": [
         {{
             "id": "owner_id",
@@ -464,9 +468,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
             "deal_owner_id": "159242778",
             "deal_owner_name": "liji",
             "deal_owner_message": f"Error occurred: {str(e)}, so assigning to default owner liji.",
-            "task_owner_id": "159242778",
-            "task_owner_name": "liji",
-            "task_owner_message": f"Error occurred: {str(e)}, so assigning to default owner liji.",
+            "task_owners": [],
             "all_owners_table": []
         }
         ti.xcom_push(key="owner_info", value=default_owner)
@@ -579,7 +581,7 @@ Email thread content:
 
 IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
 
-Steps to follow (execute in order):
+Important Steps to follow (execute in order):
 1. Extract potential contact names from the thread. Apply these exclusion rules:
    - EXCLUDE deal owners mentioned with "assign to", "owner", or similar assignment language
    - EXCLUDE internal team members, senders, or system users (e.g., skip "From: John Doe <john@company.com>")
@@ -837,6 +839,8 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
             "partner_status": None
         }
         ti.xcom_push(key="company_info", value=default)
+
+
 def check_task_threshold(ti, **context):
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
     if not entity_flags.get("parse_tasks", True):
@@ -852,25 +856,55 @@ def check_task_threshold(ti, **context):
             "warnings": []
         })
         return []
+    
     thread_content = ti.xcom_pull(key="thread_content")
     thread_id = ti.xcom_pull(key="thread_id")
     owner_info = ti.xcom_pull(key="owner_info", default={})
-    task_owner_id = owner_info.get('task_owner_id', '159242778')
-    task_owner_name = owner_info.get('task_owner_name', 'liji')
+    notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", default={})
+    
+    # Get task owners and their respective tasks
+    task_owners = owner_info.get('task_owners', [])
+    tasks = notes_tasks_meeting.get('tasks', [])
+    
+    # Map tasks to their owners and due dates
+    task_owner_mapping = []
+    for task in tasks:
+        task_details = task.get('task_details', '')
+        due_date = task.get('due_date', '')
+        task_owner_id = task.get('task_owner_id', '159242778')
+        task_owner_name = task.get('task_owner_name', 'liji')
+        
+        # Find the corresponding task owner info
+        task_index = tasks.index(task) + 1
+        matching_owner = next((owner for owner in task_owners if owner.get('task_index') == task_index), None)
+        if matching_owner:
+            task_owner_id = matching_owner.get('task_owner_id', '159242778')
+            task_owner_name = matching_owner.get('task_owner_name', 'liji')
+        
+        task_owner_mapping.append({
+            'task_details': task_details,
+            'due_date': due_date,
+            'task_owner_id': task_owner_id,
+            'task_owner_name': task_owner_name
+        })
+
     prompt = f"""You are a HubSpot API assistant. Check task volume thresholds based on this email thread.
 
 Email thread content:
 {thread_content}
-Validated Task Owner ID: {task_owner_id}
-Validated Task Owner Name: {task_owner_name}
+
+Task Owner Mapping:
+{json.dumps(task_owner_mapping, indent=2)}
+
 IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
 
 Steps to follow:
-1. Extract the due date specified for task.
-2. Invoke search_tasks with GTE and LTE set to that date owner name set to {task_owner_name}
-3. Count total task for the due date for the specified owner.
-4. Check if task count exceeds threshold of {TASK_THRESHOLD} tasks per day.
-5. Generate warnings for dates that exceed the threshold.
+1. For each task in the Task Owner Mapping, extract the due date and assigned owner.
+2. For each unique owner and due date combination:
+   - Invoke search_tasks with GTE and LTE set to the specified due date and owner name.
+   - Count total tasks for that owner on that date.
+   - Check if the task count exceeds the threshold of {TASK_THRESHOLD} tasks per day.
+3. Generate warnings for dates that exceed the threshold for each owner.
 
 Return this exact JSON structure:
 {{
@@ -878,11 +912,11 @@ Return this exact JSON structure:
         "dates_checked": [
             {{
                 "date": "YYYY-MM-DD",
-                "owner_id": "{task_owner_id}",
-                "owner_name": "{task_owner_name}",
+                "owner_id": "owner_id",
+                "owner_name": "owner_name",
                 "existing_task_count": 0,
                 "exceeds_threshold": false,
-                "warning": "High task volume: X tasks on YYYY-MM-DD" or null
+                "warning": "High task volume: X tasks on YYYY-MM-DD for owner_name" or null
             }}
         ],
         "total_warnings": 0,
@@ -898,7 +932,7 @@ Return this exact JSON structure:
 
 Fill in ALL fields. Use empty arrays [] for no results.
 For dates, use YYYY-MM-DD format.
-If no dates found in email, check today's date as default.
+If no dates found in email, check today's date as default for each owner.
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
@@ -978,15 +1012,16 @@ def parse_notes_tasks_meeting(ti, **context):
     owner_info = ti.xcom_pull(key="owner_info", default={})
 
     # Extract validated owner information
-    task_owner_id = owner_info.get('task_owner_id', '159242778')
-    task_owner_name = owner_info.get('task_owner_name', 'liji')
+    task_owners = owner_info.get('task_owners', [])
+    default_task_owner_id = "159242778"
+    default_task_owner_name = "liji"
 
     # Build conditional parsing instructions
     parsing_instructions = []
     if should_parse_notes:
         parsing_instructions.append("1. Notes - Any important discussion points, decisions made, or general notes")
     if should_parse_tasks:
-        parsing_instructions.append("2. Tasks - Action items with owner and due dates. Next steps with owner and due dates. Adding up the entities in hubspot is not considered as a task.")
+        parsing_instructions.append("2. Tasks - Action items with owner and due dates. Next steps with owner and due dates. Adding up the entities in HubSpot is not considered as a task.")
     if should_parse_meetings:
         parsing_instructions.append("3. Meeting Details - Meeting title, start time, end time, location, outcome, timestamp, attendees.")
 
@@ -995,39 +1030,47 @@ def parse_notes_tasks_meeting(ti, **context):
 Email thread content:
 {thread_content}
 
-Validated Task Owner ID: {task_owner_id}
-Validated Task Owner Name: {task_owner_name}
+Task Owners:
+{json.dumps(task_owners, indent=2)}
 
 PARSING INSTRUCTIONS (only parse what's listed below):
 {chr(10).join(parsing_instructions)}
 
 IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
+
 For notes (only if note parsing is enabled):
 - Extract any important discussion points, decisions made, or general notes.
+
 For meetings (only if meeting parsing is enabled):
 - Extract meeting title, start time, end time, location, outcome, timestamp, attendees, meeting type, and meeting status.
+
 For tasks (only if task parsing is enabled):
-- If a specific task owner is mentioned in the email and it matches an available owner from the validation, use that owner
-- If a specific task owner is mentioned but was invalid (not in available owners list), use the validated default task owner: {task_owner_name} (ID: {task_owner_id})
-- If no task owner is specified, use the validated default task owner: {task_owner_name} (ID: {task_owner_id})
-- If no due date is specified, use the date after three business date from current date.
+- Identify all tasks and their respective owners from the email content.
+- For each task:
+  - Match the task to the corresponding owner in the provided Task Owners list by task_index (1-based indexing).
+  - If a specific task owner is mentioned in the email and matches an entry in the Task Owners list, use that owner's name and ID.
+  - If a specific task owner is mentioned but does not match any entry in the Task Owners list, use the default task owner: {default_task_owner_name} (ID: {default_task_owner_id}).
+  - If no task owner is specified, use the default task owner: {default_task_owner_name} (ID: {default_task_owner_id}).
+  - If no due date is specified, use the date three business days from the current date.
+  - Assign a priority (high, medium, low) based on context; default to 'medium' if not specified.
 
 Return this exact JSON structure:
 {{
     "notes": {[] if not should_parse_notes else '[{"note_content": "detailed note content", "timestamp": "YYYY-MM-DD HH:MM:SS", "note_type": "meeting_note|discussion|decision|general"}]'},
-    "tasks": {[] if not should_parse_tasks else '[{"task_details": "detailed task description", "task_owner_name": "' + task_owner_name + '", "task_owner_id": "' + task_owner_id + '", "due_date": "YYYY-MM-DD", "priority": "high|medium|low"}]'},
+    "tasks": {[] if not should_parse_tasks else '[{"task_details": "detailed task description", "task_owner_name": "owner_name", "task_owner_id": "owner_id", "due_date": "YYYY-MM-DD", "priority": "high|medium|low", "task_index": 1}]'},
     "meeting_details": {{}} if not should_parse_meetings else {{"meeting_title": "meeting title", "start_time": "YYYY-MM-DD HH:MM:SS", "end_time": "YYYY-MM-DD HH:MM:SS", "location": "meeting location or virtual link", "outcome": "meeting outcome summary", "timestamp": "YYYY-MM-DD HH:MM:SS", "attendees": ["attendee1", "attendee2"], "meeting_type": "sales_meeting|follow_up|demo|presentation|other", "meeting_status": "scheduled|completed|cancelled"}}
 }}
 
 Guidelines:
-- ONLY extract and populate data for the categories that are enabled in the parsing instructions above
-- Use the validated task owner ({task_owner_name}, ID: {task_owner_id}) for ALL tasks unless a different valid owner is explicitly specified in the email
-- Extract dates in proper format, use current date if not specified
-- For missing information, use empty string "" or empty array []
-- If no meeting details are found, return empty object for meeting_details
-- Categorize notes and tasks appropriately
-- Never Create meetings, notes and tasks. Your role is only to parse the details.
-- If parsing is disabled for a category, return empty array/object for that category
+- ONLY extract and populate data for the categories that are enabled in the parsing instructions above.
+- For tasks, use the task_owner_name and task_owner_id from the Task Owners list when available, matching by task_index.
+- Extract dates in proper format, use current date + 3 business days if not specified.
+- For missing information, use empty string "" or empty array [].
+- If no meeting details are found, return empty object for meeting_details.
+- Categorize notes and tasks appropriately.
+- Never create meetings, notes, or tasks beyond what is specified in the email.
+- If parsing is disabled for a category, return empty array/object for that category.
+- Include task_index in each task to map to the Task Owners list.
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
@@ -1050,13 +1093,22 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
             parsed_json["meeting_details"] = {}
             logging.info("Meetings parsing was disabled - forcing empty meeting_details")
         
-        # Ensure all tasks use the validated owner information (only if tasks are enabled)
+        # Ensure all tasks use the validated owner information from task_owners (only if tasks are enabled)
         if should_parse_tasks:
             for task in parsed_json.get("tasks", []):
-                if not task.get("task_owner_id") or task.get("task_owner_id") == "":
-                    task["task_owner_id"] = task_owner_id
-                if not task.get("task_owner_name") or task.get("task_owner_name") == "":
-                    task["task_owner_name"] = task_owner_name
+                task_index = task.get("task_index", 0)
+                # Find matching task owner by task_index
+                matching_owner = next((owner for owner in task_owners if owner.get("task_index") == task_index), None)
+                if matching_owner:
+                    task["task_owner_id"] = matching_owner.get("task_owner_id", default_task_owner_id)
+                    task["task_owner_name"] = matching_owner.get("task_owner_name", default_task_owner_name)
+                else:
+                    task["task_owner_id"] = default_task_owner_id
+                    task["task_owner_name"] = default_task_owner_name
+                    logging.warning(f"No matching task owner found for task_index {task_index}, using default owner {default_task_owner_name}")
+                # Ensure task_index is included
+                if "task_index" not in task:
+                    task["task_index"] = task_index or (parsed_json["tasks"].index(task) + 1)
         
         ti.xcom_push(key="notes_tasks_meeting", value=parsed_json)
 
@@ -1074,7 +1126,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         with open(THREAD_CONTEXT_FILE, "w") as f:
             json.dump(contexts, f)
 
-        logging.info(f"Successfully parsed {len(parsed_json.get('notes', []))} notes, {len(parsed_json.get('tasks', []))} tasks, and meeting details using validated owners. Flags: notes={should_parse_notes}, tasks={should_parse_tasks}, meetings={should_parse_meetings}")
+        logging.info(f"Successfully parsed {len(parsed_json.get('notes', []))} notes, {len(parsed_json.get('tasks', []))} tasks, and meeting details. Flags: notes={should_parse_notes}, tasks={should_parse_tasks}, meetings={should_parse_meetings}")
 
     except Exception as e:
         logging.error(f"Error processing notes/tasks/meeting AI response: {e}")
@@ -1091,10 +1143,16 @@ def compile_search_results(ti, **context):
     contact_info = ti.xcom_pull(key="contact_info")
     company_info = ti.xcom_pull(key="company_info")
     notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting")
-    task_threshold_info = ti.xcom_pull(key="task_threshold_info", default={})  # Add this line
+    task_threshold_info = ti.xcom_pull(key="task_threshold_info", default={})
     thread_id = ti.xcom_pull(key="thread_id")
     email_data = ti.xcom_pull(key="email_data")
     thread_history = ti.xcom_pull(key="thread_history")
+
+    # Get previous results from DAG configuration
+    conf = context.get("dag_run", {}).conf or {}
+    previous_search_results = conf.get("previous_search_results", {})
+    previous_create_results = conf.get("previous_create_results", {})
+    is_followup_creation = conf.get("is_followup_creation", False)
 
     if not thread_history:
         logging.error(f"No thread history for thread_id={thread_id}")
@@ -1103,11 +1161,107 @@ def compile_search_results(ti, **context):
             thread_history = get_email_thread(service, email_data)
             logging.info(f"Re-fetched thread history for thread_id={thread_id}, {len(thread_history)} emails")
 
+    # Merge current results with previous results to avoid duplicates
+    merged_deal_results = deal_info.get("deal_results", {"total": 0, "results": []})
+    merged_contact_results = contact_info.get("contact_results", {"total": 0, "results": []})
+    merged_company_results = company_info.get("company_results", {"total": 0, "results": []})
+
+    # If this is a followup creation, merge with previous search results
+    if is_followup_creation and previous_search_results:
+        # Merge existing entities (avoid duplicates by ID)
+        prev_deals = previous_search_results.get("deal_results", {}).get("results", [])
+        prev_contacts = previous_search_results.get("contact_results", {}).get("results", [])
+        prev_companies = previous_search_results.get("company_results", {}).get("results", [])
+
+        # Merge deals (avoid duplicates by dealId)
+        existing_deal_ids = {deal.get("dealId") for deal in merged_deal_results["results"]}
+        for prev_deal in prev_deals:
+            if prev_deal.get("dealId") not in existing_deal_ids:
+                merged_deal_results["results"].append(prev_deal)
+                merged_deal_results["total"] += 1
+
+        # Merge contacts (avoid duplicates by contactId)
+        existing_contact_ids = {contact.get("contactId") for contact in merged_contact_results["results"]}
+        for prev_contact in prev_contacts:
+            if prev_contact.get("contactId") not in existing_contact_ids:
+                merged_contact_results["results"].append(prev_contact)
+                merged_contact_results["total"] += 1
+
+        # Merge companies (avoid duplicates by companyId)
+        existing_company_ids = {company.get("companyId") for company in merged_company_results["results"]}
+        for prev_company in prev_companies:
+            if prev_company.get("companyId") not in existing_company_ids:
+                merged_company_results["results"].append(prev_company)
+                merged_company_results["total"] += 1
+
+        logging.info(f"Merged with previous results - Deals: {len(prev_deals)} previous + {deal_info.get('deal_results', {}).get('total', 0)} new")
+        logging.info(f"Contacts: {len(prev_contacts)} previous + {contact_info.get('contact_results', {}).get('total', 0)} new")
+        logging.info(f"Companies: {len(prev_companies)} previous + {company_info.get('company_results', {}).get('total', 0)} new")
+
+    # Also include previous created entities as "existing" entities for selection
+    if is_followup_creation and previous_create_results:
+        # Add previously created entities to the "existing" results for user selection
+        prev_created_contacts = previous_create_results.get("created_contacts", {}).get("results", [])
+        prev_created_companies = previous_create_results.get("created_companies", {}).get("results", [])
+        prev_created_deals = previous_create_results.get("created_deals", {}).get("results", [])
+
+        # Convert created entities to search result format
+        for created_contact in prev_created_contacts:
+            contact_details = created_contact.get("details", {})
+            formatted_contact = {
+                "contactId": created_contact.get("id"),
+                "firstname": contact_details.get("firstname", ""),
+                "lastname": contact_details.get("lastname", ""),
+                "email": contact_details.get("email", ""),
+                "phone": contact_details.get("phone", ""),
+                "address": contact_details.get("address", ""),
+                "jobtitle": contact_details.get("jobtitle", "")
+            }
+            if created_contact.get("id") not in {c.get("contactId") for c in merged_contact_results["results"]}:
+                merged_contact_results["results"].append(formatted_contact)
+                merged_contact_results["total"] += 1
+
+        # Similar for companies and deals...
+        for created_company in prev_created_companies:
+            company_details = created_company.get("details", {})
+            formatted_company = {
+                "companyId": created_company.get("id"),
+                "name": company_details.get("name", ""),
+                "domain": company_details.get("domain", ""),
+                "address": company_details.get("address", ""),
+                "city": company_details.get("city", ""),
+                "state": company_details.get("state", ""),
+                "zip": company_details.get("zip", ""),
+                "country": company_details.get("country", ""),
+                "phone": company_details.get("phone", ""),
+                "description": company_details.get("description", ""),
+                "type": company_details.get("type", "")
+            }
+            if created_company.get("id") not in {c.get("companyId") for c in merged_company_results["results"]}:
+                merged_company_results["results"].append(formatted_company)
+                merged_company_results["total"] += 1
+
+        for created_deal in prev_created_deals:
+            deal_details = created_deal.get("details", {})
+            formatted_deal = {
+                "dealId": created_deal.get("id"),
+                "dealName": deal_details.get("dealName", ""),
+                "dealLabelName": deal_details.get("dealLabelName", ""),
+                "dealAmount": deal_details.get("dealAmount", ""),
+                "closeDate": deal_details.get("closeDate", ""),
+                "dealOwnerName": deal_details.get("dealOwnerName", "")
+            }
+            if created_deal.get("id") not in {d.get("dealId") for d in merged_deal_results["results"]}:
+                merged_deal_results["results"].append(formatted_deal)
+                merged_deal_results["total"] += 1
+
+        logging.info(f"Added previously created entities to existing results for selection")
+
     search_results = {
         "thread_id": thread_id,
-        "deal_results": deal_info.get("deal_results", {"total": 0, "results": []}),
-        "contact_results": contact_info.get("contact_results", {"total": 0, "results": []}),
-        "company_results": company_info.get("company_results", {"total": 0, "results": []}),
+        "deal_results": merged_deal_results,
+        "contact_results": merged_contact_results,
+        "company_results": merged_company_results,
         "new_entity_details": {
             "deals": deal_info.get("new_deals", []),
             "contacts": contact_info.get("new_contacts", []),
@@ -1120,7 +1274,10 @@ def compile_search_results(ti, **context):
         "invalid_owner_message": owner_info.get("invalid_owner_message", None),
         "all_owners_table": owner_info.get("all_owners_table", []),
         "partner_status": company_info.get("partner_status", None),
-        "task_threshold_info": task_threshold_info
+        "task_threshold_info": task_threshold_info,
+        "is_followup_creation": is_followup_creation,  # Flag for downstream processing
+        "previous_search_results": previous_search_results,
+        "previous_create_results": previous_create_results
     }
 
     has_existing_entities = (
@@ -1143,7 +1300,7 @@ def compile_search_results(ti, **context):
     if not has_existing_entities and not has_new_entities:
         confirmation_needed = True
         search_results["confirmation_needed"] = True
-        search_results["response_html"] = "<html><body>No entities found. Please provide details for the deal, contact, company, notes, tasks, or meeting to proceed.</body></html>"
+        search_results["response_html"] = "<html><body>No new entities found to add. Please provide details for additional deals, contacts, companies, notes, tasks, or meetings to proceed.</body></html>"
 
     ti.xcom_push(key="search_results", value=search_results)
     ti.xcom_push(key="confirmation_needed", value=confirmation_needed)
@@ -1168,13 +1325,11 @@ def compile_search_results(ti, **context):
             logging.error(f"Failed to store thread history for thread_id={thread_id}")
         else:
             logging.info(f"Stored thread history for thread_id={thread_id} with {len(stored_context['thread_history'])} emails")
-            for idx, email in enumerate(stored_context["thread_history"], 1):
-                logging.info(f"Stored Email {idx}: message_id={email['message_id']}, from={email['headers'].get('From', 'Unknown')}")
     except Exception as e:
         logging.error(f"Error updating thread context for thread_id={thread_id}: {e}")
         raise
 
-    logging.info(f"Compiled search results: {json.dumps(search_results, indent=2)}")
+    logging.info(f"Compiled search results with previous context: {json.dumps(search_results, indent=2)}")
     return search_results
 
 
@@ -1183,11 +1338,14 @@ def compose_confirmation_email(ti, **context):
     email_data = ti.xcom_pull(key="email_data")
     confirmation_needed = ti.xcom_pull(key="confirmation_needed", default=False)
     owner_info = ti.xcom_pull(key="owner_info")
+    task_owners = owner_info.get("task_owners", [])
     all_owners = owner_info.get("all_owners_table", [])
     chosen_deal_owner_id = owner_info.get("deal_owner_id", "159242778")
-    chosen_task_owner_id = owner_info.get("task_owner_id", "159242778")
     chosen_deal_owner_name = owner_info.get("deal_owner_name", "liji")
-    chosen_task_owner_name = owner_info.get("task_owner_name", "liji")
+    task_owners = owner_info.get("task_owners", [])  # This is the array of task owners
+    all_owners = owner_info.get("all_owners_table", [])
+    chosen_deal_owner_id = owner_info.get("deal_owner_id", "159242778")
+    chosen_deal_owner_name = owner_info.get("deal_owner_name", "liji")
     deal_owner_msg = owner_info.get("deal_owner_message", "")
     task_owner_msg = owner_info.get("task_owner_message", "")
     if not confirmation_needed:
@@ -1717,6 +1875,9 @@ def compose_confirmation_email(ti, **context):
 # Add this to your compose_confirmation_email function
 
 # Check if we should show the owner assignment section
+# Replace the Task Owner Assignment section in compose_confirmation_email function with this code:
+
+# Check if we should show the owner assignment section
     has_deals_or_tasks = (
         deal_results.get("total", 0) > 0 or
         len(new_deals) > 0 or
@@ -1725,10 +1886,6 @@ def compose_confirmation_email(ti, **context):
 
     if has_deals_or_tasks:
         has_content_sections = True
-        
-        # DEBUG: Log the actual messages to help with debugging
-        logging.info(f"DEBUG - deal_owner_msg: '{deal_owner_msg}'")
-        logging.info(f"DEBUG - task_owner_msg: '{task_owner_msg}'")
         
         email_content += """
         <h3>Owner Assignment Details</h3>
@@ -1743,7 +1900,6 @@ def compose_confirmation_email(ti, **context):
             deal_msg_lower = deal_owner_msg.lower()
             logging.info(f"DEBUG - deal_owner_msg.lower(): '{deal_msg_lower}'")
             
-            # More precise matching based on your exact messages
             if "no deal owner specified" in deal_msg_lower:
                 logging.info("DEBUG - Matched 'no deal owner specified' condition")
                 email_content += f"""
@@ -1760,8 +1916,7 @@ def compose_confirmation_email(ti, **context):
                     <br><strong>Action:</strong> Assigning to default owner '{chosen_deal_owner_name}'.
                 </p>
                 """
-            elif ("deal owner specified as" in deal_msg_lower or 
-                "specified" in deal_msg_lower):
+            elif ("deal owner specified as" in deal_msg_lower or "specified" in deal_msg_lower):
                 logging.info("DEBUG - Matched 'specified' condition (valid owner)")
                 email_content += f"""
                 <p style='background-color: #d4edda; padding: 10px; border-left: 4px solid #28a745;'>
@@ -1780,104 +1935,119 @@ def compose_confirmation_email(ti, **context):
             
             email_content += "</div>"
         
-        # Task Owner Assignment - show only if there are meaningful tasks
-        if len(meaningful_tasks) > 0:
-            email_content += "<div style='margin-bottom: 15px;'>"
-            email_content += "<h4 style='color: #2c5aa0; margin-bottom: 5px;'>Task Owner Assignment:</h4>"
-            
-            # Debug the exact message content
-            task_msg_lower = task_owner_msg.lower()
-            logging.info(f"DEBUG - task_owner_msg.lower(): '{task_msg_lower}'")
-            
-            # More precise matching based on your exact messages
-            if "no task owner specified" in task_msg_lower:
-                logging.info("DEBUG - Matched 'no task owner specified' condition")
-                email_content += f"""
-                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
-                    <strong>Reason:</strong> Task owner was not specified.
-                    <br><strong>Action:</strong> Assigning to default owner '{chosen_task_owner_name}'.
-                </p>
-                """
-            elif ("not valid" in task_msg_lower and "task owner" in task_msg_lower):
-                logging.info("DEBUG - Matched 'not valid' condition")
-                email_content += f"""
-                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
-                    <strong>Reason:</strong> Task owner mentioned, but the specified person is not found in the available owners list.
-                    <br><strong>Action:</strong> Assigning to default owner '{chosen_task_owner_name}'.
-                </p>
-                """
-            elif ("task owner specified as" in task_msg_lower or 
-                "specified as" in task_msg_lower):
-                logging.info("DEBUG - Matched 'specified' condition (valid owner)")
-                email_content += f"""
-                <p style='background-color: #d4edda; padding: 10px; border-left: 4px solid #28a745;'>
-                    <strong>Reason:</strong> Task owner is valid and found in the available owners list.
-                    <br><strong>Action:</strong> Assigned to '{chosen_task_owner_name}'.
-                </p>
-                """
-            else:
-                logging.info("DEBUG - No condition matched - using default case")
-                email_content += f"""
-                <p style='background-color: #d4edda; padding: 10px; border-left: 4px solid #28a745;'>
-                    <strong>Reason:</strong> Task owner assignment processed.
-                    <br><strong>Action:</strong> Assigned to '{chosen_task_owner_name}'.
-                </p>
-                """
-            
-            email_content += "</div>"
-        
-        # Available Owners Table
-        if all_owners:
-            email_content += """
-            <h4 style='color: #2c5aa0; margin-bottom: 10px;'>Available Owners:</h4>
-            <table style='border-collapse: collapse; width: 100%; margin-bottom: 20px;'>
-                <thead>
-                    <tr style='background-color: #e3f2fd;'>
-                        <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Owner ID</th>
-                        <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Owner Name</th>
-                        <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Owner Email</th>
-                        <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Assignment</th>
-                    </tr>
-                </thead>
-                <tbody>
-            """
-            
-            for owner in all_owners:
-                owner_id = owner.get("id", "")
-                owner_name = owner.get("name", "")
-                owner_email = owner.get("email", "")
+        # Task Owner Assignment - show for each task owner if there are meaningful tasks
+            # Task Owner Assignment - show for each task owner if there are meaningful tasks
+            if len(meaningful_tasks) > 0:
+                email_content += "<div style='margin-bottom: 15px;'>"
+                email_content += "<h4 style='color: #2c5aa0; margin-bottom: 5px;'>Task Owner Assignments:</h4>"
                 
-                # Determine assignment status
-                assignments = []
-                if owner_id == chosen_deal_owner_id and (deal_results.get("total", 0) > 0 or len(new_deals) > 0):
-                    assignments.append("Deal Owner")
-                if owner_id == chosen_task_owner_id and len(meaningful_tasks) > 0:
-                    assignments.append("Task Owner")
-                assignment_text = ", ".join(assignments) if assignments else ""
-                
-                # Enhanced highlighting with different colors for different assignments
-                if "Deal Owner" in assignments and "Task Owner" in assignments:
-                    row_style = ' style="background-color: #d1ecf1; border-left: 4px solid #0c5460;"'
-                elif "Deal Owner" in assignments:
-                    row_style = ' style="background-color: #d4edda; border-left: 4px solid #28a745;"'
-                elif "Task Owner" in assignments:
-                    row_style = ' style="background-color: #fff3cd; border-left: 4px solid #ffc107;"'
-                else:
-                    row_style = ' style="background-color: #f8f9fa;"'
+                for task_owner in task_owners:
+                    task_index = task_owner.get("task_index", 0)
+                    task_owner_name = task_owner.get("task_owner_name", "liji")
+                    task_owner_msg = task_owner.get("task_owner_message", "")
                     
-                email_content += f"""
-                    <tr{row_style}>
-                        <td style='border: 1px solid #ddd; padding: 8px;'>{owner_id}</td>
-                        <td style='border: 1px solid #ddd; padding: 8px;'><strong>{owner_name}</strong></td>
-                        <td style='border: 1px solid #ddd; padding: 8px;'>{owner_email}</td>
-                        <td style='border: 1px solid #ddd; padding: 8px;'><strong>{assignment_text}</strong></td>
-                    </tr>
-                """
-            
-            email_content += """
-                </tbody>
-            </table>
-            """
+                    # Find the corresponding task details
+                    task = next((t for t in meaningful_tasks if t.get("task_index") == task_index), None)
+                    task_details = task.get("task_details", "Unknown task") if task else "Unknown task"
+                    
+                    task_msg_lower = task_owner_msg.lower()
+                    logging.info(f"DEBUG - task_owner_msg.lower() for task {task_index}: '{task_msg_lower}'")
+                    
+                    # Use exact task_owner_message with appropriate styling
+                    if "no task owner specified" in task_msg_lower:
+                        logging.info(f"DEBUG - Matched 'no task owner specified' condition for task {task_index}")
+                        email_content += f"""
+                        <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
+                            <strong>Task {task_index}:</strong> {task_details}
+                            <br><strong>Reason:</strong> {task_owner_msg}
+                            <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
+                        </p>
+                        """
+                    elif "not valid" in task_msg_lower:
+                        logging.info(f"DEBUG - Matched 'not valid' condition for task {task_index}")
+                        email_content += f"""
+                        <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
+                            <strong>Task {task_index}:</strong> {task_details}
+                            <br><strong>Reason:</strong> {task_owner_msg}
+                            <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
+                        </p>
+                        """
+                    else:
+                        logging.info(f"DEBUG - Matched valid owner condition for task {task_index}")
+                        email_content += f"""
+                        <p style='background-color: #d4edda; padding: 10px; border-left: 4px solid #28a745;'>
+                            <strong>Task {task_index}:</strong> {task_details}
+                            <br><strong>Reason:</strong> {task_owner_msg}
+                            <br><strong>Action:</strong> Assigned to '{task_owner_name}'.
+                        </p>
+                        """
+    
+                    
+                    email_content += "</div>"
+                
+                # Available Owners Table
+                if all_owners:
+                    email_content += """
+                    <h4 style='color: #2c5aa0; margin-bottom: 10px;'>Available Owners:</h4>
+                    <table style='border-collapse: collapse; width: 100%; margin-bottom: 20px;'>
+                        <thead>
+                            <tr style='background-color: #e3f2fd;'>
+                                <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Owner ID</th>
+                                <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Owner Name</th>
+                                <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Owner Email</th>
+                                <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Assignment</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                    """
+                    
+                    for owner in all_owners:
+                        owner_id = owner.get("id", "")
+                        owner_name = owner.get("name", "")
+                        owner_email = owner.get("email", "")
+                        
+                        # FIXED: Determine assignment status for multiple task owners
+                        assignments = []
+                        
+                        # Check if this owner is the deal owner
+                        if owner_id == chosen_deal_owner_id and (deal_results.get("total", 0) > 0 or len(new_deals) > 0):
+                            assignments.append("Deal Owner")
+                        
+                        # Check if this owner is assigned to any tasks
+                        if any(task_owner.get("task_owner_id") == owner_id for task_owner in task_owners) and len(meaningful_tasks) > 0:
+                            task_indices = [str(task_owner.get("task_index")) for task_owner in task_owners if task_owner.get("task_owner_id") == owner_id]
+                            assignments.append(f"Task Owner (Tasks {', '.join(task_indices)})")
+                        
+                        assignment_text = ", ".join(assignments) if assignments else ""
+                        
+                        # Enhanced highlighting with different colors for different assignments
+                        if "Deal Owner" in assignments and "Task Owner" in assignments:
+                            row_style = ' style="background-color: #d1ecf1; border-left: 4px solid #0c5460;"'
+                        elif "Deal Owner" in assignments:
+                            row_style = ' style="background-color: #d4edda; border-left: 4px solid #28a745;"'
+                        elif "Task Owner" in assignments:
+                            row_style = ' style="background-color: #fff3cd; border-left: 4px solid #ffc107;"'
+                        else:
+                            row_style = ' style="background-color: #f8f9fa;"'
+                            
+                        email_content += f"""
+                            <tr{row_style}>
+                                <td style='border: 1px solid #ddd; padding: 8px;'>{owner_id}</td>
+                                <td style='border: 1px solid #ddd; padding: 8px;'><strong>{owner_name}</strong></td>
+                                <td style='border: 1px solid #ddd; padding: 8px;'>{owner_email}</td>
+                                <td style='border: 1px solid #ddd; padding: 8px;'><strong>{assignment_text}</strong></td>
+                            </tr>
+                        """
+                    
+                    email_content += """
+                        </tbody>
+                    </table>
+                    """
+                    
+                    email_content += """
+                        </tbody>
+                    </table>
+                    """
         
         email_content += "<hr>"
         
