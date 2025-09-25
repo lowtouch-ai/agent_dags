@@ -488,29 +488,31 @@ def search_deals(ti, **context):
     deal_owner_id = owner_info.get('deal_owner_id', '159242778')
     deal_owner_name = owner_info.get('deal_owner_name', 'liji')
 
-    prompt = f"""You are a HubSpot API assistant. Search for deals based on this email thread.
+    prompt = f"""You are a HubSpot API assistant. Your task is to search for existing deals based on the email thread content and, if none are found, propose new deal details only if the email clearly indicates a new opportunity (e.g., the client shows interest in moving forward). You dont have the ability to create deals.
 
 Email thread content:
 {thread_content}
 Validated Deal Owner ID: {deal_owner_id}
 Validated Deal Owner Name: {deal_owner_name}
 
-IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
+IMPORTANT: Respond with ONLY a valid JSON object. No explanations, no markdown, no other text.
 
-Steps to follow:
-1. Invoke search_deals with deal name. If deal found display deal id, deal name, deal label name, deal amount, close date, deal owner name in results.
-2. If no deals found, extract potential details for new deals from the email content. only propose new deals if there is a clear indication of a new deal in the email content for example analze wether the client is interested to move forward.
-3. deal stage Label should be displayed as dealLabelName. For e.g, If the deal stage is "appointmentscheduled", the dealLabelName should be "Appointment Scheduled".
-4. Always use deal name convention for new deals.
-5. Always return the validated deal owner for new deals.
-6. Always parse another new deal if the user requests to open a second deal even if one exists. For e.g, If you find a existing deal for the same company and the user wants to open a second deal then only parse the details.
-7. Important Instruction for choosing name for new deals, follow these naming conventions:
-   - Extract the Client Name from the email content (e.g., the company or individual being sold to).
-   - Determine if it's a direct deal (no partner involved) or a partner deal (a partner or intermediary is mentioned in the deal process).
-   - If it is a direct deal, name it as <Client Name>-<Deal Name>.
-   - If it is a partner deal, name it as <Partner Name>-<Client Name>-<Deal Name>.
-   - If the Deal Name is specified in the email content, use that. If not, create a concise Deal Name based on the deal's description (e.g., product, service, or project being discussed).
-Return this exact JSON structure:
+Steps:
+1. Search for existing deals using the deal name extracted from the email content.
+2. If deals are found, include them in 'deal_results' with: dealId, dealName, dealLabelName (e.g., 'Appointment Scheduled' for stage 'appointmentscheduled'), dealAmount, closeDate, dealOwnerName.
+3. If no deals are found, check if the email clearly indicates a new deal. If yes, propose new deals in 'new_deals'. If not, leave 'new_deals' as an empty list.
+4. Strictly follow these rules, for new deal names, :
+   - Extract the Client Name (company or individual being sold to) from the email.
+   - Check if it's a direct deal (no partner) or partner deal (partner or intermediary mentioned).
+   - Direct deal: <Client Name>-<Deal Name>
+   - Partner deal: <Partner Name>-<Client Name>-<Deal Name>
+   - Use the Deal Name from the email if specified; otherwise, create a concise one based on the description (e.g., product or service discussed).
+5. For new deals, use the validated deal owner name in dealOwnerName.
+6. Propose an additional new deal if the email explicitly requests opening a second deal, even if one exists.
+7. Use dealLabelName for deal stages (e.g., 'Appointment Scheduled').
+8. Fill all fields in the JSON. Use empty string "" for any missing values.
+
+Return exactly this JSON structure:
 {{
     "deal_results": {{
         "total": 0,
@@ -527,7 +529,7 @@ Return this exact JSON structure:
     }},
     "new_deals": [
         {{
-            "dealName": "proposed_name",
+            "dealName": "<Client Name>-<Deal Name>" OR "<Partner Name>-<Client Name>-<Deal Name>",
             "dealLabelName": "proposed_stage",
             "dealAmount": "proposed_amount",
             "closeDate": "proposed_close_date",
@@ -536,9 +538,7 @@ Return this exact JSON structure:
     ]
 }}
 
-Fill in ALL fields for each deal. Use empty string "" for missing values.
-
-RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
+RESPOND WITH ONLY THE JSON OBJECT."""
 
     response = get_ai_response(prompt, expect_json=True)
     logging.info(f"Raw AI response for deals: {response[:1000]}...")
