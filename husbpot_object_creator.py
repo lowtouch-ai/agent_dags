@@ -499,8 +499,14 @@ INSTRUCTIONS:
    - "CLARIFY": User needs clarification or provides unclear instructions.
    - "CANCEL": User wants to stop the workflow.
    Focus on the meaning of the response, not just keywords. For example, "use the first contact" or "I meant John from Acme" indicates SELECT_SPECIFIC, while "looks good" implies CONFIRM.
-
-2. **Entity Handling**:
+2. **Casual Comment Detection**: ADDITIONALLY, check if the user's response contains casual comments, observations, or informal updates about clients, deals, companies, or business relationships that should be captured as notes. Examples:
+   - "We already kicked off that CRM integration deal with Rohit… feels like things are moving there."
+   - "Had a good call with the team at Acme yesterday"
+   - "John seems happy with our progress so far"
+   - "The client mentioned they want to expand next quarter"
+   If casual comments are found, create notes for them in addition to other requested actions. **Include the speaker's name/email from the email headers in the note content.**
+   
+3. **Entity Handling**:
    - **Primary Entities (contacts, companies, deals)**:
      - If the user selects specific existing entities (by name, ID, or details), include only those in `entities_to_use_existing`.
      - If the user requests new primary entities, include them in `entities_to_create`.
@@ -513,14 +519,15 @@ INSTRUCTIONS:
        - For "CREATE_NEW": include all in `entities_to_create`, overriding priors.
        - For "CLARIFY" or "CANCEL": do not include any.
      - If the user response only addresses primary entities (e.g., confirms contacts/companies), default to including all proposed secondary entities in `entities_to_create` unless explicitly excluded.
-3. **Selection Logic**:
+4. **Selection Logic**:
    - If multiple entities of a type (e.g., contacts) were presented, and the user specifies which to use (e.g., by name, ID, or position like "first one"), only include those in `entities_to_use_existing`.
    - If the user provides vague references (e.g., "use John"), match to the most likely entity based on details like name or company.
    - If no specific selection is made but the user confirms, include all existing entities.
 
-4. **Confidence Level**: Assign "high", "medium", or "low" based on how clear the user's intent and selections are. Use "low" for ambiguous responses requiring clarification.
+5. **Confidence Level**: Assign "high", "medium", or "low" based on how clear the user's intent and selections are. Use "low" for ambiguous responses requiring clarification.
 
-5. **Reasoning**: Provide a brief explanation of how you determined the intent, selections, and entity actions.
+6. **Reasoning**: Provide a brief explanation of how you determined the intent, selections, and entity actions.
+
 
 Return ONLY valid JSON:
 {{
@@ -552,7 +559,11 @@ Return ONLY valid JSON:
         "companies": [],
         "deals": [],
         "meetings": [],
-        "notes": [],
+        "notes": [
+        "note_content": "[sender_name] mentioned [casual_comment_text]",
+            "timestamp": "2025-01-XX...",
+            "speaker_name": "[extracted_from_From_header]",
+            "speaker_email": "[extracted_email]"], //
         "tasks": []
     }},
     "entities_to_update": {{
@@ -563,6 +574,7 @@ Return ONLY valid JSON:
         "notes": [],
         "tasks": []
     }},
+    "casual_comments_detected": true/false,
     "reasoning": "..."
 }}
 """
@@ -634,6 +646,15 @@ Return ONLY valid JSON:
         logging.info(f"Reasoning: {reasoning}")
         logging.info(f"Final Selected Entities Count - Contacts: {len(selected_entities['contacts'])}, Companies: {len(selected_entities['companies'])}, Deals: {len(selected_entities['deals'])}")
         
+        should_determine_owner = False
+        should_check_task_threshold = False
+
+        if entities_to_create.get("deals") or entities_to_create.get("tasks"):
+            should_determine_owner = True
+        if entities_to_create.get("tasks"):
+            should_check_task_threshold = True
+
+        
         # Define tasks to execute based on user intent
         tasks_to_execute = []
         if user_intent in ["MODIFY", "CONFIRM", "SELECT_SPECIFIC"]:
@@ -689,6 +710,8 @@ Return ONLY valid JSON:
             "reasoning": reasoning,
             "tasks_to_execute": tasks_to_execute
         }
+        results["should_determine_owner"] = should_determine_owner
+        results["should_check_task_threshold"] = should_check_task_threshold
         
     except json.JSONDecodeError as e:
         logging.error(f"Failed to parse AI analysis: {e}")
@@ -738,6 +761,311 @@ Return ONLY valid JSON:
     logging.info(f"Analysis completed for thread {thread_id}")
     logging.info(f"User intent: {user_intent}, Tasks to execute: {tasks_to_execute}")
     return results
+
+def determine_owner(ti, **context):
+    """Fixed version that extracts thread content and tasks properly"""
+    # Get analysis results to extract thread content and tasks
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    thread_id = context['dag_run'].conf.get("thread_id")
+    
+    # Get thread content from DAG run conf or thread context
+    conf = context["dag_run"].conf
+    full_thread_history = conf.get("full_thread_history", [])
+    
+    # Build thread content from full history
+    thread_content = ""
+    for idx, email in enumerate(full_thread_history, 1):
+        content = email.get("content", "").strip()
+        if content:
+
+            soup = BeautifulSoup(content, "html.parser")
+            clean_content = soup.get_text(separator=" ", strip=True)
+            sender = email['headers'].get('From', 'Unknown')
+            is_from_bot = email.get('from_bot', False)
+            
+            if is_from_bot:
+                thread_content += f"### Bot Message {idx} (From: {sender})\n{clean_content}\n\n"
+            else:
+                thread_content += f"### User Message {idx} (From: {sender})\n{clean_content}\n\n"
+    
+    # Get tasks from analysis results
+    entities_to_create = analysis_results.get("entities_to_create", {})
+    tasks_to_create = entities_to_create.get("tasks", [])
+    
+    # If no thread content, log warning
+    if not thread_content:
+        logging.warning(f"No thread content available for owner determination in thread {thread_id}")
+        thread_content = "No thread content available for analysis."
+
+    prompt = f"""You are a HubSpot API assistant. Analyze this email thread to identify the deal owner and task owners.
+
+Email thread content:
+{thread_content}
+
+Tasks to be created:
+{json.dumps(tasks_to_create, indent=2)}
+
+IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
+
+Steps:
+
+1. Parse the Deal Owner and Task Owners from the email thread.
+2. Invoke get_all_owners Tool to retrieve the list of available owners.
+3. Parse and validate the deal owner against the available owners list:
+    - If deal owner is NOT specified at all:
+        - Default to: "liji"
+        - Message: "No deal owner specified, so assigning to default owner liji."
+    - If deal owner IS specified but NOT found in available owners list:
+        - Default to: "liji"
+        - Message: "The specified deal owner '[parsed_owner]' is not valid, so assigning to default owner liji."
+    - If deal owner IS specified and IS found in available owners list:
+        - Use the matched owner (with correct casing from the available owners list)
+        - Message: "Deal owner specified as [matched_owner_name]"
+4. Parse and validate each task owner against the available owners list:
+    - Identify all tasks and their respective owners from the email content.
+    - For each task in the tasks to be created:
+        - If task owner is NOT specified for a task:
+            - Default to: "liji"
+            - Message: "No task owner specified for task [task_index], so assigning to default owner liji."
+        - If task owner IS specified but NOT found in available owners list:
+            - Default to: "liji"
+            - Message: "The specified task owner '[parsed_owner]' for task [task_index] is not valid, so assigning to default owner liji."
+        - If task owner IS specified and IS found in available owners list:
+            - Use the matched owner (with correct casing from the available owners list)
+            - Message: "Task owner for task [task_index] specified as [matched_owner_name]"
+5. Return a list of task owners with their validation details for ALL tasks to be created.
+
+Return this exact JSON structure:
+{{
+    "deal_owner_id": "159242778",
+    "deal_owner_name": "liji",
+    "deal_owner_message": "No deal owner specified, so assigning to default owner liji." OR "The specified deal owner '[parsed_owner]' is not valid, so assigning to default owner liji." OR "Deal owner specified as [name]",
+    "task_owners": [
+        {{
+            "task_index": 1,
+            "task_owner_id": "159242778",
+            "task_owner_name": "liji",
+            "task_owner_message": "No task owner specified for task [task_index], so assigning to default owner liji." OR "The specified task owner '[parsed_owner]' for task [task_index] is not valid, so assigning to default owner liji." OR "Task owner for task [task_index] specified as [name]"
+        }}
+    ],
+    "all_owners_table": [
+        {{
+            "id": "owner_id",
+            "name": "owner_name",
+            "email": "owner_email"
+        }}
+    ]
+}}
+
+RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
+
+    response = get_ai_response(prompt, expect_json=True)
+    logging.info(f"Raw AI response for owner: {response[:1000]}...")
+
+    try:
+        parsed_json = json.loads(response.strip())
+        ti.xcom_push(key="owner_info", value=parsed_json)
+
+        # Store in thread context
+        contexts = get_thread_context()
+        if thread_id not in contexts:
+            contexts[thread_id] = {}
+        contexts[thread_id]["owner_info"] = parsed_json
+        contexts[thread_id]["prompt_owner"] = prompt
+        contexts[thread_id]["response_owner"] = response
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+        logging.info(f"Owner determination completed for thread {thread_id}")
+        logging.info(f"Deal owner: {parsed_json.get('deal_owner_name', 'unknown')}")
+        logging.info(f"Task owners: {len(parsed_json.get('task_owners', []))}")
+
+    except Exception as e:
+        logging.error(f"Error processing owner AI response: {e}")
+        default_owner = {
+            "deal_owner_id": "159242778",
+            "deal_owner_name": "liji",
+            "deal_owner_message": f"Error occurred: {str(e)}, so assigning to default owner liji.",
+            "task_owners": [],
+            "all_owners_table": []
+        }
+        ti.xcom_push(key="owner_info", value=default_owner)
+
+TASK_THRESHOLD = 15
+
+def check_task_threshold(ti, **context):
+    """Fixed version that properly extracts task information"""
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    thread_id = context['dag_run'].conf.get("thread_id")
+    
+    # Get entities to create from analysis results
+    entities_to_create = analysis_results.get("entities_to_create", {})
+    tasks_to_create = entities_to_create.get("tasks", [])
+    
+    if not tasks_to_create:
+        logging.info("No tasks to create, skipping task threshold check")
+        ti.xcom_push(key="task_warnings", value=[])
+        ti.xcom_push(key="task_threshold_info", value={
+            "task_threshold_results": {
+                "dates_checked": [],
+                "total_warnings": 0,
+                "threshold_limit": TASK_THRESHOLD
+            },
+            "extracted_dates": [],
+            "warnings": []
+        })
+        return []
+    
+    # Get thread content from DAG run conf
+    conf = context["dag_run"].conf
+    full_thread_history = conf.get("full_thread_history", [])
+    
+    # Build thread content from full history
+    thread_content = ""
+    for idx, email in enumerate(full_thread_history, 1):
+        content = email.get("content", "").strip()
+        if content:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(content, "html.parser")
+            clean_content = soup.get_text(separator=" ", strip=True)
+            sender = email['headers'].get('From', 'Unknown')
+            is_from_bot = email.get('from_bot', False)
+            
+            if is_from_bot:
+                thread_content += f"### Bot Message {idx} (From: {sender})\n{clean_content}\n\n"
+            else:
+                thread_content += f"### User Message {idx} (From: {sender})\n{clean_content}\n\n"
+    
+    # Get owner info if available
+    owner_info = ti.xcom_pull(key="owner_info", default={})
+    task_owners = owner_info.get('task_owners', [])
+    
+    # Map tasks to their owners and due dates
+    task_owner_mapping = []
+    for idx, task in enumerate(tasks_to_create, 1):
+        task_details = task.get('task_details', '')
+        due_date = task.get('due_date', '')
+        task_owner_id = task.get('task_owner_id', '159242778')
+        task_owner_name = task.get('task_owner_name', 'liji')
+        
+        # Find the corresponding task owner info if available
+        matching_owner = next((owner for owner in task_owners if owner.get('task_index') == idx), None)
+        if matching_owner:
+            task_owner_id = matching_owner.get('task_owner_id', '159242778')
+            task_owner_name = matching_owner.get('task_owner_name', 'liji')
+        
+        task_owner_mapping.append({
+            'task_index': idx,
+            'task_details': task_details,
+            'due_date': due_date,
+            'task_owner_id': task_owner_id,
+            'task_owner_name': task_owner_name
+        })
+
+    if not thread_content:
+        logging.warning(f"No thread content available for task threshold check in thread {thread_id}")
+        thread_content = "No thread content available for analysis."
+
+    prompt = f"""You are a HubSpot API assistant. Check task volume thresholds based on this email thread.
+
+Email thread content:
+{thread_content}
+
+Task Owner Mapping:
+{json.dumps(task_owner_mapping, indent=2)}
+
+IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
+
+Steps to follow:
+1. For each task in the Task Owner Mapping, extract the due date and assigned owner.
+2. For each unique owner and due date combination:
+   - Invoke search_tasks with GTE and LTE set to the specified due date and owner name.
+   - Count total tasks for that owner on that date.
+   - Check if the task count exceeds the threshold of {TASK_THRESHOLD} tasks per day.
+3. Generate warnings for dates that exceed the threshold for each owner.
+
+Return this exact JSON structure:
+{{
+    "task_threshold_results": {{
+        "dates_checked": [
+            {{
+                "date": "YYYY-MM-DD",
+                "owner_id": "owner_id",
+                "owner_name": "owner_name",
+                "existing_task_count": 0,
+                "exceeds_threshold": false,
+                "warning": "High task volume: X tasks on YYYY-MM-DD for owner_name" or null
+            }}
+        ],
+        "total_warnings": 0,
+        "threshold_limit": {TASK_THRESHOLD}
+    }},
+    "extracted_dates": [
+        "YYYY-MM-DD"
+    ],
+    "warnings": [
+        "Warning message if threshold exceeded"
+    ]
+}}
+
+Fill in ALL fields. Use empty arrays [] for no results.
+For dates, use YYYY-MM-DD format.
+If no dates found in email, check today's date as default for each owner.
+
+RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
+
+    response = get_ai_response(prompt, expect_json=True)
+    logging.info(f"Raw AI response for task threshold: {response[:1000]}...")
+
+    try:
+        parsed_json = json.loads(response.strip())
+
+        # Extract warnings from the response
+        warnings = parsed_json.get("warnings", [])
+
+        ti.xcom_push(key="task_warnings", value=warnings)
+        ti.xcom_push(key="task_threshold_info", value=parsed_json)
+
+        # Store in thread context
+        contexts = get_thread_context()
+        if thread_id not in contexts:
+            contexts[thread_id] = {}
+        contexts[thread_id]["task_warnings"] = warnings
+        contexts[thread_id]["task_threshold_info"] = parsed_json
+        contexts[thread_id]["prompt_task_threshold"] = prompt
+        contexts[thread_id]["response_task_threshold"] = response
+
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+        logging.info(f"Task threshold check completed with {len(warnings)} warnings for {len(task_owner_mapping)} tasks")
+
+    except Exception as e:
+        logging.error(f"Error processing task threshold AI response: {e}")
+        default_warnings = []
+        default_response = {
+            "task_threshold_results": {
+                "dates_checked": [],
+                "total_warnings": 0,
+                "threshold_limit": TASK_THRESHOLD
+            },
+            "extracted_dates": [],
+            "warnings": []
+        }
+
+        ti.xcom_push(key="task_warnings", value=default_warnings)
+        ti.xcom_push(key="task_threshold_info", value=default_response)
+
+        # Store error case in context
+        contexts = get_thread_context()
+        if thread_id not in contexts:
+            contexts[thread_id] = {}
+        contexts[thread_id]["task_warnings"] = default_warnings
+
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+    return warnings
 
 def create_contacts(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
@@ -876,6 +1204,16 @@ def create_deals(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     thread_id = context['dag_run'].conf.get("thread_id")
     to_create_deals = analysis_results.get("entities_to_create", {}).get("deals", [])
+    
+    # Get the latest user response from the context
+    full_thread_history = context['dag_run'].conf.get("full_thread_history", [])
+    latest_user_response = ""
+    for email in reversed(full_thread_history):
+        if not email.get('from_bot', True):  # Find latest non-bot email
+            if email.get("content"):
+                soup = BeautifulSoup(email.get("content", ""), "html.parser")
+                latest_user_response = soup.get_text(separator=" ", strip=True)
+                break
 
     if not to_create_deals:
         logging.info("No deals to create, skipping.")
@@ -883,20 +1221,43 @@ def create_deals(ti, **context):
         ti.xcom_push(key="deals_errors", value=[])
         return []
 
-    prompt = f"""Create deals in HubSpot based on the provided details.
+    prompt = f"""Create deals in HubSpot based on the provided details and the user's response.
+
+Latest User Response:
+{latest_user_response}
 
 Details to create:
 {json.dumps(to_create_deals, indent=2)}
 
 IMPORTANT: Respond with ONLY a valid JSON object.
 
+Critical Deal Naming Rules:
+1. Extract Client Name from latest user response or available details
+2. Determine if it's a direct deal or partner deal from context
+3. For direct deals: format as "<Client Name>-<Deal Name>"
+4. For partner deals: format as "<Partner Name>-<Client Name>-<Deal Name>"
+5. If Deal Name not specified, create descriptive name based on product/service mentioned
+6. Never use generic names - must reflect actual client/partner and deal purpose
+7. Preserve any specific deal amount, close date, or stage information provided
+
 Steps:
-1. For each deal detail object, invoke create_deal with the properties.
-2. Collect the created deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
+1. Analyze user response to extract client/partner names and deal details
+2. Apply naming convention strictly for each deal
+3. For each deal, invoke create_deal with the properties
+4. Collect created deal id, properly formatted deal name, label name, amount, close date, owner
 
 Return JSON:
 {{
-    "created_deals": [{{"id": "123", "details": {{ "dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}}} ...],
+    "created_deals": [{{
+        "id": "123", 
+        "details": {{ 
+            "dealName": "ClientName-DealPurpose",  // or "PartnerName-ClientName-DealPurpose"
+            "dealLabelName": "...",
+            "dealAmount": "...",
+            "closeDate": "...",
+            "dealOwnerName": "..."
+        }}
+    }}],
     "errors": ["Error message 1", "Error message 2"],
     "error": null
 }}
@@ -909,6 +1270,14 @@ If error, set error message and include individual errors in the errors array.""
         parsed = json.loads(response)
         created = parsed.get("created_deals", [])
         errors = parsed.get("errors", [])
+
+        # Validate deal names follow convention
+        for deal in created:
+            deal_name = deal.get("details", {}).get("dealName", "")
+            if not deal_name or deal_name.count("-") < 1:
+                error_msg = f"Deal {deal.get('id', 'unknown')} has invalid name format: {deal_name}"
+                logging.error(error_msg)
+                errors.append(error_msg)
 
         ti.xcom_push(key="created_deals", value=created)
         ti.xcom_push(key="deals_errors", value=errors)
@@ -924,15 +1293,19 @@ If error, set error message and include individual errors in the errors array.""
             json.dump(contexts, f)
 
         logging.info(f"Created {len(created)} deals with {len(errors)} errors")
+        for deal in created:
+            logging.info(f"Created deal: {deal.get('details', {}).get('dealName', 'Unknown')}")
+            
     except Exception as e:
-        logging.error(f"Error creating deals: {e}")
+        error_msg = f"Error creating deals: {str(e)}"
+        logging.error(error_msg)
         ti.xcom_push(key="created_deals", value=[])
-        ti.xcom_push(key="deals_errors", value=[str(e)])
+        ti.xcom_push(key="deals_errors", value=[error_msg])
         contexts = get_thread_context()
         if thread_id not in contexts:
             contexts[thread_id] = {}
-        contexts[thread_id]["create_deals_error"] = str(e)
-        contexts[thread_id]["deals_errors"] = [str(e)]
+        contexts[thread_id]["create_deals_error"] = error_msg
+        contexts[thread_id]["deals_errors"] = [error_msg]
         with open(THREAD_CONTEXT_FILE, "w") as f:
             json.dump(contexts, f)
 
@@ -948,7 +1321,7 @@ def create_meetings(ti, **context):
         ti.xcom_push(key="created_meetings", value=[])
         ti.xcom_push(key="meetings_errors", value=[])
         return []
-
+    
     prompt = f"""Create meetings in HubSpot based on the provided details.
 
 Meeting details:
@@ -1024,6 +1397,7 @@ IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
 1. For each note, invoke create_notes with the content.
+2. Format note content as: "Speaker: [name] mentioned [note_content]"
 2. Collect the created Note id, Note body, last modified date in tabular format.
 3. Always use `hs_timestamp` in YYYY-MM-DDTHH:MM:SSZ format while creating notes.
 Return JSON:
@@ -1094,6 +1468,7 @@ Steps:
 1. For each task, invoke create_tasks with hs_timestamp, hs_task_body, hs_task_subject, hs_task_status, hs_task_priority, hs_task_type, hubspot_owner_id.
 2. Collect the created Task id, task body, last modified date, due date, task owner name in tabular format.
 3. Always use `hs_timestamp` in YYYY-MM-DDTHH:MM:SSZ format while creating tasks.
+4. Important task_owner_name should be always the name. For example rekha is the owner then rekha should be displayed in the owner name field and not the id 8765.
 Return JSON:
 {{
     "created_tasks": [{{"id": "123", "details": {{ "task_details": "...", "task_owner_name": "...", "task_owner_id": "...", "due_date": "...", "priority": "..."}}}} ...],
@@ -1952,7 +2327,8 @@ def compose_response_html(ti, **context):
     updated_meetings = ti.xcom_pull(key="updated_meetings", default=[])
     updated_notes = ti.xcom_pull(key="updated_notes", default=[])
     updated_tasks = ti.xcom_pull(key="updated_tasks", default=[])
-
+    owner_info = ti.xcom_pull(key="owner_info", default={})
+    task_threshold_info = ti.xcom_pull(key="task_threshold_info", default={})
     associations_created = ti.xcom_pull(key="associations_created", default=[])
 
     thread_id = context['dag_run'].conf.get("thread_id")
@@ -2419,6 +2795,185 @@ def compose_response_html(ti, **context):
             </tbody>
         </table>
         """
+    # ...existing code in compose_response_html...
+
+    # --- Task Volume Analysis Section ---
+    dates_checked = task_threshold_info.get("task_threshold_results", {}).get("dates_checked", [])
+    if final_created_tasks and dates_checked:
+        email_content += """
+        <h3>Task Volume Analysis</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Owner Name</th>
+                    <th>Existing Tasks</th>
+                    <th>Threshold Status</th>
+                    <th>Warning</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+        for date_info in dates_checked:
+            date = date_info.get("date", "")
+            owner_name = date_info.get("owner_name", "")
+            task_count = date_info.get("existing_task_count", 0)
+            exceeds = "Exceeds" if date_info.get("exceeds_threshold") else "Within Limit"
+            warning = date_info.get("warning") or "None"
+            email_content += f"""
+                <tr>
+                    <td>{date}</td>
+                    <td>{owner_name}</td>
+                    <td>{task_count}</td>
+                    <td>{exceeds}</td>
+                    <td>{warning}</td>
+                </tr>
+            """
+        email_content += """
+            </tbody>
+        </table>
+        <p><em>Note: High task volumes may impact workflow performance and user productivity.</em></p>
+        <hr>
+        """
+
+    # --- Owner Assignment Section ---
+    has_deals_or_tasks = (
+        (existing_deals and len(existing_deals) > 0) or
+        (created_deals and len(created_deals) > 0) or
+        (final_created_tasks and len(final_created_tasks) > 0)
+    )
+    if has_deals_or_tasks and owner_info:
+        chosen_deal_owner_id = owner_info.get("deal_owner_id", "159242778")
+        chosen_deal_owner_name = owner_info.get("deal_owner_name", "liji")
+        deal_owner_msg = owner_info.get("deal_owner_message", "")
+        task_owners = owner_info.get("task_owners", [])
+        all_owners = owner_info.get("all_owners_table", [])
+
+        email_content += """
+        <h3>Owner Assignment Details</h3>
+        """
+
+        # Deal Owner Assignment
+        if (existing_deals and len(existing_deals) > 0) or (created_deals and len(created_deals) > 0):
+            email_content += "<div style='margin-bottom: 15px;'>"
+            email_content += "<h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Owner Assignment:</h4>"
+            deal_msg_lower = deal_owner_msg.lower()
+            if "no deal owner specified" in deal_msg_lower:
+                email_content += f"""
+                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
+                    <strong>Reason:</strong> Deal owner was not specified.
+                    <br><strong>Action:</strong> Assigning to default owner '{chosen_deal_owner_name}'.
+                </p>
+                """
+            elif ("not valid" in deal_msg_lower and "deal owner" in deal_msg_lower):
+                email_content += f"""
+                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
+                    <strong>Reason:</strong> Deal owner mentioned, but not found in the available owners list.
+                    <br><strong>Action:</strong> Assigning to default owner '{chosen_deal_owner_name}'.
+                </p>
+                """
+            elif ("deal owner specified as" in deal_msg_lower or "specified" in deal_msg_lower):
+                email_content += f"""
+                <p style='background-color: #d4edda; padding: 10px; border-left: 4px solid #28a745;'>
+                    <strong>Reason:</strong> Deal owner is valid and found in the available owners list.
+                    <br><strong>Action:</strong> Assigned to '{chosen_deal_owner_name}'.
+                </p>
+                """
+            else:
+                email_content += f"""
+                <p style='background-color: #d4edda; padding: 10px; border-left: 4px solid #28a745;'>
+                    <strong>Reason:</strong> Deal owner assignment processed.
+                    <br><strong>Action:</strong> Assigned to '{chosen_deal_owner_name}'.
+                </p>
+                """
+            email_content += "</div>"
+
+        # Task Owner Assignment
+        if final_created_tasks and task_owners:
+            email_content += "<div style='margin-bottom: 15px;'>"
+            email_content += "<h4 style='color: #2c5aa0; margin-bottom: 5px;'>Task Owner Assignments:</h4>"
+            for task_owner in task_owners:
+                task_index = task_owner.get("task_index", 0)
+                task_owner_name = task_owner.get("task_owner_name", "liji")
+                task_owner_msg = task_owner.get("task_owner_message", "")
+                task = next((t for t in final_created_tasks if t.get("details", {}).get("task_index") == task_index), None)
+                task_details = task.get("details", {}).get("task_details", "Unknown task") if task else "Unknown task"
+                task_msg_lower = task_owner_msg.lower()
+                if "no task owner specified" in task_msg_lower:
+                    email_content += f"""
+                    <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
+                        <strong>Task {task_index}:</strong> {task_details}
+                        <br><strong>Reason:</strong> {task_owner_msg}
+                        <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
+                    </p>
+                    """
+                elif "not valid" in task_msg_lower:
+                    email_content += f"""
+                    <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
+                        <strong>Task {task_index}:</strong> {task_details}
+                        <br><strong>Reason:</strong> {task_owner_msg}
+                        <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
+                    </p>
+                    """
+                else:
+                    email_content += f"""
+                    <p style='background-color: #d4edda; padding: 10px; border-left: 4px solid #28a745;'>
+                        <strong>Task {task_index}:</strong> {task_details}
+                        <br><strong>Reason:</strong> {task_owner_msg}
+                        <br><strong>Action:</strong> Assigned to '{task_owner_name}'.
+                    </p>
+                    """
+            email_content += "</div>"
+
+        # Available Owners Table
+        if all_owners:
+            email_content += """
+            <h4 style='color: #2c5aa0; margin-bottom: 10px;'>Available Owners:</h4>
+            <table style='border-collapse: collapse; width: 100%; margin-bottom: 20px;'>
+                <thead>
+                    <tr style='background-color: #e3f2fd;'>
+                        <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Owner ID</th>
+                        <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Owner Name</th>
+                        <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Owner Email</th>
+                        <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Assignment</th>
+                    </tr>
+                </thead>
+                <tbody>
+            """
+            for owner in all_owners:
+                owner_id = owner.get("id", "")
+                owner_name = owner.get("name", "")
+                owner_email = owner.get("email", "")
+                assignments = []
+                if owner_id == chosen_deal_owner_id and ((existing_deals and len(existing_deals) > 0) or (created_deals and len(created_deals) > 0)):
+                    assignments.append("Deal Owner")
+                if any(task_owner.get("task_owner_id") == owner_id for task_owner in task_owners) and final_created_tasks:
+                    task_indices = [str(task_owner.get("task_index")) for task_owner in task_owners if task_owner.get("task_owner_id") == owner_id]
+                    assignments.append(f"Task Owner (Tasks {', '.join(task_indices)})")
+                assignment_text = ", ".join(assignments) if assignments else ""
+                if "Deal Owner" in assignments and "Task Owner" in assignments:
+                    row_style = ' style="background-color: #d1ecf1; border-left: 4px solid #0c5460;"'
+                elif "Deal Owner" in assignments:
+                    row_style = ' style="background-color: #d4edda; border-left: 4px solid #28a745;"'
+                elif "Task Owner" in assignments:
+                    row_style = ' style="background-color: #fff3cd; border-left: 4px solid #ffc107;"'
+                else:
+                    row_style = ' style="background-color: #f8f9fa;"'
+                email_content += f"""
+                    <tr{row_style}>
+                        <td style='border: 1px solid #ddd; padding: 8px;'>{owner_id}</td>
+                        <td style='border: 1px solid #ddd; padding: 8px;'><strong>{owner_name}</strong></td>
+                        <td style='border: 1px solid #ddd; padding: 8px;'>{owner_email}</td>
+                        <td style='border: 1px solid #ddd; padding: 8px;'><strong>{assignment_text}</strong></td>
+                    </tr>
+                """
+            email_content += """
+                </tbody>
+            </table>
+            """
+        email_content += "<hr>"
+
+# ...rest of your compose_response_html code...
 
     email_content += """
         <div class="closing">
@@ -2575,9 +3130,14 @@ def branch_to_creation_tasks(ti, **context):
     # Ensure mandatory tasks are always included
     tasks_to_execute = list(set(tasks_to_execute + mandatory_tasks))
     
+    if analysis_results.get("should_determine_owner"):
+        tasks_to_execute.append("determine_owner")
+    if analysis_results.get("should_check_task_threshold"):
+        tasks_to_execute.append("check_task_threshold")
     # Validate task IDs
     valid_task_ids = [
-        "create_contacts", "create_companies", "create_deals", "create_meetings", "create_notes", "create_tasks",
+        "create_contacts", "create_companies", "determine_owner", "check_task_threshold",  # <-- add these two
+        "create_deals", "create_meetings", "create_notes", "create_tasks",
         "update_contacts", "update_companies", "update_deals", "update_meetings", "update_notes", "update_tasks",
         "create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"
     ]
@@ -2609,6 +3169,18 @@ with DAG(
         task_id="branch_to_creation_tasks",
         python_callable=branch_to_creation_tasks,
         provide_context=True
+    )
+
+    determine_owner_task = PythonOperator(
+    task_id="determine_owner",
+    python_callable=determine_owner,
+    provide_context=True
+    )
+
+    check_task_threshold_task = PythonOperator(
+    task_id="check_task_threshold",
+    python_callable=check_task_threshold,
+    provide_context=True
     )
 
     create_contacts_task = PythonOperator(
@@ -2721,6 +3293,8 @@ with DAG(
     creation_tasks = {
         "create_contacts": create_contacts_task,
         "create_companies": create_companies_task,
+        "determine_owner": determine_owner_task,
+        "check_task_threshold": check_task_threshold_task,
         "create_deals": create_deals_task,
         "create_meetings": create_meetings_task,
         "create_notes": create_notes_task,
