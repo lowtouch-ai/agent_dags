@@ -401,6 +401,11 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
 def summarize_engagement_details(ti, **context):
     """Retrieve and summarize engagement details based on thread content and email data."""
+    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    if not entity_flags.get("request_summary", False):
+        logging.info("No summary requested, skipping engagement summary")
+        ti.xcom_push(key="engagement_summary", value={})  # Or {"skipped": True}
+        return
     thread_content = ti.xcom_pull(key="thread_content")
     thread_id = ti.xcom_pull(key="thread_id")
     email_data = ti.xcom_pull(key="email_data", default={})
@@ -1149,6 +1154,7 @@ For notes (only if note parsing is enabled):
 
 For meetings (only if meeting parsing is enabled):
 - Extract meeting title, start time, end time, location, outcome, timestamp, attendees, meeting type, and meeting status.
+- If "I" is mentioned for attendees that refers to the email sender.
 
 For tasks (only if task parsing is enabled):
 - Identify all tasks and their respective owners from the email content.
