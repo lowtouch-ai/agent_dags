@@ -72,6 +72,38 @@ def decode_email_payload(msg):
         logging.error(f"Error decoding email payload: {str(e)}")
         return ""
 
+def remove_quoted_text(text):
+    """
+    Remove quoted email thread history from the email body, keeping only the current message.
+    Handles common email client quote patterns (e.g., 'On ... wrote:', '>', '---').
+    """
+    try:
+        logging.info("Removing quoted text from email body")
+        # Common patterns for quoted text
+        patterns = [
+            r'On\s.*?\swrote:',  # Standard 'On ... wrote:'
+            r'-{2,}\s*Original Message\s*-{2,}',  # Outlook-style
+            r'_{2,}\s*',  # Some clients use underscores
+            r'From:\s*.*?\n',  # Quoted 'From:' headers
+            r'>.*?\n'  # Lines starting with '>' (quoted replies)
+        ]
+        
+        # Split text by any of the patterns
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                text = text[:match.start()].strip()
+        
+        # Remove any remaining lines starting with '>'
+        lines = text.split('\n')
+        cleaned_lines = [line for line in lines if not line.strip().startswith('>')]
+        text = '\n'.join(cleaned_lines).strip()
+        logging.info(f"Text after removing quoted text: {text[:100] if text else ''}...")
+        return text if text else "No content after removing quoted text"
+    except Exception as e:
+        logging.error(f"Error in remove_quoted_text: {str(e)}")
+        return text.strip()
+
 def get_email_thread(service, email_data, from_address):
     """Retrieve and format the email thread as a conversation list with user and response roles."""
     try:
@@ -182,9 +214,6 @@ def get_ai_response(prompt, images=None, conversation_history=None):
         ai_content = response.message.content
         logging.info(f"Full message content from agent: {ai_content[:500]}...")
 
-        if "technical difficulties" in ai_content.lower() or "error" in ai_content.lower():
-            logging.warning("AI response contains potential error message")
-            return "<html><body>Unexpected response received. Please contact support.</body></html>"
 
         ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
         if not ai_content.strip():
@@ -255,15 +284,15 @@ def step_1_process_email(ti, **context):
     if email_data.get("attachments"):
         for attachment in email_data["attachments"]:
             if "extracted_content" in attachment and "content" in attachment["extracted_content"]:
-                attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
+                attachment_content += f"\nAttachment :\n{attachment['extracted_content']['content']}\n"
     
     # ADDED: Split thread into history and current content
-    if len(complete_email_thread) > 1:
-        conversation_history = complete_email_thread[:-1]  # All previous messages
-        current_content = complete_email_thread[-1]["content"]  # Current message
+    if complete_email_thread :
+        conversation_history = [] # All previous messages
+        current_content = complete_email_thread[-1]["content"] if len(complete_email_thread) > 0 else email_data.get("content", "").strip()  # Current message
     else:
         conversation_history = []  # No previous conversation
-        current_content = complete_email_thread[0]["content"] if complete_email_thread else email_data.get("content", "").strip()
+        current_content = email_data.get("content", "").strip()
     
     # ADDED: Log conversation history
     logging.info(f"Complete conversation history contains {len(conversation_history)} messages")
@@ -275,6 +304,7 @@ def step_1_process_email(ti, **context):
     if current_content:
         soup = BeautifulSoup(current_content, "html.parser")
         current_content = soup.get_text(separator=" ", strip=True)
+        current_content = remove_quoted_text(current_content)
     
     # ADDED: Append attachment content to current content
     if attachment_content:
@@ -291,6 +321,8 @@ def step_1_process_email(ti, **context):
     ti.xcom_push(key="step_1_prompt", value=prompt)
     ti.xcom_push(key="step_1_response", value=response)
     ti.xcom_push(key="conversation_history", value=conversation_history + [{"role": "user", "content": prompt}, {"role": "assistant", "content": response}])
+    ti.xcom_push(key="email content", value=current_content)
+    ti.xcom_push(key="complete_email_thread", value=complete_email_thread)
     
     logging.info(f"Step 1 completed: {response[:200]}...")
     return response
@@ -320,6 +352,12 @@ def step_3_compose_email(ti, **context):
     """Step 3: Create the vendor bill"""
     step_1_response = ti.xcom_pull(key="step_1_response")
     step_2_response = ti.xcom_pull(key="step_2_response")
+    if step_1_response:
+        # Remove the specific confirmation sentence, case-insensitive
+        confirmation_pattern = r'Please confirm the extracted details\. Would you like to create the vendor bill by performing three-way matching\?'
+        step_1_response = re.sub(confirmation_pattern, '', step_1_response, flags=re.IGNORECASE).strip()
+        # Also remove any trailing whitespace or newlines
+        step_1_response = re.sub(r'\n\s*\n\s*$', '', step_1_response)
     content_appended = step_1_response + "\n\n" + step_2_response if step_1_response and step_2_response else step_1_response or step_2_response or ""
     sender_name = context['dag_run'].conf.get("email_data", {}).get("headers", {}).get("From", "Valued Customer")
     name_email_match = re.match(r'^(.*?)\s*<(.*?@.*?)>$', sender_name)
@@ -329,27 +367,52 @@ def step_3_compose_email(ti, **context):
         sender_name = "Valued Customer"
     logging.info(f"Sender name extracted: {sender_name}")
     
-    prompt = f"""
-        Compose a professional and human-like business email in American English, written in the tone of a senior Customer Success Manager, to notify a vendor about the outcome of an invoice submission (Posted, Draft, Failed, or Duplicate).
-        Address the email to the vendor using their name: '{sender_name}'.
-        The email must include:
-        - A clear introductory line acknowledging the invoice receipt with the invoice number and vendor name (if available), followed by a short sentence stating the current status of the invoice (Posted, Draft, Failed, or Duplicate).
-        - A natural explanation of the status outcome (including Invoice Number and, for Draft, Failed, or Duplicate, specific issues like price mismatch, missing PO, unreadable file, duplicate invoice, or unrecognized product in a bulleted list).
-        - For Duplicate invoices:
-            - If the existing invoice is Posted, state that a duplicate was detected and no new bill was created, referencing the existing posted invoice details.
-            - If the existing invoice is Draft, state that a duplicate was detected and no new bill was created, referencing the existing draft invoice details and any validation issues (excluding the duplicate detection message).
-        - A concise summary of invoice details (Invoice Number, Invoice Date, Due Date, Internal Invoice ID, Status, Vendor Name if available, Purchase Order if available, Currency, Subtotal, Tax with rate if available, Total Amount) in bullet format. For Duplicate invoices, label as 'Existing Invoice Details' (Posted) or 'Existing Draft Invoice Details' (Draft).
-        - A product line item table **with borders** (including Item Description, Quantity, Unit Price, Tax, Total Price), placed immediately after the invoice summary.
-        - If the invoice status is Draft, Failed, or Duplicate (Draft), include a short, natural-language paragraph below the product table briefly summarizing the **validation issues**.
-        - A naturally worded sentence or short paragraph explaining the next steps based on the invoice status:
-            - For **Posted**, confirm the invoice has been successfully entered into the payment cycle.
-            - For **Draft** or **Failed**, kindly request corrections and resubmission to invoflux-agent-8013@lowtouch.ai.
-            - For **Duplicate (Posted)**, suggest reviewing the posted invoice and contacting support if needed.
-            - For **Duplicate (Draft)**, suggest reviewing the draft invoice, correcting details, or uploading a revised invoice to invoflux-agent-8013@lowtouch.ai.
-        - A polite closing paragraph offering further assistance, mentioning the contact email invoflux-agent-8013@lowtouch.ai, and signed with 'Invoice Processing Team, InvoFlux'.
-        Use only clean, valid HTML for the email body without any section headers (e.g., no 'Status-Based Message', 'Invoice Summary', or 'Validation Issues Identified'). Avoid technical or template-style formatting and placeholders (e.g., '[Invoice Number]'). The email should read as if it was personally written.
-        Return only the HTML body, and nothing else.
-    """
+    prompt=f"""
+        Generate a professional, human-like business email in American English, written in the tone of a senior Customer Success Manager, to notify a vendor, addressed by name '{sender_name}', about the status of their invoice submission (Posted or Draft), including any duplicate invoice detections.
+
+        Content: {content_appended}
+
+        Follow this exact structure for the email body, using clean, valid HTML without any additional wrappers like <html> or <body>. Do not omit any sections or elements listed below. Use natural, professional wording but adhere strictly to the format. Extract all details from the provided Content; use 'N/A' if a value is not available. For the due date, if not mentioned in the Content, specify '30 days from the invoice date'.
+
+        1. Greeting: <p>Dear {sender_name},</p>
+
+        2. Opening paragraph: <p>We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name if available, else omit 'from [Vendor Name]']. The invoice has been recorded in our system; however, it currently remains in [Status] status [due to the following validation issues if Draft or duplicate, else omit this part]. For duplicates, instead use: 'We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name]. However, this invoice is a duplicate. The existing invoice is in [Posted/Draft] status, and no new invoice was created.'</p>
+
+        3. Issues list (only if Draft or duplicate): If there are validation issues or it's a duplicate, include: <ul> followed by <li>[each specific issue]</li> </ul>. For duplicate, include the duplicate notice as one of the issues if needed, but primarily list any other issues.
+
+        4. Invoice Summary section: <p><strong>Invoice Summary</strong></p> followed by a list in paragraph form (each on new line with <br>): 
+           Invoice Number: [value]<br>
+           Invoice Date: [value]<br>
+           Due Date: [value if available, else '30 days from the invoice date']<br>
+           Internal Invoice ID: [value]<br>
+           Status: [value]<br>
+           Vendor Name: [value]<br>
+           Purchase Order: [value]<br>
+           Currency: [value]<br>
+           Subtotal: [value]<br>
+           Tax ([rate if available]%): [amount if available]<br>
+           Total Amount: [value]<br>
+
+        For duplicates, label this as 'Existing Invoice Summary' or 'Existing Draft Invoice Summary' based on the existing status, and populate with the existing invoice's details.
+
+        5. Product Details section: <p><strong>Product Details</strong></p> followed immediately by a table: <table border="1" cellspacing="0" cellpadding="5"><tr><th>Item Description</th><th>Quantity</th><th>Unit Price</th><th>Tax</th><th>Total Price</th></tr> [rows with <tr><td>[desc]</td><td>[qty]</td><td>[price]</td><td>[tax]</td><td>[total]</td></tr> for each item] </table>
+
+        6. Closing statement paragraph: <p>[A concise natural statement based on the invoice status:
+           - Posted: The invoice is now in our payment cycle and will be processed accordingly.
+           - Draft: Please review the issues above, make the necessary corrections, and resubmit the updated invoice to <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>.
+           - Duplicate (Posted): Please review the existing invoice details above. If this was submitted in error, no further action is needed; otherwise, contact us for support.
+           - Duplicate (Draft): Please review the existing draft details above, correct any issues, and resubmit to <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>.
+           ]</p>
+
+        7. Assistance paragraph: <p>Please let us know if you need any assistance. You can reach us at <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>.</p>
+
+        8. Signature: <p>Best regards,<br>Invoice Processing Team,<br>InvoFlux</p>
+
+        Ensure the email is natural, professional, and concise. Avoid rigid or formulaic language to maintain a human-like tone. Do not use placeholders; replace with actual extracted values. Return only the HTML content as specified, without <!DOCTYPE>, <html>, or <body> tags.
+
+        Return only the HTML body of the email.
+        """
+
     # Pass only the previous step's response as history
     history = [{"role": "assistant", "content": content_appended}] if content_appended else []
     response = get_ai_response(prompt, conversation_history=history)
