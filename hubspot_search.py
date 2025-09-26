@@ -316,11 +316,11 @@ def fetch_thread(ti, **context):
     logging.info(f"Fetched thread content for thread {email_data.get('threadId')}")
 
 def analyze_thread_entities(ti, **context):
-    """Analyze thread content to determine which entities need to be searched"""
+    """Analyze thread content to determine which entities need to be searched and if a summary is requested."""
     thread_content = ti.xcom_pull(key="thread_content")
     thread_id = ti.xcom_pull(key="thread_id")
     
-    prompt = f"""You are a HubSpot API assistant. Analyze this email thread to determine which entities (deals, contacts, companies) are mentioned or need to be processed.
+    prompt = f"""You are a HubSpot API assistant. Analyze this email thread to determine which entities (deals, contacts, companies) are mentioned or need to be processed, and whether the user is requesting a summary of a client or deal before their next meeting.
 
 Email thread content:
 {thread_content}
@@ -328,12 +328,15 @@ Email thread content:
 IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
 
 Analyze the content and determine:
-1. Are deals mentioned, discussed, or need to be created?. Deals are only created if the client is interested to move forward.
-2. Parse the contact name, if found then contacts need to be processed. 
-3. Are companies mentioned, discussed, or need to be created?. If company is being specified then it needs to be processed even if not explicitly asked to proceesed. Even if the companies are already created or associated then also it needs to be processed.
-4. Do we need to create notes. Notes are created only if there is a discussion held with the client.
-5. Do we need to create tasks. Tasks are created only if there is a follow-up action required with the client.
-6. Do we need to create meetings. Meetings are created only if a meeting was held and meeting details are given. example date, time, duration, timezone etc.
+1. Is the user requesting a summary of a client or deal before their next meeting? Look for phrases like "summarize details for contact name", "summary for deal name", or explicit mentions of preparing for an upcoming meeting.
+2. If a summary is requested, set ALL other flags (search_deals, search_contacts, search_companies, parse_notes, parse_tasks, parse_meetings) to false.
+3. If no summary is requested, determine the following:
+   - Are deals mentioned, discussed, or need to be created? Deals are only created if the client is interested to move forward.
+   - Parse the contact name; if found, contacts need to be processed.
+   - Are companies mentioned, discussed, or need to be created? If a company is specified, it needs to be processed even if not explicitly asked. Even if companies are already created or associated, they need to be processed.
+   - Do we need to create notes? Notes are created only if there is a discussion held with the client.
+   - Do we need to create tasks? Tasks are created only if there is a follow-up action required with the client.
+   - Do we need to create meetings? Meetings are created only if a meeting was held and meeting details are given (e.g., date, time, duration, timezone).
 
 Return this exact JSON structure:
 {{
@@ -343,12 +346,14 @@ Return this exact JSON structure:
     "parse_notes": true/false,
     "parse_tasks": true/false,
     "parse_meetings": true/false,
+    "request_summary": true/false,
     "deals_reason": "explanation why deals need processing or not",
     "contacts_reason": "explanation why contacts need processing or not",
     "companies_reason": "explanation why companies need processing or not",
     "notes_reason": "explanation why notes need processing or not",
     "tasks_reason": "explanation why tasks need processing or not",
-    "meetings_reason": "explanation why meetings need processing or not"
+    "meetings_reason": "explanation why meetings need processing or not",
+    "summary_reason": "explanation why a summary is requested or not"
 }}
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
@@ -371,20 +376,121 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         with open(THREAD_CONTEXT_FILE, "w") as f:
             json.dump(contexts, f)
             
-        logging.info(f"Entity search flags: deals={parsed_json.get('search_deals')}, contacts={parsed_json.get('search_contacts')}, companies={parsed_json.get('search_companies')}")
+        logging.info(f"Entity search flags: deals={parsed_json.get('search_deals')}, contacts={parsed_json.get('search_contacts')}, companies={parsed_json.get('search_companies')}, request_summary={parsed_json.get('request_summary')}")
         
     except Exception as e:
         logging.error(f"Error processing entity analysis AI response: {e}")
-        # Default to searching all entities if analysis fails
+        # Default to searching all entities and no summary if analysis fails
         default = {
             "search_deals": True,
             "search_contacts": True,
             "search_companies": True,
+            "parse_notes": True,
+            "parse_tasks": True,
+            "parse_meetings": True,
+            "request_summary": False,
             "deals_reason": "Analysis failed, defaulting to search",
             "contacts_reason": "Analysis failed, defaulting to search",
-            "companies_reason": "Analysis failed, defaulting to search"
+            "companies_reason": "Analysis failed, defaulting to search",
+            "notes_reason": "Analysis failed, defaulting to parse",
+            "tasks_reason": "Analysis failed, defaulting to parse",
+            "meetings_reason": "Analysis failed, defaulting to parse",
+            "summary_reason": "Analysis failed, no summary requested"
         }
         ti.xcom_push(key="entity_search_flags", value=default)
+
+def summarize_engagement_details(ti, **context):
+    """Retrieve and summarize engagement details based on thread content and email data."""
+    thread_content = ti.xcom_pull(key="thread_content")
+    thread_id = ti.xcom_pull(key="thread_id")
+    email_data = ti.xcom_pull(key="email_data", default={})
+
+    prompt = f"""You are a HubSpot API assistant. Summarize engagement details based on the provided email thread content. Parse the contact name, deal ID (if specified), company name, and other relevant details directly from the thread content.
+
+Thread Content:
+{thread_content}
+
+Email Subject:
+{email_data.get("headers", {}).get("Subject", "")}
+
+IMPORTANT: Respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
+
+Steps:
+- **When the user requests "Summarize details for {{contact name to search}}", retrieve the `contactId` for the specified contact**.
+  - Check if the user has provided a specific `dealId` or deal identifier in the request.
+  - If a specific `dealId` is provided, retrieve only the engagements associated with that `dealId` and summarize the details in the specified format for that deal.
+  - Invoke `get_engagements_by_object_id` tool to get engagement of a perticular `dealId`
+  - List the Associated Deals If no `dealId` is provided and the contact has only one associated deal, retrieve the engagements for that `dealId` and summarize the details in the specified format.
+  - Ensure the agent does not retrieve or process engagements for any deals other than the user-specified `dealId` or the single deal when applicable.
+  - Summarize the details in the bellow format, ensuring clarity and relevance for the selected deal only.
+  **Output format** :
+    - **Contact**: {{contact_name}}, Email: {{email}}, Company: {{company_name}} in tabular format.
+    - **Deal**: {{Deal_name}}, Stage: {{Deal_stage}}, Amount: {{Deal_Amount}}, Close Date: {{Deal_close_date}} in tabular format.
+    - **Company**: {{Company_name}}, Domain: {{email}} in tabular format
+    - **Engagements**:Generate a engagement summary based on the notes retrieved, including the discussed things. Ensure the summary is structured, concise yet thorough, and includes at least 5-7 sentences to cover all critical aspects.
+      - Display the latest meeting held, if available.
+      - Do not show the retrieved noted as it is. Analyze the notes and make a summary then display the generated summary.
+      - Never show tasks.
+      - Never show Note ID.      
+    - **Detailed Deal Summary**: Generate a comprehensive deal summary for each engagement, including the company name, deal stage, deal amount, key stakeholders, timeline, and any relevant risks or opportunities. Ensure the summary is structured, concise yet thorough, and includes at least 3-5 sentences to cover all critical aspects of the deal.
+    - **Comprehensive Call Strategy**: Develop a detailed call strategy for pitching the Pro plan, tailored to the specific company and deal context. Include the following:
+      - A clear outline of the pitch, highlighting the Pro plan’s key features and benefits relevant to the company’s needs.
+      - The deal amount and how it aligns with the client’s budget or value proposition.
+      - Reference to previous interactions (e.g., prior calls, emails, or meetings) to personalize the approach and build continuity.
+      - Anticipated objections and tailored responses to address them.
+      - A step-by-step plan for the call, including opening, value proposition, handling questions, and closing with clear next steps.
+      - Ensure the strategy is actionable, spans at least 3-5 paragraphs, and incorporates specific examples or data where applicable.
+
+Return this exact JSON structure:
+{{
+    "contact_summary": {{
+        "contact_name": "parsed_contact_name",
+        "email": "inferred_email_from_thread",
+        "company_name": "inferred_company_name"
+    }},
+    "deal_summary": {{
+        "deal_name": "inferred_deal_name",
+        "stage": "inferred_deal_stage",
+        "amount": "inferred_amount",
+        "close_date": "inferred_close_date"
+    }},
+    "company_summary": {{
+        "company_name": "inferred_company_name",
+        "domain": "inferred_domain"
+    }},
+    "engagement_summary": "5-7 sentence summary of engagements, including discussed topics and latest meeting if available",
+    "detailed_deal_summary": "3-5 sentence detailed summary of the deal",
+    "call_strategy": "3-5 paragraph call strategy for pitching the Pro plan"
+}}
+
+Guidelines:
+- Parse contact name, deal ID (if any), company name, and other details directly from thread content or email subject.
+- Infer all fields from thread content and email data; use empty string "" for missing values.
+- Do not use contact, company, or deal info from XCom; rely solely on thread content and email data.
+- If no contact name is found, return {{"error": "No contact name found in thread content"}}.
+- Ensure summaries and call strategy are tailored to the context in the thread.
+
+RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
+
+    response = get_ai_response(prompt, expect_json=True)
+    logging.info(f"Raw AI response for engagement summary: {response[:1000]}...")
+
+    try:
+        parsed_json = json.loads(response.strip())
+        ti.xcom_push(key="engagement_summary", value=parsed_json)
+
+        # Update thread context
+        contexts = get_thread_context()
+        contexts[thread_id]["engagement_summary"] = parsed_json
+        contexts[thread_id]["prompt_engagement_summary"] = prompt
+        contexts[thread_id]["response_engagement_summary"] = response
+        with open(THREAD_CONTEXT_FILE, "w") as f:
+            json.dump(contexts, f)
+
+        logging.info(f"Engagement summary generated for thread_id: {thread_id}")
+    except Exception as e:
+        logging.error(f"Error processing engagement summary AI response: {e}")
+        ti.xcom_push(key="engagement_summary", value={"error": f"Error processing engagement summary: {str(e)}"})
 
 def determine_owner(ti, **context):
     thread_content = ti.xcom_pull(key="thread_content")
@@ -579,7 +685,7 @@ def search_contacts(ti, **context):
 Email thread content:
 {thread_content}
 
-IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
+IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting. You are only capable of searching contacts amd you do not have the ability to create contacts.
 
 Important Steps to follow (execute in order):
 1. Extract potential contact names from the thread. Apply these exclusion rules:
@@ -767,7 +873,7 @@ def search_companies(ti, **context):
 Email thread content:
 {thread_content}
 
-IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
+IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting. You are only capable of searching comapnies and you do not have the ability to create companies.
 
 Steps to follow:
 1. Parse the company name.
@@ -1348,6 +1454,8 @@ def compose_confirmation_email(ti, **context):
     chosen_deal_owner_name = owner_info.get("deal_owner_name", "liji")
     deal_owner_msg = owner_info.get("deal_owner_message", "")
     task_owner_msg = owner_info.get("task_owner_message", "")
+    engagement_summary = ti.xcom_pull(key="engagement_summary", default={})
+    
     if not confirmation_needed:
         logging.info("No confirmation needed, proceeding to trigger next DAG.")
         return "No confirmation needed"
@@ -1867,7 +1975,93 @@ def compose_confirmation_email(ti, **context):
         <p><em>Note: High task volumes may impact workflow performance and user productivity.</em></p>
         <hr>
         """
-
+# Engagement Summary Section (only if engagement summary exists and no error)
+    if engagement_summary and "error" not in engagement_summary:
+        has_content_sections = True
+        
+        # Extract the actual values from the engagement summary
+        contact_name = engagement_summary.get('contact_summary', {}).get('contact_name', '')
+        contact_email = engagement_summary.get('contact_summary', {}).get('email', '')
+        company_name = engagement_summary.get('contact_summary', {}).get('company_name', '')
+        
+        deal_name = engagement_summary.get('deal_summary', {}).get('deal_name', '')
+        deal_stage = engagement_summary.get('deal_summary', {}).get('stage', '')
+        deal_amount = engagement_summary.get('deal_summary', {}).get('amount', '')
+        close_date = engagement_summary.get('deal_summary', {}).get('close_date', '')
+        
+        company_summary_name = engagement_summary.get('company_summary', {}).get('company_name', '')
+        company_domain = engagement_summary.get('company_summary', {}).get('domain', '')
+        
+        engagement_text = engagement_summary.get('engagement_summary', '')
+        detailed_deal_text = engagement_summary.get('detailed_deal_summary', '')
+        call_strategy_text = engagement_summary.get('call_strategy', '')
+        
+        email_content += f"""
+        <h3>Engagement Summary for Requested Contact</h3>
+        <h4>Contact Summary</h4>
+        <table>
+            <thead>
+                <tr>
+                    <th>Contact Name</th>
+                    <th>Email</th>
+                    <th>Company Name</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>{contact_name}</td>
+                    <td>{contact_email}</td>
+                    <td>{company_name}</td>
+                </tr>
+            </tbody>
+        </table>
+        
+        <h4>Deal Summary</h4>
+        <table>
+            <thead>
+                <tr>
+                    <th>Deal Name</th>
+                    <th>Stage</th>
+                    <th>Amount</th>
+                    <th>Close Date</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>{deal_name}</td>
+                    <td>{deal_stage}</td>
+                    <td>{deal_amount}</td>
+                    <td>{close_date}</td>
+                </tr>
+            </tbody>
+        </table>
+        
+        <h4>Company Summary</h4>
+        <table>
+            <thead>
+                <tr>
+                    <th>Company Name</th>
+                    <th>Domain</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>{company_summary_name}</td>
+                    <td>{company_domain}</td>
+                </tr>
+            </tbody>
+        </table>
+        
+        <h4>Engagement Summary</h4>
+        <p>{engagement_text}</p>
+        
+        <h4>Detailed Deal Summary</h4>
+        <p>{detailed_deal_text}</p>
+        
+        <h4>Comprehensive Call Strategy</h4>
+        <p>{call_strategy_text}</p>
+        <hr>
+        """
 # Fixed Owner Assignment Section Logic
 # This should replace the corresponding section in your compose_confirmation_email function
 
@@ -2236,6 +2430,13 @@ with DAG(
         provide_context=True
     )
 
+    summarize_engagement_task = PythonOperator(
+    task_id="summarize_engagement_details",
+    python_callable=summarize_engagement_details,
+    provide_context=True
+    )
+
+
     determine_owner_task = PythonOperator(
         task_id="determine_owner",
         python_callable=determine_owner,
@@ -2306,6 +2507,6 @@ with DAG(
         task_id="end_workflow"
     )
 
-    fetch_thread_task >> analyze_thread_entities_task >> determine_owner_task >> search_deals_task >> search_contacts_task >> search_companies_task >> check_task_threshold_task >> parse_notes_tasks_meeting_task >> compile_results_task >> compose_email_task >> send_email_task >> decide_trigger_task
+    fetch_thread_task >> analyze_thread_entities_task >> summarize_engagement_task >> determine_owner_task >> search_deals_task >> search_contacts_task >> search_companies_task >> check_task_threshold_task >> parse_notes_tasks_meeting_task >> compile_results_task >> compose_email_task >> send_email_task >> decide_trigger_task
     decide_trigger_task >> trigger_task
     decide_trigger_task >> end_workflow
