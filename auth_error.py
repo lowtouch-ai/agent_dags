@@ -33,7 +33,7 @@ def on_failure_callback(context,SVC_NAME):
 profile_config = ProfileConfig(
     profile_name="jaffle_shop",
     target_name="dev",
-    profiles_yml_filepath = "/appz/home/airflow/dags/dbt/jaffle_shop/profiles.yml",
+    profiles_yml_filepath = "/appz/home/airflow/dags/dbt/jaffle_shop/error/profiles.yml",
 )
 
 def print_variable(**kwargs):
