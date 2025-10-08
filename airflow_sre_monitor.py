@@ -80,9 +80,10 @@ def get_ai_response(prompt, conversation_history=None):
 
 
 def task1_identify_auth_errors(ti, **context):
+    time_interval = Variable.get("AIRFLOW_LOG_TIME_INTERVAL", "2 hour")
     try:
         # First prompt to check for password authentication errors
-        prompt1 = """check if there are any occurrences of \"password authentication\" errors in the 'airflowsvr-2.0' environment for the last 24 hours."""
+        prompt1 = f"""check if there are any occurrences of \"password authentication\" errors in the 'airflowsvr-2.0' environment for the last {time_interval}."""
         response1 = get_ai_response(prompt1)
         logging.info(f"Task 1 - First prompt response: {response1[:200]}...")
 
