@@ -14,7 +14,7 @@ def check_postgres_auth_wrong():
     host = "postgres"
     database = "postgres"
     user = os.getenv("AIRFLOW_POSTGRES_USER")
-    password = os.getenv("REDIS_USER_PASSWD")  # wrong env
+    password = os.getenv("VAULT_SECRET_ID")  # wrong env
     conn = psycopg2.connect(
         host=host,
         dbname=database,
