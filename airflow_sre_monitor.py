@@ -363,7 +363,7 @@ def task8_send_email(ti, **context):
         raise
 
 with DAG(
-    "airflow_log_analysis_dag",
+    "airflow_sre_agent_monitoring",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
