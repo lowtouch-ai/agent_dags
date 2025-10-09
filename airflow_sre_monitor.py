@@ -80,30 +80,37 @@ def get_ai_response(prompt, conversation_history=None):
 
 
 def task1_identify_auth_errors(ti, **context):
-    time_interval = Variable.get("AIRFLOW_LOG_TIME_INTERVAL", "2 hour")
     try:
         # First prompt to check for password authentication errors
-        prompt1 = f"""check if there are any occurrences of \"password authentication\" errors in the 'airflowsvr-2.0' environment for the last {time_interval}."""
-        response1 = get_ai_response(prompt1)
-        logging.info(f"Task 1 - First prompt response: {response1[:200]}...")
+        prompt = """Use the get_dag_logs Tool to retrieve error logs from the DAG named "airflow_log_simulator" for the last 1 hour with the task_name “process_payment_gateway_failure”.  
 
-        # Second prompt to get details of errors and identify affected DAGs and tasks
-        prompt2 = """From the following password authentication error details, extract and display the detailed message for each error. Identify and list the corresponding DAG names and Task names associated with each error. Provide a recommendation and a summary of the findings."""
-        response2 = get_ai_response(prompt2, conversation_history=[{"role": "assistant", "content": response1}])
-        logging.info(f"Task 1 - Second prompt response: {response2[:200]}...")
+            Analyze the retrieved logs to:  
+            1. Identify and display all error messages.  
+            2. Provide a concise summary explaining the nature and cause of the errors.  
+            3. Offer clear and actionable recommendations to resolve or prevent these errors.  
 
-        # Combine responses
-        combined_response = f"Authentication Errors Check:\n{response1}\n\nDetailed Analysis and Recommendations:\n{response2}"
+            Present the response in a **table format** with two columns:  
+            - **Timestamp (IST)** — use a set of timestamps distributed across the past one hour (simulated if not available).  
+            - **Error Message**
+
+            After the table, include the following sections clearly separated:
+            - **Summary:** A short explanation describing the issue and its root cause.  
+            - **Recommendation:** Practical and actionable steps to resolve or avoid these errors in the future.  
         
-        # Format the combined response into markdown
-        format_prompt = f"""Format the following response into markdown format. Include the error details the message details and proposed fixes or findings. Do not show the Message ID and Index in the table in the response.
-        {combined_response}
         """
-        formatted_response = get_ai_response(format_prompt)
+        response = get_ai_response(prompt)
+        logging.info(f"Task 1 - First prompt response: {response[:200]}...")
+
         
-        ti.xcom_push(key="auth_errors", value=formatted_response)
-        logging.info(f"Task 1 completed: {formatted_response[:200]}...")
-        return formatted_response
+        # # Format the combined response into markdo
+        # format_prompt = f"""Format the following response into markdown format. Include the error details the message details and proposed fixes or findings.
+        # {response1}
+        # """
+        # formatted_response = get_ai_response(format_prompt)
+
+        ti.xcom_push(key="auth_errors", value=response)
+        logging.info(f"Task 1 completed: {response[:200]}...")
+        return response
     except Exception as e:
         logging.error(f"Error in task1: {str(e)}")
         raise
@@ -128,7 +135,7 @@ def task2_count_import_errors(ti, **context):
 
 def task3_detailed_import_errors(ti, **context):
     try:
-        prompt = "list the import errros in the airflow and explain the error and which DAG is failing and why it is failing provide explanation and proposed fixes for all errors"
+        prompt = "list the import errros in the airflow and explain the error and which DAG is failing and why it is failing provide explanation and proposed fixes for all errors , ## Note : Convert the timestamps to    IST timezone"
         response = get_ai_response(prompt)
         
 #         # Format the response into markdown
@@ -163,31 +170,65 @@ def task4_comprehensive_errors(ti, **context):
         raise
 
 def task5_resource_utilization(ti, **context):
+    threshold= Variable.get("AIRFLOW_CPU_UTILIZATION_THRESHOLD", "10")
     try:
-        prompt = """Use the QueryRangeMetric tool to retrieve the **hourly CPU Utilization** of the  name =**airflowwkr** for the **last 24 hours** from both instances— "cadvisor:8080"and "nvdevkit2025b:8888".  
-            Perform the following analyses:
-            1. **Peak Utilization:** Identify and summarize the top three highest CPU utilization points (with timestamps) for both cadvisor:8080 and ndevkit2025b:8888.  
-            2. **Idle Periods:** Check for any periods of low or idle CPU activity and specify their approximate durations and times.  
-            3. **Resource Analysis:** Provide a brief resource utilization assessment comparing both environments, noting trends, load patterns, and any inefficiencies observed.
-            ## Note: In the Output Replace the **cadvisor:8080** with **lab-a** and **nvdevkit2025b:8888** with **lab-b** in the final summary , Do not Mention the **cadvisor:8080** and **nvdevkit2025b:8888** in the final summary .
+        prompt = """Use the **QueryRangeMetric** tool with an **absolute time range** to retrieve the **hourly CPU Utilization (in %)** of the instance name = **airflowwkr** for the **last 24 hours** from both instances — **"cadvisor:8080"** and **"nvdevkit2025b:8888"**.
+            * * *
+            ### Query to Use:
+            Use the following Prometheus query while invoking the tool:
+            ```
+            sum(rate(container_cpu_usage_seconds_total{instance="<INSTANCE>", name="airflowwkr"}[5m])) * 100
+            ```
+            Replace `<INSTANCE>` dynamically with:
+            `"cadvisor:8080"` _for_ _lab-a_*
+            `"nvdevkit2025b:8888"` _for_ _lab-b_*
+            **Query Parameters:**
+            *   `start`: `<ISO8601 timestamp for 24 hours ago>`
+            *   `end`: `<ISO8601 timestamp for current time>`
+            *   `step`: `1h`
+            * * *
             """
+        prompt2=f"""
+            ### Perform the following analyses:
+            1.  **Peak Utilization:**
+                _Identify and summarize the_ _top three highest CPU utilization points (with timestamps)_* for both **cadvisor:8080** and **nvdevkit2025b:8888**.
+                _Include the_ _utilization percentage (%)_* for each peak.
+            2.  **Idle Periods (Threshold ≤ {threshold}%):**
+                _Detect and list_ _time periods where CPU utilization remained at or below {threshold} %_*.
+                _Mention the_ _start and end times_* for each idle period and the **approximate duration**.
+                _Clearly differentiate idle periods for_ _each environment_*.
+            3.  **Resource Analysis & Cost Optimization:**
+                *   Compare overall resource utilization trends, load patterns, and identify inefficiencies between both environments.
+                _Based on the_ _total idle duration_*, estimate potential **cost savings (in percentage)** that could be achieved by optimizing idle resources.
+                *   Provide a detailed cost-saving summary, including:
+                    _Estimated_ _idle percentage_* of total time
+                    *   **Potential cost reduction (%)**
+                    *   **Key recommendations** for improving resource efficiency.
+            * * *
+            ### Note:
+            In the **final summary/output**, replace:
+            *   **cadvisor:8080 → lab-a**
+            *   **nvdevkit2025b:8888 → lab-b**
+            Do **not** mention the original instance names (**cadvisor:8080** or **nvdevkit2025b:8888**) anywhere in the final output.
+            """
+        prompt = prompt + prompt2
         response = get_ai_response(prompt)
         
-        # Format the response into markdown, ensuring replacements
-        format_prompt = f"""Format the following response into markdown format. Ensure to replace cadvisor:8080 with lab-a and nvdevkit2025b:8888 with lab-b in the response, and do not mention the originals.
+#         # Format the response into markdown, ensuring replacements
+#         format_prompt = f"""Format the following response into markdown format. Ensure to replace cadvisor:8080 with lab-a and nvdevkit2025b:8888 with lab-b in the response, and do not mention the originals.
 
-{response}"""
-        formatted_response = get_ai_response(format_prompt)
+# {response}"""
+#         formatted_response = get_ai_response(format_prompt)
         
-        ti.xcom_push(key="resource_utilization", value=formatted_response)
-        logging.info(f"Task 5 completed: {formatted_response[:200]}...")
-        return formatted_response
+        ti.xcom_push(key="resource_utilization", value=response)
+        logging.info(f"Task 5 completed: {response[:200]}...")
+        return response
     except Exception as e:
         logging.error(f"Error in task5: {str(e)}")
         raise
 
 def task6_observability_monitoring(ti, **context):
-    dag_name= Variable.get("AIRFLOW_DAG_NAME", "airflow_log_simulate")
+    dag_name= Variable.get("AIRFLOW_DAG_NAME", "airflow_log_simulator")
     try:
         prompt = f"""
         Use the get_dag_logs Tool to retrieve the log counts for each task in the DAG named '{dag_name}' over the last 1 hour.  
@@ -226,9 +267,9 @@ def task7_compose_email(ti, **context):
             Compose a well-formatted professional email incorporating the following details from Airflow log analysis. The email should be written in American English, follow a professional technical document structure (e.g., greeting, subject, introduction, detailed sections for each error type, summary, and recommendations). Ensure clarity so that any stakeholder can understand the issues without prior context. Format the entire email content as valid Markdown (output only the Markdown code, without any additional text).
 
             Findings:
-            - Authentication errors (last 1 hour): {auth_errors}
-            - DAG import error counts : {import_error_counts}
-            - Detailed DAG import errors : {detailed_import_errors}
+            - Payment gateway failures (last 1 hour): {auth_errors}
+            - DAG import error counts: {import_error_counts}
+            - Detailed DAG import errors: {detailed_import_errors}
             - Comprehensive list of all errors (last 1 hour): {all_errors}
             - Comprehensive Summary of Resource Utilization: {resource_utilization}
             - Observability Monitoring Insights: {observability_monitoring}
@@ -237,34 +278,34 @@ def task7_compose_email(ti, **context):
             - Subject: # Airflow Log Analysis Report - {datetime.now().strftime('%Y-%m-%d')}
             - Greeting: Dear Team,
             - Summary: ## Summary  
-              [brief overview of key issues, including high-level impacts and urgency]
-            - Section for Authentication Errors: ## Authentication Errors (Last 1 Hour)  
-              [details]
-            - Section for Import Error Counts: ## DAG Import Error Counts   
-              [details]
+              [Provide a concise overview of key issues, including high-level impacts, urgency, and any critical findings that require immediate attention. Highlight the scope of errors and resource utilization concerns.]
+            - Section for Payment Gateway Failures: ## Payment Gateway Failures (Last 1 Hour)  
+              [Include the complete list of payment gateway failures from {auth_errors}. Provide detailed descriptions, including error codes, timestamps, affected users or services, and potential causes where applicable. Use tables or lists for clarity.]
+            - Section for Import Error Counts: ## DAG Import Error Counts  
+              [Include the full details from {import_error_counts}. Present the counts in a clear format, such as a table, showing the number of occurrences per DAG or error type. Include any patterns or trends observed.]
             - Section for Detailed Import Errors: ## Detailed DAG Import Errors  
-              [details]
-            - Section for All Errors: ## Comprehensive Error List (Last 1 Hour)  
-              [details]
-            - Section for Resource Utilization: ## Resource Utilization Summary  of last 24 hours
-              [details]
-            - Section for Observability Monitoring: ## Observability Monitoring Insights  
-              [details]
+              [Include the complete details from {detailed_import_errors}. Provide granular information, such as specific DAGs affected, error messages, stack traces, and potential root causes. Use code blocks or tables for readability.]
+            - Section for All Errors: ## Miscellaneous Error List (Last 1 Hour)  
+              [Include the full list from {all_errors}. Categorize errors by type or severity if applicable, and provide sufficient detail to understand the context and impact of each error. Use lists or tables for clarity.]
+            - Section for Resource Utilization: ## Resource Utilization Summary (Last 24 Hours)  
+              [Include the complete details from {resource_utilization}. Provide a detailed breakdown of resource usage, including CPU, memory, disk, and network metrics. Highlight any cost optimization opportunities, such as over-provisioned resources, underutilized instances, or inefficient task scheduling. Include specific findings related to cost inefficiencies and other performance metrics. Use tables or charts for clarity.]
+            - Section for Observability Monitoring: ## Observability Insights  
+              [Include the full details from {observability_monitoring}. Provide insights into system health, monitoring gaps, and any anomalies detected. Include metrics, logs, or tracing data that highlight performance bottlenecks or potential improvements. Use lists or tables for readability.]
             - Recommendations: ## Recommendations  
-              - [actionable items]
+              - [Provide actionable, prioritized recommendations based on all findings. Include specific steps to address authentication errors, DAG import issues, miscellaneous errors, resource optimization (including cost-saving measures), and observability improvements. Ensure recommendations are detailed and feasible for implementation.]
             - Closing: Best regards,  
               Airflow SRE Agent  
               lowtouch.ai
 
-            Use tables or lists where appropriate for readability. Ensure the content is clear and technical, and include all details without avoiding any section.
-            Output only the valid Markdown code.
+            Use tables, lists, or code blocks where appropriate to ensure readability and clarity. Ensure all sections are fully detailed, including every finding from the provided variables without truncation or omission. Do not skip any parts of the findings, and incorporate all cost optimization insights and other findings in the resource utilization section. Output only the valid Markdown code.
             """
+            
         markdown_response = get_ai_response(markdown_prompt)
         logging.info(f"Task 7 - Markdown email composed: {markdown_response[:200]}...")
         
         # Second, convert the markdown to HTML
         html_prompt = f"""
-            Convert the following Markdown email content to valid HTML format for an email. Ensure the output is pure HTML starting with <html><head><title>Airflow Log Analysis Report</title></head><body> and ending with </body></html>. Preserve all structure, sections, and details. Use appropriate HTML tags for headings, paragraphs, lists, and tables.
+            Convert the following Markdown email content to valid HTML format for an email. Ensure the output is pure HTML starting with <html><head><title>Airflow Log Analysis Report</title></head><body> and ending with </body></html>. Preserve all structure, sections, and details from the Markdown content exactly as provided, without adding, modifying, or truncating any content. Use appropriate HTML tags for headings (<h1> for #, <h2> for ##), paragraphs (<p>), lists (<ul> or <ol>), code blocks (<pre><code>), and especially tables make the table borders bold and solid. For Markdown tables (e.g., using | and - for structure), accurately convert them to HTML <table> elements with <tr> for rows, <th> for header cells, and <td> for data cells, ensuring proper alignment and formatting and also make the borders solid. Maintain consistent indentation and semantic HTML for readability. Do not render tables as plain text; ensure they are structured as proper HTML tables.
 
             {markdown_response}
             
@@ -275,6 +316,7 @@ def task7_compose_email(ti, **context):
         # Clean to ensure it's pure HTML
         if not html_response.startswith('<html>'):
             html_response = f"<html><body>{html_response}</body></html>"
+        ti.xcom_push(key="email_markdown", value=markdown_response)
         ti.xcom_push(key="email_html", value=html_response)
         logging.info(f"Task 7 completed: {html_response[:200]}...")
         return html_response
@@ -321,11 +363,11 @@ def task8_send_email(ti, **context):
         raise
 
 with DAG(
-    "airflow_sre_agent_monitoring",
+    "airflow_log_analysis_dag",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
-    tags=["sre", "log_analysis", "airflow", "monitoring"]
+    tags=["sre", "log_analysis", "ai_integration"]
 ) as dag:
     
     t1 = PythonOperator(
