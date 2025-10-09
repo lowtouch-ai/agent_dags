@@ -367,7 +367,7 @@ with DAG(
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
-    tags=["sre", "log_analysis", "ai_integration"]
+    tags=["sre", "log_analysis", "airflow", "monitoring"]
 ) as dag:
     
     t1 = PythonOperator(
