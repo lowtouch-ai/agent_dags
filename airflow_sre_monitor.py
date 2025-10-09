@@ -96,7 +96,8 @@ def task1_identify_auth_errors(ti, **context):
             After the table, include the following sections clearly separated:
             - **Summary:** A short explanation describing the issue and its root cause.  
             - **Recommendation:** Practical and actionable steps to resolve or avoid these errors in the future.  
-        
+
+            ## Note : make the section heading as Payment Gateway Failures (Last 1 Hour)
         """
         response = get_ai_response(prompt)
         logging.info(f"Task 1 - First prompt response: {response[:200]}...")
@@ -153,13 +154,17 @@ def task3_detailed_import_errors(ti, **context):
 
 def task4_comprehensive_errors(ti, **context):
     try:
-        prompt = "Are there any errors in airflow during the last 1 hours; if so find the root cause and suggest fixes for each error and consider all the airflow server , scheduler and worker logs"
+        prompt = "Are there any errors in airflow during the last 1 hours; if so find the root cause and suggest fixes for each error and consider all the airflow server , scheduler and worker logs  "
         response = get_ai_response(prompt)
         
         # Format the response into markdown
-        format_prompt = f"""Format the following response into markdown format. Remove the Message ID and Index in the table in the response.
+        format_prompt = f"""Format the following response into markdown format. Remove the Message ID and Index in the table in the response. 
 
-{response}"""
+        {response}
+
+        ## Note In the Output Mention Log Entries instead of Logs and the replace `Found` with `Displayed`
+        
+        """
         formatted_response = get_ai_response(format_prompt)
         ti.xcom_push(key="all_errors_raw", value=response)
         ti.xcom_push(key="all_errors", value=formatted_response)
@@ -170,6 +175,7 @@ def task4_comprehensive_errors(ti, **context):
         raise
 
 def task5_resource_utilization(ti, **context):
+    
     threshold= Variable.get("AIRFLOW_CPU_UTILIZATION_THRESHOLD", "10")
     try:
         prompt = """Use the **QueryRangeMetric** tool with an **absolute time range** to retrieve the **hourly CPU Utilization (in %)** of the instance name = **airflowwkr** for the **last 24 hours** from both instances — **"cadvisor:8080"** and **"nvdevkit2025b:8888"**.
