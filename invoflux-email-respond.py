@@ -376,10 +376,16 @@ def step_3_compose_email(ti, **context):
 
         1. Greeting: <p>Dear {sender_name},</p>
 
-        2. Opening paragraph: <p>We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name if available, else omit 'from [Vendor Name]']. The invoice has been recorded in our system; however, it currently remains in [Status] status [due to the following validation issues if Draft or duplicate, else omit this part]. For duplicates, instead use: 'We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name]. However, this invoice is a duplicate. The existing invoice is in [Posted/Draft] status, and no new invoice was created.'</p>
+        2. Opening paragraph: If the Content does not indicate a duplicate (e.g., no 'Duplicate invoice number found' in validation issues): 
+           - If Status is Posted, use: We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name if available, else omit 'from [Vendor Name]']. It has been created in the Posted status.
+           - If Status is Draft, use: We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name if available, else omit 'from [Vendor Name]']. The invoice has been recorded in our system; however, it currently remains in Draft status due to the following validation issues.
 
-        3. Issues list (only if Draft or duplicate): If there are validation issues or it's a duplicate, include: <ul> followed by <li>[each specific issue]</li> </ul>. For duplicate, include the duplicate notice as one of the issues if needed, but primarily list any other issues.
+        If the Content indicates a duplicate (e.g., 'Duplicate invoice number found' in validation issues), use: 'We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name]. However, this invoice is a duplicate. The existing invoice is in [Posted/Draft] status, and no new invoice was created' [due to the following validation issues: if there are other non-duplicate validation issues, else omit this part]. Use the existing status from Content if available, else infer from context (e.g., Draft if validation failed).
 
+        3. Issues list (only if Draft or if duplicate with other validation issues): If there are validation issues, include only non-duplicate issues, do not include duplicate issues:
+        *  followed by
+        * [each specific issue].
+        
         4. Invoice Summary section: <p><strong>Invoice Summary</strong></p> followed by a list in paragraph form (each on new line with <br>): 
            Invoice Number: [value]<br>
            Invoice Date: [value]<br>
@@ -412,7 +418,6 @@ def step_3_compose_email(ti, **context):
 
         Return only the HTML body of the email.
         """
-
     # Pass only the previous step's response as history
     history = [{"role": "assistant", "content": content_appended}] if content_appended else []
     response = get_ai_response(prompt, conversation_history=history)
