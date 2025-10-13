@@ -380,8 +380,8 @@ def step_3_compose_email(ti, **context):
            - If Status is Posted, use: We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name if available, else omit 'from [Vendor Name]']. It has been created in the Posted status.
            - If Status is Draft, use: We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name if available, else omit 'from [Vendor Name]']. The invoice has been recorded in our system; however, it currently remains in Draft status due to the following validation issues.
 
-        If the Content indicates a duplicate (e.g., 'Duplicate invoice number found' in validation issues), use: 'We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name]. However, this invoice is a duplicate. The existing invoice is in [Posted/Draft] status, and no new invoice was created' [due to the following validation issues: if there are other non-duplicate validation issues, else omit this part]. Use the existing status from Content if available, else infer from context (e.g., Draft if validation failed).
-
+        If the Content indicates a duplicate (e.g., 'Duplicate invoice number found' in validation issues), use: 'We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name]. However, this invoice is a duplicate. The existing invoice is in [Posted/Draft] status, and no new invoice was created' [due to the following validation issues: only if the existing status is Draft and there are other non-duplicate validation issues, else omit this part]. Use the existing status from Content if available, else infer from context (e.g., Draft if validation failed).
+        
         3. Issues list (only if Draft or if duplicate with other validation issues): If there are validation issues, include only non-duplicate issues, do not include duplicate issues:
         *  followed by
         * [each specific issue].
