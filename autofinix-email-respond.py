@@ -307,46 +307,49 @@ CUSTOMER EMAIL: {sender_email}
 REQUESTED LOAN INFORMATION: {loan_request_info}
 
 VALIDATION PROCESS:
-1. Use available API tools to verify if the email address {sender_email} is registered in the system
-2. Check if this customer has authorization to access the requested loan information
-3. Verify the customer's identity and access permissions
+1. Use available API tools to verify if the email address {sender_email} is registered as a customer in the system.
+2. If not registered, immediately fail validation.
+3. Use available API tools to retrieve ONLY the email address associated with the requested loan (do not retrieve any other loan details).
+4. If no loan-associated email is found or the loan doesn't exist, fail validation.
+5. Check if the retrieved loan-associated email EXACTLY matches (case-insensitive) the customer email {sender_email}.
+6. Verify the customer's identity and access permissions based on the above checks.
 
 IMPORTANT: 
-- Only perform validation - do NOT retrieve or provide loan data
-- Do NOT generate or create any loan information
-- Use only the provided API tools for validation
+- Retrieve ONLY the necessary information for validation: customer registration status and loan-associated email.
+- Do NOT retrieve, generate, create, or provide any other loan data or information.
+- Use only the provided API tools for validation.
+- If ANY check fails (e.g., not registered, no loan email, mismatch), the validation MUST fail.
+- Be strict: only pass if ALL checks confirm exact match and authorization.
+- Do not add explanations or extra text in your response.
 
-REQUIRED RESPONSE FORMAT:
-Return EXACTLY one of these responses:
-- VALIDATION_PASSED: Customer is authorized to access the requested loan information
-- VALIDATION_FAILED: Customer is not authorized or email not found in system
-
-Provide no additional text, tables, or loan data - only the validation result."""
+OUTPUT FORMAT:
+Return EXACTLY one of these responses with NO additional text, descriptions, tables, or data:
+VALIDATION_PASSED
+VALIDATION_FAILED"""
     
     # Get validation response
     response = get_ai_response(prompt, conversation_history=history)
     
     # Process validation result
     soup = BeautifulSoup(response, "html.parser")
-    clean_response = soup.get_text(separator=" ", strip=True).lower()
+    clean_response = soup.get_text(separator=" ", strip=True).strip().upper()
     
     logging.debug(f"Raw validation response: {response}")
     logging.debug(f"Cleaned validation response: {clean_response}")
     
-    # Determine validation status
-    validation_passed = "validation_passed" in clean_response
-    validation_failed = "validation_failed" in clean_response
+    # Extract status (handle potential extra text or colon)
+    validation_status = clean_response.split(":")[0].strip() if ":" in clean_response else clean_response
     
-    if validation_failed:
-        is_valid = False
-        logging.warning(f"Customer validation FAILED for {sender_email}")
-    elif validation_passed:
+    # Determine validation status
+    if validation_status == "VALIDATION_PASSED":
         is_valid = True
         logging.info(f"Customer validation PASSED for {sender_email}")
-    else:
-        # Default to failed for security if status is unclear
+    elif validation_status == "VALIDATION_FAILED":
         is_valid = False
-        logging.warning(f"Unclear validation response - defaulting to FAILED for security: {clean_response}")
+        logging.warning(f"Customer validation FAILED for {sender_email}")
+    else:
+        is_valid = False
+        logging.warning(f"Unclear or invalid validation response format - defaulting to FAILED for security: {clean_response}")
     
     # Update conversation history
     history.append({"prompt": prompt, "response": response})
