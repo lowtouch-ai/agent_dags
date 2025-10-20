@@ -107,7 +107,7 @@ def check_slot_usage(ti, **context):
         Present the response in markdown format with:
         - **Peak Slot Usage**: Maximum slots used.
         - **Problematic Queries**: List of queries (with exact SQL text ) that contributed to high usage.
-        - **Analysis**: Brief explanation of findings and potential issues, referencing schema if relevant (e.g., joins on `articles.productid` or `order.customerid`).
+        - **Analysis**: Brief explanation of findings and potential issues, referencing schema if relevant  (e.g., joins on `articles.productid` or `order.customerid`) , provide the percentage of cost saving based on the findings.
         """
         response = get_ai_response(prompt)
         ti.xcom_push(key="slot_usage", value=response)
@@ -130,7 +130,7 @@ def check_execution_time(ti, **context):
         Present the response in markdown format with:
         - **Max Execution Time**: Highest execution time observed.
         - **Problematic Queries**: List of queries (with exact SQL text) that contributed to high execution times.
-        - **Analysis**: Brief explanation of findings and potential issues, referencing schema if relevant.
+        - **Analysis**: Brief explanation of findings and potential issues, referencing schema if relevant , provide the percentage of cost saving based on the findings.
         """
         response = get_ai_response(prompt)
         ti.xcom_push(key="execution_time", value=response)
@@ -153,7 +153,7 @@ def check_memory_usage(ti, **context):
         Present the response in markdown format with:
         - **Peak Memory Usage**: Maximum bytes scanned (in MB).
         - **Problematic Queries**: List of queries (with exact SQL text) that contributed to high memory usage.
-        - **Analysis**: Brief explanation of findings and potential issues, referencing schema if relevant.
+        - **Analysis**: Brief explanation of findings and potential issues, referencing schema if relevant , provide the percentage of cost saving based on the findings.
         """
         response = get_ai_response(prompt)
         ti.xcom_push(key="memory_usage", value=response)
@@ -195,9 +195,8 @@ def compile_analysis_report(ti, **context):
         Start with:  
         `Dear Team,`
 
-        ---
 
-        **2. Executive Summary**
+        **2. Summary of Findings**
         Provide a concise but technically detailed overview including:
         - Total number of queries executed (from Execution Count section).
         - Count of total *unique* problematic queries across all sections (deduplicate any repeated ones).
@@ -218,7 +217,7 @@ def compile_analysis_report(ti, **context):
         - Whether queries exceeded expected thresholds.
         - Include 2–3 technical recommendations (partitioning, optimized joins, or clustering).
 
-        ---
+        
 
         ### **Execution Time**
         - Include the **exact content** from the provided Execution Time section ({execution_time}).
@@ -227,7 +226,7 @@ def compile_analysis_report(ti, **context):
         - Impacts on pipeline latency or throughput.
         - Suggested optimizations or query rewrites.
 
-        ---
+        
 
         ### **Memory Usage**
         - Include the **exact content** from the provided Memory Usage section ({memory_usage}).
@@ -236,27 +235,10 @@ def compile_analysis_report(ti, **context):
         - Impact on overall query efficiency and cost.
         - Technical recommendations (filter refinement, window function optimization, clustering).
 
-        ---
+        
 
-        **4. Consolidated Problematic Queries**
-        - Extract and list **all unique problematic queries** found in Slot Usage, Execution Time, and Memory Usage.
-        - Deduplicate any repeated SQL statements.
-        - For each query, include:
-        - The **SQL code block**.
-        - A **brief issue summary** (e.g., “Excessive joins on large tables”, “No partition filter on timestamp field”, etc.).
-        - The **affected metrics** (Slot Usage, Execution Time, Memory Usage).
-        - Present the data in this format:
 
-        **Query**
-        **Affected Metrics**: Slot Usage, Memory Usage  
-        **Issue Summary**: Large self-joins on `articles` table leading to high slot and memory usage.  
-        ```sql
-        -- query here
-        ````
-
-        ---
-
-        **5. Recommendations**
+        **4. Recommendations**
         Provide a consolidated list of all optimization actions combining findings from all metric sections.
         Organize recommendations under three categories:
 
@@ -281,7 +263,7 @@ def compile_analysis_report(ti, **context):
 
         ---
 
-        **6. Final Consolidated Summary**
+        **5. Final Consolidated Summary**
         Write a closing section that:
 
         * Summarizes the overall findings and optimization plan.
