@@ -15,6 +15,7 @@ dag = DAG(
     description='A DAG to simulate BigQuery queries by running good and bad queries sequentially',
     schedule_interval=None,
     catchup=False,
+    tags=["sre", "bigquery", "simulation",]
 )
 
 good_queries = [
@@ -192,3 +193,4 @@ for i, query in enumerate(all_queries):
     if prev_task:
         prev_task >> task
     prev_task = task
+
