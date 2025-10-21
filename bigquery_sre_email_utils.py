@@ -134,7 +134,7 @@ def build_conversation_history(service, thread_id, self_email):
         thread = service.users().threads().get(userId="me", id=thread_id).execute()
         conversation = []
         logging.info(f"Retrieved thread with ID: {thread_id} containing {len(thread.get('messages', []))} messages")
-        messages_with_dates = []
+        messages_with_dates = []     
 
         for msg in thread.get("messages", []):
             headers = {h['name']: h['value'] for h in msg['payload'].get('headers', [])}
@@ -144,15 +144,20 @@ def build_conversation_history(service, thread_id, self_email):
             if not content.strip():
                 logging.warning(f"No content in message {msg.get('id')}")
                 continue
-                
-            # Clean content
+            
+            # Clean HTML
             soup = BeautifulSoup(content, "html.parser")
             content = soup.get_text(separator=" ", strip=True)
-            content = remove_quoted_text(content)
+            
+            # ONLY remove lines that start with '>' (actual quote markers)
+            lines = content.split('\n')
+            cleaned_lines = [line for line in lines if not line.strip().startswith('>')]
+            content = '\n'.join(cleaned_lines).strip()
+            
             if not content.strip():
                 logging.warning(f"No content after cleaning in message {msg.get('id')}")
                 continue
-                
+            
             role = "user" if sender != self_email.lower() else "assistant"
             date_str = headers.get("Date", "")
             
@@ -171,15 +176,17 @@ def build_conversation_history(service, thread_id, self_email):
         except Exception as e:
             logging.warning(f"Error sorting by date, using original order: {str(e)}")
 
-        # CRITICAL FIX: Create clean conversation list WITHOUT datetime objects or extra metadata
+        # Create clean conversation list
         for msg in messages_with_dates:
             conversation.append({
                 "role": msg["role"],
                 "content": msg["content"]
-                # DO NOT include "date" or "message_id" as they're not needed for AI
             })
 
         logging.info(f"Built conversation history with {len(conversation)} messages")
+        if conversation:
+            logging.info(f"Last message preview: {conversation[-1]['content'][:200]}...")
+        
         return conversation
         
     except Exception as e:
@@ -345,7 +352,7 @@ def trigger_response_tasks(**kwargs):
         task_id = f"trigger_response_{email['id'].replace('-', '_')}"
         trigger_task = TriggerDagRunOperator(
             task_id=task_id,
-            trigger_dag_id="bigquery_sre_reply_responder",
+            trigger_dag_id="bigquery_email_responder",
             conf={"thread_id": email["threadId"]},
         )
         trigger_task.execute(context=kwargs)
@@ -355,7 +362,7 @@ def no_email_found(**kwargs):
     logging.info("No new reply emails found to process.")
 
 with DAG(
-    "bigquery_monitor_mailbox",
+    "bigquery_mailbox_monitor",
     default_args=default_args,
     schedule_interval="*/1 * * * *",  # Every minute
     catchup=False,
@@ -411,27 +418,46 @@ def categorize_prompt(ti, **context):
     
     # Build conversation history (including all messages)
     history = build_conversation_history(service, thread_id, self_email)
-    logging.info(f"history : {history}")
+    logging.info(f"Built conversation history with {len(history)} messages")
     
-    # Extract and clean the current prompt from the last message
+    # Get the current prompt from the LAST message in history (already cleaned)
+    if not history:
+        raise ValueError("No messages found in thread")
+    
+    # The last message in history IS the current prompt (already cleaned by build_conversation_history)
+    current_message = history[-1]
+    prompt = current_message['content']
+
+    # Extract sender's name from the thread
     thread = service.users().threads().get(userId="me", id=thread_id).execute()
     messages = thread['messages']
     last_msg = messages[-1]
-    prompt = decode_email_payload(last_msg)
+    headers = {h['name']: h['value'] for h in last_msg['payload']['headers']}
+    sender_from = headers.get('From', '')
+    logging.info(f"sender from address for the debug : {sender_from}")
+    # Extract name from "Name <email>" or just use email
+    sender_name = ""
+    if '<' in sender_from:
+        sender_name = sender_from.split('<')[0].strip().strip('"')
+    else:
+        sender_name = sender_from.split('@')[0]  # Use email prefix as fallback
+    logging.info(f"sender name is {sender_name}")
+    ti.xcom_push(key="sender_name", value=sender_name)
     
-    if not prompt.strip():
+    if not prompt or not prompt.strip():
+        # Fallback: try to get directly from thread
+        thread = service.users().threads().get(userId="me", id=thread_id).execute()
+        messages = thread['messages']
+        last_msg = messages[-1]
+        
+        # Get snippet as last resort
         prompt = last_msg.get('snippet', '')
-        logging.warning(f"Could not extract body, using snippet: {prompt[:100]}")
+        logging.warning(f"Using snippet as fallback: {prompt[:100]}")
     
-    if prompt:
-        soup = BeautifulSoup(prompt, "html.parser")
-        prompt = soup.get_text(separator=" ", strip=True)
-        prompt = remove_quoted_text(prompt)
-    
-    if not prompt:
+    if not prompt or not prompt.strip():
         raise ValueError("Could not extract prompt from the latest message")
     
-    logging.info(f"prompt : {prompt}")
+    logging.info(f"prompt for the debugging: {prompt}")
     
     # Push only JSON-serializable data
     ti.xcom_push(key="conversation_history", value=history[:-1] if history else [])
@@ -532,49 +558,64 @@ def send_reply(ti, **context):
     return f"Reply sent in thread {thread_id}"
 
 def ask_for_details(ti, **context):
+    history = ti.xcom_pull(key="conversation_history") or []
     prompt = ti.xcom_pull(key="current_prompt")
+    sender_name = ti.xcom_pull(key="sender_name")
     detail_prompt = f"""
     The user asked: {prompt}
     Provide a detailed explanation regarding their request about BigQuery SRE metrics. 
-    Structure the response as a reply email starting with a greeting (eg : Hi there ,  Hello), followed by a detailed paragraph explanation, and include a few bullet points summarizing the key aspects. 
+    Structure the response as a reply email starting with a greeting (eg : Hi {sender_name} ,  Hello), followed by a detailed paragraph explanation, and include a few bullet points summarizing the key aspects. 
     Ensure the response is clear, concise, and formatted appropriately for an email body.
     ends the email body with 
     Thanks,
     BigQuery SRE Team
     lowtouch.ai
     """
-    response = get_ai_response(detail_prompt)
+    response = get_ai_response(detail_prompt,history)
     ti.xcom_push(key="analysis_report", value=response)
     return response
 
 def usage_analyzer(ti, **context):
+    history = ti.xcom_pull(key="conversation_history") or []
     prompt = ti.xcom_pull(key="current_prompt")
+    sender_name = ti.xcom_pull(key="sender_name")
     usage_prompt = f"""
     The user asked: {prompt}
     Provide a detailed analysis of the requested BigQuery SRE metrics, focusing on execution count and slot usage based on the report.
-    Structure the response as a reply email starting with a greeting (eg : Hi there ,  Hello), followed by a detailed explanation, and include a list of findings formatted as bullet points.
+    Structure the response as a reply email starting with a greeting (eg : Hi {sender_name} ,  Hello), followed by a detailed explanation, and include a list of findings formatted as bullet points.
     Ensure the response is clear, concise, and formatted appropriately for an email body.
     ends the email body with 
     Thanks,
     BigQuery SRE Team
     lowtouch.ai
     """
-    response = get_ai_response(usage_prompt)
+    response = get_ai_response(usage_prompt,history)
     ti.xcom_push(key="analysis_report", value=response)
     return response
 
 def non_relevant_question(ti, **context):
-    response = "<html><body>Unfortunately I am not trained to answer this at this point</body></html>"
+    sender_name = ti.xcom_pull(key="sender_name")
+    response = f"""
+    <html>
+        <body>
+            <p>Hi {sender_name},</p>
+            <p>Thank you for reaching out. Unfortunately, I am not trained to answer your query at this time.</p>
+            <p>If you have any other questions or need assistance, feel free to let us know.</p>
+            <p>Best regards,<br>BigQuery SRE Team<br>lowtouch.ai</p>
+        </body>
+    </html>
+    """
     ti.xcom_push(key="html_report", value=response)
     return response
 
 def convert_to_html(ti, **context):
     report = ti.xcom_pull(key="checked_report")
+    sender_name = ti.xcom_pull(key="sender_name")
     html_prompt = f"""
     Convert the following email body into valid HTML format for a professional reply email.
 
     Requirements:
-    - Start with a greeting like "Hi," or "Hello, (if reciepient name is not there just use Hi or Hello Only not mention [reciepient name] in the final HTML).
+    - Start with a greeting like "Hi {sender_name}," or "Hello {sender_name}," (if recipient name is not there just use Hi or Hello Only not mention [recipient name] in the final HTML).
     - Preserve all structure using only basic HTML tags (<p>, <b>, <h1>-<h3>, <ul>, <li>, <code>, <br>).
     - Do NOT include any inline styles, colors, padding, or CSS.
     - Convert headings, bullet points, and bold text appropriately.
@@ -596,6 +637,7 @@ def convert_to_html(ti, **context):
 def response_checker(ti, **context):
     prompt = ti.xcom_pull(key="current_prompt")
     report = ti.xcom_pull(key="analysis_report")
+    history = ti.xcom_pull(key="conversation_history") or []
     logging.info(f"prompt : {prompt}")
     if not report:
         raise ValueError("No analysis report available")
@@ -621,7 +663,7 @@ def response_checker(ti, **context):
 
         Now evaluate and output the JSON.
         """
-        response = get_ai_response(check_prompt)
+        response = get_ai_response(check_prompt,history)
         try:
             
             # Clean response by removing possible JSON code block markers
@@ -649,7 +691,7 @@ def response_checker(ti, **context):
         
         Provide the fully improved email body as a complete and polished response.
         """
-        new_report = get_ai_response(improve_prompt)
+        new_report = get_ai_response(improve_prompt,history)
         report = new_report if new_report else report  # Fallback to original if empty
     
     ti.xcom_push(key="checked_report", value=report)
@@ -658,7 +700,7 @@ def response_checker(ti, **context):
 
 # Processing DAG: Handles reply logic
 with DAG(
-    "bigquery_sre_reply_responder",
+    "bigquery_email_responder",
     default_args=default_args,
     schedule_interval=None,  # Triggered only
     catchup=False,
