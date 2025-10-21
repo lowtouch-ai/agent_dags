@@ -26,8 +26,8 @@ default_args = {
     "retry_delay": timedelta(seconds=15),
 }
 
-CLOUD_ASSESS_FROM_ADDRESS = Variable.get("CLOUD_ASSESS_FROM_ADDRESS")  
-GMAIL_CREDENTIALS = Variable.get("CLOUD_ASSESS_GMAIL_CREDENTIALS")  
+CLOUD_ASSESS_FROM_ADDRESS = Variable.get("AKAMAI_CLOUD_ASSESS_FROM_ADDRESS")  
+GMAIL_CREDENTIALS = Variable.get("AKAMAI_CLOUD_ASSESS_GMAIL_CREDENTIALS")  
 LAST_PROCESSED_EMAIL_FILE = "/appz/cache/last_processed_email.json"
 ATTACHMENT_DIR = "/appz/data/attachments/"
 
