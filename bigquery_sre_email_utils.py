@@ -537,7 +537,7 @@ def send_reply(ti, **context):
     cc_emails = ', '.join(all_emails - {last_sender})
     
     msg = MIMEMultipart()
-    msg["From"] = self_email
+    msg["From"] = f"BigQuery SRE agent via lowtouch.ai <{self_email}>"
     msg["To"] = last_sender
     if cc_emails:
         msg["Cc"] = cc_emails
@@ -564,12 +564,12 @@ def ask_for_details(ti, **context):
     detail_prompt = f"""
     The user asked: {prompt}
     Provide a detailed explanation regarding their request about BigQuery SRE metrics. 
-    Structure the response as a reply email starting with a greeting (eg : Hi {sender_name} ,  Hello), followed by a detailed paragraph explanation, and include a few bullet points summarizing the key aspects. 
+    Structure the response as a reply email starting with a greeting (eg : Hi {sender_name}), followed by a detailed paragraph explanation, and include a few bullet points summarizing the key aspects. 
     Ensure the response is clear, concise, and formatted appropriately for an email body.
     ends the email body with 
     Thanks,
-    BigQuery SRE Team
-    lowtouch.ai
+    
+    BigQuery SRE agent @lowtouch.ai
     """
     response = get_ai_response(detail_prompt,history)
     ti.xcom_push(key="analysis_report", value=response)
@@ -582,12 +582,12 @@ def usage_analyzer(ti, **context):
     usage_prompt = f"""
     The user asked: {prompt}
     Provide a detailed analysis of the requested BigQuery SRE metrics, focusing on execution count and slot usage based on the report.
-    Structure the response as a reply email starting with a greeting (eg : Hi {sender_name} ,  Hello), followed by a detailed explanation, and include a list of findings formatted as bullet points.
+    Structure the response as a reply email starting with a greeting (eg : Hi {sender_name} ), followed by a detailed explanation, and include a list of findings formatted as bullet points.
     Ensure the response is clear, concise, and formatted appropriately for an email body.
     ends the email body with 
     Thanks,
-    BigQuery SRE Team
-    lowtouch.ai
+    
+    BigQuery SRE agent @lowtouch.ai
     """
     response = get_ai_response(usage_prompt,history)
     ti.xcom_push(key="analysis_report", value=response)
@@ -601,7 +601,7 @@ def non_relevant_question(ti, **context):
             <p>Hi {sender_name},</p>
             <p>Thank you for reaching out. Unfortunately, I am not trained to answer your query at this time.</p>
             <p>If you have any other questions or need assistance, feel free to let us know.</p>
-            <p>Best regards,<br>BigQuery SRE Team<br>lowtouch.ai</p>
+            <p>Best regards,<br><br>BigQuery SRE agent @lowtouch.ai</p>
         </body>
     </html>
     """
@@ -615,14 +615,14 @@ def convert_to_html(ti, **context):
     Convert the following email body into valid HTML format for a professional reply email.
 
     Requirements:
-    - Start with a greeting like "Hi {sender_name}," or "Hello {sender_name}," (if recipient name is not there just use Hi or Hello Only not mention [recipient name] in the final HTML).
+    - Start with a greeting like "Hi {sender_name}," or "Hello {sender_name}," .
     - Preserve all structure using only basic HTML tags (<p>, <b>, <h1>-<h3>, <ul>, <li>, <code>, <br>).
     - Do NOT include any inline styles, colors, padding, or CSS.
     - Convert headings, bullet points, and bold text appropriately.
     - At the end of the email, append exactly:
-        Thanks,<br>
-        BigQuery SRE Team<br>
-        lowtouch.ai
+        Thanks,<br><br>
+        
+        BigQuery SRE agent @lowtouch.ai
     - Do NOT include an email subject line or any commentary.
 
     email content:
