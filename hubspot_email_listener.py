@@ -355,7 +355,7 @@ def mark_message_as_read(service, message_id):
 
 def get_ai_response(prompt, conversation_history=None, expect_json=False):
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v4'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
         messages = []
 
         if expect_json:
@@ -553,7 +553,7 @@ def trigger_meeting_minutes(**kwargs):
         task_id = f"trigger_search_{email['id'].replace('-', '_')}"
         trigger_task = TriggerDagRunOperator(
             task_id=task_id,
-            trigger_dag_id="hubspot_search",
+            trigger_dag_id="hubspot_search_entities",
             conf=trigger_conf,
         )
         trigger_task.execute(context=kwargs)
@@ -582,7 +582,7 @@ def trigger_continuation_dag(**kwargs):
         task_id = f"trigger_continuation_{email['id'].replace('-', '_')}"
         trigger_task = TriggerDagRunOperator(
             task_id=task_id,
-            trigger_dag_id="hubspot_create",
+            trigger_dag_id="hubspot_create_objects",
             conf=trigger_conf,
         )
         trigger_task.execute(context=kwargs)
@@ -603,7 +603,7 @@ except FileNotFoundError:
     pass
 
 with DAG(
-    "hubspot_monitor",
+    "hubspot_monitor_mailbox",
     default_args=default_args,
     schedule_interval=timedelta(minutes=1),
     catchup=False,
