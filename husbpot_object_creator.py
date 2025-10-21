@@ -48,149 +48,9 @@ def authenticate_gmail():
         logging.error(f"Failed to authenticate Gmail: {str(e)}")
         return None
 
-def get_thread_context():
-    try:
-        if os.path.exists(THREAD_CONTEXT_FILE):
-            with open(THREAD_CONTEXT_FILE, "r") as f:
-                return json.load(f)
-    except Exception as e:
-        logging.error(f"Error reading {THREAD_CONTEXT_FILE}: {e}")
-        return {}
-
-def update_thread_context(thread_id, context_data):
-    os.makedirs(os.path.dirname(THREAD_CONTEXT_FILE), exist_ok=True)
-    try:
-        contexts = get_thread_context()
-        contexts[thread_id] = context_data
-        # Validate JSON before writing
-        json_string = json.dumps(contexts, indent=2)
-        json.loads(json_string)  # Ensure it’s valid JSON
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            f.write(json_string)
-        logging.info(f"Updated thread context for thread_id={thread_id}")
-    except json.JSONDecodeError as e:
-        logging.error(f"Invalid JSON format when writing to {THREAD_CONTEXT_FILE}: {e}")
-        raise
-    except Exception as e:
-        logging.error(f"Error writing to {THREAD_CONTEXT_FILE}: {e}")
-        raise
-
-def decode_email_payload(msg):
-    try:
-        if msg.is_multipart():
-            for part in msg.walk():
-                content_type = part.get_content_type()
-                if content_type in ["text/plain", "text/html"]:
-                    try:
-                        return part.get_payload(decode=True).decode()
-                    except UnicodeDecodeError:
-                        return part.get_payload(decode=True).decode('latin-1')
-        else:
-            try:
-                return msg.get_payload(decode=True).decode()
-            except UnicodeDecodeError:
-                return msg.get_payload(decode=True).decode('latin-1')
-        return ""
-    except Exception as e:
-        logging.error(f"Error decoding email payload: {e}")
-        return ""
-
-def get_email_thread(service, email_data):
-    try:
-        if not email_data or "headers" not in email_data or not isinstance(email_data.get("headers"), dict):
-            logging.error("Invalid email_data: 'headers' key missing or not a dictionary")
-            return []
-
-        thread_id = email_data.get("threadId")
-        message_id = email_data["headers"].get("Message-ID", "")
-        email_id = email_data.get("id", "")
-
-        if not thread_id:
-            logging.warning(f"No thread ID provided for message ID {message_id}. Querying Gmail API.")
-            query_result = service.users().messages().list(userId="me", q=f"rfc822msgid:{message_id}").execute()
-            messages = query_result.get("messages", [])
-            if messages:
-                message = service.users().messages().get(userId="me", id=messages[0]["id"]).execute()
-                thread_id = message.get("threadId")
-                logging.info(f"Resolved thread ID: {thread_id} for message ID {message_id}")
-
-        if not thread_id:
-            logging.warning(f"No thread ID resolved for message ID {message_id}. Treating as single email.")
-            raw_message = service.users().messages().get(userId="me", id=email_id, format="raw").execute()
-            msg = message_from_bytes(base64.urlsafe_b64decode(raw_message["raw"]))
-            content = decode_email_payload(msg)
-            headers = email_data.get("headers", {})
-            from_address = headers.get("From", "").lower()
-            is_from_bot = HUBSPOT_FROM_ADDRESS.lower() in from_address
-            email_entry = {
-                "headers": headers,
-                "content": content.strip(),
-                "timestamp": int(email_data.get("internalDate", 0)),
-                "from_bot": is_from_bot,
-                "message_id": email_id
-            }
-            logging.info(f"Single email processed: message_id={email_id}, from={headers.get('From', 'Unknown')}, timestamp={email_entry['timestamp']}")
-            return [email_entry]
-
-        email_thread = []
-        page_token = None
-        retries = 3
-        for attempt in range(retries):
-            try:
-                while True:
-                    thread_request = service.users().threads().get(userId="me", id=thread_id)
-                    if page_token:
-                        thread_request = thread_request.pageToken(page_token)
-                    thread = thread_request.execute()
-                    messages = thread.get("messages", [])
-                    email_thread.extend(messages)
-                    page_token = thread.get("nextPageToken")
-                    if not page_token:
-                        break
-                break
-            except HttpError as e:
-                logging.error(f"Attempt {attempt+1} failed to fetch thread {thread_id}: {e}")
-                if attempt < retries - 1:
-                    time.sleep(2 ** attempt)
-                else:
-                    logging.error(f"Failed to fetch thread {thread_id} after {retries} attempts")
-                    return []
-
-        logging.info(f"Processing thread {thread_id} with {len(email_thread)} messages")
-        processed_thread = []
-        for msg in email_thread:
-            raw_msg = base64.urlsafe_b64decode(msg["raw"]) if "raw" in msg else None
-            if not raw_msg:
-                raw_message = service.users().messages().get(userId="me", id=msg["id"], format="raw").execute()
-                raw_msg = base64.urlsafe_b64decode(raw_message["raw"])
-
-            email_msg = message_from_bytes(raw_msg)
-            headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
-            content = decode_email_payload(email_msg)
-            from_address = headers.get("From", "").lower()
-            is_from_bot = HUBSPOT_FROM_ADDRESS.lower() in from_address
-
-            processed_thread.append({
-                "headers": headers,
-                "content": content.strip(),
-                "timestamp": int(msg.get("internalDate", 0)),
-                "from_bot": is_from_bot,
-                "message_id": msg.get("id", "")
-            })
-
-        processed_thread.sort(key=lambda x: x.get("timestamp", 0))
-
-        logging.info(f"Retrieved thread {thread_id} with {len(processed_thread)} messages")
-        for idx, email in enumerate(processed_thread, 1):
-            logging.info(f"Email {idx}: message_id={email['message_id']}, from={email['headers'].get('From', 'Unknown')}, timestamp={email['timestamp']}, from_bot={email['from_bot']}, content_preview={email['content'][:100]}...")
-        return processed_thread
-    except Exception as e:
-        logging.error(f"Error retrieving email thread for thread_id={thread_id}: {e}", exc_info=True)
-        return []
-
 def get_ai_response(prompt, conversation_history=None, expect_json=False):
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'HubSpotWorkflow'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
         messages = []
 
         if expect_json:
@@ -201,10 +61,14 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
 
         if conversation_history:
             for item in conversation_history:
-                messages.append({"role": "user", "content": item["prompt"]})
-                messages.append({"role": "assistant", "content": item["response"]})
+                if "role" in item and "content" in item:
+                    messages.append({"role": item["role"], "content": item["content"]})
+                else:
+                    messages.append({"role": "user", "content": item.get("prompt", "")})
+                    messages.append({"role": "assistant", "content": item.get("response", "")})
+                    
         messages.append({"role": "user", "content": prompt})
-        response = client.chat(model='hubspot:v4', messages=messages, stream=False)
+        response = client.chat(model='hubspot:v6af', messages=messages, stream=False)
         ai_content = response.message.content
         ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
 
@@ -219,14 +83,9 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
             return json.dumps({"error": str(e)})
         return f"<html><body>Error processing AI request: {str(e)}</body></html>"
 
-import re
-
 def parse_email_addresses(address_string):
-    """Parse email addresses from To/Cc/Bcc header strings"""
     if not address_string:
         return []
-    
-    # Split by comma and clean up each address
     addresses = []
     for addr in address_string.split(','):
         addr = addr.strip()
@@ -235,13 +94,10 @@ def parse_email_addresses(address_string):
     return addresses
 
 def extract_all_recipients(email_data):
-    """Extract all recipients from To, Cc, and Bcc headers"""
     headers = email_data.get("headers", {})
-    
     to_recipients = parse_email_addresses(headers.get("To", ""))
     cc_recipients = parse_email_addresses(headers.get("Cc", ""))
     bcc_recipients = parse_email_addresses(headers.get("Bcc", ""))
-    
     return {
         "to": to_recipients,
         "cc": cc_recipients,
@@ -249,35 +105,24 @@ def extract_all_recipients(email_data):
     }
 
 def send_email(service, recipient, subject, body, in_reply_to, references, cc=None, bcc=None):
-    """Updated send_email function with BCC support"""
     try:
         msg = MIMEMultipart()
-        msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
+        msg["From"] = f"HubSpot via lowtouch.ai <{HUB_FROM_ADDRESS}>"
         msg["To"] = recipient
         
         if cc:
-            # Clean Cc: Remove bot's own email if present, and ensure it's a string
-            cc_list = [email.strip() for email in cc.split(',') if email.strip().lower() != HUBSPOT_FROM_ADDRESS.lower()]
+            cc_list = [email.strip() for email in cc.split(',') if email.strip().lower() != HUB_FROM_ADDRESS.lower()]
             cleaned_cc = ', '.join(cc_list)
             if cleaned_cc:
                 msg["Cc"] = cleaned_cc
                 logging.info(f"Including Cc in email: {cleaned_cc}")
-            else:
-                logging.info("Cc provided but empty after cleaning, skipping.")
-        else:
-            logging.info("No Cc provided.")
             
         if bcc:
-            # Clean Bcc: Remove bot's own email if present
-            bcc_list = [email.strip() for email in bcc.split(',') if email.strip().lower() != HUBSPOT_FROM_ADDRESS.lower()]
+            bcc_list = [email.strip() for email in bcc.split(',') if email.strip().lower() != HUB_FROM_ADDRESS.lower()]
             cleaned_bcc = ', '.join(bcc_list)
             if cleaned_bcc:
                 msg["Bcc"] = cleaned_bcc
                 logging.info(f"Including Bcc in email: {cleaned_bcc}")
-            else:
-                logging.info("Bcc provided but empty after cleaning, skipping.")
-        else:
-            logging.info("No Bcc provided.")
             
         msg["Subject"] = subject
         msg["In-Reply-To"] = in_reply_to
@@ -286,378 +131,248 @@ def send_email(service, recipient, subject, body, in_reply_to, references, cc=No
         
         raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
         result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
-        logging.info(f"Email sent to {recipient} (Cc: {cc if cc else 'None'}, Bcc: {bcc if bcc else 'None'})")
+        logging.info(f"Email sent to {recipient}")
         return result
     except Exception as e:
         logging.error(f"Failed to send email: {e}")
         return None
 
+# ============================================================================
+# DAG TASK FUNCTIONS
+# ============================================================================
+
+def load_context_from_dag_run(ti, **context):
+    """Load context from DAG run configuration passed by search or monitor DAG"""
+    dag_run_conf = context['dag_run'].conf
+    
+    # Extract all necessary data
+    thread_id = dag_run_conf.get("thread_id")
+    search_results = dag_run_conf.get("search_results", {})
+    email_data = dag_run_conf.get("email_data", {})
+    chat_history = dag_run_conf.get("chat_history", [])
+    thread_history = dag_run_conf.get("thread_history", [])
+    
+    logging.info(f"=== LOADING CONTEXT FROM DAG RUN ===")
+    logging.info(f"Thread ID: {thread_id}")
+    logging.info(f"Chat history length: {len(chat_history)}")
+    logging.info(f"Thread history length: {len(thread_history)}")
+    logging.info(f"Search results available: {bool(search_results)}")
+    
+    # Push to XCom
+    ti.xcom_push(key="thread_id", value=thread_id)
+    ti.xcom_push(key="search_results", value=search_results)
+    ti.xcom_push(key="email_data", value=email_data)
+    ti.xcom_push(key="chat_history", value=chat_history)
+    ti.xcom_push(key="thread_history", value=thread_history)
+    
+    return {
+        "thread_id": thread_id,
+        "search_results": search_results,
+        "email_data": email_data,
+        "chat_history": chat_history,
+        "thread_history": thread_history
+    }
+
 def analyze_user_response(ti, **context):
-    conf = context["dag_run"].conf
-    thread_id = conf.get("thread_id")
-    search_results = conf.get("search_results", {})
-    create_results = conf.get("create_results", {})
-    logging.info(f"Search results: {search_results}")
-    logging.info(f"Create results: {create_results}")
+    """Analyze user's message to determine intent and entities using conversation history"""
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    thread_history = ti.xcom_pull(key="thread_history", default=[])
+    thread_id = ti.xcom_pull(key="thread_id")
     
     if not thread_id:
-        logging.error("No thread_id provided in dag_run.conf")
-        results = {
+        logging.error("No thread_id provided")
+        default_result = {
             "status": "error",
-            "error_message": "No thread_id provided in dag_run.conf",
-            "next_steps": ["Provide a valid thread_id"],
-            "entities_to_create": {},
-            "entities_to_update": {},
+            "error_message": "No thread_id provided",
             "user_intent": "ERROR",
             "confidence_level": "low",
-            "tasks_to_execute": ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
-        }
-        ti.xcom_push(key="analysis_results", value=results)
-        return results
-
-    thread_context = get_thread_context().get(thread_id, {})
-    email_data = conf.get("email_data", thread_context.get("email_data", {}))
-    full_thread_history = conf.get("full_thread_history", thread_context.get("thread_history", []))
-    user_response_email = conf.get("user_response_email", email_data)
-
-    logging.info(f"=== CONTINUATION DAG INPUT DEBUG ===")
-    logging.info(f"Conf keys: {list(conf.keys())}")
-    logging.info(f"Thread ID: {thread_id}")
-    logging.info(f"Full thread history length: {len(full_thread_history)}")
-    logging.info(f"Search results new_entity_details: {search_results.get('new_entity_details', {})}")
-    logging.info(f"Create results: {create_results}")
-
-    service = authenticate_gmail()
-    if not service:
-        logging.error("Gmail authentication failed, skipping analysis.")
-        results = {
-            "status": "error",
-            "error_message": "Gmail authentication failed",
-            "next_steps": ["Retry authentication"],
             "entities_to_create": {},
             "entities_to_update": {},
-            "selected_entities": search_results.get("selected_entities", {}),
-            "user_intent": "ERROR",
-            "confidence_level": "low",
+            "selected_entities": {},
             "tasks_to_execute": ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
         }
-        ti.xcom_push(key="analysis_results", value=results)
-        return results
-
-    if not full_thread_history:
-        logging.warning(f"No thread history in conf for thread_id={thread_id}, fetching from Gmail API")
-        full_thread_history = get_email_thread(service, email_data)
-        if not full_thread_history:
-            logging.error(f"Failed to fetch thread history for thread_id={thread_id}")
-            results = {
-                "status": "error",
-                "error_message": "Failed to fetch thread history",
-                "next_steps": ["Verify thread_id and Gmail API access"],
-                "entities_to_create": {},
-                "entities_to_update": {},
-                "selected_entities": search_results.get("selected_entities", {}),
-                "user_intent": "ERROR",
-                "confidence_level": "low",
-                "tasks_to_execute": ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
-            }
-            ti.xcom_push(key="analysis_results", value=results)
-            return results
-
-    # Normalize original entities from search_results
-    original_entities_normalized = {
-        "contacts": search_results.get("new_entity_details", {}).get("contacts", []),
-        "companies": search_results.get("new_entity_details", {}).get("companies", []),
-        "deals": search_results.get("new_entity_details", {}).get("deals", []),
-        "meetings": [search_results.get("new_entity_details", {}).get("meeting_details", {})] if search_results.get("new_entity_details", {}).get("meeting_details") else [],
-        "notes": search_results.get("new_entity_details", {}).get("notes", []),
-        "tasks": search_results.get("new_entity_details", {}).get("tasks", [])
-    }
-
-    # Get entities from search_results - THESE ARE THE EXISTING ENTITIES FOUND
-    existing_entities = {
-        "contacts": search_results.get("contact_results", {}).get("results", []),
-        "companies": search_results.get("company_results", {}).get("results", []),
-        "deals": search_results.get("deal_results", {}).get("results", []),
-        "meetings": [],
-        "notes": [],
-        "tasks": []
-    }
-
-    prior_analysis_results = thread_context.get("analysis_results", {})
-    prior_selected_entities = prior_analysis_results.get("selected_entities", {}) if prior_analysis_results else {}
-    # Initialize selected entities (will be filtered based on user selection)
-    selected_entities = {
-        "contacts": prior_selected_entities.get("contacts", existing_entities["contacts"].copy()),
-        "companies": prior_selected_entities.get("companies", existing_entities["companies"].copy()),
-        "deals": prior_selected_entities.get("deals", existing_entities["deals"].copy()),
-        "meetings": prior_selected_entities.get("meetings", []),
-        "notes": prior_selected_entities.get("notes", []),
-        "tasks": prior_selected_entities.get("tasks", [])
-    }
-    logging.info(f"Initialized selected_entities from prior context: Contacts={len(selected_entities['contacts'])}, Companies={len(selected_entities['companies'])}, Deals={len(selected_entities['deals'])}")
-
-    # Merge create_results into selected_entities (treat as existing entities)
-    if create_results:
-        previous_contacts = create_results.get("created_contacts", {}).get("results", []) + create_results.get("updated_contacts", {}).get("results", [])
-        previous_companies = create_results.get("created_companies", {}).get("results", []) + create_results.get("updated_companies", {}).get("results", [])
-        previous_deals = create_results.get("created_deals", {}).get("results", []) + create_results.get("updated_deals", {}).get("results", [])
-        previous_meetings = create_results.get("created_meetings", {}).get("results", []) + create_results.get("updated_meetings", {}).get("results", [])
-        previous_notes = create_results.get("created_notes", {}).get("results", []) + create_results.get("updated_notes", {}).get("results", [])
-        previous_tasks = create_results.get("created_tasks", {}).get("results", []) + create_results.get("updated_tasks", {}).get("results", [])
-
-        selected_entities["contacts"].extend([{"contactId": c.get("id"), **c.get("details", {})} for c in previous_contacts])
-        selected_entities["companies"].extend([{"companyId": c.get("id"), **c.get("details", {})} for c in previous_companies])
-        selected_entities["deals"].extend([{"dealId": d.get("id"), **d.get("details", {})} for d in previous_deals])
-        selected_entities["meetings"].extend([{"meetingId": m.get("id"), **m.get("details", {})} for m in previous_meetings])
-        selected_entities["notes"].extend([{"noteId": n.get("id"), **n.get("details", {})} for n in previous_notes])
-        selected_entities["tasks"].extend([{"taskId": t.get("id"), **t.get("details", {})} for t in previous_tasks])
-
-        logging.info(f"Merged previous create_results into selected_entities. Updated selected_entities: {selected_entities}")
-
-    thread_content = ""
-    bot_messages = []
-    user_messages = []
-    latest_user_response = ""
-
-    for idx, email in enumerate(full_thread_history, 1):
+        ti.xcom_push(key="analysis_results", value=default_result)
+        return default_result
+    
+    # Build complete conversation context
+    conversation_context = ""
+    
+    # Add chat history (structured conversation between bot and user)
+    for msg in chat_history:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        conversation_context += f"[{role.upper()}]: {content}\n\n"
+    
+    # Add thread history (email messages with metadata)
+    for idx, email in enumerate(thread_history, 1):
         content = email.get("content", "").strip()
         if content:
             soup = BeautifulSoup(content, "html.parser")
             clean_content = soup.get_text(separator=" ", strip=True)
             sender = email['headers'].get('From', 'Unknown')
-            timestamp = email.get('timestamp', 0)
             is_from_bot = email.get('from_bot', False)
-
-            if is_from_bot:
-                bot_messages.append({
-                    "content": clean_content,
-                    "timestamp": timestamp,
-                    "email_index": idx
-                })
-                thread_content += f"### Bot Message {idx} (From: {sender})\n{clean_content}\n\n"
-            else:
-                user_messages.append({
-                    "content": clean_content,
-                    "timestamp": timestamp,
-                    "email_index": idx,
-                    "sender": sender
-                })
-                thread_content += f"### User Message {idx} (From: {sender})\n{clean_content}\n\n"
-                if idx == len(full_thread_history):
-                    latest_user_response = clean_content
-
-    if not thread_content:
-        logging.error("No valid thread content found")
-        results = {
+            role_label = "BOT" if is_from_bot else "USER"
+            conversation_context += f"[{role_label} EMAIL {idx} - From: {sender}]: {clean_content}\n\n"
+    
+    if not conversation_context.strip():
+        logging.error("No valid conversation content found")
+        default_result = {
             "status": "error",
-            "error_message": "No valid thread content found. Unable to process.",
-            "next_steps": ["Send a new email to restart the workflow"],
-            "entities_to_create": {},
-            "entities_to_update": {},
-            "selected_entities": selected_entities,
+            "error_message": "No valid conversation content found",
             "user_intent": "ERROR",
             "confidence_level": "low",
-            "tasks_to_execute": ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
+            "entities_to_create": {},
+            "entities_to_update": {},
+            "selected_entities": {},
+            "tasks_to_execute": ["compose_response_html", "collect_and_save_results", "send_final_email"]
         }
-        ti.xcom_push(key="analysis_results", value=results)
-        return results
+        ti.xcom_push(key="analysis_results", value=default_result)
+        logging.info(f"Analysis results pushed to XCom: {default_result}")
+        return default_result
+    
+    # Get latest user message for context
+    latest_user_message = ""
+    sender_email = ""
+    sender_name = ""
+    for email in reversed(thread_history):
+        if not email.get('from_bot', True):
+            if email.get("content"):
+                soup = BeautifulSoup(email.get("content", ""), "html.parser")
+                latest_user_message = soup.get_text(separator=" ", strip=True)
+                sender_email = email.get('headers', {}).get('From', '')
+                # Extract name from "Name <email>" format
+                import re
+                match = re.match(r'(.+?)\s*<(.+?)>', sender_email)
+                if match:
+                    sender_name = match.group(1).strip()
+                    sender_email = match.group(2).strip()
+                break
+    
+    # CRITICAL: Extract entities from conversation history, NOT search
+    prompt = f"""You are an AI assistant analyzing an email conversation to determine user intent and extract HubSpot entities FROM THE CONVERSATION HISTORY ONLY.
 
-    # Updated analysis prompt to rely on AI interpretation
-    analysis_prompt = f"""
-You are an AI assistant tasked with analyzing the user's latest response in the context of an email thread to determine their intent and decide which entities to use, create, or update. Focus on the semantic meaning of the user's response, not just specific keywords. Use the full conversation thread, existing entities, and proposed new entities to make informed decisions.
+FULL CONVERSATION HISTORY:
+{conversation_context}
 
-EXISTING ENTITIES FOUND IN SEARCH (presented to the user as options):
-CONTACTS: {json.dumps(existing_entities["contacts"], indent=2)}
-COMPANIES: {json.dumps(existing_entities["companies"], indent=2)}  
-DEALS: {json.dumps(existing_entities["deals"], indent=2)}
+LATEST USER MESSAGE:
+{latest_user_message}
 
-ORIGINAL PROPOSED NEW ENTITIES (suggested for creation in the initial workflow):
-{json.dumps(original_entities_normalized, indent=2)}
+SENDER INFO:
+Name: {sender_name}
+Email: {sender_email}
 
-PREVIOUSLY CREATED/UPDATED ENTITIES (from prior actions, for reference):
-{json.dumps({
-    "created_contacts": create_results.get("created_contacts", {}).get("results", []),
-    "created_companies": create_results.get("created_companies", {}).get("results", []),
-    "created_deals": create_results.get("created_deals", {}).get("results", []),
-    "created_meetings": create_results.get("created_meetings", {}).get("results", []),
-    "created_notes": create_results.get("created_notes", {}).get("results", []),
-    "created_tasks": create_results.get("created_tasks", {}).get("results", [])
-}, indent=2)}
+CRITICAL INSTRUCTIONS:
+- You MUST extract entities ONLY from the conversation history above
+- DO NOT search for entities or create new searches
+- The bot's previous messages contain tables with entity details (IDs, names, emails, etc.)
+- Parse these tables to extract existing entities and proposed new entities
+- The user's latest message indicates their intent (confirm, modify, select specific, etc.)
 
-FULL CONVERSATION THREAD:
-{thread_content}
+ENTITY EXTRACTION RULES:
+1. **Existing Entities**: Look for tables in bot messages labeled "Existing Contact Details", "Existing Company Details", "Existing Deal Details"
+   - Extract: contactId, firstname, lastname, email, phone, address, jobtitle
+   - Extract: companyId, name, domain, address, city, state, zip, country, phone, description, type
+   - Extract: dealId, dealName, dealLabelName (stage), dealAmount, closeDate, dealOwnerName
 
-LATEST USER RESPONSE:
-{latest_user_response}
+2. **Proposed New Entities**: Look for tables labeled "Objects to be Created" with subsections for "New Contacts", "New Companies", "New Deals", "Notes", "Tasks", "Meeting Details"
+   - Extract all fields from these tables exactly as shown
 
-INSTRUCTIONS:
-1. **Determine User Intent**: Based on the latest user response and thread context, identify the user's intent. Possible intents are:
-   - "CONFIRM": User agrees to proceed with proposed entities (existing or new).
-   - "MODIFY": User requests changes to existing or proposed entities.
-   - "CREATE_NEW": User wants to create new entities, ignoring existing ones.
-   - "SELECT_SPECIFIC": User selects specific existing entities from multiple options.
-   - "CLARIFY": User needs clarification or provides unclear instructions.
-   - "CANCEL": User wants to stop the workflow.
-   Focus on the meaning of the response, not just keywords. For example, "use the first contact" or "I meant John from Acme" indicates SELECT_SPECIFIC, while "looks good" implies CONFIRM.
-2. **Casual Comment Detection**: ADDITIONALLY, check if the user's response contains casual comments, observations, or informal updates about clients, deals, companies, or business relationships that should be captured as notes. Examples:
-   - "We already kicked off that CRM integration deal with Rohit… feels like things are moving there."
-   - "Had a good call with the team at Acme yesterday"
-   - "John seems happy with our progress so far"
-   - "The client mentioned they want to expand next quarter"
-   If casual comments are found, create notes for them in addition to other requested actions. **Include the speaker's name/email from the email headers in the note content.**
-   
-3. **Entity Handling**:
-   - **Primary Entities (contacts, companies, deals)**:
-     - If the user selects specific existing entities (by name, ID, or details), include only those in `entities_to_use_existing`.
-     - If the user requests new primary entities, include them in `entities_to_create`.
-     - If the user confirms without specifying, include all existing primary entities in `entities_to_use_existing`.
-   - **Secondary Entities (meetings, notes, tasks)**:
-     - If PREVIOUSLY CREATED/UPDATED ENTITIES are NOT present (no prior creations/updates), always include all proposed secondary entities from ORIGINAL PROPOSED NEW ENTITIES in `entities_to_create` unless the user explicitly states to exclude them (e.g., "do not create tasks") or requests specific modifications.
-     - If PREVIOUSLY CREATED/UPDATED ENTITIES are present, follow the user's intent: 
-       - For "CONFIRM" or no mention: include all proposed secondary entities in `entities_to_create` (or `entities_to_update` if modifications are implied).
-       - For "MODIFY" or "SELECT_SPECIFIC": include only the specified or modified versions in `entities_to_create` or `entities_to_update`.
-       - For "CREATE_NEW": include all in `entities_to_create`, overriding priors.
-       - For "CLARIFY" or "CANCEL": do not include any.
-     - If the user response only addresses primary entities (e.g., confirms contacts/companies), default to including all proposed secondary entities in `entities_to_create` unless explicitly excluded.
+3. **User Intent Detection**:
+   - "CONFIRM": User agrees (e.g., "proceed", "looks good", "yes", "correct", "go ahead")
+   - "MODIFY": User requests changes (e.g., "change the date", "update the amount", "fix the name")
+   - "CREATE_NEW": User wants new entities ignoring existing (e.g., "create new contact", "don't use existing")
+   - "SELECT_SPECIFIC": User selects specific entities (e.g., "use the first contact", "select John from Acme")
+   - "CLARIFY": User needs clarification or provides unclear instructions
+   - "CANCEL": User wants to stop (e.g., "cancel", "never mind", "stop")
+
 4. **Selection Logic**:
-   - If multiple entities of a type (e.g., contacts) were presented, and the user specifies which to use (e.g., by name, ID, or position like "first one"), only include those in `entities_to_use_existing`.
-   - If the user provides vague references (e.g., "use John"), match to the most likely entity based on details like name or company.
-   - If no specific selection is made but the user confirms, include all existing entities.
+   - If user says "proceed" or "confirm" without specifying → Include ALL existing entities in `selected_entities` and ALL proposed new entities in `entities_to_create`
+   - If user specifies particular entities (by name, ID, or position) → Include only those in `selected_entities`
+   - If user requests modifications → Include modified versions in `entities_to_update`
+   - If user mentions casual comments about clients/deals → Add as notes in `entities_to_create`
 
-5. **Confidence Level**: Assign "high", "medium", or "low" based on how clear the user's intent and selections are. Use "low" for ambiguous responses requiring clarification.
+5. **Casual Comment Handling**:
+   - If the latest message is a casual comment (opinion, feedback, observation) with NO action requests:
+     - Set intent to "CASUAL_COMMENT"
+     - Create a note with the comment text
+     - Include speaker name and email from SENDER INFO
+     - Use current timestamp
+     - DO NOT create contacts, companies, deals, tasks, or meetings
+     - Set casual_comments_detected to true
+   - Examples of casual comments:
+     * "It was great to have this deal and I think its an interesting one"
+     * "This client is really engaged"
+     * "Looking forward to working with them"
+     * "Great progress on this deal"
 
-6. **Reasoning**: Provide a brief explanation of how you determined the intent, selections, and entity actions.
 
+6. **Secondary Entities (meetings, notes, tasks)**:
+   - For CASUAL_COMMENT intent: Only create the note with the comment, nothing else
+   - If user confirms without modifications → Include all proposed secondary entities in `entities_to_create`
+   - If user modifies primary entities only → Still include all secondary entities unless explicitly excluded
+   - If user says "no tasks" or "skip the meeting" → Exclude those specific types
 
 Return ONLY valid JSON:
 {{
-    "user_intent": "...",
-    "confidence_level": "...",
-    "entity_selections": {{
-        "contacts": [{{"contactId": "...", "reason": "User specified this contact by name/details"}}],
-        "companies": [{{"companyId": "...", "reason": "User specified this company"}}],
-        "deals": [{{"dealId": "...", "reason": "User specified this deal"}}]
-    }},
-    "requested_changes": {{
-        "contacts": [],
-        "companies": [],
-        "deals": [],
-        "meetings": [],
-        "notes": [],
-        "tasks": []
-    }},
-    "entities_to_use_existing": {{
-        "contacts": [],
-        "companies": [],
-        "deals": [],
-        "meetings": [],
-        "notes": [],
-        "tasks": []
+    "user_intent": "CONFIRM|MODIFY|CREATE_NEW|SELECT_SPECIFIC|CLARIFY|CANCEL",
+    "confidence_level": "high|medium|low",
+    "selected_entities": {{
+        "contacts": [{{"contactId": "...", "firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "..."}}],
+        "companies": [{{"companyId": "...", "name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
+        "deals": [{{"dealId": "...", "dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}]
     }},
     "entities_to_create": {{
-        "contacts": [],
-        "companies": [],
-        "deals": [],
-        "meetings": [],
-        "notes": [
-        "note_content": "[sender_name] mentioned [casual_comment_text]",
-            "timestamp": "2025-01-XX...",
-            "speaker_name": "[extracted_from_From_header]",
-            "speaker_email": "[extracted_email]"], //
-        "tasks": []
+        "contacts": [{{"firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "..."}}],
+        "companies": [{{"name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
+        "deals": [{{"dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}],
+        "meetings": [{{"meeting_title": "...", "start_time": "...", "end_time": "...", "location": "...", "outcome": "...", "timestamp": "...", "attendees": [], "meeting_type": "...", "meeting_status": "..."}}],
+        "notes": [{{"note_content": "...", "timestamp": "...", "note_type": "...", "speaker_name": "{{sender_name}}", "speaker_email": "{{sender_email}}"}}],
+        "tasks": [{{"task_details": "...", "task_owner_name": "...", "task_owner_id": "...", "due_date": "...", "priority": "...", "task_index": 1}}]
     }},
     "entities_to_update": {{
-        "contacts": [],
-        "companies": [],
-        "deals": [],
+        "contacts": [{{"contactId": "...", "updates": {{"field": "new_value"}}}}],
+        "companies": [{{"companyId": "...", "updates": {{"field": "new_value"}}}}],
+        "deals": [{{"dealId": "...", "updates": {{"field": "new_value"}}}}],
         "meetings": [],
         "notes": [],
-        "tasks": []
+        "tasks": [{{"taskId": "...", "updates": {{"field": "new_value"}}}}]
     }},
-    "casual_comments_detected": true/false,
-    "reasoning": "..."
+    "casual_comments_detected": true|false,
+    "reasoning": "Brief explanation of intent, selections, and entity actions. For casual comments, explain why it's just a comment and not an action request."
 }}
+
+CRITICAL REMINDERS:
+- Extract entities FROM conversation history tables, NOT by searching
+- Parse HTML tables in bot messages to extract entity details
+- For CASUAL_COMMENT intent: Create ONLY a note, no other entities
+- For other intents: Default to including ALL entities if user confirms without specifics
+- Always preserve entity IDs from existing entities
+- Use empty arrays [] for entity types not mentioned
+- Current timestamp format: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
 
-    ai_analysis = get_ai_response(analysis_prompt, expect_json=True)
+    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
     
     try:
-        parsed_analysis = json.loads(ai_analysis)
+        parsed_analysis = json.loads(response)
         user_intent = parsed_analysis.get("user_intent", "CONFIRM")
         confidence_level = parsed_analysis.get("confidence_level", "medium")
-        entity_selections = parsed_analysis.get("entity_selections", {})
-        requested_changes = parsed_analysis.get("requested_changes", {})
-        entities_to_use_existing = parsed_analysis.get("entities_to_use_existing", {})
         entities_to_create = parsed_analysis.get("entities_to_create", {})
         entities_to_update = parsed_analysis.get("entities_to_update", {})
-        reasoning = parsed_analysis.get("reasoning", "")
+        selected_entities = parsed_analysis.get("selected_entities", {})
         
-        # Apply entity filtering based on user selections
-        filtered_selected_entities = {
-            "contacts": [],
-            "companies": [],
-            "deals": [],
-            "meetings": selected_entities["meetings"],  # These typically don't have multiple options
-            "notes": selected_entities["notes"],
-            "tasks": selected_entities["tasks"]
-        }
-        
-        # Filter contacts based on user selection
-        if entity_selections.get("contacts"):
-            selected_contact_ids = [sel["contactId"] for sel in entity_selections["contacts"]]
-            filtered_selected_entities["contacts"] = [
-                contact for contact in selected_entities["contacts"] 
-                if contact.get("contactId") in selected_contact_ids
-            ]
-            logging.info(f"Filtered contacts to user selection: {len(filtered_selected_entities['contacts'])} of {len(selected_entities['contacts'])}")
-        else:
-            filtered_selected_entities["contacts"] = prior_selected_entities.get("contacts", selected_entities["contacts"])
-            logging.info(f"No new contact selection; using prior filtered: {len(filtered_selected_entities['contacts'])}")
-            
-        # Filter companies based on user selection  
-        if entity_selections.get("companies"):
-            selected_company_ids = [sel["companyId"] for sel in entity_selections["companies"]]
-            filtered_selected_entities["companies"] = [
-                company for company in selected_entities["companies"]
-                if company.get("companyId") in selected_company_ids
-            ]
-            logging.info(f"Filtered companies to user selection: {len(filtered_selected_entities['companies'])} of {len(selected_entities['companies'])}")
-        else:
-            filtered_selected_entities["companies"] = prior_selected_entities.get("companies", selected_entities["companies"])
-            logging.info(f"No new company selection; using prior filtered: {len(filtered_selected_entities['companies'])}")
-        # Filter deals based on user selection
-        if entity_selections.get("deals"):
-            selected_deal_ids = [sel["dealId"] for sel in entity_selections["deals"]]
-            filtered_selected_entities["deals"] = [
-                deal for deal in selected_entities["deals"]
-                if deal.get("dealId") in selected_deal_ids  
-            ]
-            logging.info(f"Filtered deals to user selection: {len(filtered_selected_entities['deals'])} of {len(selected_entities['deals'])}")
-        else:
-            filtered_selected_entities["deals"] = selected_entities["deals"]
-        
-        # Update selected_entities to use the filtered version
-        selected_entities = filtered_selected_entities
-        
-        logging.info(f"AI Analysis Results:")
-        logging.info(f"User Intent: {user_intent}")
-        logging.info(f"Confidence: {confidence_level}")
-        logging.info(f"Entity Selections: {json.dumps(entity_selections, indent=2)}")
-        logging.info(f"Reasoning: {reasoning}")
-        logging.info(f"Final Selected Entities Count - Contacts: {len(selected_entities['contacts'])}, Companies: {len(selected_entities['companies'])}, Deals: {len(selected_entities['deals'])}")
-        
+        # Determine which tasks to execute
+        tasks_to_execute = []
         should_determine_owner = False
         should_check_task_threshold = False
-
-        if entities_to_create.get("deals") or entities_to_create.get("tasks"):
-            should_determine_owner = True
-        if entities_to_create.get("tasks"):
-            should_check_task_threshold = True
-
-        
-        # Define tasks to execute based on user intent
-        tasks_to_execute = []
-        if user_intent in ["MODIFY", "CONFIRM", "SELECT_SPECIFIC"]:
+        if user_intent == "CASUAL_COMMENT":
+            # For casual comments, only create notes and associations
+            if entities_to_create.get("notes"):
+                tasks_to_execute.append("create_notes")
+            tasks_to_execute.extend(["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"])
+            
+        elif user_intent in ["MODIFY", "CONFIRM", "SELECT_SPECIFIC", "CREATE_NEW"]:
+            # Check for updates first
             if entities_to_update.get("tasks"):
                 tasks_to_execute.append("update_tasks")
             if entities_to_update.get("contacts"):
@@ -670,137 +385,114 @@ Return ONLY valid JSON:
                 tasks_to_execute.append("update_meetings")
             if entities_to_update.get("notes"):
                 tasks_to_execute.append("update_notes")
+            
+            # Check for creates
             if entities_to_create.get("contacts"):
                 tasks_to_execute.append("create_contacts")
             if entities_to_create.get("companies"):
                 tasks_to_execute.append("create_companies")
             if entities_to_create.get("deals"):
                 tasks_to_execute.append("create_deals")
+                should_determine_owner = True
             if entities_to_create.get("meetings"):
                 tasks_to_execute.append("create_meetings")
             if entities_to_create.get("notes"):
                 tasks_to_execute.append("create_notes")
             if entities_to_create.get("tasks"):
                 tasks_to_execute.append("create_tasks")
+                should_determine_owner = True
+                should_check_task_threshold = True
+                
             tasks_to_execute.extend(["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"])
-        elif user_intent == "CREATE_NEW":
-            tasks_to_execute = ["create_contacts", "create_companies", "create_deals", "create_meetings", "create_notes", "create_tasks", "create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
         elif user_intent == "CLARIFY":
             tasks_to_execute = ["compose_response_html", "collect_and_save_results", "send_final_email"]
         elif user_intent == "CANCEL":
             tasks_to_execute = ["compose_response_html", "collect_and_save_results", "send_final_email"]
-
-        # If no tasks are to be executed, set mandatory tasks
-        if not tasks_to_execute:
-            logging.info("No tasks to execute, proceeding with mandatory tasks only.")
+        else:
             tasks_to_execute = ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
-
-        # Define results dictionary for successful AI analysis
+        
+        # Insert owner determination and threshold checks at the beginning if needed
+        if should_check_task_threshold:
+            tasks_to_execute.insert(0, "check_task_threshold")
+        if should_determine_owner:
+            tasks_to_execute.insert(0, "determine_owner")
+        
         results = {
             "status": "success",
-            "error_message": "",
-            "next_steps": ["Proceed with entity updates/creation based on intent and selections"],
             "user_intent": user_intent,
             "confidence_level": confidence_level,
-            "entity_selections": entity_selections,
-            "requested_changes": requested_changes,
             "entities_to_create": entities_to_create,
             "entities_to_update": entities_to_update,
-            "selected_entities": selected_entities,  # This now contains filtered entities
-            "reasoning": reasoning,
-            "tasks_to_execute": tasks_to_execute
+            "selected_entities": selected_entities,
+            "reasoning": parsed_analysis.get("reasoning", ""),
+            "tasks_to_execute": tasks_to_execute,
+            "should_determine_owner": should_determine_owner,
+            "should_check_task_threshold": should_check_task_threshold,
+            "casual_comments_detected": parsed_analysis.get("casual_comments_detected", False)
         }
-        results["should_determine_owner"] = should_determine_owner
-        results["should_check_task_threshold"] = should_check_task_threshold
+        
+        logging.info(f"Analysis completed: Intent={user_intent}, Confidence={confidence_level}")
+        logging.info(f"Tasks to execute: {tasks_to_execute}")
+        logging.info(f"Selected entities: Contacts={len(selected_entities.get('contacts', []))}, "
+                    f"Companies={len(selected_entities.get('companies', []))}, "
+                    f"Deals={len(selected_entities.get('deals', []))}")
+        logging.info(f"Entities to create: Contacts={len(entities_to_create.get('contacts', []))}, "
+                    f"Companies={len(entities_to_create.get('companies', []))}, "
+                    f"Deals={len(entities_to_create.get('deals', []))}, "
+                    f"Meetings={len(entities_to_create.get('meetings', []))}, "
+                    f"Notes={len(entities_to_create.get('notes', []))}, "
+                    f"Tasks={len(entities_to_create.get('tasks', []))}")
         
     except json.JSONDecodeError as e:
         logging.error(f"Failed to parse AI analysis: {e}")
-        logging.error(f"Raw AI response: {ai_analysis}")
-        # Fallback
-        user_intent = "CONFIRM"
-        if "PROCEED WITH EXISTING" in latest_user_response.upper():
-            user_intent = "CONFIRM"
-        elif "CREATE NEW" in latest_user_response.upper():
-            user_intent = "CREATE_NEW"
-        elif any(keyword in latest_user_response.lower() for keyword in ["modify", "change", "update", "correct"]):
-            user_intent = "MODIFY"
+        logging.error(f"Raw AI response: {response}")
         
-        tasks_to_execute = ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
+        # Fallback analysis
+        user_intent = "CONFIRM"
+        if "create new" in latest_user_message.lower():
+            user_intent = "CREATE_NEW"
+        elif any(keyword in latest_user_message.lower() for keyword in ["modify", "change", "update", "correct"]):
+            user_intent = "MODIFY"
         
         results = {
             "status": "error",
             "error_message": f"Failed to parse AI analysis: {str(e)}",
-            "next_steps": ["Retry AI analysis or clarify user response"],
             "user_intent": user_intent,
             "confidence_level": "low",
-            "entity_selections": {},
-            "requested_changes": {},
             "entities_to_create": {},
             "entities_to_update": {},
-            "selected_entities": selected_entities,
+            "selected_entities": {},
             "reasoning": "Fallback analysis due to AI parsing error",
-            "tasks_to_execute": tasks_to_execute
+            "tasks_to_execute": ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"],
+            "should_determine_owner": False,
+            "should_check_task_threshold": False,
+            "casual_comments_detected": False
         }
-
-    # Push results to XCom
+    
     ti.xcom_push(key="analysis_results", value=results)
-
-    # Update thread context
-    updated_context = thread_context.copy()
-    updated_context.update({
-        "analysis_results": results,
-        "full_thread_history": full_thread_history,
-        "latest_user_response": latest_user_response,
-        "analysis_timestamp": datetime.now().isoformat(),
-        "workflow_status": "analysis_completed",
-        "awaiting_reply": False,
-        "persistent_selected_entities": selected_entities
-    })
-    update_thread_context(thread_id, updated_context)
-
     logging.info(f"Analysis completed for thread {thread_id}")
-    logging.info(f"User intent: {user_intent}, Tasks to execute: {tasks_to_execute}")
     return results
 
 def determine_owner(ti, **context):
-    """Fixed version that extracts thread content and tasks properly"""
-    # Get analysis results to extract thread content and tasks
+    """Determine deal and task owners from conversation"""
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
     analysis_results = ti.xcom_pull(key="analysis_results", default={})
-    thread_id = context['dag_run'].conf.get("thread_id")
     
-    # Get thread content from DAG run conf or thread context
-    conf = context["dag_run"].conf
-    full_thread_history = conf.get("full_thread_history", [])
+    # Build conversation context
+    conversation_context = ""
+    for msg in chat_history:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        conversation_context += f"[{role.upper()}]: {content}\n\n"
     
-    # Build thread content from full history
-    thread_content = ""
-    for idx, email in enumerate(full_thread_history, 1):
-        content = email.get("content", "").strip()
-        if content:
-
-            soup = BeautifulSoup(content, "html.parser")
-            clean_content = soup.get_text(separator=" ", strip=True)
-            sender = email['headers'].get('From', 'Unknown')
-            is_from_bot = email.get('from_bot', False)
-            
-            if is_from_bot:
-                thread_content += f"### Bot Message {idx} (From: {sender})\n{clean_content}\n\n"
-            else:
-                thread_content += f"### User Message {idx} (From: {sender})\n{clean_content}\n\n"
-    
-    # Get tasks from analysis results
+    # Get tasks to be created
     entities_to_create = analysis_results.get("entities_to_create", {})
     tasks_to_create = entities_to_create.get("tasks", [])
-    
-    # If no thread content, log warning
-    if not thread_content:
-        logging.warning(f"No thread content available for owner determination in thread {thread_id}")
-        thread_content = "No thread content available for analysis."
 
-    prompt = f"""You are a HubSpot API assistant. Analyze this email thread to identify the deal owner and task owners.
+    prompt = f"""You are a HubSpot API assistant. Analyze this conversation to identify deal owner and task owners.
 
-Email thread content:
-{thread_content}
+FULL CONVERSATION:
+{conversation_context}
 
 Tasks to be created:
 {json.dumps(tasks_to_create, indent=2)}
@@ -813,11 +505,11 @@ Steps:
 2. Invoke get_all_owners Tool to retrieve the list of available owners.
 3. Parse and validate the deal owner against the available owners list:
     - If deal owner is NOT specified at all:
-        - Default to: "liji"
-        - Message: "No deal owner specified, so assigning to default owner liji."
+        - Default to: "Kishore"
+        - Message: "No deal owner specified, so assigning to default owner Kishore."
     - If deal owner IS specified but NOT found in available owners list:
-        - Default to: "liji"
-        - Message: "The specified deal owner '[parsed_owner]' is not valid, so assigning to default owner liji."
+        - Default to: "Kishore"
+        - Message: "The specified deal owner '[parsed_owner]' is not valid, so assigning to default owner Kishore."
     - If deal owner IS specified and IS found in available owners list:
         - Use the matched owner (with correct casing from the available owners list)
         - Message: "Deal owner specified as [matched_owner_name]"
@@ -825,11 +517,11 @@ Steps:
     - Identify all tasks and their respective owners from the email content.
     - For each task in the tasks to be created:
         - If task owner is NOT specified for a task:
-            - Default to: "liji"
-            - Message: "No task owner specified for task [task_index], so assigning to default owner liji."
+            - Default to: "Kishore"
+            - Message: "No task owner specified for task [task_index], so assigning to default owner Kishore."
         - If task owner IS specified but NOT found in available owners list:
-            - Default to: "liji"
-            - Message: "The specified task owner '[parsed_owner]' for task [task_index] is not valid, so assigning to default owner liji."
+            - Default to: "Kishore"
+            - Message: "The specified task owner '[parsed_owner]' for task [task_index] is not valid, so assigning to default owner Kishore."
         - If task owner IS specified and IS found in available owners list:
             - Use the matched owner (with correct casing from the available owners list)
             - Message: "Task owner for task [task_index] specified as [matched_owner_name]"
@@ -837,15 +529,15 @@ Steps:
 
 Return this exact JSON structure:
 {{
-    "deal_owner_id": "159242778",
-    "deal_owner_name": "liji",
-    "deal_owner_message": "No deal owner specified, so assigning to default owner liji." OR "The specified deal owner '[parsed_owner]' is not valid, so assigning to default owner liji." OR "Deal owner specified as [name]",
+    "deal_owner_id": "71346067",
+    "deal_owner_name": "Kishore",
+    "deal_owner_message": "No deal owner specified, so assigning to default owner Kishore." OR "The specified deal owner '[parsed_owner]' is not valid, so assigning to default owner Kishore." OR "Deal owner specified as [name]",
     "task_owners": [
         {{
             "task_index": 1,
-            "task_owner_id": "159242778",
-            "task_owner_name": "liji",
-            "task_owner_message": "No task owner specified for task [task_index], so assigning to default owner liji." OR "The specified task owner '[parsed_owner]' for task [task_index] is not valid, so assigning to default owner liji." OR "Task owner for task [task_index] specified as [name]"
+            "task_owner_id": "71346067",
+            "task_owner_name": "Kishore",
+            "task_owner_message": "No task owner specified for task [task_index], so assigning to default owner Kishore." OR "The specified task owner '[parsed_owner]' for task [task_index] is not valid, so assigning to default owner Kishore." OR "Task owner for task [task_index] specified as [name]"
         }}
     ],
     "all_owners_table": [
@@ -859,51 +551,34 @@ Return this exact JSON structure:
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
-    response = get_ai_response(prompt, expect_json=True)
-    logging.info(f"Raw AI response for owner: {response[:1000]}...")
-
+    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    
     try:
         parsed_json = json.loads(response.strip())
         ti.xcom_push(key="owner_info", value=parsed_json)
-
-        # Store in thread context
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["owner_info"] = parsed_json
-        contexts[thread_id]["prompt_owner"] = prompt
-        contexts[thread_id]["response_owner"] = response
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Owner determination completed for thread {thread_id}")
-        logging.info(f"Deal owner: {parsed_json.get('deal_owner_name', 'unknown')}")
-        logging.info(f"Task owners: {len(parsed_json.get('task_owners', []))}")
-
+        logging.info(f"Owner determined: {parsed_json.get('deal_owner_name')}")
     except Exception as e:
         logging.error(f"Error processing owner AI response: {e}")
         default_owner = {
-            "deal_owner_id": "159242778",
-            "deal_owner_name": "liji",
-            "deal_owner_message": f"Error occurred: {str(e)}, so assigning to default owner liji.",
+            "deal_owner_id": "71346067",
+            "deal_owner_name": "Kishore",
+            "deal_owner_message": f"Error: {str(e)}, using default owner Kishore",
             "task_owners": [],
             "all_owners_table": []
         }
         ti.xcom_push(key="owner_info", value=default_owner)
 
-TASK_THRESHOLD = 15
-
 def check_task_threshold(ti, **context):
-    """Fixed version that properly extracts task information"""
+    """Check if task volume exceeds threshold"""
     analysis_results = ti.xcom_pull(key="analysis_results", default={})
-    thread_id = context['dag_run'].conf.get("thread_id")
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    owner_info = ti.xcom_pull(key="owner_info", default={})
     
-    # Get entities to create from analysis results
     entities_to_create = analysis_results.get("entities_to_create", {})
     tasks_to_create = entities_to_create.get("tasks", [])
     
     if not tasks_to_create:
-        logging.info("No tasks to create, skipping task threshold check")
+        logging.info("No tasks to create, skipping threshold check")
         ti.xcom_push(key="task_warnings", value=[])
         ti.xcom_push(key="task_threshold_info", value={
             "task_threshold_results": {
@@ -916,60 +591,34 @@ def check_task_threshold(ti, **context):
         })
         return []
     
-    # Get thread content from DAG run conf
-    conf = context["dag_run"].conf
-    full_thread_history = conf.get("full_thread_history", [])
+    # Build conversation context
+    conversation_context = ""
+    for msg in chat_history:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        conversation_context += f"[{role.upper()}]: {content}\n\n"
     
-    # Build thread content from full history
-    thread_content = ""
-    for idx, email in enumerate(full_thread_history, 1):
-        content = email.get("content", "").strip()
-        if content:
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(content, "html.parser")
-            clean_content = soup.get_text(separator=" ", strip=True)
-            sender = email['headers'].get('From', 'Unknown')
-            is_from_bot = email.get('from_bot', False)
-            
-            if is_from_bot:
-                thread_content += f"### Bot Message {idx} (From: {sender})\n{clean_content}\n\n"
-            else:
-                thread_content += f"### User Message {idx} (From: {sender})\n{clean_content}\n\n"
-    
-    # Get owner info if available
-    owner_info = ti.xcom_pull(key="owner_info", default={})
     task_owners = owner_info.get('task_owners', [])
     
-    # Map tasks to their owners and due dates
+    # Map tasks to owners
     task_owner_mapping = []
     for idx, task in enumerate(tasks_to_create, 1):
-        task_details = task.get('task_details', '')
-        due_date = task.get('due_date', '')
-        task_owner_id = task.get('task_owner_id', '159242778')
-        task_owner_name = task.get('task_owner_name', 'liji')
-        
-        # Find the corresponding task owner info if available
         matching_owner = next((owner for owner in task_owners if owner.get('task_index') == idx), None)
-        if matching_owner:
-            task_owner_id = matching_owner.get('task_owner_id', '159242778')
-            task_owner_name = matching_owner.get('task_owner_name', 'liji')
+        task_owner_id = matching_owner.get('task_owner_id', '71346067') if matching_owner else '71346067'
+        task_owner_name = matching_owner.get('task_owner_name', 'Kishore') if matching_owner else 'Kishore'
         
         task_owner_mapping.append({
             'task_index': idx,
-            'task_details': task_details,
-            'due_date': due_date,
+            'task_details': task.get('task_details', ''),
+            'due_date': task.get('due_date', ''),
             'task_owner_id': task_owner_id,
             'task_owner_name': task_owner_name
         })
 
-    if not thread_content:
-        logging.warning(f"No thread content available for task threshold check in thread {thread_id}")
-        thread_content = "No thread content available for analysis."
+    prompt = f"""You are a HubSpot API assistant. Check task volume thresholds.
 
-    prompt = f"""You are a HubSpot API assistant. Check task volume thresholds based on this email thread.
-
-Email thread content:
-{thread_content}
+FULL CONVERSATION:
+{conversation_context}
 
 Task Owner Mapping:
 {json.dumps(task_owner_mapping, indent=2)}
@@ -1014,35 +663,17 @@ If no dates found in email, check today's date as default for each owner.
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
-    response = get_ai_response(prompt, expect_json=True)
-    logging.info(f"Raw AI response for task threshold: {response[:1000]}...")
 
+    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    
     try:
         parsed_json = json.loads(response.strip())
-
-        # Extract warnings from the response
         warnings = parsed_json.get("warnings", [])
-
         ti.xcom_push(key="task_warnings", value=warnings)
         ti.xcom_push(key="task_threshold_info", value=parsed_json)
-
-        # Store in thread context
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["task_warnings"] = warnings
-        contexts[thread_id]["task_threshold_info"] = parsed_json
-        contexts[thread_id]["prompt_task_threshold"] = prompt
-        contexts[thread_id]["response_task_threshold"] = response
-
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Task threshold check completed with {len(warnings)} warnings for {len(task_owner_mapping)} tasks")
-
+        logging.info(f"Task threshold check completed with {len(warnings)} warnings")
     except Exception as e:
         logging.error(f"Error processing task threshold AI response: {e}")
-        default_warnings = []
         default_response = {
             "task_threshold_results": {
                 "dates_checked": [],
@@ -1052,184 +683,154 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
             "extracted_dates": [],
             "warnings": []
         }
-
-        ti.xcom_push(key="task_warnings", value=default_warnings)
+        ti.xcom_push(key="task_warnings", value=[])
         ti.xcom_push(key="task_threshold_info", value=default_response)
-
-        # Store error case in context
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["task_warnings"] = default_warnings
-
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
+    
     return warnings
 
+# CREATE FUNCTIONS (abbreviated - follow same pattern)
 def create_contacts(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
-    thread_id = context['dag_run'].conf.get("thread_id")
     to_create_contacts = analysis_results.get("entities_to_create", {}).get("contacts", [])
-
+    
     if not to_create_contacts:
-        logging.info("No contacts to create, skipping.")
+        logging.info("No contacts to create")
         ti.xcom_push(key="created_contacts", value=[])
         ti.xcom_push(key="contacts_errors", value=[])
         return []
+    
+    prompt = f"""Create contacts in HubSpot.
 
-    prompt = f"""Create contacts in HubSpot based on the provided details.
-
-Details to create:
+Contact Details to Create:
 {json.dumps(to_create_contacts, indent=2)}
 
-IMPORTANT: Respond with ONLY a valid JSON object.
-
 Steps:
-1. For each contact detail object, invoke create_contact with the properties.
-2. Collect the created IDs, contact name, email, phone, address and display in tabular format. If any details missing, leave it blank in table.
+1. For each contact, invoke create_contact tool with the provided properties
+2. Return the created contact ID and all properties
 
-Return JSON:
+Return ONLY this JSON structure (no other text):
 {{
-    "created_contacts": [{{"id": "123", "details": {{ "firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "..."}}}} ...],
-    "errors": ["Error message 1", "Error message 2"],
-    "error": null
-}}
-
-If error, set error message and include individual errors in the errors array."""
+    "created_contacts": [
+        {{
+            "id": "contact_id_from_api",
+            "details": {{
+                "firstname": "value",
+                "lastname": "value",
+                "email": "value",
+                "phone": "value",
+                "address": "value",
+                "jobtitle": "value"
+            }}
+        }}
+    ],
+    "errors": []
+}}"""
 
     response = get_ai_response(prompt, expect_json=True)
-
+    
     try:
         parsed = json.loads(response)
         created = parsed.get("created_contacts", [])
         errors = parsed.get("errors", [])
-
         ti.xcom_push(key="created_contacts", value=created)
         ti.xcom_push(key="contacts_errors", value=errors)
-
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["created_contacts"] = created
-        contexts[thread_id]["contacts_errors"] = errors
-        contexts[thread_id]["create_contacts_prompt"] = prompt
-        contexts[thread_id]["create_contacts_response"] = response
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Created {len(created)} contacts with {len(errors)} errors")
+        logging.info(f"Created {len(created)} contacts")
+        return created
     except Exception as e:
         logging.error(f"Error creating contacts: {e}")
+        logging.error(f"Raw response: {response}")
         ti.xcom_push(key="created_contacts", value=[])
         ti.xcom_push(key="contacts_errors", value=[str(e)])
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["create_contacts_error"] = str(e)
-        contexts[thread_id]["contacts_errors"] = [str(e)]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-    return created
+        return []
 
 def create_companies(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
-    thread_id = context['dag_run'].conf.get("thread_id")
     to_create_companies = analysis_results.get("entities_to_create", {}).get("companies", [])
-
+    
     if not to_create_companies:
-        logging.info("No companies to create, skipping.")
+        logging.info("No companies to create")
         ti.xcom_push(key="created_companies", value=[])
         ti.xcom_push(key="companies_errors", value=[])
         return []
+    
+    prompt = f"""Create companies in HubSpot.
 
-    prompt = f"""Create companies in HubSpot based on the provided details.
-
-Details to create:
+Company Details to Create:
 {json.dumps(to_create_companies, indent=2)}
 
-IMPORTANT: Respond with ONLY a valid JSON object.
-
 Steps:
-1. For each company detail object, invoke create_company with the properties.
-2. In the properties the `type` should be one of "PARTNER", "PROSPECT". If not specified, set to "PROSPECT".
-3. Collect the created company id, company name, domain, state, city, country, phone, type and display in tabular format. If any details not found, show as blank in table.
+1. For each company, invoke create_company tool with the provided properties
+2. Return the created company ID and all properties
 
-Return JSON:
+Return ONLY this JSON structure (no other text):
 {{
-    "created_companies": [{{"id": "123", "details": {{ "name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}}} ...],
-    "errors": ["Error message 1", "Error message 2"],
-    "error": null
-}}
-
-If error, set error message and include individual errors in the errors array."""
-
+    "created_companies": [
+        {{
+            "id": "company_id_from_api",
+            "details": {{
+                "name": "value",
+                "domain": "value",
+                "address": "value",
+                "city": "value",
+                "state": "value",
+                "zip": "value",
+                "country": "value",
+                "phone": "value",
+                "description": "value",
+                "type": "value"
+            }}
+        }}
+    ],
+    "errors": []
+}}"""
+    
     response = get_ai_response(prompt, expect_json=True)
-
+    
     try:
         parsed = json.loads(response)
         created = parsed.get("created_companies", [])
         errors = parsed.get("errors", [])
-
         ti.xcom_push(key="created_companies", value=created)
         ti.xcom_push(key="companies_errors", value=errors)
-
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["created_companies"] = created
-        contexts[thread_id]["companies_errors"] = errors
-        contexts[thread_id]["create_companies_prompt"] = prompt
-        contexts[thread_id]["create_companies_response"] = response
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Created {len(created)} companies with {len(errors)} errors")
+        logging.info(f"Created {len(created)} companies")
+        return created
     except Exception as e:
         logging.error(f"Error creating companies: {e}")
+        logging.error(f"Raw response: {response}")
         ti.xcom_push(key="created_companies", value=[])
         ti.xcom_push(key="companies_errors", value=[str(e)])
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["create_companies_error"] = str(e)
-        contexts[thread_id]["companies_errors"] = [str(e)]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-    return created
+        return []
 
 def create_deals(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
-    thread_id = context['dag_run'].conf.get("thread_id")
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    owner_info = ti.xcom_pull(key="owner_info", default={})
     to_create_deals = analysis_results.get("entities_to_create", {}).get("deals", [])
     
-    # Get the latest user response from the context
-    full_thread_history = context['dag_run'].conf.get("full_thread_history", [])
-    latest_user_response = ""
-    for email in reversed(full_thread_history):
-        if not email.get('from_bot', True):  # Find latest non-bot email
-            if email.get("content"):
-                soup = BeautifulSoup(email.get("content", ""), "html.parser")
-                latest_user_response = soup.get_text(separator=" ", strip=True)
-                break
-
     if not to_create_deals:
-        logging.info("No deals to create, skipping.")
+        logging.info("No deals to create")
         ti.xcom_push(key="created_deals", value=[])
         ti.xcom_push(key="deals_errors", value=[])
         return []
+    
+    deal_owner_id = owner_info.get("deal_owner_id", "71346067")
+    deal_owner_name = owner_info.get("deal_owner_name", "Kishore")
+    
+    # Add owner info to each deal
+    for deal in to_create_deals:
+        if not deal.get("dealOwnerName"):
+            deal["dealOwnerName"] = deal_owner_name
+        if not deal.get("dealOwnerId"):
+            deal["dealOwnerId"] = deal_owner_id
+    
+    prompt = f"""Create deals in HubSpot.
 
-    prompt = f"""Create deals in HubSpot based on the provided details and the user's response.
-
-Latest User Response:
-{latest_user_response}
-
-Details to create:
+Deal Details to Create:
 {json.dumps(to_create_deals, indent=2)}
 
-IMPORTANT: Respond with ONLY a valid JSON object.
+Deal Owner: {deal_owner_name} (ID: {deal_owner_id})
+
+IMPORTANT: Respond with ONLY a valid JSON object. Always invoke create_deal..
 
 Critical Deal Naming Rules:
 1. Extract Client Name from latest user response or available details
@@ -1239,7 +840,16 @@ Critical Deal Naming Rules:
 5. If Deal Name not specified, create descriptive name based on product/service mentioned
 6. Never use generic names - must reflect actual client/partner and deal purpose
 7. Preserve any specific deal amount, close date, or stage information provided
-
+8. Never use commas for deal amount.
+9. Use only the following for deal stage:
+    - appointmentscheduled
+    - qualifiedtobuy
+    - presentationscheduled
+    - decisionmakerboughtin
+    - contractsent
+    - closedwon
+    - closedlost
+10. Never use the hubspot owner  name for calling the api, it should always be the id.
 Steps:
 1. Analyze user response to extract client/partner names and deal details
 2. Apply naming convention strictly for each deal
@@ -1264,268 +874,287 @@ Return JSON:
 
 If error, set error message and include individual errors in the errors array."""
 
-    response = get_ai_response(prompt, expect_json=True)
-
+    
+    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    
     try:
         parsed = json.loads(response)
         created = parsed.get("created_deals", [])
         errors = parsed.get("errors", [])
-
-        # Validate deal names follow convention
-        for deal in created:
-            deal_name = deal.get("details", {}).get("dealName", "")
-            if not deal_name or deal_name.count("-") < 1:
-                error_msg = f"Deal {deal.get('id', 'unknown')} has invalid name format: {deal_name}"
-                logging.error(error_msg)
-                errors.append(error_msg)
-
         ti.xcom_push(key="created_deals", value=created)
         ti.xcom_push(key="deals_errors", value=errors)
-
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["created_deals"] = created
-        contexts[thread_id]["deals_errors"] = errors
-        contexts[thread_id]["create_deals_prompt"] = prompt
-        contexts[thread_id]["create_deals_response"] = response
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Created {len(created)} deals with {len(errors)} errors")
-        for deal in created:
-            logging.info(f"Created deal: {deal.get('details', {}).get('dealName', 'Unknown')}")
-            
+        logging.info(f"Created {len(created)} deals")
+        return created
     except Exception as e:
-        error_msg = f"Error creating deals: {str(e)}"
-        logging.error(error_msg)
+        logging.error(f"Error creating deals: {e}")
+        logging.error(f"Raw response: {response}")
         ti.xcom_push(key="created_deals", value=[])
-        ti.xcom_push(key="deals_errors", value=[error_msg])
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["create_deals_error"] = error_msg
-        contexts[thread_id]["deals_errors"] = [error_msg]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-    return created
+        ti.xcom_push(key="deals_errors", value=[str(e)])
+        return []
 
 def create_meetings(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
-    thread_id = context['dag_run'].conf.get("thread_id")
     to_create_meetings = analysis_results.get("entities_to_create", {}).get("meetings", [])
-
+    
     if not to_create_meetings:
-        logging.info("No meetings to create, skipping.")
+        logging.info("No meetings to create")
         ti.xcom_push(key="created_meetings", value=[])
         ti.xcom_push(key="meetings_errors", value=[])
         return []
     
-    prompt = f"""Create meetings in HubSpot based on the provided details.
+    prompt = f"""Create meetings in HubSpot.
 
-Meeting details:
+Meeting Details to Create:
 {json.dumps(to_create_meetings, indent=2)}
 
-IMPORTANT: Respond with ONLY a valid JSON object.
-
 Steps:
-1. For each meeting, invoke create_meetings with the properties (date, attendees, summary).
-2. Collect the created ID, Title, Start Time (EST), End Time (EST), Location, Outcome in tabular format.
-3. Always use `hs_timestamp` in YYYY-MM-DDTHH:MM:SSZ format while creating meetings.
-Return JSON:
+1. For each meeting, invoke create_meeting tool with:
+   - hs_meeting_title
+   - hs_meeting_start_time
+   - hs_meeting_end_time
+   - hs_meeting_location
+   - hs_meeting_outcome
+   - hs_meeting_body (from outcome)
+2. Return the created meeting ID and all properties
+
+Return ONLY this JSON structure (no other text):
 {{
-    "created_meetings": [{{"id": "123", "details": {{ "meeting_title": "...", "start_time": "...", "end_time": "...", "location": "...", "outcome": "...", "timestamp": "...", "attendees": [], "meeting_type": "..."}}}} ...],
-    "errors": ["Error message 1", "Error message 2"],
-    "error": null
-}}
-
-If error, set error message and include individual errors in the errors array."""
-
+    "created_meetings": [
+        {{
+            "id": "meeting_id_from_api",
+            "details": {{
+                "meeting_title": "value",
+                "start_time": "value",
+                "end_time": "value",
+                "location": "value",
+                "outcome": "value",
+                "attendees": ["name1", "name2"]
+            }}
+        }}
+    ],
+    "errors": []
+}}"""
+    
     response = get_ai_response(prompt, expect_json=True)
-
+    
     try:
         parsed = json.loads(response)
         created = parsed.get("created_meetings", [])
         errors = parsed.get("errors", [])
-
         ti.xcom_push(key="created_meetings", value=created)
         ti.xcom_push(key="meetings_errors", value=errors)
-
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["created_meetings"] = created
-        contexts[thread_id]["meetings_errors"] = errors
-        contexts[thread_id]["create_meetings_prompt"] = prompt
-        contexts[thread_id]["create_meetings_response"] = response
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Created {len(created)} meetings with {len(errors)} errors")
+        logging.info(f"Created {len(created)} meetings")
+        return created
     except Exception as e:
         logging.error(f"Error creating meetings: {e}")
+        logging.error(f"Raw response: {response}")
         ti.xcom_push(key="created_meetings", value=[])
-        ti.xcom_push(key="meetings_errors", value=[str(e)])
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["create_meetings_error"] = str(e)
-        contexts[thread_id]["meetings_errors"] = [str(e)]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-    return created
+        ti.xcom_push(key="meetings_errors", value=[])
+        return []
 
 def create_notes(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
-    thread_id = context['dag_run'].conf.get("thread_id")
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
     to_create_notes = analysis_results.get("entities_to_create", {}).get("notes", [])
-
+    
     if not to_create_notes:
-        logging.info("No notes to create, skipping.")
+        logging.info("No notes to create")
         ti.xcom_push(key="created_notes", value=[])
         ti.xcom_push(key="notes_errors", value=[])
         return []
+    
+    prompt = f"""You are a HubSpot Note Creation Assistant. Your role is to **create notes in HubSpot** using the provided note details.  
+**You MUST invoke the `create_notes` API for every note in the input.**  
+No parsing of user intent — assume all input notes are confirmed and ready to create.
 
-    prompt = f"""Create notes in HubSpot based on the provided details.
+---
 
-Notes:
+NOTES TO CREATE:
 {json.dumps(to_create_notes, indent=2)}
 
-IMPORTANT: Respond with ONLY a valid JSON object.
+---
 
-Steps:
-1. For each note, invoke create_notes with the content.
-2. Format note content as: "Speaker: [name] mentioned [note_content]"
-2. Collect the created Note id, Note body, last modified date in tabular format.
-3. Always use `hs_timestamp` in YYYY-MM-DDTHH:MM:SSZ format while creating notes.
-Return JSON:
+**STRICT EXECUTION RULES:**
+
+1. **For each note in `to_create_notes`:**
+   - Format `note_content` as:  
+     "[name] mentioned [note_content]" 
+     (Use `name` from the note object if present; otherwise use `"User"`)
+
+2. **Invoke HubSpot `create_notes` API** with:
+   - `hs_timestamp`: Current UTC time in `YYYY-MM-DDTHH:MM:SSZ` format
+   - `hs_note_body`: The formatted `note_content`
+   - Required associations (if provided in input)
+
+3. **On success per note:**
+   - Capture: `id`, formatted `note_content`, `hs_lastmodifieddate`
+
+4. **On failure per note:**
+   - Capture error message in `errors` array
+
+5. **Always return full JSON** — even if all fail.
+
+---
+
+**RETURN EXACTLY THIS JSON STRUCTURE:**
 {{
-    "created_notes": [{{"id": "123", "details": {{ "note_content": "...", "timestamp": "..."}}}} ...],
-    "errors": ["Error message 1", "Error message 2"],
+    "created_notes": [
+        {{
+            "id": "123",
+            "details": {{
+                "note_content": "[User] mentioned Follow up on Q4 budget approval",
+                "timestamp": "2025-04-05T10:30:00Z"
+            }}
+        }}
+    ],
+    "errors": [],
     "error": null
 }}
 
-If error, set error message and include individual errors in the errors array."""  # Existing prompt
-
-    response = get_ai_response(prompt, expect_json=True)
-
+**RULES:**
+- `created_notes`: Array of successfully created notes
+- `errors`: Array of strings for failed creations
+- `error`: `null` unless catastrophic failure
+- **Always invoke API** — no skipping
+- Use **UTC** for all timestamps
+- **RESPOND WITH ONLY THE JSON OBJECT — NO OTHER TEXT.**
+"""
+    
+    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    
     try:
         parsed = json.loads(response)
         created = parsed.get("created_notes", [])
         errors = parsed.get("errors", [])
-
         ti.xcom_push(key="created_notes", value=created)
         ti.xcom_push(key="notes_errors", value=errors)
-
-        contexts = get_thread_context()
-        # Initialize thread_id in contexts if it doesn’t exist
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["created_notes"] = created
-        contexts[thread_id]["notes_errors"] = errors
-        contexts[thread_id]["create_notes_prompt"] = prompt
-        contexts[thread_id]["create_notes_response"] = response
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Created {len(created)} notes with {len(errors)} errors")
+        logging.info(f"Created {len(created)} notes")
+        return created
     except Exception as e:
         logging.error(f"Error creating notes: {e}")
+        logging.error(f"Raw response: {response}")
         ti.xcom_push(key="created_notes", value=[])
-        ti.xcom_push(key="notes_errors", value=[str(e)])
-        contexts = get_thread_context()
-        # Initialize thread_id in contexts if it doesn’t exist
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["create_notes_error"] = str(e)
-        contexts[thread_id]["notes_errors"] = [str(e)]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-    return created
+        ti.xcom_push(key="notes_errors", value=[])
+        return []
 
 def create_tasks(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
-    thread_id = context['dag_run'].conf.get("thread_id")
+    owner_info = ti.xcom_pull(key="owner_info", default={})
     to_create_tasks = analysis_results.get("entities_to_create", {}).get("tasks", [])
-
+    
     if not to_create_tasks:
-        logging.info("No tasks to create, skipping.")
+        logging.info("No tasks to create")
         ti.xcom_push(key="created_tasks", value=[])
         ti.xcom_push(key="tasks_errors", value=[])
         return []
+    
+    task_owners = owner_info.get("task_owners", [])
+    
+    # Map task owners to tasks - CRITICAL: Ensure each task has correct owner
+    for idx, task in enumerate(to_create_tasks, 1):
+        matching_owner = next((owner for owner in task_owners if owner.get("task_index") == idx), None)
+        if matching_owner:
+            task["task_owner_id"] = matching_owner.get("task_owner_id", "71346067")
+            task["task_owner_name"] = matching_owner.get("task_owner_name", "Kishore")
+        else:
+            # If no matching owner found, keep existing values or use defaults
+            if "task_owner_id" not in task:
+                task["task_owner_id"] = "71346067"
+            if "task_owner_name" not in task:
+                task["task_owner_name"] = "Kishore"
+    
+    # Log the tasks with their assigned owners for debugging
+    logging.info(f"Tasks with mapped owners: {json.dumps(to_create_tasks, indent=2)}")
+    
+    prompt = f"""Create tasks in HubSpot.
 
-    prompt = f"""Create tasks in HubSpot based on the provided details.
-
-Tasks:
+Task Details to Create (with assigned owners):
 {json.dumps(to_create_tasks, indent=2)}
 
-IMPORTANT: Respond with ONLY a valid JSON object.
+CRITICAL INSTRUCTIONS:
+1. You MUST use the EXACT task_owner_id specified for each task
+2. DO NOT change or override the task_owner_id values
+3. Each task already has the correct owner assigned - preserve it
 
 Steps:
-1. For each task, invoke create_tasks with hs_timestamp, hs_task_body, hs_task_subject, hs_task_status, hs_task_priority, hs_task_type, hubspot_owner_id.
-2. Collect the created Task id, task body, last modified date, due date, task owner name in tabular format.
-3. Always use `hs_timestamp` in YYYY-MM-DDTHH:MM:SSZ format while creating tasks.
-4. Important task_owner_name should be always the name. For example rekha is the owner then rekha should be displayed in the owner name field and not the id 8765.
-Return JSON:
+1. For each task, invoke create_task tool with:
+   - hs_task_subject: The task_details field
+   - hs_task_body: The task_details field
+   - hubspot_owner_id: Use the EXACT task_owner_id from the task (DO NOT change this)
+   - hs_task_status: "NOT_STARTED"
+   - hs_task_priority: The priority field (HIGH/MEDIUM/LOW)
+   - hs_timestamp: Convert due_date to milliseconds since epoch
+2. Return the created task ID and properties including the ACTUAL owner name used
+
+EXAMPLE for task with task_owner_id "159242825":
+create_task({{
+    "properties": {{
+        "hs_task_subject": "Draft a proposal...",
+        "hs_task_body": "Draft a proposal...",
+        "hubspot_owner_id": "159242825",  // MUST use this exact ID
+        "hs_task_status": "NOT_STARTED",
+        "hs_task_priority": "MEDIUM",
+        "hs_timestamp": "1729641600000"
+    }}
+}})
+
+Return ONLY this JSON structure (no other text):
 {{
-    "created_tasks": [{{"id": "123", "details": {{ "task_details": "...", "task_owner_name": "...", "task_owner_id": "...", "due_date": "...", "priority": "..."}}}} ...],
-    "errors": ["Error message 1", "Error message 2"],
-    "error": null
+    "created_tasks": [
+        {{
+            "id": "task_id_from_api",
+            "details": {{
+                "task_details": "value",
+                "task_owner_name": "actual_owner_name_from_api",
+                "task_owner_id": "actual_owner_id_used",
+                "due_date": "value",
+                "priority": "value",
+                "task_index": task_index_number
+            }}
+        }}
+    ],
+    "errors": []
 }}
 
-If error, set error message and include individual errors in the errors array."""
-
+CRITICAL: Preserve the task_owner_id from the input. Do not default to Kishore (71346067) unless explicitly specified."""
+    
     response = get_ai_response(prompt, expect_json=True)
-
+    
     try:
         parsed = json.loads(response)
         created = parsed.get("created_tasks", [])
         errors = parsed.get("errors", [])
-
+        
+        # Verify owners were assigned correctly
+        for task in created:
+            task_index = task.get("details", {}).get("task_index")
+            original_task = next((t for t in to_create_tasks if t.get("task_index") == task_index), None)
+            if original_task:
+                expected_owner_id = original_task.get("task_owner_id")
+                actual_owner_id = task.get("details", {}).get("task_owner_id")
+                if expected_owner_id != actual_owner_id:
+                    logging.warning(f"Task {task_index}: Expected owner {expected_owner_id}, got {actual_owner_id}")
+        
         ti.xcom_push(key="created_tasks", value=created)
         ti.xcom_push(key="tasks_errors", value=errors)
-
-        contexts = get_thread_context()
-        contexts[thread_id]["created_tasks"] = created
-        contexts[thread_id]["tasks_errors"] = errors
-        contexts[thread_id]["create_tasks_prompt"] = prompt
-        contexts[thread_id]["create_tasks_response"] = response
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Created {len(created)} tasks with {len(errors)} errors")
+        logging.info(f"Created {len(created)} tasks with owners: {[(t.get('details', {}).get('task_owner_name'), t.get('details', {}).get('task_index')) for t in created]}")
+        return created
     except Exception as e:
         logging.error(f"Error creating tasks: {e}")
+        logging.error(f"Raw response: {response}")
         ti.xcom_push(key="created_tasks", value=[])
         ti.xcom_push(key="tasks_errors", value=[str(e)])
-        contexts = get_thread_context()
-        contexts[thread_id]["create_tasks_error"] = str(e)
-        contexts[thread_id]["tasks_errors"] = [str(e)]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-    return created
-
-def update_contacts(ti, **context):
-    analysis_results = ti.xcom_pull(key="analysis_results")
-    thread_id = context['dag_run'].conf.get("thread_id")
-    to_update_contacts = analysis_results.get("entities_to_update", {}).get("contacts", [])
-
-    if not to_update_contacts:
-        logging.info("No contacts to update, skipping.")
-        ti.xcom_push(key="updated_contacts", value=[])
-        ti.xcom_push(key="contacts_update_errors", value=[])
         return []
 
-    prompt = f"""Update contacts in HubSpot based on the provided details.
-
-Details to update:
-{json.dumps(to_update_contacts, indent=2)}
-
-IMPORTANT: Respond with ONLY a valid JSON object.
+# UPDATE FUNCTIONS (abbreviated - follow same pattern)
+def update_contacts(ti, **context):
+    analysis_results = ti.xcom_pull(key="analysis_results")
+    to_update = analysis_results.get("entities_to_update", {}).get("contacts", [])
+    if not to_update:
+        ti.xcom_push(key="updated_contacts", value=[])
+        return []
+    prompt = f"""Update contacts: {json.dumps(to_update, indent=2)}
+    IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
 1. For each contact, invoke update_contact with the id and changes.
@@ -1541,53 +1170,23 @@ Return JSON:
 If error, set error message and include individual errors in the errors array."""
 
     response = get_ai_response(prompt, expect_json=True)
-
     try:
         parsed = json.loads(response)
         updated = parsed.get("updated_contacts", [])
-        errors = parsed.get("errors", [])
-
         ti.xcom_push(key="updated_contacts", value=updated)
-        ti.xcom_push(key="contacts_update_errors", value=errors)
-
-        contexts = get_thread_context()
-        contexts[thread_id]["updated_contacts"] = updated
-        contexts[thread_id]["contacts_update_errors"] = errors
-        contexts[thread_id]["update_contacts_prompt"] = prompt
-        contexts[thread_id]["update_contacts_response"] = response
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Updated {len(updated)} contacts with {len(errors)} errors")
+        return updated
     except Exception as e:
-        logging.error(f"Error updating contacts: {e}")
         ti.xcom_push(key="updated_contacts", value=[])
-        ti.xcom_push(key="contacts_update_errors", value=[str(e)])
-        contexts = get_thread_context()
-        contexts[thread_id]["update_contacts_error"] = str(e)
-        contexts[thread_id]["contacts_update_errors"] = [str(e)]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-    return updated
+        return []
 
 def update_companies(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
-    thread_id = context['dag_run'].conf.get("thread_id")
-    to_update_companies = analysis_results.get("entities_to_update", {}).get("companies", [])
-
-    if not to_update_companies:
-        logging.info("No companies to update, skipping.")
+    to_update = analysis_results.get("entities_to_update", {}).get("companies", [])
+    if not to_update:
         ti.xcom_push(key="updated_companies", value=[])
-        ti.xcom_push(key="companies_update_errors", value=[])
         return []
-
-    prompt = f"""Update companies in HubSpot based on the provided details.
-
-Details to update:
-{json.dumps(to_update_companies, indent=2)}
-
-IMPORTANT: Respond with ONLY a valid JSON object.
+    prompt = f"""Update companies: {json.dumps(to_update, indent=2)}
+    IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
 1. For each company, invoke update_company with the id and changes.
@@ -1601,55 +1200,23 @@ Return JSON:
 }}
 
 If error, set error message and include individual errors in the errors array."""
-
     response = get_ai_response(prompt, expect_json=True)
-
     try:
         parsed = json.loads(response)
-        updated = parsed.get("updated_companies", [])
-        errors = parsed.get("errors", [])
-
-        ti.xcom_push(key="updated_companies", value=updated)
-        ti.xcom_push(key="companies_update_errors", value=errors)
-
-        contexts = get_thread_context()
-        contexts[thread_id]["updated_companies"] = updated
-        contexts[thread_id]["companies_update_errors"] = errors
-        contexts[thread_id]["update_companies_prompt"] = prompt
-        contexts[thread_id]["update_companies_response"] = response
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Updated {len(updated)} companies with {len(errors)} errors")
-    except Exception as e:
-        logging.error(f"Error updating companies: {e}")
+        ti.xcom_push(key="updated_companies", value=parsed.get("updated_companies", []))
+        return parsed.get("updated_companies", [])
+    except:
         ti.xcom_push(key="updated_companies", value=[])
-        ti.xcom_push(key="companies_update_errors", value=[str(e)])
-        contexts = get_thread_context()
-        contexts[thread_id]["update_companies_error"] = str(e)
-        contexts[thread_id]["companies_update_errors"] = [str(e)]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-    return updated
+        return []
 
 def update_deals(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
-    thread_id = context['dag_run'].conf.get("thread_id")
-    to_update_deals = analysis_results.get("entities_to_update", {}).get("deals", [])
-
-    if not to_update_deals:
-        logging.info("No deals to update, skipping.")
+    to_update = analysis_results.get("entities_to_update", {}).get("deals", [])
+    if not to_update:
         ti.xcom_push(key="updated_deals", value=[])
-        ti.xcom_push(key="deals_update_errors", value=[])
         return []
-
-    prompt = f"""Update deals in HubSpot based on the provided details.
-
-Details to update:
-{json.dumps(to_update_deals, indent=2)}
-
-IMPORTANT: Respond with ONLY a valid JSON object.
+    prompt = f"""Update deals: {json.dumps(to_update, indent=2)}
+    IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
 1. For each deal, invoke update_deal with the id and changes.
@@ -1663,55 +1230,23 @@ Return JSON:
 }}
 
 If error, set error message and include individual errors in the errors array."""
-
     response = get_ai_response(prompt, expect_json=True)
-
     try:
         parsed = json.loads(response)
-        updated = parsed.get("updated_deals", [])
-        errors = parsed.get("errors", [])
-
-        ti.xcom_push(key="updated_deals", value=updated)
-        ti.xcom_push(key="deals_update_errors", value=errors)
-
-        contexts = get_thread_context()
-        contexts[thread_id]["updated_deals"] = updated
-        contexts[thread_id]["deals_update_errors"] = errors
-        contexts[thread_id]["update_deals_prompt"] = prompt
-        contexts[thread_id]["update_deals_response"] = response
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Updated {len(updated)} deals with {len(errors)} errors")
-    except Exception as e:
-        logging.error(f"Error updating deals: {e}")
+        ti.xcom_push(key="updated_deals", value=parsed.get("updated_deals", []))
+        return parsed.get("updated_deals", [])
+    except:
         ti.xcom_push(key="updated_deals", value=[])
-        ti.xcom_push(key="deals_update_errors", value=[str(e)])
-        contexts = get_thread_context()
-        contexts[thread_id]["update_deals_error"] = str(e)
-        contexts[thread_id]["deals_update_errors"] = [str(e)]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-    return updated
+        return []
 
 def update_meetings(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
-    thread_id = context['dag_run'].conf.get("thread_id")
-    to_update_meetings = analysis_results.get("entities_to_update", {}).get("meetings", [])
-
-    if not to_update_meetings:
-        logging.info("No meetings to update, skipping.")
+    to_update = analysis_results.get("entities_to_update", {}).get("meetings", [])
+    if not to_update:
         ti.xcom_push(key="updated_meetings", value=[])
-        ti.xcom_push(key="meetings_update_errors", value=[])
         return []
-
-    prompt = f"""Update meetings in HubSpot based on the provided details.
-
-Meeting details to update:
-{json.dumps(to_update_meetings, indent=2)}
-
-IMPORTANT: Respond with ONLY a valid JSON object.
+    prompt = f"""Update meetings: {json.dumps(to_update, indent=2)}
+    IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
 1. For each meeting, invoke update_meeting with the id and changes.
@@ -1727,53 +1262,22 @@ Return JSON:
 If error, set error message and include individual errors in the errors array."""
 
     response = get_ai_response(prompt, expect_json=True)
-
     try:
         parsed = json.loads(response)
-        updated = parsed.get("updated_meetings", [])
-        errors = parsed.get("errors", [])
-
-        ti.xcom_push(key="updated_meetings", value=updated)
-        ti.xcom_push(key="meetings_update_errors", value=errors)
-
-        contexts = get_thread_context()
-        contexts[thread_id]["updated_meetings"] = updated
-        contexts[thread_id]["meetings_update_errors"] = errors
-        contexts[thread_id]["update_meetings_prompt"] = prompt
-        contexts[thread_id]["update_meetings_response"] = response
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Updated {len(updated)} meetings with {len(errors)} errors")
-    except Exception as e:
-        logging.error(f"Error updating meetings: {e}")
+        ti.xcom_push(key="updated_meetings", value=parsed.get("updated_meetings", []))
+        return parsed.get("updated_meetings", [])
+    except:
         ti.xcom_push(key="updated_meetings", value=[])
-        ti.xcom_push(key="meetings_update_errors", value=[str(e)])
-        contexts = get_thread_context()
-        contexts[thread_id]["update_meetings_error"] = str(e)
-        contexts[thread_id]["meetings_update_errors"] = [str(e)]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-    return updated
+        return []
 
 def update_notes(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
-    thread_id = context['dag_run'].conf.get("thread_id")
-    to_update_notes = analysis_results.get("entities_to_update", {}).get("notes", [])
-
-    if not to_update_notes:
-        logging.info("No notes to update, skipping.")
+    to_update = analysis_results.get("entities_to_update", {}).get("notes", [])
+    if not to_update:
         ti.xcom_push(key="updated_notes", value=[])
-        ti.xcom_push(key="notes_update_errors", value=[])
         return []
-
-    prompt = f"""Update notes in HubSpot based on the provided details.
-
-Notes to update:
-{json.dumps(to_update_notes, indent=2)}
-
-IMPORTANT: Respond with ONLY a valid JSON object.
+    prompt = f"""Update notes: {json.dumps(to_update, indent=2)}
+    IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
 1. For each note, invoke update_note with the id and changes.
@@ -1789,73 +1293,60 @@ Return JSON:
 If error, set error message and include individual errors in the errors array."""
 
     response = get_ai_response(prompt, expect_json=True)
-
     try:
         parsed = json.loads(response)
-        updated = parsed.get("updated_notes", [])
-        errors = parsed.get("errors", [])
-
-        ti.xcom_push(key="updated_notes", value=updated)
-        ti.xcom_push(key="notes_update_errors", value=errors)
-
-        contexts = get_thread_context()
-        contexts[thread_id]["updated_notes"] = updated
-        contexts[thread_id]["notes_update_errors"] = errors
-        contexts[thread_id]["update_notes_prompt"] = prompt
-        contexts[thread_id]["update_notes_response"] = response
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Updated {len(updated)} notes with {len(errors)} errors")
-    except Exception as e:
-        logging.error(f"Error updating notes: {e}")
+        ti.xcom_push(key="updated_notes", value=parsed.get("updated_notes", []))
+        return parsed.get("updated_notes", [])
+    except:
         ti.xcom_push(key="updated_notes", value=[])
-        ti.xcom_push(key="notes_update_errors", value=[str(e)])
-        contexts = get_thread_context()
-        contexts[thread_id]["update_notes_error"] = str(e)
-        contexts[thread_id]["notes_update_errors"] = [str(e)]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-    return updated
-
-def update_tasks(ti, **context):
-    from json import JSONDecodeError
-    analysis_results = ti.xcom_pull(key="analysis_results")
-    thread_id = context['dag_run'].conf.get("thread_id")
-    to_update_tasks = analysis_results.get("entities_to_update", {}).get("tasks", [])
-
-    if not to_update_tasks:
-        logging.info("No tasks to update, skipping.")
-        ti.xcom_push(key="updated_tasks", value=[])
-        ti.xcom_push(key="tasks_update_errors", value=[])
         return []
 
-    # Get current task details from selected_entities to preserve original information
+def update_tasks(ti, **context):
+    analysis_results = ti.xcom_pull(key="analysis_results")
+    owner_info = ti.xcom_pull(key="owner_info", default={})
+    to_update = analysis_results.get("entities_to_update", {}).get("tasks", [])
+    if not to_update:
+        ti.xcom_push(key="updated_tasks", value=[])
+        return []
+    
+    # Get current task details to preserve original information
     selected_entities = analysis_results.get("selected_entities", {})
     current_tasks = selected_entities.get("tasks", [])
     
-    # Create a mapping of task IDs to their current details
+    # Get task owners from owner_info (corrected owners)
+    task_owners = owner_info.get("task_owners", [])
+    
+    # Build task details map with corrected owner information
     task_details_map = {}
     for task in current_tasks:
         task_id = task.get("taskId") or task.get("id")
         if task_id:
-            task_details_map[task_id] = {
-                "task_details": task.get("task_details", ""),
-                "task_owner_name": task.get("task_owner_name", ""),
-                "task_owner_id": task.get("task_owner_id", ""),
-                "due_date": task.get("due_date", ""),
-                "priority": task.get("priority", "")
-            }
+            task_details_map[task_id] = task
+    
+    # Map corrected owners to tasks being updated
+    for task_update in to_update:
+        task_id = task_update.get("taskId") or task_update.get("id")
+        if task_id and task_id in task_details_map:
+            # Get task_index from the original task
+            original_task = task_details_map[task_id]
+            task_index = original_task.get("task_index")
+            
+            # Find matching corrected owner
+            if task_index:
+                matching_owner = next((owner for owner in task_owners if owner.get("task_index") == task_index), None)
+                if matching_owner:
+                    # Add corrected owner info to the update
+                    task_update["task_owner_id"] = matching_owner.get("task_owner_id", "71346067")
+                    task_update["task_owner_name"] = matching_owner.get("task_owner_name", "Kishore")
+                else:
+                    # Use existing owner info if no corrected owner found
+                    task_update["task_owner_id"] = original_task.get("task_owner_id", "71346067")
+                    task_update["task_owner_name"] = original_task.get("task_owner_name", "Kishore")
+    
+    prompt = f"""Update tasks in HubSpot.
 
-    # Prepare the update prompt with explicit API call format
-    prompt = f"""Update tasks in HubSpot using the update_task function. You must follow the exact API format.
-
-Tasks to update:
-{json.dumps(to_update_tasks, indent=2)}
-
-Current task details (preserve these unless specifically updating):
-{json.dumps(task_details_map, indent=2)}
+Tasks to update: {json.dumps(to_update, indent=2)}
+Current task details: {json.dumps(task_details_map, indent=2)}
 
 CRITICAL INSTRUCTIONS:
 1. For each task update, call update_task with this EXACT format:
@@ -1873,8 +1364,9 @@ CRITICAL INSTRUCTIONS:
 
 2. PRESERVE original task descriptions from task_details_map
 3. Convert due_date changes to hs_timestamp format
-4. Use the task's existing owner ID
-5. After each update, call search_tasks(task_id) to get updated details
+4. Use the task's existing owner ID from the original task details.
+5. Use the task's existing owner id and invoke get_all_owners to get the owners name.
+6. After each update, call search_tasks(task_id) to get updated details
 
 EXAMPLE for task 197051476705:
 - Current details: "Draft a one-page pilot outline for shipment tracking..."  
@@ -1907,206 +1399,106 @@ Return ONLY this JSON format:
   "error": null
 }}"""
 
+
+    
+    response = get_ai_response(prompt, expect_json=True)
     try:
-        response = get_ai_response(prompt, expect_json=True)
         parsed = json.loads(response)
         updated = parsed.get("updated_tasks", [])
-        errors = parsed.get("errors", [])
-
-        # Validate and fix any missing task details
+        
+        # Validate and restore missing details
         for task in updated:
             task_id = task.get("id")
-            details = task.get("details", {})
-            
             if task_id in task_details_map:
                 original = task_details_map[task_id]
+                details = task.get("details", {})
                 
-                # Restore original task details if missing or generic
-                if not details.get("task_details") or details.get("task_details") in ["INTEGRATION", ""]:
+                # Preserve task description if not updated
+                if not details.get("task_details"):
                     details["task_details"] = original.get("task_details", "")
-                    logging.info(f"Restored task_details for {task_id}: {details['task_details']}")
                 
-                # Restore other missing fields
-                if not details.get("task_owner_name"):
-                    details["task_owner_name"] = original.get("task_owner_name", "")
-                if not details.get("task_owner_id"):
-                    details["task_owner_id"] = original.get("task_owner_id", "")
-                if not details.get("priority"):
-                    details["priority"] = original.get("priority", "high")
-
-        ti.xcom_push(key="updated_tasks", value=updated)
-        ti.xcom_push(key="tasks_update_errors", value=errors)
-
-        # Save to thread context
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["updated_tasks"] = updated
-        contexts[thread_id]["tasks_update_errors"] = errors
-        contexts[thread_id]["update_tasks_prompt"] = prompt
-        contexts[thread_id]["update_tasks_response"] = response
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Updated {len(updated)} tasks with {len(errors)} errors")
+                # Ensure task_index is preserved
+                if not details.get("task_index"):
+                    details["task_index"] = original.get("task_index")
         
-        # Enhanced logging for debugging
+        # Log owner assignments for debugging
         for task in updated:
-            task_id = task.get("id", "unknown")
-            task_desc = task.get("details", {}).get("task_details", "NO_DETAILS")[:50]
-            due_date = task.get("details", {}).get("due_date", "NO_DATE")
-            logging.info(f"Task {task_id}: '{task_desc}...' due: {due_date}")
-            
+            task_index = task.get("details", {}).get("task_index")
+            owner_name = task.get("details", {}).get("task_owner_name")
+            owner_id = task.get("details", {}).get("task_owner_id")
+            logging.info(f"Updated task {task_index}: Assigned to {owner_name} (ID: {owner_id})")
+        
+        ti.xcom_push(key="updated_tasks", value=updated)
         return updated
-        
-    except JSONDecodeError as e:
-        error_msg = f"Failed to parse AI response: {str(e)}"
-        logging.error(error_msg)
-        logging.error(f"Raw AI response: {response}")
-        
-        ti.xcom_push(key="updated_tasks", value=[])
-        ti.xcom_push(key="tasks_update_errors", value=[error_msg])
-        
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["update_tasks_error"] = error_msg
-        contexts[thread_id]["tasks_update_errors"] = [error_msg]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-        
-        return []
-        
     except Exception as e:
-        error_msg = f"Error updating tasks: {str(e)}"
-        logging.error(error_msg)
-        
+        logging.error(f"Error updating tasks: {e}")
+        logging.error(f"Raw response: {response}")
         ti.xcom_push(key="updated_tasks", value=[])
-        ti.xcom_push(key="tasks_update_errors", value=[error_msg])
-        
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["update_tasks_error"] = error_msg
-        contexts[thread_id]["tasks_update_errors"] = [error_msg]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-        
         return []
 
 def create_associations(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
-    thread_id = context['dag_run'].conf.get("thread_id")
-    conf = context["dag_run"].conf
-    search_results = conf.get("search_results", {})
-
-    if not analysis_results:
-        logging.error("No analysis_results found in XCom. Cannot proceed with associations.")
-        ti.xcom_push(key="associations_created", value=[])
-        ti.xcom_push(key="associations_errors", value=["Missing analysis_results"])
-        contexts = get_thread_context()
-        contexts[thread_id]["associations_created"] = []
-        contexts[thread_id]["associations_errors"] = ["Missing analysis_results"]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-        return []
-
-    # Get newly created entities
+    search_results = ti.xcom_pull(key="search_results", default={})
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    thread_history = ti.xcom_pull(key="thread_history", default=[])
+    
+    # Get all created entities
     created_contacts = ti.xcom_pull(key="created_contacts", default=[])
     created_companies = ti.xcom_pull(key="created_companies", default=[])
     created_deals = ti.xcom_pull(key="created_deals", default=[])
     created_meetings = ti.xcom_pull(key="created_meetings", default=[])
     created_notes = ti.xcom_pull(key="created_notes", default=[])
     created_tasks = ti.xcom_pull(key="created_tasks", default=[])
-
-    # Get updated entities (IDs remain the same)
+    
+    # Get updated entities
     updated_contacts = ti.xcom_pull(key="updated_contacts", default=[])
     updated_companies = ti.xcom_pull(key="updated_companies", default=[])
     updated_deals = ti.xcom_pull(key="updated_deals", default=[])
-    updated_meetings = ti.xcom_pull(key="updated_meetings", default=[])
-    updated_notes = ti.xcom_pull(key="updated_notes", default=[])
-    updated_tasks = ti.xcom_pull(key="updated_tasks", default=[])
-
-    # Use filtered selected_entities from analysis_results
+    
+    # Get selected existing entities
     selected_entities = analysis_results.get("selected_entities", {})
-    logging.info(f"Using filtered selected_entities from analysis: {json.dumps(selected_entities, indent=2)}")
-
-    # Extract existing entity IDs from selected_entities
-    existing_contact_ids = [str(contact.get("contactId")) for contact in selected_entities.get("contacts", []) if contact.get("contactId")]
-    existing_company_ids = [str(company.get("companyId")) for company in selected_entities.get("companies", []) if company.get("companyId")]
-    existing_deal_ids = [str(deal.get("dealId")) for deal in selected_entities.get("deals", []) if deal.get("dealId")]
-
-    # Fallback to raw search_results if selected_entities is empty
-    if not existing_contact_ids:
-        existing_contact_ids = [str(contact.get("contactId")) for contact in search_results.get("contact_results", {}).get("results", []) if contact.get("contactId")]
-        logging.warning("selected_entities had no contacts; falling back to raw search_results")
-    if not existing_company_ids:
-        existing_company_ids = [str(company.get("companyId")) for company in search_results.get("company_results", {}).get("results", []) if company.get("companyId")]
-        logging.warning("selected_entities had no companies; falling back to raw search_results")
-    if not existing_deal_ids:
-        existing_deal_ids = [str(deal.get("dealId")) for deal in search_results.get("deal_results", {}).get("results", []) if deal.get("dealId")]
-        logging.warning("selected_entities had no deals; falling back to raw search_results")
-
-    # Get updated entity IDs
-    updated_contact_ids = [c.get("id", "") for c in updated_contacts if c.get("id")]
-    updated_company_ids = [c.get("id", "") for c in updated_companies if c.get("id")]
-    updated_deal_ids = [d.get("id", "") for d in updated_deals if d.get("id")]
-    updated_meeting_ids = [m.get("id", "") for m in updated_meetings if m.get("id")]
-    updated_note_ids = [n.get("id", "") for n in updated_notes if n.get("id")]
-    updated_task_ids = [t.get("id", "") for t in updated_tasks if t.get("id")]
-
-    # New IDs
-    new_contact_ids = [c.get("id", "") for c in created_contacts if c.get("id")]
-    new_company_ids = [c.get("id", "") for c in created_companies if c.get("id")]
-    new_deal_ids = [d.get("id", "") for d in created_deals if d.get("id")]
-    new_meeting_ids = [m.get("id", "") for m in created_meetings if m.get("id")]
-    new_note_ids = [n.get("id", "") for n in created_notes if n.get("id")]
-    new_task_ids = [t.get("id", "") for t in created_tasks if t.get("id")]
-
-    # Priority logic: Use new IDs first, then updated IDs, then selected existing IDs
-    final_contact_ids = new_contact_ids if new_contact_ids else (updated_contact_ids if updated_contact_ids else existing_contact_ids)
-    final_company_ids = new_company_ids if new_company_ids else (updated_company_ids if updated_company_ids else existing_company_ids)
-    final_deal_ids = new_deal_ids if new_deal_ids else (updated_deal_ids if updated_deal_ids else existing_deal_ids)
-    final_meeting_ids = new_meeting_ids if new_meeting_ids else updated_meeting_ids
-    final_note_ids = new_note_ids if new_note_ids else updated_note_ids
-    final_task_ids = new_task_ids if new_task_ids else updated_task_ids
-
-    # Combine all IDs for association tracking
-    all_entity_ids = {
-        "final_contacts": final_contact_ids,
-        "final_companies": final_company_ids,
-        "final_deals": final_deal_ids,
-        "final_meetings": final_meeting_ids,
-        "final_notes": final_note_ids,
-        "final_tasks": final_task_ids
-    }
-
-    # Log the entity IDs to be associated
-    logging.info(f"Associating entities for thread {thread_id}:")
-    logging.info(f"Final Contact IDs: {final_contact_ids}")
-    logging.info(f"Final Company IDs: {final_company_ids}")
-    logging.info(f"Final Deal IDs: {final_deal_ids}")
-    logging.info(f"Final Meeting IDs: {final_meeting_ids}")
-    logging.info(f"Final Note IDs: {final_note_ids}")
-    logging.info(f"Final Task IDs: {final_task_ids}")
-
-    # Check if we have any entities to associate
-    total_entities = (len(final_contact_ids) + len(final_company_ids) + len(final_deal_ids) +
-                      len(final_meeting_ids) + len(final_note_ids) + len(final_task_ids))
-
-    if total_entities == 0:
-        logging.warning("No entities available to associate, creating empty associations list.")
+    existing_contact_ids = [str(c.get("contactId")) for c in selected_entities.get("contacts", [])]
+    existing_company_ids = [str(c.get("companyId")) for c in selected_entities.get("companies", [])]
+    existing_deal_ids = [str(d.get("dealId")) for d in selected_entities.get("deals", [])]
+    
+    # Prioritize: new > updated > existing
+    final_contact_ids = [c.get("id") for c in created_contacts] or [c.get("id") for c in updated_contacts] or existing_contact_ids
+    final_company_ids = [c.get("id") for c in created_companies] or [c.get("id") for c in updated_companies] or existing_company_ids
+    final_deal_ids = [d.get("id") for d in created_deals] or [d.get("id") for d in updated_deals] or existing_deal_ids
+    final_meeting_ids = [m.get("id") for m in created_meetings]
+    final_note_ids = [n.get("id") for n in created_notes]
+    final_task_ids = [t.get("id") for t in created_tasks]
+    
+    logging.info(f"Association IDs - Contacts: {final_contact_ids}, Companies: {final_company_ids}, Deals: {final_deal_ids}")
+    
+    if not any([final_contact_ids, final_company_ids, final_deal_ids, final_meeting_ids, final_note_ids, final_task_ids]):
+        logging.warning("No entities to associate")
         ti.xcom_push(key="associations_created", value=[])
-        ti.xcom_push(key="associations_errors", value=[])
-        contexts = get_thread_context()
-        contexts[thread_id]["associations_created"] = []
-        contexts[thread_id]["associations_errors"] = []
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
         return []
+    
+    conversation_context = ""
+    for msg in chat_history:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        conversation_context += f"[{role.upper()}]: {content}\n\n"
+        
+    for idx, email in enumerate(thread_history, 1):
+        content = email.get("content", "").strip()
+        if content:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(content, "html.parser")
+            clean_content = soup.get_text(separator=" ", strip=True)
+            sender = email['headers'].get('From', 'Unknown')
+            is_from_bot = email.get('from_bot', False)
+            role_label = "BOT" if is_from_bot else "USER"
+            conversation_context += f"[{role_label} EMAIL {idx} - From: {sender}]: {clean_content}\n\n"
+    
+    prompt = f"""You are a HubSpot API assistant responsible for creating associations between entities.
 
-    prompt = f"""Always associate the `AVAILABLE ENTITY IDS` by using `create_multi_association` tool.
-AVAILABLE ENTITY IDS:
+CONVERSATION HISTORY:
+{conversation_context}
+
+AVAILABLE ENTITY IDS (from current workflow):
 - Contact IDs: {final_contact_ids}
 - Company IDs: {final_company_ids}  
 - Deal IDs: {final_deal_ids}
@@ -2114,24 +1506,60 @@ AVAILABLE ENTITY IDS:
 - Note IDs: {final_note_ids}
 - Task IDs: {final_task_ids}
 
-You can only associate entities by calling the tool: `create_multi_association`.
-Use the below format for each association request:
+CRITICAL INSTRUCTIONS:
+
+**Your Task**: Create associations using `create_multi_association` tool.
+
+**ID Selection Logic**:
+
+1. **If IDs are in AVAILABLE ENTITY IDS**: Use them directly
+   
+2. **If IDs are NOT in AVAILABLE ENTITY IDS**: Extract them from the CONVERSATION HISTORY
+   - Look for entity IDs mentioned in previous bot responses (usually in HTML tables)
+   - Look for entity IDs mentioned by the user (e.g., "associate with deal 12345")
+   - Search for patterns like:
+     * "contactId: 12345" or "Contact ID: 12345"
+     * "companyId: 67890" or "Company ID: 67890"
+     * "dealId: 54321" or "Deal ID: 54321"
+     * "associate with contact 99999"
+     * "link to existing deal 88888"
+
+**Common Scenarios**:
+- User creates a NEW task → wants to associate with EXISTING deal/contact/company from conversation
+- User creates a NEW note → wants to associate with EXISTING entities mentioned earlier
+- User creates a NEW contact → wants to associate with EXISTING company/deal from conversation
+
+**How to Extract IDs from Conversation**:
+1. Parse HTML tables in bot messages - look for columns like "ID", "Contact ID", "Deal ID", etc.
+2. Look for user statements like "associate with...", "link to...", "connect to..."
+3. If bot previously showed existing entities with their IDs, extract those IDs
+
+**Association Format**:
 {{
     "single": {{
-        "deal_id": "string",
-        "contact_id": "string", 
-        "company_id": "string",
-        "note_id": "string",
-        "task_id": "string",
-        "meeting_id": "string"
+        "deal_id": "string_or_empty",
+        "contact_id": "string_or_empty",
+        "company_id": "string_or_empty",
+        "note_id": "string_or_empty",
+        "task_id": "string_or_empty",
+        "meeting_id": "string_or_empty"
     }}
 }}
 
-Rules:
-1. Each association request should include relevant entity IDs (leave as empty string "" if not applicable)
-2. Use comma separation for multiple IDs in a field if needed. example: "contact_id": "123,456".
+**Rules**:
+1. Use AVAILABLE IDs when present
+2. Extract IDs from CONVERSATION when not in available lists
+3. Use comma separation for multiple IDs: "contact_id": "123,456"
+4. Leave as empty string "" if not applicable
+5. Always invoke `create_multi_association` tool for each association
 
-Return JSON:
+**Example Scenario**:
+- Bot previously showed: "Existing Deal: ABC Corp Deal (ID: 11223344)"
+- User says: "Create a task for this deal"
+- Available IDs: Task ID: 99887766, Deal IDs: []
+- Action: Extract deal_id "11223344" from conversation, associate with task_id "99887766"
+
+Return ONLY valid JSON:
 {{
     "association_requests": [
         {{
@@ -2139,243 +1567,146 @@ Return JSON:
                 "deal_id": "123",
                 "contact_id": "456", 
                 "company_id": "789",
-                "note_id": "",
-                "task_id": "",
-                "meeting_id": ""
-            }}
-        }},
-        {{
-            "single": {{
-                "deal_id": "",
-                "contact_id": "456",
-                "company_id": "789", 
                 "note_id": "101",
                 "task_id": "202",
                 "meeting_id": "303"
             }}
         }}
     ],
-    "errors": ["Error message 1", "Error message 2"],
+    "ids_from_conversation": {{
+        "contact_ids": [],
+        "company_ids": [],
+        "deal_ids": ["123"],
+        "note_ids": [],
+        "task_ids": [],
+        "meeting_ids": []
+    }},
+    "errors": [],
     "error": null
 }}
 
-If error, set error message and include individual errors in the errors array."""
+The "ids_from_conversation" field should list any IDs you extracted from the conversation history (not from AVAILABLE ENTITY IDS).
 
+If error, set error message and include individual errors in the errors array.
+"""
+    
     response = get_ai_response(prompt, expect_json=True)
-    association_requests = []  # Initialize to avoid UnboundLocalError
-
     try:
-        # Log raw response for debugging
-        logging.info(f"Raw AI response: {response}")
-        # Validate response before parsing
-        if not response or response.strip() == "":
-            raise ValueError("Empty response from AI service")
-        if response.strip().startswith(('<', '[', '{')):
-            parsed = json.loads(response)
-            association_requests = parsed.get("association_requests", [])
-            errors = parsed.get("errors", [])
-            if parsed.get("error"):
-                logging.warning(f"Association creation returned error: {parsed['error']}")
-        else:
-            raise ValueError(f"Invalid JSON response: {response[:100]}...")
-
-        ti.xcom_push(key="associations_created", value=association_requests)
-        ti.xcom_push(key="associations_errors", value=errors)
-
-        contexts = get_thread_context()
-        contexts[thread_id]["associations_created"] = association_requests
-        contexts[thread_id]["associations_errors"] = errors
-        contexts[thread_id]["create_associations_prompt"] = prompt
-        contexts[thread_id]["create_associations_response"] = response
-        contexts[thread_id]["all_entity_ids_used"] = all_entity_ids
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-
-        logging.info(f"Created {len(association_requests)} association requests with {len(errors)} errors")
+        parsed = json.loads(response)
+        associations = parsed.get("association_requests", [])
+        extracted_ids = parsed.get("ids_from_conversation", {})
+        
+        # Log extracted IDs for debugging
+        if extracted_ids and any(extracted_ids.values()):
+            logging.info(f"IDs extracted from conversation (not in available lists): {extracted_ids}")
+        
+        ti.xcom_push(key="associations_created", value=associations)
+        ti.xcom_push(key="extracted_conversation_ids", value=extracted_ids)
+        logging.info(f"Created {len(associations)} associations")
+        return associations
     except Exception as e:
-        error_msg = f"Error creating associations: {str(e)}"
-        logging.error(error_msg)
+        logging.error(f"Error creating associations: {e}")
+        logging.error(f"Raw AI response: {response}")
         ti.xcom_push(key="associations_created", value=[])
-        ti.xcom_push(key="associations_errors", value=[error_msg])
-        contexts = get_thread_context()
-        contexts[thread_id]["create_associations_error"] = error_msg
-        contexts[thread_id]["associations_errors"] = [error_msg]
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
+        return []
 
-    return association_requests
 def collect_and_save_results(ti, **context):
-    thread_id = context['dag_run'].conf.get("thread_id")
-    
-    # Pull all created and updated entities from XCom
-    created_contacts = ti.xcom_pull(key="created_contacts") or []
-    created_companies = ti.xcom_pull(key="created_companies") or []
-    created_deals = ti.xcom_pull(key="created_deals") or []
-    created_meetings = ti.xcom_pull(key="created_meetings") or []
-    created_notes = ti.xcom_pull(key="created_notes") or []
-    created_tasks = ti.xcom_pull(key="created_tasks") or []
-    
-    updated_contacts = ti.xcom_pull(key="updated_contacts") or []
-    updated_companies = ti.xcom_pull(key="updated_companies") or []
-    updated_deals = ti.xcom_pull(key="updated_deals") or []
-    updated_meetings = ti.xcom_pull(key="updated_meetings") or []
-    updated_notes = ti.xcom_pull(key="updated_notes") or []
-    updated_tasks = ti.xcom_pull(key="updated_tasks") or []
-    
-    associations_created = ti.xcom_pull(key="associations_created") or []
-    
-    # NEW: Pull analysis_results to get selected_entities
-    analysis_results = ti.xcom_pull(key="analysis_results") or {}
-    selected_entities = analysis_results.get("selected_entities", {})
-    
-    # Structure create_results to mirror search_results
-    create_results = {
-        "thread_id": thread_id,
-        "created_contacts": {
-            "total": len(created_contacts),
-            "results": created_contacts  # List of created contact dicts with id and details
-        },
-        "created_companies": {
-            "total": len(created_companies),
-            "results": created_companies
-        },
-        "created_deals": {
-            "total": len(created_deals),
-            "results": created_deals
-        },
-        "created_meetings": {
-            "total": len(created_meetings),
-            "results": created_meetings
-        },
-        "created_notes": {
-            "total": len(created_notes),
-            "results": created_notes
-        },
-        "created_tasks": {
-            "total": len(created_tasks),
-            "results": created_tasks
-        },
-        "updated_contacts": {
-            "total": len(updated_contacts),
-            "results": updated_contacts
-        },
-        "updated_companies": {
-            "total": len(updated_companies),
-            "results": updated_companies
-        },
-        "updated_deals": {
-            "total": len(updated_deals),
-            "results": updated_deals
-        },
-        "updated_meetings": {
-            "total": len(updated_meetings),
-            "results": updated_meetings
-        },
-        "updated_notes": {
-            "total": len(updated_notes),
-            "results": updated_notes
-        },
-        "updated_tasks": {
-            "total": len(updated_tasks),
-            "results": updated_tasks
-        },
-        "associations_created": {
-            "total": len(associations_created),
-            "results": associations_created
-        }
-    }
-    
-    # NEW: Add selected_entities as the "used" or "selected" results for contacts, companies, deals
-    create_results["selected_contacts"] = {
-        "total": len(selected_entities.get("contacts", [])),
-        "results": selected_entities.get("contacts", [])
-    }
-    create_results["selected_companies"] = {
-        "total": len(selected_entities.get("companies", [])),
-        "results": selected_entities.get("companies", [])
-    }
-    create_results["selected_deals"] = {
-        "total": len(selected_entities.get("deals", [])),
-        "results": selected_entities.get("deals", [])
-    }
-    
-    # Update thread context with create_results
-    try:
-        contexts = get_thread_context()
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id]["create_results"] = create_results
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-        logging.info(f"Saved create_results for thread {thread_id}")
-    except Exception as e:
-        logging.error(f"Error saving create_results for thread {thread_id}: {e}")
-
-
-def compose_response_html(ti, **context):
-    analysis_results = ti.xcom_pull(key="analysis_results")
+    """Collect all results for final email"""
     created_contacts = ti.xcom_pull(key="created_contacts", default=[])
     created_companies = ti.xcom_pull(key="created_companies", default=[])
     created_deals = ti.xcom_pull(key="created_deals", default=[])
     created_meetings = ti.xcom_pull(key="created_meetings", default=[])
     created_notes = ti.xcom_pull(key="created_notes", default=[])
     created_tasks = ti.xcom_pull(key="created_tasks", default=[])
-
+    
     updated_contacts = ti.xcom_pull(key="updated_contacts", default=[])
     updated_companies = ti.xcom_pull(key="updated_companies", default=[])
     updated_deals = ti.xcom_pull(key="updated_deals", default=[])
     updated_meetings = ti.xcom_pull(key="updated_meetings", default=[])
     updated_notes = ti.xcom_pull(key="updated_notes", default=[])
     updated_tasks = ti.xcom_pull(key="updated_tasks", default=[])
+    
+    associations_created = ti.xcom_pull(key="associations_created", default=[])
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    selected_entities = analysis_results.get("selected_entities", {})
+    
+    create_results = {
+        "created_contacts": {"total": len(created_contacts), "results": created_contacts},
+        "created_companies": {"total": len(created_companies), "results": created_companies},
+        "created_deals": {"total": len(created_deals), "results": created_deals},
+        "created_meetings": {"total": len(created_meetings), "results": created_meetings},
+        "created_notes": {"total": len(created_notes), "results": created_notes},
+        "created_tasks": {"total": len(created_tasks), "results": created_tasks},
+        "updated_contacts": {"total": len(updated_contacts), "results": updated_contacts},
+        "updated_companies": {"total": len(updated_companies), "results": updated_companies},
+        "updated_deals": {"total": len(updated_deals), "results": updated_deals},
+        "updated_meetings": {"total": len(updated_meetings), "results": updated_meetings},
+        "updated_notes": {"total": len(updated_notes), "results": updated_notes},
+        "updated_tasks": {"total": len(updated_tasks), "results": updated_tasks},
+        "associations_created": {"total": len(associations_created), "results": associations_created},
+        "selected_contacts": {"total": len(selected_entities.get("contacts", [])), "results": selected_entities.get("contacts", [])},
+        "selected_companies": {"total": len(selected_entities.get("companies", [])), "results": selected_entities.get("companies", [])},
+        "selected_deals": {"total": len(selected_entities.get("deals", [])), "results": selected_entities.get("deals", [])}
+    }
+    
+    ti.xcom_push(key="create_results", value=create_results)
+    logging.info(f"Collected results: {sum(r['total'] for r in create_results.values())} total operations")
+    return create_results
+
+def compose_response_html(ti, **context):
+    """Compose HTML response email with all created/updated/selected entities"""
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
     owner_info = ti.xcom_pull(key="owner_info", default={})
     task_threshold_info = ti.xcom_pull(key="task_threshold_info", default={})
-    associations_created = ti.xcom_pull(key="associations_created", default=[])
-
-    thread_id = context['dag_run'].conf.get("thread_id")
-    email_data = context['dag_run'].conf.get("email_data", {})
-    user_response_email = context['dag_run'].conf.get("user_response_email", email_data)
-    selected_entities = analysis_results.get("selected_entities", {"contacts": [], "companies": [], "deals": []})
+    
+    created_contacts = ti.xcom_pull(key="created_contacts", default=[])
+    created_companies = ti.xcom_pull(key="created_companies", default=[])
+    created_deals = ti.xcom_pull(key="created_deals", default=[])
+    created_meetings = ti.xcom_pull(key="created_meetings", default=[])
+    created_notes = ti.xcom_pull(key="created_notes", default=[])
+    created_tasks = ti.xcom_pull(key="created_tasks", default=[])
+    
+    updated_contacts = ti.xcom_pull(key="updated_contacts", default=[])
+    updated_companies = ti.xcom_pull(key="updated_companies", default=[])
+    updated_deals = ti.xcom_pull(key="updated_deals", default=[])
+    updated_meetings = ti.xcom_pull(key="updated_meetings", default=[])
+    updated_notes = ti.xcom_pull(key="updated_notes", default=[])
+    updated_tasks = ti.xcom_pull(key="updated_tasks", default=[])
+    
+    selected_entities = analysis_results.get("selected_entities", {})
     existing_contacts = selected_entities.get("contacts", [])
     existing_companies = selected_entities.get("companies", [])
     existing_deals = selected_entities.get("deals", [])
-    from_sender = user_response_email.get("headers", {}).get("From", email_data.get("headers", {}).get("From", ""))
-
-    ### NEW: Load prior create_results from conf to include previous creations in email
-    prior_create_results = context['dag_run'].conf.get("create_results", {})
-    prior_created_notes = prior_create_results.get("created_notes", {}).get("results", [])
-    prior_created_tasks = prior_create_results.get("created_tasks", {}).get("results", [])
-    prior_created_meetings = prior_create_results.get("created_meetings", {}).get("results", [])
-    # Merge priors + current (priors first for history order)
-    all_created_notes = prior_created_notes + created_notes
-    all_created_tasks = prior_created_tasks + created_tasks
-    all_created_meetings = prior_created_meetings + created_meetings
-    logging.info(f"Merged prior creations for email: Notes={len(all_created_notes)}, Tasks={len(all_created_tasks)}, Meetings={len(all_created_meetings)}")
-
+    
+    thread_id = context['dag_run'].conf.get("thread_id")
+    email_data = ti.xcom_pull(key="email_data", default={})
+    from_sender = email_data.get("headers", {}).get("From", "")
+    
+    # Filter out updated tasks from created tasks to avoid duplication
     updated_task_ids = [task.get("id") for task in updated_tasks if task.get("id")]
-    final_created_tasks = [t for t in all_created_tasks if t.get("id") not in updated_task_ids]
-    email_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
-            th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
-            th {{ background-color: #f2f2f2; font-weight: bold; }}
-            h3 {{ color: #333; margin-top: 30px; margin-bottom: 15px; }}
-            .greeting {{ margin-bottom: 20px; }}
-            .closing {{ margin-top: 30px; }}
-            .warning {{ background-color: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 10px; border-radius: 5px; margin: 10px 0; }}
-        </style>
-    </head>
-    <body>
-        <div class="greeting">
-            <p>Hello {from_sender},</p>
-            <p>I have completed the requested operations in HubSpot. Here is the summary:</p>
-        </div>
-    """
-
-    # FIXED: Check for actual data, not just empty lists
-    if (existing_contacts and len(existing_contacts) > 0) or (updated_contacts and len(updated_contacts) > 0):
+    final_created_tasks = [t for t in created_tasks if t.get("id") not in updated_task_ids]
+    
+    email_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
+        th {{ background-color: #f2f2f2; font-weight: bold; }}
+        h3 {{ color: #333; margin-top: 30px; margin-bottom: 15px; }}
+        .greeting {{ margin-bottom: 20px; }}
+        .closing {{ margin-top: 30px; }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {from_sender},</p>
+        <p>I have completed the requested operations in HubSpot. Here is the summary:</p>
+    </div>
+"""
+    
+    # Existing/Used Contacts
+    if existing_contacts or updated_contacts:
         email_content += """
         <h3>Contacts Used/Updated</h3>
         <table>
@@ -2385,7 +1716,7 @@ def compose_response_html(ti, **context):
                     <th>Firstname</th>
                     <th>Lastname</th>
                     <th>Email</th>
-                    <th>Phone Number</th>
+                    <th>Phone</th>
                     <th>Address</th>
                     <th>Job Title</th>
                     <th>Status</th>
@@ -2421,13 +1752,10 @@ def compose_response_html(ti, **context):
                     <td>Updated</td>
                 </tr>
             """
-        email_content += """
-            </tbody>
-        </table>
-        """
-
-    # FIXED: Check for actual data, not just empty lists
-    if (existing_companies and len(existing_companies) > 0) or (updated_companies and len(updated_companies) > 0):
+        email_content += "</tbody></table>"
+    
+    # Existing/Used Companies
+    if existing_companies or updated_companies:
         email_content += """
         <h3>Companies Used/Updated</h3>
         <table>
@@ -2485,13 +1813,10 @@ def compose_response_html(ti, **context):
                     <td>Updated</td>
                 </tr>
             """
-        email_content += """
-            </tbody>
-        </table>
-        """
-
-    # FIXED: Check for actual data, not just empty lists
-    if (existing_deals and len(existing_deals) > 0) or (updated_deals and len(updated_deals) > 0):
+        email_content += "</tbody></table>"
+    
+    # Existing/Used Deals
+    if existing_deals or updated_deals:
         email_content += """
         <h3>Deals Used/Updated</h3>
         <table>
@@ -2534,13 +1859,10 @@ def compose_response_html(ti, **context):
                     <td>Updated</td>
                 </tr>
             """
-        email_content += """
-            </tbody>
-        </table>
-        """
-
-    # Show newly created entities only if data exists
-    if created_contacts and len(created_contacts) > 0:
+        email_content += "</tbody></table>"
+    
+    # Newly Created Contacts
+    if created_contacts:
         email_content += """
         <h3>Newly Created Contacts</h3>
         <table>
@@ -2550,7 +1872,7 @@ def compose_response_html(ti, **context):
                     <th>Firstname</th>
                     <th>Lastname</th>
                     <th>Email</th>
-                    <th>Phone Number</th>
+                    <th>Phone</th>
                     <th>Address</th>
                     <th>Job Title</th>
                 </tr>
@@ -2570,12 +1892,10 @@ def compose_response_html(ti, **context):
                     <td>{details.get("jobtitle", "")}</td>
                 </tr>
             """
-        email_content += """
-            </tbody>
-        </table>
-        """
-
-    if created_companies and len(created_companies) > 0:
+        email_content += "</tbody></table>"
+    
+    # Newly Created Companies
+    if created_companies:
         email_content += """
         <h3>Newly Created Companies</h3>
         <table>
@@ -2613,12 +1933,10 @@ def compose_response_html(ti, **context):
                     <td>{details.get("type", "")}</td>
                 </tr>
             """
-        email_content += """
-            </tbody>
-        </table>
-        """
-
-    if created_deals and len(created_deals) > 0:
+        email_content += "</tbody></table>"
+    
+    # Newly Created Deals
+    if created_deals:
         email_content += """
         <h3>Newly Created Deals</h3>
         <table>
@@ -2646,16 +1964,10 @@ def compose_response_html(ti, **context):
                     <td>{details.get("dealOwnerName", "")}</td>
                 </tr>
             """
-        email_content += """
-            </tbody>
-        </table>
-        """
-
-    # Rest of the function continues with meetings, notes, tasks...
-    # (Keep the existing logic for the remaining sections)
+        email_content += "</tbody></table>"
     
-    ### UPDATED: Use all_created_* for secondaries to include priors
-    if all_created_meetings or updated_meetings:
+    # Meetings Created/Updated
+    if created_meetings or updated_meetings:
         email_content += """
         <h3>Meetings Created/Updated</h3>
         <table>
@@ -2674,7 +1986,7 @@ def compose_response_html(ti, **context):
             </thead>
             <tbody>
         """
-        for meeting in all_created_meetings:
+        for meeting in created_meetings:
             details = meeting.get("details", {})
             attendees = ", ".join(details.get("attendees", []))
             email_content += f"""
@@ -2706,12 +2018,10 @@ def compose_response_html(ti, **context):
                     <td>Updated</td>
                 </tr>
             """
-        email_content += """
-            </tbody>
-        </table>
-        """
-
-    if all_created_notes or updated_notes:
+        email_content += "</tbody></table>"
+    
+    # Notes Created/Updated
+    if created_notes or updated_notes:
         email_content += """
         <h3>Notes Created/Updated</h3>
         <table>
@@ -2725,7 +2035,7 @@ def compose_response_html(ti, **context):
             </thead>
             <tbody>
         """
-        for note in all_created_notes:
+        for note in created_notes:
             details = note.get("details", {})
             email_content += f"""
                 <tr>
@@ -2745,12 +2055,10 @@ def compose_response_html(ti, **context):
                     <td>Updated</td>
                 </tr>
             """
-        email_content += """
-            </tbody>
-        </table>
-        """
-
-    if final_created_tasks  or updated_tasks :
+        email_content += "</tbody></table>"
+    
+    # Tasks Created/Updated
+    if final_created_tasks or updated_tasks:
         email_content += """
         <h3>Tasks Created/Updated</h3>
         <table>
@@ -2759,6 +2067,7 @@ def compose_response_html(ti, **context):
                     <th>ID</th>
                     <th>Task Details</th>
                     <th>Owner Name</th>
+                    <th>Owner ID</th>
                     <th>Due Date</th>
                     <th>Priority</th>
                     <th>Status</th>
@@ -2766,7 +2075,6 @@ def compose_response_html(ti, **context):
             </thead>
             <tbody>
         """
-        # CHANGE: Use final_created_tasks instead of all_created_tasks
         for task in final_created_tasks:
             details = task.get("details", {})
             email_content += f"""
@@ -2774,6 +2082,7 @@ def compose_response_html(ti, **context):
                     <td>{task.get("id", "")}</td>
                     <td>{details.get("task_details", "")}</td>
                     <td>{details.get("task_owner_name", "")}</td>
+                    <td>{details.get("task_owner_id", "")}</td>
                     <td>{details.get("due_date", "")}</td>
                     <td>{details.get("priority", "")}</td>
                     <td>Created</td>
@@ -2786,368 +2095,283 @@ def compose_response_html(ti, **context):
                     <td>{task.get("id", "")}</td>
                     <td>{details.get("task_details", "")}</td>
                     <td>{details.get("task_owner_name", "")}</td>
+                    <td>{details.get("task_owner_id", "")}</td>
                     <td>{details.get("due_date", "")}</td>
                     <td>{details.get("priority", "")}</td>
                     <td>Updated</td>
                 </tr>
             """
-        email_content += """
-            </tbody>
-        </table>
-        """
-    # ...existing code in compose_response_html...
-
-    # --- Task Volume Analysis Section ---
-    dates_checked = task_threshold_info.get("task_threshold_results", {}).get("dates_checked", [])
-    if final_created_tasks and dates_checked:
-        email_content += """
-        <h3>Task Volume Analysis</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>Date</th>
-                    <th>Owner Name</th>
-                    <th>Existing Tasks</th>
-                    <th>Threshold Status</th>
-                    <th>Warning</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
-        for date_info in dates_checked:
-            date = date_info.get("date", "")
-            owner_name = date_info.get("owner_name", "")
-            task_count = date_info.get("existing_task_count", 0)
-            exceeds = "Exceeds" if date_info.get("exceeds_threshold") else "Within Limit"
-            warning = date_info.get("warning") or "None"
-            email_content += f"""
-                <tr>
-                    <td>{date}</td>
-                    <td>{owner_name}</td>
-                    <td>{task_count}</td>
-                    <td>{exceeds}</td>
-                    <td>{warning}</td>
-                </tr>
-            """
-        email_content += """
-            </tbody>
-        </table>
-        <p><em>Note: High task volumes may impact workflow performance and user productivity.</em></p>
-        <hr>
-        """
-
-    # --- Owner Assignment Section ---
-    has_deals_or_tasks = (
-        (existing_deals and len(existing_deals) > 0) or
-        (created_deals and len(created_deals) > 0) or
-        (final_created_tasks and len(final_created_tasks) > 0)
-    )
-    if has_deals_or_tasks and owner_info:
-        chosen_deal_owner_id = owner_info.get("deal_owner_id", "159242778")
-        chosen_deal_owner_name = owner_info.get("deal_owner_name", "liji")
-        deal_owner_msg = owner_info.get("deal_owner_message", "")
-        task_owners = owner_info.get("task_owners", [])
-        all_owners = owner_info.get("all_owners_table", [])
-
-        email_content += """
-        <h3>Owner Assignment Details</h3>
-        """
-
-        # Deal Owner Assignment
-        if (existing_deals and len(existing_deals) > 0) or (created_deals and len(created_deals) > 0):
-            email_content += "<div style='margin-bottom: 15px;'>"
-            email_content += "<h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Owner Assignment:</h4>"
-            deal_msg_lower = deal_owner_msg.lower()
-            if "no deal owner specified" in deal_msg_lower:
-                email_content += f"""
-                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
-                    <strong>Reason:</strong> Deal owner was not specified.
-                    <br><strong>Action:</strong> Assigning to default owner '{chosen_deal_owner_name}'.
-                </p>
-                """
-            elif ("not valid" in deal_msg_lower and "deal owner" in deal_msg_lower):
-                email_content += f"""
-                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
-                    <strong>Reason:</strong> Deal owner mentioned, but not found in the available owners list.
-                    <br><strong>Action:</strong> Assigning to default owner '{chosen_deal_owner_name}'.
-                </p>
-                """
-            elif ("deal owner specified as" in deal_msg_lower or "specified" in deal_msg_lower):
-                email_content += f"""
-                <p style='background-color: #d4edda; padding: 10px; border-left: 4px solid #28a745;'>
-                    <strong>Reason:</strong> Deal owner is valid and found in the available owners list.
-                    <br><strong>Action:</strong> Assigned to '{chosen_deal_owner_name}'.
-                </p>
-                """
-            else:
-                email_content += f"""
-                <p style='background-color: #d4edda; padding: 10px; border-left: 4px solid #28a745;'>
-                    <strong>Reason:</strong> Deal owner assignment processed.
-                    <br><strong>Action:</strong> Assigned to '{chosen_deal_owner_name}'.
-                </p>
-                """
-            email_content += "</div>"
-
-        # Task Owner Assignment
-        if final_created_tasks and task_owners:
-            email_content += "<div style='margin-bottom: 15px;'>"
-            email_content += "<h4 style='color: #2c5aa0; margin-bottom: 5px;'>Task Owner Assignments:</h4>"
-            for task_owner in task_owners:
-                task_index = task_owner.get("task_index", 0)
-                task_owner_name = task_owner.get("task_owner_name", "liji")
-                task_owner_msg = task_owner.get("task_owner_message", "")
-                task = next((t for t in final_created_tasks if t.get("details", {}).get("task_index") == task_index), None)
-                task_details = task.get("details", {}).get("task_details", "Unknown task") if task else "Unknown task"
-                task_msg_lower = task_owner_msg.lower()
-                if "no task owner specified" in task_msg_lower:
-                    email_content += f"""
-                    <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
-                        <strong>Task {task_index}:</strong> {task_details}
-                        <br><strong>Reason:</strong> {task_owner_msg}
-                        <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
-                    </p>
-                    """
-                elif "not valid" in task_msg_lower:
-                    email_content += f"""
-                    <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
-                        <strong>Task {task_index}:</strong> {task_details}
-                        <br><strong>Reason:</strong> {task_owner_msg}
-                        <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
-                    </p>
-                    """
-                else:
-                    email_content += f"""
-                    <p style='background-color: #d4edda; padding: 10px; border-left: 4px solid #28a745;'>
-                        <strong>Task {task_index}:</strong> {task_details}
-                        <br><strong>Reason:</strong> {task_owner_msg}
-                        <br><strong>Action:</strong> Assigned to '{task_owner_name}'.
-                    </p>
-                    """
-            email_content += "</div>"
-
-        # Available Owners Table
-        if all_owners:
-            email_content += """
-            <h4 style='color: #2c5aa0; margin-bottom: 10px;'>Available Owners:</h4>
-            <table style='border-collapse: collapse; width: 100%; margin-bottom: 20px;'>
-                <thead>
-                    <tr style='background-color: #e3f2fd;'>
-                        <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Owner ID</th>
-                        <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Owner Name</th>
-                        <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Owner Email</th>
-                        <th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>Assignment</th>
-                    </tr>
-                </thead>
-                <tbody>
-            """
-            for owner in all_owners:
-                owner_id = owner.get("id", "")
-                owner_name = owner.get("name", "")
-                owner_email = owner.get("email", "")
-                assignments = []
-                if owner_id == chosen_deal_owner_id and ((existing_deals and len(existing_deals) > 0) or (created_deals and len(created_deals) > 0)):
-                    assignments.append("Deal Owner")
-                if any(task_owner.get("task_owner_id") == owner_id for task_owner in task_owners) and final_created_tasks:
-                    task_indices = [str(task_owner.get("task_index")) for task_owner in task_owners if task_owner.get("task_owner_id") == owner_id]
-                    assignments.append(f"Task Owner (Tasks {', '.join(task_indices)})")
-                assignment_text = ", ".join(assignments) if assignments else ""
-                if "Deal Owner" in assignments and "Task Owner" in assignments:
-                    row_style = ' style="background-color: #d1ecf1; border-left: 4px solid #0c5460;"'
-                elif "Deal Owner" in assignments:
-                    row_style = ' style="background-color: #d4edda; border-left: 4px solid #28a745;"'
-                elif "Task Owner" in assignments:
-                    row_style = ' style="background-color: #fff3cd; border-left: 4px solid #ffc107;"'
-                else:
-                    row_style = ' style="background-color: #f8f9fa;"'
-                email_content += f"""
-                    <tr{row_style}>
-                        <td style='border: 1px solid #ddd; padding: 8px;'>{owner_id}</td>
-                        <td style='border: 1px solid #ddd; padding: 8px;'><strong>{owner_name}</strong></td>
-                        <td style='border: 1px solid #ddd; padding: 8px;'>{owner_email}</td>
-                        <td style='border: 1px solid #ddd; padding: 8px;'><strong>{assignment_text}</strong></td>
-                    </tr>
-                """
-            email_content += """
-                </tbody>
-            </table>
-            """
-        email_content += "<hr>"
-
-# ...rest of your compose_response_html code...
-
+        email_content += "</tbody></table>"
+    
+    # # Task Volume Analysis
+    # dates_checked = task_threshold_info.get("task_threshold_results", {}).get("dates_checked", [])
+    # if final_created_tasks and dates_checked:
+    #     email_content += """
+    #     <h3>Task Volume Analysis</h3>
+    #     <table>
+    #         <thead>
+    #             <tr>
+    #                 <th>Date</th>
+    #                 <th>Owner Name</th>
+    #                 <th>Existing Tasks</th>
+    #                 <th>Threshold Status</th>
+    #                 <th>Warning</th>
+    #             </tr>
+    #         </thead>
+    #         <tbody>
+    #     """
+    #     for date_info in dates_checked:
+    #         exceeds = "Exceeds" if date_info.get("exceeds_threshold") else "Within Limit"
+    #         warning = date_info.get("warning") or "None"
+    #         email_content += f"""
+    #             <tr>
+    #                 <td>{date_info.get("date", "")}</td>
+    #                 <td>{date_info.get("owner_name", "")}</td>
+    #                 <td>{date_info.get("existing_task_count", 0)}</td>
+    #                 <td>{exceeds}</td>
+    #                 <td>{warning}</td>
+    #             </tr>
+    #         """
+    #     email_content += """
+    #         </tbody>
+    #     </table>
+    #     <p><em>Note: High task volumes may impact workflow performance and user productivity.</em></p>
+    #     """
+    
+    # # Owner Assignment Section
+    # has_deals_or_tasks = (
+    #     (existing_deals and len(existing_deals) > 0) or
+    #     (created_deals and len(created_deals) > 0) or
+    #     (final_created_tasks and len(final_created_tasks) > 0)
+    # )
+    
+    # if has_deals_or_tasks and owner_info:
+    #     chosen_deal_owner_id = owner_info.get("deal_owner_id", "71346067")
+    #     chosen_deal_owner_name = owner_info.get("deal_owner_name", "Kishore")
+    #     deal_owner_msg = owner_info.get("deal_owner_message", "")
+    #     task_owners = owner_info.get("task_owners", [])
+    #     all_owners = owner_info.get("all_owners_table", [])
+        
+    #     email_content += "<h3>Owner Assignment Details</h3>"
+        
+    #     # Deal Owner Assignment
+    #     if (existing_deals and len(existing_deals) > 0) or (created_deals and len(created_deals) > 0):
+    #         email_content += """
+    #         <h4>Deal Owner Assignment:</h4>
+    #         <table>
+    #             <thead>
+    #                 <tr>
+    #                     <th>Reason</th>
+    #                     <th>Action</th>
+    #                 </tr>
+    #             </thead>
+    #             <tbody>
+    #         """
+    #         deal_msg_lower = deal_owner_msg.lower()
+    #         if "no deal owner specified" in deal_msg_lower:
+    #             email_content += f"""
+    #                 <tr>
+    #                     <td>Deal owner was not specified.</td>
+    #                     <td>Assigning to default owner '{chosen_deal_owner_name}'.</td>
+    #                 </tr>
+    #             """
+    #         elif "not valid" in deal_msg_lower:
+    #             email_content += f"""
+    #                 <tr>
+    #                     <td>Deal owner mentioned, but not found in the available owners list.</td>
+    #                     <td>Assigning to default owner '{chosen_deal_owner_name}'.</td>
+    #                 </tr>
+    #             """
+    #         else:
+    #             email_content += f"""
+    #                 <tr>
+    #                     <td>Deal owner is valid and found in the available owners list.</td>
+    #                     <td>Assigned to '{chosen_deal_owner_name}'.</td>
+    #                 </tr>
+    #             """
+    #         email_content += "</tbody></table>"
+        
+    #     # Task Owner Assignments
+    #     if final_created_tasks and task_owners:
+    #         email_content += """
+    #         <h4>Task Owner Assignments:</h4>
+    #         <table>
+    #             <thead>
+    #                 <tr>
+    #                     <th>Task Index</th>
+    #                     <th>Task Details</th>
+    #                     <th>Reason</th>
+    #                     <th>Action</th>
+    #                 </tr>
+    #             </thead>
+    #             <tbody>
+    #         """
+    #         for task_owner in task_owners:
+    #             task_index = task_owner.get("task_index", 0)
+    #             task_owner_name = task_owner.get("task_owner_name", "Kishore")
+    #             task_owner_msg = task_owner.get("task_owner_message", "")
+                
+    #             task = next((t for t in final_created_tasks if t.get("details", {}).get("task_index") == task_index), None)
+    #             task_details = task.get("details", {}).get("task_details", "Unknown task") if task else "Unknown task"
+                
+    #             task_msg_lower = task_owner_msg.lower()
+                
+    #             if "no task owner specified" in task_msg_lower:
+    #                 email_content += f"""
+    #                     <tr>
+    #                         <td>{task_index}</td>
+    #                         <td>{task_details}</td>
+    #                         <td>Task owner was not specified.</td>
+    #                         <td>Assigning to default owner '{task_owner_name}'.</td>
+    #                     </tr>
+    #                 """
+    #             elif "not valid" in task_msg_lower:
+    #                 email_content += f"""
+    #                     <tr>
+    #                         <td>{task_index}</td>
+    #                         <td>{task_details}</td>
+    #                         <td>Task owner mentioned, but not found in the available owners list.</td>
+    #                         <td>Assigning to default owner '{task_owner_name}'.</td>
+    #                     </tr>
+    #                 """
+    #             else:
+    #                 email_content += f"""
+    #                     <tr>
+    #                         <td>{task_index}</td>
+    #                         <td>{task_details}</td>
+    #                         <td>Task owner is valid and found in the available owners list.</td>
+    #                         <td>Assigned to '{task_owner_name}'.</td>
+    #                     </tr>
+    #                 """
+    #         email_content += "</tbody></table>"
+        
+    #     # Available Owners Table
+    #     if all_owners:
+    #         email_content += """
+    #         <h4>Available Owners:</h4>
+    #         <table>
+    #             <thead>
+    #                 <tr>
+    #                     <th>Owner ID</th>
+    #                     <th>Owner Name</th>
+    #                     <th>Owner Email</th>
+    #                     <th>Assignment</th>
+    #                 </tr>
+    #             </thead>
+    #             <tbody>
+    #         """
+            
+    #         for owner in all_owners:
+    #             owner_id = owner.get("id", "")
+    #             owner_name = owner.get("name", "")
+    #             owner_email = owner.get("email", "")
+                
+    #             assignments = []
+    #             if owner_id == chosen_deal_owner_id and ((existing_deals and len(existing_deals) > 0) or (created_deals and len(created_deals) > 0)):
+    #                 assignments.append("Deal Owner")
+                
+    #             if any(task_owner.get("task_owner_id") == owner_id for task_owner in task_owners) and final_created_tasks:
+    #                 task_indices = [str(task_owner.get("task_index")) for task_owner in task_owners if task_owner.get("task_owner_id") == owner_id]
+    #                 assignments.append(f"Task Owner (Tasks {', '.join(task_indices)})")
+                
+    #             assignment_text = ", ".join(assignments) if assignments else ""
+                
+    #             email_content += f"""
+    #                 <tr>
+    #                     <td>{owner_id}</td>
+    #                     <td>{owner_name}</td>
+    #                     <td>{owner_email}</td>
+    #                     <td>{assignment_text}</td>
+    #                 </tr>
+    #             """
+            
+    #         email_content += "</tbody></table>"
+    
+    # Closing
     email_content += """
-        <div class="closing">
-            <p>Please let me know if any adjustments or corrections are needed.</p>
-            <p>Best regards,<br>
-            HubSpot Agent<br>
-            hubspot-agent-9201@lowtouch.ai</p>
-        </div>
-    </body>
-    </html>
-    """
-
+    <div class="closing">
+        <p>Please let me know if any adjustments or corrections are needed.</p>
+        <p>Best regards,<br>
+        HubSpot Agent<br>
+        hubspot-agent-9201@lowtouch.ai</p>
+    </div>
+</body>
+</html>"""
+    
     ti.xcom_push(key="response_html", value=email_content)
-    contexts = get_thread_context()
-    contexts[thread_id]["response_html"] = email_content
-    with open(THREAD_CONTEXT_FILE, "w") as f:
-        json.dump(contexts, f)
-
     logging.info(f"Composed response HTML for thread {thread_id}")
+    
     return email_content
 
 def send_final_email(ti, **context):
-    """Updated send_final_email with multi-recipient support"""
-    email_data = context['dag_run'].conf.get("email_data", {})
-    user_response_email = context['dag_run'].conf.get("user_response_email", email_data)
+    """Send final completion email"""
+    email_data = ti.xcom_pull(key="email_data", default={})
     response_html = ti.xcom_pull(key="response_html")
-    thread_id = context['dag_run'].conf.get("thread_id")
-
+    
     service = authenticate_gmail()
     if not service:
-        logging.error("Gmail authentication failed, cannot send final email.")
-        contexts = get_thread_context()
-        contexts[thread_id]["final_email_error"] = "Gmail authentication failed"
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
+        logging.error("Gmail authentication failed")
         raise ValueError("Gmail authentication failed")
-
-    # Get thread context to retrieve all_recipients from confirmation email
-    thread_context = get_thread_context().get(thread_id, {})
-    stored_all_recipients = thread_context.get("all_recipients", {})
     
-    # If no stored recipients, extract from current user response
-    if not stored_all_recipients:
-        stored_all_recipients = extract_all_recipients(user_response_email)
-
-    # Get sender from user response
-    sender_email = user_response_email["headers"].get("From", "")
-    original_subject = user_response_email['headers'].get('Subject', 'Meeting Minutes Request')
-
-    if not original_subject.lower().startswith('re:'):
-        subject = f"Re: {original_subject}"
-    else:
-        subject = original_subject
-
-    in_reply_to = user_response_email["headers"].get("Message-ID", "")
-    references = user_response_email["headers"].get("References", "")
-
-    # Prepare recipients for reply-all functionality
+    all_recipients = extract_all_recipients(email_data)
+    sender_email = email_data["headers"].get("From", "")
+    original_subject = email_data['headers'].get('Subject', 'HubSpot Request')
+    
+    subject = f"Re: {original_subject}" if not original_subject.startswith('Re:') else original_subject
+    in_reply_to = email_data["headers"].get("Message-ID", "")
+    references = email_data["headers"].get("References", "")
+    
+    # Prepare recipients
     primary_recipient = sender_email
-    
-    # For Cc: Include recipients from user response + stored recipients
-    current_recipients = extract_all_recipients(user_response_email)
     cc_recipients = []
     
-    # Add current Cc recipients
-    for cc_addr in current_recipients["cc"]:
-        if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and 
+    for to_addr in all_recipients["to"]:
+        if (to_addr.lower() != sender_email.lower() and 
+            HUB_FROM_ADDRESS.lower() not in to_addr.lower()):
+            cc_recipients.append(to_addr)
+    
+    for cc_addr in all_recipients["cc"]:
+        if (HUB_FROM_ADDRESS.lower() not in cc_addr.lower() and 
             cc_addr not in cc_recipients):
             cc_recipients.append(cc_addr)
     
-    # Add current To recipients (except sender and bot)
-    for to_addr in current_recipients["to"]:
-        if (to_addr.lower() != sender_email.lower() and 
-            HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower() and
-            to_addr not in cc_recipients):
-            cc_recipients.append(to_addr)
+    bcc_recipients = [addr for addr in all_recipients["bcc"] if HUB_FROM_ADDRESS.lower() not in addr.lower()]
     
-    # Add original recipients from stored context if they're not already included
-    for to_addr in stored_all_recipients.get("to", []):
-        if (to_addr.lower() != sender_email.lower() and 
-            HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower() and
-            to_addr not in cc_recipients):
-            cc_recipients.append(to_addr)
-    
-    for cc_addr in stored_all_recipients.get("cc", []):
-        if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and 
-            cc_addr not in cc_recipients):
-            cc_recipients.append(cc_addr)
-
-    # For Bcc: Include current + stored Bcc recipients
-    bcc_recipients = []
-    for bcc_addr in current_recipients.get("bcc", []):
-        if (HUBSPOT_FROM_ADDRESS.lower() not in bcc_addr.lower() and
-            bcc_addr not in bcc_recipients):
-            bcc_recipients.append(bcc_addr)
-    
-    for bcc_addr in stored_all_recipients.get("bcc", []):
-        if (HUBSPOT_FROM_ADDRESS.lower() not in bcc_addr.lower() and
-            bcc_addr not in bcc_recipients):
-            bcc_recipients.append(bcc_addr)
-
-    # Convert to strings
     cc_string = ', '.join(cc_recipients) if cc_recipients else None
     bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
+    
+    logging.info(f"Sending final email to: {primary_recipient}")
+    
+    result = send_email(service, primary_recipient, subject, response_html, 
+                       in_reply_to, references, cc=cc_string, bcc=bcc_string)
+    
+    if result:
+        logging.info(f"Final email sent successfully")
+        return result
+    else:
+        logging.error("Failed to send final email")
+        raise ValueError("Failed to send final email")
 
-    logging.info(f"Sending final email:")
-    logging.info(f"Primary recipient: {primary_recipient}")
-    logging.info(f"Cc recipients: {cc_string}")
-    logging.info(f"Bcc recipients: {bcc_string}")
-
-    retries = 3
-    for attempt in range(retries):
-        try:
-            result = send_email(service, primary_recipient, subject, response_html, 
-                              in_reply_to, references, cc=cc_string, bcc=bcc_string)
-            if result:
-                logging.info(f"Final workflow completion email sent to all recipients")
-                contexts = get_thread_context()
-                contexts[thread_id].update({
-                    "final_email_sent": True,
-                    "final_email_timestamp": datetime.now().isoformat(),
-                    "workflow_status": "completed"
-                })
-                with open(THREAD_CONTEXT_FILE, "w") as f:
-                    json.dump(contexts, f)
-                return result
-            else:
-                logging.error(f"Attempt {attempt+1} failed to send email")
-        except Exception as e:
-            logging.error(f"Attempt {attempt+1} failed to send email: {e}")
-            if attempt < retries - 1:
-                time.sleep(2 ** attempt)
-            else:
-                logging.error(f"Failed to send final email after {retries} attempts")
-                contexts = get_thread_context()
-                contexts[thread_id]["final_email_error"] = f"Failed to send final email: {str(e)}"
-                with open(THREAD_CONTEXT_FILE, "w") as f:
-                    json.dump(contexts, f)
-                raise
-
-    return None
 def branch_to_creation_tasks(ti, **context):
-    analysis_results = ti.xcom_pull(task_ids='analyze_user_response', key='analysis_results')
-    mandatory_tasks = ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
+    """Branch to appropriate creation/update tasks"""
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
     
     if not analysis_results or not isinstance(analysis_results, dict):
-        logging.error("Invalid or missing analysis_results from analyze_user_response")
-        logging.info(f"Proceeding with mandatory tasks: {mandatory_tasks}")
-        return mandatory_tasks
-
-    # Use tasks_to_execute from analysis_results
+        logging.error("Invalid analysis_results")
+        return ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
+    
     tasks_to_execute = analysis_results.get("tasks_to_execute", [])
     
-    # Ensure mandatory tasks are always included
+    # Ensure mandatory tasks are included
+    mandatory_tasks = ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
     tasks_to_execute = list(set(tasks_to_execute + mandatory_tasks))
     
-    if analysis_results.get("should_determine_owner"):
-        tasks_to_execute.append("determine_owner")
-    if analysis_results.get("should_check_task_threshold"):
-        tasks_to_execute.append("check_task_threshold")
-    # Validate task IDs
-    valid_task_ids = [
-        "create_contacts", "create_companies", "determine_owner", "check_task_threshold",  # <-- add these two
-        "create_deals", "create_meetings", "create_notes", "create_tasks",
-        "update_contacts", "update_companies", "update_deals", "update_meetings", "update_notes", "update_tasks",
-        "create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"
-    ]
-    invalid_tasks = [task for task in tasks_to_execute if task not in valid_task_ids]
-    if invalid_tasks:
-        logging.error(f"Invalid task IDs found: {invalid_tasks}. Proceeding with mandatory tasks only.")
-        tasks_to_execute = mandatory_tasks
-
     logging.info(f"Tasks to execute: {tasks_to_execute}")
     return tasks_to_execute
+
+# ============================================================================
+# DAG DEFINITION
+# ============================================================================
 
 with DAG(
     "hubspot_create_objects",
@@ -3158,6 +2382,12 @@ with DAG(
 ) as dag:
 
     start_task = DummyOperator(task_id="start_workflow")
+
+    load_context_task = PythonOperator(
+        task_id="load_context_from_dag_run",
+        python_callable=load_context_from_dag_run,
+        provide_context=True
+    )
 
     analyze_task = PythonOperator(
         task_id="analyze_user_response",
@@ -3172,15 +2402,15 @@ with DAG(
     )
 
     determine_owner_task = PythonOperator(
-    task_id="determine_owner",
-    python_callable=determine_owner,
-    provide_context=True
+        task_id="determine_owner",
+        python_callable=determine_owner,
+        provide_context=True
     )
 
     check_task_threshold_task = PythonOperator(
-    task_id="check_task_threshold",
-    python_callable=check_task_threshold,
-    provide_context=True
+        task_id="check_task_threshold",
+        python_callable=check_task_threshold,
+        provide_context=True
     )
 
     create_contacts_task = PythonOperator(
@@ -3263,10 +2493,10 @@ with DAG(
     )
 
     collect_results_task = PythonOperator(
-    task_id="collect_and_save_results",
-    python_callable=collect_and_save_results,
-    provide_context=True,
-    trigger_rule="none_failed_min_one_success"
+        task_id="collect_and_save_results",
+        python_callable=collect_and_save_results,
+        provide_context=True,
+        trigger_rule="none_failed_min_one_success"
     )
 
     compose_response_task = PythonOperator(
@@ -3288,7 +2518,8 @@ with DAG(
         trigger_rule="all_done"
     )
 
-    start_task >> analyze_task >> branch_task
+    # Define task dependencies
+    start_task >> load_context_task >> analyze_task >> branch_task
 
     creation_tasks = {
         "create_contacts": create_contacts_task,
@@ -3310,6 +2541,7 @@ with DAG(
     branch_task >> [task for task in creation_tasks.values()]
 
     for task in creation_tasks.values():
-            task >> create_associations_task
+        task >> create_associations_task
+    
     branch_task >> create_associations_task
-    create_associations_task >> compose_response_task >> collect_results_task >> send_final_email_task >> end_task
+    create_associations_task >> collect_results_task >> compose_response_task >> send_final_email_task >> end_task
