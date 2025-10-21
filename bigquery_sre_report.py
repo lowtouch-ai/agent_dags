@@ -24,7 +24,7 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
-OLLAMA_HOST = "http://agentomatic:8000/"
+OLLAMA_HOST = Variable.get("BigQuery_OLLAMA_HOST", "http://agentomatic:8000/")
 
 def authenticate_gmail():
     try:
@@ -448,3 +448,4 @@ with DAG(
     )
 
     t1 >> t2 >> t3 >> t4 >> t5 >> t6 >> t7
+
