@@ -27,7 +27,7 @@ LAST_PROCESSED_EMAIL_FILE = "/appz/cache/last_processed_bigquery_email.json"
 # Reuse from your original code: authenticate_gmail, get_ai_response, check_execution_count, check_slot_usage, check_execution_time, check_memory_usage, compile_analysis_report, convert_to_html
 # Assuming they are imported or defined here.
 
-OLLAMA_HOST = "http://agentomatic:8000/"
+OLLAMA_HOST = Variable.get("BigQuery_OLLAMA_HOST", "http://agentomatic:8000/")
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 default_args = {
