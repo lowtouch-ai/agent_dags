@@ -248,7 +248,7 @@ with open(readme_path, 'r') as file:
     readme_content = file.read()
 
 # Define DAG
-with DAG("cloud_assess_monitor_mailbox",
+with DAG("akamai_cloud_assess_monitor_mailbox",
          default_args=default_args,
          schedule_interval=timedelta(minutes=1),
          catchup=False,

@@ -432,7 +432,7 @@ except FileNotFoundError:
     readme_content = "Cloud assessment response DAG"
 
 with DAG(
-    "cloud_assess_send_response_email",
+    "akamai_cloud_assess_send_response_email",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
