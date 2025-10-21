@@ -280,8 +280,8 @@ def compile_analysis_report(ti, **context):
         End the email with a professional sign-off:
 
         Thanks,
-        BigQuery SRE Team
-        lowtouch.ai
+        
+        BigQuery SRE agent @lowtouch.ai
 
         """
         response = get_ai_response(prompt)
@@ -329,7 +329,7 @@ def convert_to_html(ti, **context):
 
             ### Example formatting rules:
 
-            * `**Executive Summary**` → `<h2>Executive Summary</h2>`
+            * `**Summary**` → `<h2>Summary</h2>`
             * `### Slot Usage` → `<h3>Slot Usage</h3>`
             * Inline code like `project_id` → `<code>project_id</code>`
             * Code block:
@@ -384,7 +384,7 @@ def send_email(ti, **context):
             raise ValueError("Sender or receiver email not configured")
 
         msg = MIMEMultipart()
-        msg["From"] = sender_email
+        msg["From"] = f"BigQuery SRE agent via lowtouch.ai <{sender_email}>"
         msg["To"] = receiver_email
         msg["Subject"] = f"BigQuery SRE Report - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         msg.attach(MIMEText(cleaned_response, "html"))
@@ -448,4 +448,3 @@ with DAG(
     )
 
     t1 >> t2 >> t3 >> t4 >> t5 >> t6 >> t7
-
