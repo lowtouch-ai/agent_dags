@@ -233,7 +233,7 @@ def trigger_response_tasks(**kwargs):
         logging.info(f"Triggering Response DAG with email data and {len(email['attachments'])} attachments: {email}")
         trigger_task = TriggerDagRunOperator(
             task_id=task_id,
-            trigger_dag_id="cloud_assess_send_response_email",
+            trigger_dag_id="akamai_cloud_assess_send_response_email",
             conf={"email_data": email},
         )
         trigger_task.execute(context=kwargs)

@@ -317,7 +317,10 @@ def step_1_process_email(ti, **context):
 
     logging.info(f"Final current content: {current_content}")
 
-    prompt = f"Assess the cloud details from the following Markdown table and provide a detailed assessment report:\n\n{current_content}\n\nNote: If no valid attachment, inform the user to attach one."
+    prompt = f"""Assess the cloud details from the following Markdown table and provide a detailed assessment report:
+                {current_content}
+                Note: If no valid attachment is provided, inform the user to attach one. Include the following signature at the bottom of the report:
+                **Signature**: akamai-presales-agent@lowtouch.ai"""
 
     logging.info(f"Final prompt to AI: {prompt}...")
     
@@ -344,23 +347,19 @@ def step_2_compose_email(ti, **context):
 
         Content: {content_appended}
 
-        Follow this exact structure for the email body, using clean, valid HTML without any additional wrappers like <html> or <body>. Do not omit any sections or elements listed below. Use natural, professional wording but adhere strictly to the format. Extract all details from the provided Content; use 'N/A' if a value is not available.
+        Follow this exact structure for the email body, using clean, valid HTML without any additional wrappers like <html> or <body>. Do not omit any sections or elements listed below. Use natural, professional wording but adhere strictly to the format. Extract all details from the provided Content; use 'N/A' if a value is not available. Infuse insights where appropriate to make the summary analytical and actionable, highlighting implications for the client's operations, potential risks, opportunities for optimization, and alignments with Akamai's cloud solutions or lowtouch.ai's agentic AI capabilities for automation.
 
         1. Greeting: <p>Dear {sender_name},</p>
 
-        2. Opening paragraph: We have received your filled details and completed the cloud assessment for Akamai. Here is the summary:
+        2. Opening paragraph: <p>We have received your filled details and completed the cloud assessment for Akamai. This assessment analyzes your current setup to identify strengths, areas for improvement, and strategic opportunities. Here is a insightful summary to guide next steps:</p>
 
-        3. Assessment Summary section: <p><strong>Assessment Summary</strong></p> followed by a paragraph form (each on new line with <br>): 
-           [Key findings extracted from Content, e.g., Cloud Provider: [value]<br> Usage: [value]<br> etc.]
-
-        4. Detailed Assessment mentioned in `Sample Cloud Assessment Report`: <p><strong>Detailed Assessment</strong></p> followed by the full assessment from Content.
-
-        5. Signature: <p>Best regards,<br>Cloud Assessment Team,<br>lowtouch.ai</p>
+        3. Detailed Assessment mentioned in `Sample Cloud Assessment Report`: <p><strong>Assessment Report</strong></p> followed by the full assessment from Content.
 
         Ensure the email is natural, professional, and concise. Avoid rigid or formulaic language to maintain a human-like tone. Do not use placeholders; replace with actual extracted values. Return only the HTML content as specified, without <!DOCTYPE>, <html>, or <body> tags.
 
         Return only the HTML body of the email.
         """
+    
     # Pass previous step's response as history
     history = [{"role": "assistant", "content": content_appended}] if content_appended else []
     response = get_ai_response(prompt, conversation_history=history)
