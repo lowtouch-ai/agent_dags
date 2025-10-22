@@ -253,7 +253,7 @@ with DAG("akamai_presales_assess_monitor_mailbox",
          schedule_interval=timedelta(minutes=1),
          catchup=False,
          doc_md=readme_content,
-         tags=["mailbox", "cloud_assess", "monitor"]) as dag:
+         tags=["mailbox", "cloud_assess", "monitor", "akamai-presales"]) as dag:
 
     fetch_emails_task = PythonOperator(
         task_id="fetch_unread_emails",

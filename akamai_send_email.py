@@ -486,7 +486,7 @@ with DAG(
     schedule_interval=None,
     catchup=False,
     doc_md=readme_content,
-    tags=["email", "cloud_assess", "send", "response"]
+    tags=["email", "cloud_assess", "send", "response", "akamai-presales"]
 ) as dag:
     
     task_1 = PythonOperator(
