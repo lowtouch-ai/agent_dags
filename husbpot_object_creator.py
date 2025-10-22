@@ -11,11 +11,9 @@ import re
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
-from email import message_from_bytes
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from googleapiclient.errors import HttpError
-from airflow.models import Variable
 import time
 
 # Configure logging
