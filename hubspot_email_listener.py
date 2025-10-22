@@ -57,172 +57,8 @@ def update_last_checked_timestamp(timestamp):
     with open(LAST_PROCESSED_EMAIL_FILE, "w") as f:
         json.dump({"last_processed": timestamp}, f)
 
-def get_thread_context():
-    try:
-        if os.path.exists(THREAD_CONTEXT_FILE):
-            if os.path.getsize(THREAD_CONTEXT_FILE) == 0:
-                logging.warning(f"Thread context file {THREAD_CONTEXT_FILE} is empty")
-                return {}
-            with open(THREAD_CONTEXT_FILE, "r") as f:
-                data = json.load(f)
-                logging.info(f"Loaded thread context for {data} threads")
-                if not isinstance(data, dict):
-                    logging.error(f"Invalid thread context data: expected dict, got {type(data)}")
-                    return {}
-                return data
-        else:
-            logging.info(f"Thread context file {THREAD_CONTEXT_FILE} does not exist")
-            return {}
-    except json.JSONDecodeError:
-        logging.error(f"Corrupted JSON in {THREAD_CONTEXT_FILE}, returning empty dict")
-        return {}
-    except Exception as e:
-        logging.error(f"Error reading {THREAD_CONTEXT_FILE}: {e}", exc_info=True)
-        return {}
-
-def update_thread_context(thread_id, context_update):
-    """Update the thread context for a given thread_id with the provided context_update dict."""
-    try:
-        os.makedirs(os.path.dirname(THREAD_CONTEXT_FILE), exist_ok=True)
-        contexts = {}
-        if os.path.exists(THREAD_CONTEXT_FILE):
-            with open(THREAD_CONTEXT_FILE, "r") as f:
-                contexts = json.load(f)
-        if thread_id not in contexts:
-            contexts[thread_id] = {}
-        contexts[thread_id].update(context_update)
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-        logging.info(f"Updated thread context for thread_id={thread_id}")
-    except Exception as e:
-        logging.error(f"Error updating thread context for thread_id={thread_id}: {e}")
-
-def debug_thread_context():
-    """Debug function to log current thread context state"""
-    try:
-        contexts = get_thread_context()
-        logging.info("=== CURRENT THREAD CONTEXTS ===")
-        for thread_id, context in contexts.items():
-            logging.info(f"Thread {thread_id}:")
-            logging.info(f"  - confirmation_needed: {context.get('confirmation_needed', 'NOT SET')}")
-            logging.info(f"  - confirmation_sent: {context.get('confirmation_sent', 'NOT SET')}")
-            logging.info(f"  - awaiting_reply: {context.get('awaiting_reply', 'NOT SET')}")
-            logging.info(f"  - has search_results: {bool(context.get('search_results', {}))}")
-            logging.info(f"  - timestamp: {context.get('confirmation_timestamp', 'NOT SET')}")
-        logging.info("=== END THREAD CONTEXTS ===")
-        if not contexts:
-            logging.info("No thread contexts found!")
-    except Exception as e:
-        logging.error(f"Error reading thread contexts: {e}")
-
-# Add this function to your monitor DAG (hubspot_monitor_mailbox.py)
-
-# Add this function to your monitor DAG (hubspot_monitor_mailbox.py)
-
-def get_email_thread(service, email_data):
-    """Retrieve the full email thread history, ensuring all messages are included."""
-    try:
-        # Validate email_data structure
-        if not email_data or "headers" not in email_data or not isinstance(email_data.get("headers"), dict):
-            logging.error("Invalid email_data: 'headers' key missing or not a dictionary")
-            return []
-
-        thread_id = email_data.get("threadId")
-        message_id = email_data["headers"].get("Message-ID", "")
-        email_id = email_data.get("id", "")
-
-        # Check stored thread context for existing thread history
-        stored_context = get_thread_context().get(thread_id, {})
-        stored_thread_history = stored_context.get("thread_history", [])
-        if stored_thread_history:
-            logging.info(f"Using stored thread history for thread {thread_id} with {len(stored_thread_history)} messages")
-            return stored_thread_history
-
-        # If no thread ID, try to find it using the message ID
-        if not thread_id:
-            logging.warning(f"No thread ID provided for message ID {message_id}. Querying Gmail API.")
-            query_result = service.users().messages().list(userId="me", q=f"rfc822msgid:{message_id}").execute()
-            messages = query_result.get("messages", [])
-            if messages:
-                message = service.users().messages().get(userId="me", id=messages[0]["id"]).execute()
-                thread_id = message.get("threadId")
-                logging.info(f"Resolved thread ID: {thread_id} for message ID {message_id}")
-
-        # If still no thread ID, treat as a single email
-        if not thread_id:
-            logging.warning(f"No thread ID resolved for message ID {message_id}. Treating as single email.")
-            raw_message = service.users().messages().get(userId="me", id=email_id, format="raw").execute()
-            msg = message_from_bytes(base64.urlsafe_b64decode(raw_message["raw"]))
-            content = decode_email_payload(msg)
-            headers = email_data.get("headers", {})
-            from_address = headers.get("From", "").lower()
-            is_from_bot = HUBSPOT_FROM_ADDRESS.lower() in from_address
-            email_entry = {
-                "headers": headers,
-                "content": content.strip(),
-                "timestamp": int(email_data.get("internalDate", 0)),
-                "from_bot": is_from_bot,
-                "message_id": email_id
-            }
-            logging.info(f"Single email processed: message_id={email_id}, from={headers.get('From', 'Unknown')}, timestamp={email_entry['timestamp']}")
-            return [email_entry]
-
-        # Fetch the full thread with pagination
-        email_thread = []
-        page_token = None
-        while True:
-            thread_request = service.users().threads().get(userId="me", id=thread_id)
-            if page_token:
-                thread_request = thread_request.pageToken(page_token)
-            thread = thread_request.execute()
-            messages = thread.get("messages", [])
-            email_thread.extend(messages)
-            
-            page_token = thread.get("nextPageToken")
-            if not page_token:
-                break
-
-        logging.info(f"Processing thread {thread_id} with {len(email_thread)} messages")
-        processed_thread = []
-        for msg in email_thread:
-            # Fetch raw message if not included
-            raw_msg = base64.urlsafe_b64decode(msg["raw"]) if "raw" in msg else None
-            if not raw_msg:
-                raw_message = service.users().messages().get(userId="me", id=msg["id"], format="raw").execute()
-                raw_msg = base64.urlsafe_b64decode(raw_message["raw"])
-
-            email_msg = message_from_bytes(raw_msg)
-            headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
-            content = decode_email_payload(email_msg)
-            from_address = headers.get("From", "").lower()
-            is_from_bot = HUBSPOT_FROM_ADDRESS.lower() in from_address
-
-            processed_thread.append({
-                "headers": headers,
-                "content": content.strip(),
-                "timestamp": int(msg.get("internalDate", 0)),
-                "from_bot": is_from_bot,
-                "message_id": msg.get("id", "")
-            })
-
-        # Sort by timestamp (ascending) to ensure correct conversation order
-        processed_thread.sort(key=lambda x: x.get("timestamp", 0))
-        
-        # Log thread details for debugging
-        logging.info(f"Retrieved thread {thread_id} with {len(processed_thread)} messages")
-        for idx, email in enumerate(processed_thread, 1):
-            logging.info(f"Email {idx}: message_id={email['message_id']}, from={email['headers'].get('From', 'Unknown')}, timestamp={email['timestamp']}, from_bot={email['from_bot']}, content_preview={email['content'][:100]}...")
-
-        # Store thread history in context
-        update_thread_context(thread_id, {"thread_history": processed_thread})
-        return processed_thread
-
-    except Exception as e:
-        logging.error(f"Error retrieving email thread for thread_id={thread_id}: {e}", exc_info=True)
-        return []
-
 def decode_email_payload(msg):
-    """Decode email payload - ALSO MISSING"""
+    """Decode email payload to extract text content."""
     try:
         if msg.is_multipart():
             for part in msg.walk():
@@ -242,8 +78,146 @@ def decode_email_payload(msg):
         logging.error(f"Error decoding email payload: {e}")
         return ""
 
+def get_email_thread(service, email_data):
+    """
+    Retrieve full email thread by reconstructing from References header and searching for each message.
+    """
+    try:
+        if not email_data or "headers" not in email_data:
+            logging.error("Invalid email_data: 'headers' key missing")
+            return []
+
+        thread_id = email_data.get("threadId")
+        headers = email_data.get("headers", {})
+        current_message_id = headers.get("Message-ID", "")
+        email_id = email_data.get("id", "")
+        
+        logging.info(f"Processing email: email_id={email_id}, thread_id={thread_id}")
+
+        # ✅ Extract all message IDs from References header
+        references = headers.get("References", "")
+        in_reply_to = headers.get("In-Reply-To", "")
+        
+        # Parse message IDs from References
+        message_ids = []
+        if references:
+            # References contains space-separated Message-IDs
+            message_ids = re.findall(r'<([^>]+)>', references)
+        if in_reply_to:
+            reply_to_id = re.search(r'<([^>]+)>', in_reply_to)
+            if reply_to_id and reply_to_id.group(1) not in message_ids:
+                message_ids.append(reply_to_id.group(1))
+        
+        # Add current message ID
+        current_id = re.search(r'<([^>]+)>', current_message_id)
+        if current_id:
+            message_ids.append(current_id.group(1))
+        
+        logging.info(f"Found {len(message_ids)} message IDs in thread from References header")
+        
+        # Now fetch each message by searching for its Message-ID
+        processed_thread = []
+        for msg_id in message_ids:
+            try:
+                # Search for message by RFC822 Message-ID
+                search_query = f'rfc822msgid:{msg_id}'
+                search_result = service.users().messages().list(
+                    userId="me",
+                    q=search_query,
+                    maxResults=1
+                ).execute()
+                
+                messages = search_result.get("messages", [])
+                if not messages:
+                    logging.warning(f"Could not find message with ID: {msg_id}")
+                    continue
+                
+                # Fetch the full message
+                gmail_msg_id = messages[0]["id"]
+                raw_message = service.users().messages().get(
+                    userId="me",
+                    id=gmail_msg_id,
+                    format="raw"
+                ).execute()
+                
+                raw_msg = base64.urlsafe_b64decode(raw_message["raw"])
+                email_msg = message_from_bytes(raw_msg)
+                
+                # Get metadata for headers
+                metadata = service.users().messages().get(
+                    userId="me",
+                    id=gmail_msg_id,
+                    format="metadata",
+                    metadataHeaders=["From", "Subject", "Date", "Message-ID", "In-Reply-To", "References"]
+                ).execute()
+                
+                msg_headers = {}
+                for h in metadata.get("payload", {}).get("headers", []):
+                    msg_headers[h["name"]] = h["value"]
+                
+                content = decode_email_payload(email_msg)
+                from_address = msg_headers.get("From", "").lower()
+                is_from_bot = HUBSPOT_FROM_ADDRESS.lower() in from_address
+                timestamp = int(metadata.get("internalDate", 0))
+
+                processed_thread.append({
+                    "headers": msg_headers,
+                    "content": content.strip(),
+                    "timestamp": timestamp,
+                    "from_bot": is_from_bot,
+                    "message_id": gmail_msg_id,
+                    "role": "assistant" if is_from_bot else "user"
+                })
+                
+                logging.info(f"✓ Retrieved message {len(processed_thread)}/{len(message_ids)}: {msg_id[:30]}...")
+                
+            except Exception as e:
+                logging.error(f"Error fetching message {msg_id}: {e}")
+                continue
+
+        # Sort by timestamp
+        processed_thread.sort(key=lambda x: x.get("timestamp", 0))
+        
+        logging.info(f"✓ Processed thread {thread_id} with {len(processed_thread)} messages")
+        for idx, email in enumerate(processed_thread, 1):
+            role = email['role']
+            from_email = email['headers'].get('From', 'Unknown')[:40]
+            preview = email['content'][:60].replace('\n', ' ')
+            timestamp = email['timestamp']
+            logging.info(f"  [{idx}] {role} @ {timestamp}: from={from_email}, preview={preview}...")
+
+        return processed_thread
+
+    except Exception as e:
+        logging.error(f"Error retrieving thread: {e}", exc_info=True)
+        return []
+
+def format_chat_history(thread_history):
+    """
+    Convert thread history to chat history format compatible with the agent.
+    Format matches agent.py structure with HumanMessage and AIMessage.
+    
+    Args:
+        thread_history: List of email messages with role, content, etc.
+    
+    Returns:
+        List of formatted messages for agent consumption
+    """
+    chat_history = []
+    
+    for msg in thread_history[:-1]:  # Exclude the latest message (will be sent as current prompt)
+        # Create message in format similar to agent.py
+        message = {
+            "role": msg["role"],  # "user" or "assistant"
+            "content": msg["content"]
+        }
+        chat_history.append(message)
+    
+    logging.info(f"Formatted chat history with {len(chat_history)} messages")
+    return chat_history
+
 def fetch_unread_emails(**kwargs):
-    """FIXED VERSION - Prevents duplicate email processing"""
+    """Fetch unread emails and extract full thread history for each."""
     service = authenticate_gmail()
     if not service:
         logging.error("Gmail authentication failed, skipping email fetch.")
@@ -251,15 +225,10 @@ def fetch_unread_emails(**kwargs):
         return []
     
     last_checked_timestamp = get_last_checked_timestamp()
-    
-    # FIX 1: Use proper timestamp format for Gmail API (seconds, not milliseconds)
     last_checked_seconds = last_checked_timestamp // 1000 if last_checked_timestamp > 1000000000000 else last_checked_timestamp
     
-    # FIX 2: Add more specific query to avoid edge cases
     query = f"is:unread after:{last_checked_seconds}"
-    
-    logging.info(f"Using query: {query}")
-    logging.info(f"Last checked timestamp: {last_checked_timestamp} (converted: {last_checked_seconds})")
+    logging.info(f"Fetching emails with query: {query}")
     
     try:
         results = service.users().messages().list(userId="me", labelIds=["INBOX"], q=query).execute()
@@ -271,29 +240,20 @@ def fetch_unread_emails(**kwargs):
     
     unread_emails = []
     max_timestamp = last_checked_timestamp
-    thread_context = get_thread_context()
-    if thread_context is None:
-        logging.error("thread_context is None, initializing as empty dict")
-        thread_context = {}
-    logging.info(f"Thread context type: {type(thread_context)}, value: {thread_context}")
-    logging.info(f"Current thread contexts: {list(thread_context.keys())}")
-    
-    # FIX 3: Track processed message IDs to avoid duplicates within same run
     processed_message_ids = set()
     
     logging.info(f"Found {len(messages)} unread messages to process")
-    logging.info(f"Current thread contexts: {list(thread_context.keys())}")
     
     for msg in messages:
         msg_id = msg["id"]
         
-        # FIX 4: Skip if already processed in this run
         if msg_id in processed_message_ids:
-            logging.info(f"Skipping already processed message in this run: {msg_id}")
+            logging.info(f"Skipping already processed message: {msg_id}")
             continue
             
         try:
-            msg_data = service.users().messages().get(userId="me", id=msg_id).execute()
+            msg_data = service.users().messages().get(userId="me", id=msg_id, format="metadata",
+                                                      metadataHeaders=["From", "Subject", "Date", "Message-ID", "References", "In-Reply-To"]).execute()
         except Exception as e:
             logging.error(f"Error fetching message {msg_id}: {e}")
             continue
@@ -305,78 +265,70 @@ def fetch_unread_emails(**kwargs):
         
         logging.info(f"Processing message ID: {msg_id}, From: {sender}, Timestamp: {timestamp}, Thread ID: {thread_id}")
         
-        # FIX 5: More precise timestamp filtering to prevent reprocessing
+        # Skip old messages
         if timestamp <= last_checked_timestamp:
-            logging.info(f"Skipping message {msg_id} - timestamp {timestamp} <= last_checked {last_checked_timestamp}")
+            logging.info(f"Skipping old message {msg_id} - timestamp {timestamp} <= {last_checked_timestamp}")
             continue
         
-        # Skip no-reply emails and old emails
-        if "no-reply" in sender:
+        # Skip no-reply emails
+        if "no-reply" in sender or "noreply" in sender:
             logging.info(f"Skipping no-reply email from: {sender}")
             continue
         
-        # Skip emails from our own bot to avoid loops
+        # Skip emails from bot itself
         if sender == HUBSPOT_FROM_ADDRESS.lower():
-            logging.info(f"Skipping email from bot itself: {sender}")
+            logging.info(f"Skipping email from bot: {sender}")
             continue
-            
+        
+        # ✅ FIX: Construct email_object BEFORE calling get_email_thread
         email_object = {
             "id": msg_id,
             "threadId": thread_id,
             "headers": headers,
-            "content": msg_data.get("snippet", ""),
-            "timestamp": timestamp
+            "content": "",  # Will be filled by get_email_thread
+            "timestamp": timestamp,
+            "internalDate": timestamp  # Add this for get_email_thread compatibility
         }
         
-        # Reply detection logic (keeping the existing sophisticated logic)
-        is_reply = False
-        thread_context_data = {}
+        # ✅ NOW we can safely call get_email_thread with email_object
+        thread_history = get_email_thread(service, email_object)
         
-        if thread_id:
-            thread_context_data = thread_context.get(thread_id, {})
-            
-            # Check email headers for reply indicators
-            subject = headers.get("Subject", "")
-            in_reply_to = headers.get("In-Reply-To", "")
-            references = headers.get("References", "")
-            
-            # Multiple ways to detect replies
-            is_subject_reply = subject.lower().startswith("re:")
-            has_reply_headers = bool(in_reply_to or references)
-            
-            # Context-based detection
-            has_confirmation_sent = thread_context_data.get("confirmation_sent", False)
-            is_awaiting_reply = thread_context_data.get("awaiting_reply", False)
-            
-            # Reply detection logic
-            context_based_reply = has_confirmation_sent and is_awaiting_reply and (is_subject_reply or has_reply_headers)
-            stored_context_reply = (is_subject_reply or has_reply_headers) and thread_id in thread_context
-            fallback_header_reply = is_subject_reply or has_reply_headers
-            
-            is_reply = context_based_reply or stored_context_reply or fallback_header_reply
-            
-            logging.info(f"Thread {thread_id} analysis:")
-            logging.info(f"  - has_confirmation_sent: {has_confirmation_sent}")
-            logging.info(f"  - is_awaiting_reply: {is_awaiting_reply}")
-            logging.info(f"  - is_subject_reply: {is_subject_reply}")
-            logging.info(f"  - has_reply_headers: {has_reply_headers}")
-            logging.info(f"  - FINAL is_reply: {is_reply}")
-        else:
-            logging.info(f"No thread_id for message {msg_id}")
+        if not thread_history:
+            logging.error(f"Failed to retrieve thread history for message {msg_id}")
+            continue
         
-        email_object["is_reply"] = is_reply
-        email_object["thread_context"] = thread_context_data
+        # Format chat history (all messages except the latest)
+        chat_history = format_chat_history(thread_history)
+        
+        # Extract latest message content (current user prompt)
+        latest_message = thread_history[-1]
+        
+        # Update email_object with the latest message content
+        email_object["content"] = latest_message["content"]
+        
+        # Determine if this is a reply based on thread length and email headers
+        is_reply = len(thread_history) > 1
+        subject = headers.get("Subject", "")
+        is_reply = is_reply or subject.lower().startswith("re:") or bool(headers.get("In-Reply-To")) or bool(headers.get("References"))
+        
+        # ✅ Add all required fields to email_object
+        email_object.update({
+            "is_reply": is_reply,
+            "thread_history": thread_history,  # Full thread for reference
+            "chat_history": chat_history,  # Formatted for agent
+            "thread_length": len(thread_history)
+        })
+        
+        logging.info(f"Email {msg_id}: is_reply={is_reply}, thread_length={len(thread_history)}, chat_history_length={len(chat_history)}")
         
         unread_emails.append(email_object)
-        processed_message_ids.add(msg_id)  # FIX 6: Track processed IDs
+        processed_message_ids.add(msg_id)
         
-        # FIX 7: Update max_timestamp properly
         if timestamp > max_timestamp:
             max_timestamp = timestamp
             
-    # FIX 8: Always update timestamp, even if no new emails (prevents stuck state)
-    if messages:  # Only update if there were messages to process
-        # Add small buffer to prevent boundary issues
+    # Update timestamp
+    if messages:
         update_timestamp = max_timestamp + 1
         update_last_checked_timestamp(update_timestamp)
         logging.info(f"Updated last checked timestamp to: {update_timestamp}")
@@ -384,51 +336,9 @@ def fetch_unread_emails(**kwargs):
         logging.info("No messages found, timestamp unchanged")
         
     kwargs['ti'].xcom_push(key="unread_emails", value=unread_emails)
-    logging.info(f"Final results: {len(unread_emails)} unread emails, {sum(1 for e in unread_emails if e['is_reply'])} are replies")
+    logging.info(f"Processed {len(unread_emails)} emails ({sum(1 for e in unread_emails if e['is_reply'])} replies)")
     
     return unread_emails
-
-
-# ADDITIONAL HELPER FUNCTIONS TO PREVENT ISSUES
-
-def get_last_checked_timestamp_safe():
-    """Safe wrapper for getting last checked timestamp"""
-    try:
-        timestamp = get_last_checked_timestamp()
-        # Ensure we have a valid timestamp
-        if not timestamp or timestamp <= 0:
-            # If no valid timestamp, start from 24 hours ago
-            import time
-            timestamp = int((time.time() - 86400) * 1000)  # 24 hours ago in milliseconds
-            logging.info(f"No valid timestamp found, starting from 24h ago: {timestamp}")
-        return timestamp
-    except Exception as e:
-        logging.error(f"Error getting last checked timestamp: {e}")
-        import time
-        return int((time.time() - 86400) * 1000)
-
-
-def update_last_checked_timestamp_safe(timestamp):
-    """Safe wrapper for updating timestamp with validation"""
-    try:
-        if not timestamp or timestamp <= 0:
-            logging.error(f"Invalid timestamp provided: {timestamp}")
-            return False
-            
-        # Ensure timestamp is reasonable (not too far in future)
-        import time
-        current_time = int(time.time() * 1000)
-        if timestamp > current_time + 3600000:  # More than 1 hour in future
-            logging.warning(f"Timestamp {timestamp} seems too far in future, using current time")
-            timestamp = current_time
-            
-        update_last_checked_timestamp(timestamp)
-        logging.info(f"Successfully updated timestamp to: {timestamp}")
-        return True
-    except Exception as e:
-        logging.error(f"Error updating timestamp: {e}")
-        return False
-
 
 def mark_message_as_read(service, message_id):
     try:
@@ -443,159 +353,243 @@ def mark_message_as_read(service, message_id):
         logging.error(f"Error marking message {message_id} as read: {e}")
         return False
 
+def get_ai_response(prompt, conversation_history=None, expect_json=False):
+    try:
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
+        messages = []
+
+        if expect_json:
+            messages.append({
+                "role": "system",
+                "content": "You are a JSON-only API. Always respond with valid JSON objects. Never include explanatory text, HTML, or markdown formatting. Only return the requested JSON structure."
+            })
+
+        if conversation_history:
+            for item in conversation_history:
+                messages.append({"role": "user", "content": item["prompt"]})
+                messages.append({"role": "assistant", "content": item["response"]})
+        messages.append({"role": "user", "content": prompt})
+        response = client.chat(model='hubspot:v6af', messages=messages, stream=False)
+        ai_content = response.message.content
+
+        ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
+
+        if not expect_json and not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html') and not ai_content.strip().startswith('{'):
+            ai_content = f"<html><body>{ai_content}</body></html>"
+
+        return ai_content.strip()
+    except Exception as e:
+        logging.error(f"Error in get_ai_response: {e}")
+        if expect_json:
+            return f'{{"error": "Error processing AI request: {str(e)}"}}'
+        else:
+            return f"<html><body>Error processing AI request: {str(e)}</body></html>"
+
 def branch_function(**kwargs):
     ti = kwargs['ti']
     unread_emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="unread_emails")
-    
+
     if not unread_emails:
         logging.info("No unread emails found, proceeding to no_email_found_task.")
         return "no_email_found_task"
+
+    # Build email details for AI analysis with FULL chat history context
+    email_details = []
+    for idx, email in enumerate(unread_emails, 1):
+        headers = email.get("headers", {})
+        chat_history = email.get("chat_history", [])
+        logging.info(f"Chat history is: {chat_history}")
+        # Format ALL messages in chat history for context
+        conversation_history = []
+        for msg in chat_history:  # ALL messages, not just last 3
+            conversation_history.append({
+                "role": msg.get("role", "unknown"),
+                "content": msg.get("content", ""),
+                "from": msg.get("from", "Unknown"),
+                "timestamp": msg.get("timestamp", 0)
+            })
+        
+        email_info = {
+            "email_number": idx,
+            "from": headers.get("From", "Unknown"),
+            "subject": headers.get("Subject", "No Subject"),
+            "latest_message": email.get("content", ""),  # Full latest user message
+            "is_reply": email.get("is_reply", False),
+            "thread_length": email.get("thread_length", 1),
+            "conversation_history": conversation_history  # COMPLETE conversation context
+        }
+        email_details.append(email_info)
     
-    # Separate replies from new emails
-    replies = [email for email in unread_emails if email.get("is_reply", False)]
-    new_emails = [email for email in unread_emails if not email.get("is_reply", False)]
+    # Enhanced routing prompt with FULL conversation context
+    prompt = f'''You are an AI assistant that routes emails to the appropriate workflow. You have access to the COMPLETE conversation history and the user's latest message. Analyze the full context to determine the correct action.
+
+EMAILS TO CLASSIFY:
+{json.dumps(email_details, indent=2)}
+
+ROUTING RULES (Execute in priority order - ANALYZE CONTENT IN CONTEXT):
+
+1. **NEW ACTION REQUEST (Search first, then create)** ⚠️ HIGHEST PRIORITY
+   - User requests to CREATE new entities: deals, contacts, companies, meetings
+   - User wants to LOG meeting minutes or discussion notes
+   - User assigns NEW TASKS with due dates and owners
+   - Keywords: "create", "add", "open", "log meeting", "schedule task", "new deal", "add contact", "second deal", "another deal"
+   - Example: Even in a reply thread, if user says "open a second deal" or "create another task" → Route to search_dag
+   → Route to: search_dag
+
+2. **CONTINUATION (Reply to confirmation or follow-up actions)**
+   - User is responding to bot's confirmation request (check conversation_history for bot's questions)
+   - User provides clarifications, corrections, or approvals to previous bot messages
+   - Simple confirmations: "proceed", "confirm", "looks good", "yes", "correct", "that's right"
+   - User making minor corrections to bot's proposed actions
+   - Check conversation_history: if bot asked for confirmation and user is responding → continuation_dag
+   → Route to: continuation_dag
+
+3. **CASUAL COMMENTS (Add as notes)**
+   - Informal updates about clients/deals/meetings without action requests
+   - No explicit action verbs
+   - Conversational tone without specific requests
+   → Route to: continuation_dag
+
+4. **UPDATE EXISTING ENTITIES**
+   - User explicitly asks to UPDATE or MODIFY existing records
+   - Keywords: "update", "modify", "change", "edit", "correct"
+   - References specific entity IDs or names
+   - NO new entity creation requested
+   → Route to: continuation_dag
+
+5. **ENGAGEMENT SUMMARY REQUEST**
+   - User requests summary of contact/deal before meeting
+   - Keywords: "summarize", "summary for", "prepare summary", "what do we know about"
+   → Route to: search_dag
+
+CRITICAL DECISION LOGIC:
+- Look at conversation_history to understand what the bot previously said/asked
+- Look at latest_message to see what the user is requesting NOW
+- If latest_message contains NEW creation requests (deals, tasks, contacts) → search_dag (even if is_reply=true)
+- If latest_message is confirming/responding to bot's previous question → continuation_dag
+- If latest_message has no conversation_history (thread_length=1) → search_dag (new conversation)
+- When in doubt between new vs continuation, prefer search_dag for action requests
+
+RESPONSE FORMAT (JSON only):
+{{"task_type": "continuation_dag", "reasoning": "User confirming bot's previous confirmation request"}}
+{{"task_type": "search_dag", "reasoning": "User requesting new deal creation in follow-up message"}}
+
+Analyze the conversation context and respond with JSON:'''
     
-    logging.info(f"Email classification: {len(replies)} replies, {len(new_emails)} new emails")
+    logging.info(f"Sending routing prompt to AI with {len(email_details)} emails and conversation context")
     
-    # Process replies first - they have higher priority
+    response = get_ai_response(prompt, expect_json=True)
+    logging.info(f"AI routing response: {response}")
+    
+    # Parse JSON response
+    try:
+        json_response = json.loads(response)
+    except json.JSONDecodeError:
+        json_response = extract_json_from_text(response)
+
+    # Route based on AI decision
+    if json_response and "task_type" in json_response:
+        task_type = json_response["task_type"].lower()
+        reasoning = json_response.get("reasoning", "No reasoning provided")
+        logging.info(f"✓ AI DECISION: {task_type}, REASONING: {reasoning}")
+        
+        if "continuation" in task_type:
+            ti.xcom_push(key="reply_emails", value=unread_emails)
+            logging.info(f"→ Routing {len(unread_emails)} emails to continuation_dag")
+            return "trigger_continuation_dag"
+            
+        elif "search" in task_type:
+            ti.xcom_push(key="new_emails", value=unread_emails)
+            logging.info(f"→ Routing {len(unread_emails)} emails to search_dag")
+            return "trigger_meeting_minutes"
+    
+    # Fallback logic
+    logging.warning("AI failed to provide valid response, using fallback")
+    replies = [e for e in unread_emails if e.get("is_reply", False)]
+    new_emails = [e for e in unread_emails if not e.get("is_reply", False)]
+    
     if replies:
-        logging.info(f"Found {len(replies)} replies, triggering continuation DAG")
-        # Store only replies for processing
         ti.xcom_push(key="reply_emails", value=replies)
         return "trigger_continuation_dag"
-    
-    # If no replies, process new meeting minutes requests
     if new_emails:
-        logging.info(f"Found {len(new_emails)} new emails, proceeding to trigger meeting minutes tasks")
-        # Store only new emails for processing
         ti.xcom_push(key="new_emails", value=new_emails)
         return "trigger_meeting_minutes"
-    
-    logging.info("No actionable emails found, proceeding to no_email_found_task")
+
     return "no_email_found_task"
+
+def extract_json_from_text(text):
+    """Extract JSON from text with markdown or other wrappers."""
+    try:
+        text = text.strip()
+        text = re.sub(r'```json\s*', '', text)
+        text = re.sub(r'```\s*', '', text)
+        
+        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        return None
+    except Exception as e:
+        logging.error(f"Error extracting JSON: {e}")
+        return None
 
 def trigger_meeting_minutes(**kwargs):
     ti = kwargs['ti']
-    # Get new emails from branch function
     new_emails = ti.xcom_pull(task_ids="branch_task", key="new_emails") or []
     
     if not new_emails:
-        logging.info("No new emails to process for meeting minutes")
+        logging.info("No new emails to process")
         return
     
     for email in new_emails:
-        task_id = f"trigger_response_{email['id'].replace('-', '_')}"
+        # Pass email with chat_history to search DAG
+        trigger_conf = {
+            "email_data": email,
+            "chat_history": email.get("chat_history", []),
+            "thread_history": email.get("thread_history", []),
+            "thread_id": email.get("threadId", ""),  # ADD THIS
+            "message_id": email.get("id", "")
+        }
+        
+        task_id = f"trigger_search_{email['id'].replace('-', '_')}"
         trigger_task = TriggerDagRunOperator(
             task_id=task_id,
             trigger_dag_id="hubspot_search_entities",
-            conf={"email_data": email},
+            conf=trigger_conf,
         )
         trigger_task.execute(context=kwargs)
     
-    logging.info(f"Triggered meeting minutes search for {len(new_emails)} new emails")
+    logging.info(f"Triggered search DAG for {len(new_emails)} emails")
 
 def trigger_continuation_dag(**kwargs):
     ti = kwargs['ti']
     reply_emails = ti.xcom_pull(task_ids="branch_task", key="reply_emails") or []
-    unread_emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="unread_emails") or []
     
     if not reply_emails:
-        logging.info("No reply emails to process for continuation")
+        logging.info("No reply emails to process")
         return
 
-    service = authenticate_gmail()
-    if not service:
-        logging.error("Gmail authentication failed, cannot fetch thread history")
-        return
-
-    thread_context = get_thread_context()
-    
     for email in reply_emails:
-        reply_thread_id = email["threadId"]
-        reply_message_id = email["headers"].get("Message-ID", "")
-        reply_references = email["headers"].get("References", "")
-        
-        # Find the original thread_id by matching References or Message-ID
-        original_thread_id = None
-        for thread_id, context in thread_context.items():
-            stored_references = context.get("references", "")
-            stored_original_message_id = context.get("original_message_id", "")
-            stored_confirmation_message_id = context.get("confirmation_message_id", "")
-            if (stored_original_message_id and stored_original_message_id in reply_references) or \
-               (stored_confirmation_message_id and stored_confirmation_message_id in reply_references) or \
-               (reply_message_id and reply_message_id in stored_references):
-                original_thread_id = thread_id
-                break
-        
-        if not original_thread_id:
-            logging.error(f"No matching thread context found for reply email {email['id']} with threadId={reply_thread_id}")
-            logging.info(f"Reply email References: {reply_references}")
-            logging.info(f"Available thread_context keys: {list(thread_context.keys())}")
-            # Fallback: Fetch thread history using reply_thread_id
-            full_thread_history = get_email_thread(service, email)
-            if full_thread_history:
-                original_thread_id = reply_thread_id
-                logging.info(f"Using reply_thread_id={reply_thread_id} as fallback")
-            else:
-                logging.error(f"Failed to fetch thread history for reply email {email['id']}")
-                continue
-        
-        logging.info(f"Matched reply email {email['id']} to original thread_id={original_thread_id} (reply threadId={reply_thread_id})")
-        
-        # Retrieve stored context for the original thread_id
-        stored_context = thread_context.get(original_thread_id, {})
-        if not stored_context:
-            logging.error(f"No stored context found for original thread_id={original_thread_id}")
-            continue
-        
-        # Retrieve thread history
-        full_thread_history = stored_context.get("thread_history", [])
-        if not full_thread_history:
-            logging.info(f"No stored thread history for thread {original_thread_id}, fetching from Gmail API")
-            full_thread_history = get_email_thread(service, email)
-        
-        if not full_thread_history:
-            logging.error(f"Failed to fetch thread history for thread {original_thread_id}")
-            continue
-
-        # Log thread history for debugging
-        logging.info(f"Thread {original_thread_id} full history: {len(full_thread_history)} emails")
-        for idx, msg in enumerate(full_thread_history, 1):
-            logging.info(f"Thread {original_thread_id} Email {idx}: message_id={msg['message_id']}, from={msg['headers'].get('From', 'Unknown')}, timestamp={msg['timestamp']}, content_preview={msg['content'][:100]}...")
-
-        # Prepare configuration for continuation DAG
-            continuation_conf = {
+        # Pass email with full chat_history to continuation DAG
+        trigger_conf = {
             "email_data": email,
-            "search_results": stored_context.get("search_results", {}),
-            "create_results": stored_context.get("create_results", {}),  # Optional: include if exists
-            "thread_id": original_thread_id,
-            "full_thread_history": full_thread_history,
-            "original_confirmation_email": stored_context.get("confirmation_email", ""),
-            "user_response_email": email,
-            "unread_emails": unread_emails
+            "chat_history": email.get("chat_history", []),
+            "thread_history": email.get("thread_history", []),
+            "thread_id": email.get("threadId"),
+            "thread_id": email.get("threadId", ""),  # ADD THIS
+            "message_id": email.get("id", "")
         }
-
-        # Log continuation_conf for debugging
-        logging.info(f"Continuation conf for thread {original_thread_id}:")
-        logging.info(f"  - email_data: {json.dumps({k: v for k, v in email.items() if k != 'content'}, indent=2)}")
-        logging.info(f"  - search_results: {json.dumps(continuation_conf['search_results'], indent=2)}")
-        logging.info(f"  - full_thread_history: {len(continuation_conf['full_thread_history'])} emails")
-        logging.info(f"  - original_confirmation_email: {continuation_conf['original_confirmation_email'][:100] if continuation_conf['original_confirmation_email'] else 'None'}")
-        logging.info(f"  - user_response_email: {json.dumps({k: v for k, v in email.items() if k != 'content'}, indent=2)}")
-        logging.info(f"  - thread_id: {original_thread_id}")
-
-        # Trigger continuation DAG
+        
         task_id = f"trigger_continuation_{email['id'].replace('-', '_')}"
         trigger_task = TriggerDagRunOperator(
             task_id=task_id,
             trigger_dag_id="hubspot_create_objects",
-            conf=continuation_conf,
+            conf=trigger_conf,
         )
         trigger_task.execute(context=kwargs)
         
-        logging.info(f"Triggered continuation DAG for thread {original_thread_id}")
+        logging.info(f"✓ Triggered continuation DAG for thread {email.get('threadId')}")
 
-    logging.info(f"Triggered continuation for {len(reply_emails)} reply emails")
+    logging.info(f"Triggered continuation for {len(reply_emails)} emails")
 
 def no_email_found(**kwargs):
     logging.info("No new emails or replies found to process.")
