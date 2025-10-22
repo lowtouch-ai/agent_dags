@@ -319,8 +319,7 @@ def step_1_process_email(ti, **context):
 
     prompt = f"""Assess the cloud details from the following Markdown table and provide a detailed assessment report:
                 {current_content}
-                Note: If no valid attachment is provided, inform the user to attach one. Include the following signature at the bottom of the report:
-                **Signature**: akamai-presales-agent@lowtouch.ai"""
+                Note: If no valid attachment is provided, inform the user to attach one. Do not Include any contact information at the bottom of the report as this is an email report"""
 
     logging.info(f"Final prompt to AI: {prompt}...")
     
@@ -354,7 +353,7 @@ def step_2_compose_email(ti, **context):
         2. Opening paragraph: <p>We have received your filled details and completed the cloud assessment for Akamai. This assessment analyzes your current setup to identify strengths, areas for improvement, and strategic opportunities. Here is a insightful summary to guide next steps:</p>
 
         3. Detailed Assessment mentioned in `Sample Cloud Assessment Report`: <p><strong>Assessment Report</strong></p> followed by the full assessment from Content.
-
+        4. Signature: <p>Best regards,<br>Akamai Cloud Assessment Team,<br>lowtouch.ai</p>
         Ensure the email is natural, professional, and concise. Avoid rigid or formulaic language to maintain a human-like tone. Do not use placeholders; replace with actual extracted values. Return only the HTML content as specified, without <!DOCTYPE>, <html>, or <body> tags.
 
         Return only the HTML body of the email.
