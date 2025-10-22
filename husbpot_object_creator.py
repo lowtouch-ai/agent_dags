@@ -107,18 +107,18 @@ def extract_all_recipients(email_data):
 def send_email(service, recipient, subject, body, in_reply_to, references, cc=None, bcc=None):
     try:
         msg = MIMEMultipart()
-        msg["From"] = f"HubSpot via lowtouch.ai <{HUB_FROM_ADDRESS}>"
+        msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
         msg["To"] = recipient
         
         if cc:
-            cc_list = [email.strip() for email in cc.split(',') if email.strip().lower() != HUB_FROM_ADDRESS.lower()]
+            cc_list = [email.strip() for email in cc.split(',') if email.strip().lower() != HUBSPOT_FROM_ADDRESS.lower()]
             cleaned_cc = ', '.join(cc_list)
             if cleaned_cc:
                 msg["Cc"] = cleaned_cc
                 logging.info(f"Including Cc in email: {cleaned_cc}")
             
         if bcc:
-            bcc_list = [email.strip() for email in bcc.split(',') if email.strip().lower() != HUB_FROM_ADDRESS.lower()]
+            bcc_list = [email.strip() for email in bcc.split(',') if email.strip().lower() != HUBSPOT_FROM_ADDRESS.lower()]
             cleaned_bcc = ', '.join(bcc_list)
             if cleaned_bcc:
                 msg["Bcc"] = cleaned_bcc
@@ -2327,15 +2327,15 @@ def send_final_email(ti, **context):
     
     for to_addr in all_recipients["to"]:
         if (to_addr.lower() != sender_email.lower() and 
-            HUB_FROM_ADDRESS.lower() not in to_addr.lower()):
+            HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower()):
             cc_recipients.append(to_addr)
     
     for cc_addr in all_recipients["cc"]:
-        if (HUB_FROM_ADDRESS.lower() not in cc_addr.lower() and 
+        if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and 
             cc_addr not in cc_recipients):
             cc_recipients.append(cc_addr)
     
-    bcc_recipients = [addr for addr in all_recipients["bcc"] if HUB_FROM_ADDRESS.lower() not in addr.lower()]
+    bcc_recipients = [addr for addr in all_recipients["bcc"] if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()]
     
     cc_string = ', '.join(cc_recipients) if cc_recipients else None
     bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
