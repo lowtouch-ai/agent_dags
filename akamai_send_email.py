@@ -353,7 +353,7 @@ def step_2_compose_email(ti, **context):
         2. Opening paragraph: <p>We have received your filled details and completed the cloud assessment for Akamai. This assessment analyzes your current setup to identify strengths, areas for improvement, and strategic opportunities. Here is a insightful summary to guide next steps:</p>
 
         3. Detailed Assessment mentioned in `Sample Cloud Assessment Report`: <p><strong>Assessment Report</strong></p> followed by the full assessment from Content.
-        4. Signature: <p>Best regards,<br>Akamai Cloud Assessment Team,<br>lowtouch.ai</p>
+        4. Signature: <p>Best regards<br><br> </p>
         Ensure the email is natural, professional, and concise. Avoid rigid or formulaic language to maintain a human-like tone. Do not use placeholders; replace with actual extracted values. Return only the HTML content as specified, without <!DOCTYPE>, <html>, or <body> tags.
 
         Return only the HTML body of the email.
@@ -377,12 +377,63 @@ def step_2_compose_email(ti, **context):
     ti.xcom_push(key="step_2_prompt", value=prompt)
     ti.xcom_push(key="step_2_response", value=response)
     ti.xcom_push(key="conversation_history", value=full_history)
-    ti.xcom_push(key="final_html_content", value=cleaned_response)
+    ti.xcom_push(key="markdown_email_content", value=cleaned_response)
     
     logging.info(f"Step 2 completed: {response[:200]}...")
     return response
 
-def step_3_send_email(ti, **context):
+def step_3_convert_to_html(ti, **context):
+    """Step 4: Convert Markdown email body to standards-compliant HTML for email rendering."""
+    try:
+        markdown_email = ti.xcom_pull(key="markdown_email_content") or "No email content available."
+        prompt = f"""
+            Convert the following Markdown-formatted email body into a **well-structured and standards-compliant HTML document** for email rendering.
+
+            ### Requirements:
+            1. Output must be **pure valid HTML** (no Markdown traces like `**`, `#`, or backticks).
+            2. Begin with:
+            ```html
+            <html><head><title>Cloud Assessment Report</title></head><body>
+            ```
+            and end with:
+            ```html
+            </body></html>
+            ```
+            3. Preserve **all structure and content exactly** as provided — do not modify or shorten any section.
+            4. Use **semantic HTML tags**:
+               - Markdown headings → `<h1>`, `<h2>`, `<h3>`, `<h4>`
+               - Paragraphs → `<p>`
+               - Bullet/numbered lists → `<ul>` / `<ol>` with `<li>`
+               - Code blocks → `<pre><code>` (preserve indentation and SQL syntax)
+               - Bold text → `<strong>`
+               - Italic text → `<em>`
+               - Tables → `<table border="1" style="border-collapse: collapse; width:100%; border: 1px solid #333;">`
+                 Include `<tr>`, `<th>`, `<td>` with visible borders.
+               - Links → `<a href="...">` (preserve mailto links like `mailto:cloud-assess@lowtouch.ai`)
+            5. Maintain **consistent indentation and spacing** for readability.
+            6. Ensure **Markdown characters (like `**`, `_`, `#`, ```) are fully removed** and replaced with proper HTML formatting.
+
+            ### Example formatting rules:
+            - `**Assessment Report**` → `<h2>Assessment Report</h2>`
+            - `### Conclustion` → `<h3>Conclustion</h3>`
+
+            Now, convert the following Markdown email body to clean, valid, and visually structured HTML:
+
+            {markdown_email}
+
+            Output **only** the final HTML code (no Markdown, no commentary).
+            """
+        html_response = get_ai_response(prompt)
+        if not html_response.startswith('<html>'):
+            html_response = f"<html><head><title>Cloud Assessment Report</title></head><body>{html_response}</body></html>"
+        ti.xcom_push(key="final_html_content", value=html_response)
+        logging.info(f"HTML email content generated: {html_response[:200]}...")
+        return html_response
+    except Exception as e:
+        logging.error(f"Error in convert_to_html: {str(e)}")
+        raise
+
+def step_4_send_email(ti, **context):
     """Step 3: Send the final email."""
     try:
         email_data = context['dag_run'].conf.get("email_data", {})
@@ -451,9 +502,15 @@ with DAG(
     )
     
     task_3 = PythonOperator(
-        task_id="step_3_send_email",
-        python_callable=step_3_send_email,
+        task_id="step_3_convert_to_html",
+        python_callable=step_3_convert_to_html,
+        provide_context=True
+    )
+
+    task_4 = PythonOperator(
+        task_id="step_4_send_email",
+        python_callable=step_4_send_email,
         provide_context=True
     )
     
-    task_1 >> task_2 >> task_3
+    task_1 >> task_2 >> task_3 >> task_4
