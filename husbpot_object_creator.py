@@ -17,6 +17,8 @@ from email.mime.multipart import MIMEMultipart
 from googleapiclient.errors import HttpError
 from airflow.models import Variable
 import time
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from hubspot_email_listener import get_email_thread
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
