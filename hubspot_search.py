@@ -48,6 +48,26 @@ def authenticate_gmail():
         logging.error(f"Failed to authenticate Gmail: {str(e)}")
         return None
 
+def decode_email_payload(msg):
+    try:
+        if msg.is_multipart():
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                if content_type in ["text/plain", "text/html"]:
+                    try:
+                        return part.get_payload(decode=True).decode()
+                    except UnicodeDecodeError:
+                        return part.get_payload(decode=True).decode('latin-1')
+        else:
+            try:
+                return msg.get_payload(decode=True).decode()
+            except UnicodeDecodeError:
+                return msg.get_payload(decode=True).decode('latin-1')
+        return ""
+    except Exception as e:
+        logging.error(f"Error decoding email payload: {e}")
+        return ""
+
 def get_ai_response(prompt, conversation_history=None, expect_json=False):
     try:
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
