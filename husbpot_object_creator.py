@@ -32,7 +32,7 @@ default_args = {
 HUBSPOT_FROM_ADDRESS = Variable.get("HUBSPOT_FROM_ADDRESS")
 GMAIL_CREDENTIALS = Variable.get("HUBSPOT_GMAIL_CREDENTIALS")
 OLLAMA_HOST = "http://agentomatic:8000/"
-THREAD_CONTEXT_FILE = "/appz/cache/hubspot_thread_context.json"
+TASK_THRESHOLD = 15
 
 def authenticate_gmail():
     try:
