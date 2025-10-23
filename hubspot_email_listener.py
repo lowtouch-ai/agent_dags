@@ -12,6 +12,7 @@ import logging
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import re
+from ollama import Client
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -217,6 +218,37 @@ def format_chat_history(thread_history):
     logging.info(f"Formatted chat history with {len(chat_history)} messages")
     return chat_history
 
+
+def extract_all_recipients(email_data):
+    """Extract all recipients (To, Cc, Bcc) from email headers."""
+    headers = email_data.get("headers", {})
+    
+    def parse_addresses(header_value):
+        """Parse email addresses from header string"""
+        if not header_value:
+            return []
+        
+        addresses = []
+        for addr in header_value.split(','):
+            addr = addr.strip()
+            email_match = re.search(r'<([^>]+)>', addr)
+            if email_match:
+                addresses.append(email_match.group(1).strip())
+            elif '@' in addr:
+                addresses.append(addr.strip())
+        
+        return addresses
+    
+    to_recipients = parse_addresses(headers.get("To", ""))
+    cc_recipients = parse_addresses(headers.get("Cc", ""))
+    bcc_recipients = parse_addresses(headers.get("Bcc", ""))
+    
+    return {
+        "to": to_recipients,
+        "cc": cc_recipients,
+        "bcc": bcc_recipients
+    }
+
 def fetch_unread_emails(**kwargs):
     """Fetch unread emails and extract full thread history for each."""
     service = authenticate_gmail()
@@ -253,8 +285,14 @@ def fetch_unread_emails(**kwargs):
             continue
             
         try:
-            msg_data = service.users().messages().get(userId="me", id=msg_id, format="metadata",
-                                                      metadataHeaders=["From", "Subject", "Date", "Message-ID", "References", "In-Reply-To"]).execute()
+            # ⭐ CHANGED: Fetch FULL metadata including To, Cc, Bcc headers
+            msg_data = service.users().messages().get(
+                userId="me", 
+                id=msg_id, 
+                format="metadata",
+                metadataHeaders=["From", "To", "Cc", "Bcc", "Subject", "Date", 
+                               "Message-ID", "References", "In-Reply-To"]
+            ).execute()
         except Exception as e:
             logging.error(f"Error fetching message {msg_id}: {e}")
             continue
@@ -281,17 +319,23 @@ def fetch_unread_emails(**kwargs):
             logging.info(f"Skipping email from bot: {sender}")
             continue
         
-        # ✅ FIX: Construct email_object BEFORE calling get_email_thread
+        # ✅ Construct email_object with all headers INCLUDING recipient headers
         email_object = {
             "id": msg_id,
             "threadId": thread_id,
-            "headers": headers,
+            "headers": headers,  # Now includes To, Cc, Bcc
             "content": "",  # Will be filled by get_email_thread
             "timestamp": timestamp,
-            "internalDate": timestamp  # Add this for get_email_thread compatibility
+            "internalDate": timestamp
         }
         
-        # ✅ NOW we can safely call get_email_thread with email_object
+        # ⭐ Extract all recipients from this email
+        all_recipients = extract_all_recipients(email_object)
+        
+        logging.info(f"Extracted recipients - To: {all_recipients.get('to', [])}, "
+                    f"Cc: {all_recipients.get('cc', [])}, Bcc: {all_recipients.get('bcc', [])}")
+        
+        # Get thread history
         thread_history = get_email_thread(service, email_object)
         
         if not thread_history:
@@ -303,24 +347,27 @@ def fetch_unread_emails(**kwargs):
         
         # Extract latest message content (current user prompt)
         latest_message = thread_history[-1]
+        latest_message_content = extract_latest_reply(latest_message["content"])
         
         # Update email_object with the latest message content
-        email_object["content"] = latest_message["content"]
+        email_object["content"] = latest_message_content
         
         # Determine if this is a reply based on thread length and email headers
         is_reply = len(thread_history) > 1
         subject = headers.get("Subject", "")
         is_reply = is_reply or subject.lower().startswith("re:") or bool(headers.get("In-Reply-To")) or bool(headers.get("References"))
         
-        # ✅ Add all required fields to email_object
+        # ✅ Add all required fields to email_object including recipients
         email_object.update({
             "is_reply": is_reply,
-            "thread_history": thread_history,  # Full thread for reference
-            "chat_history": chat_history,  # Formatted for agent
-            "thread_length": len(thread_history)
+            "thread_history": thread_history,
+            "chat_history": chat_history,
+            "thread_length": len(thread_history),
+            "all_recipients": all_recipients  # ⭐ Store recipients in email object
         })
         
-        logging.info(f"Email {msg_id}: is_reply={is_reply}, thread_length={len(thread_history)}, chat_history_length={len(chat_history)}")
+        logging.info(f"Email {msg_id}: is_reply={is_reply}, thread_length={len(thread_history)}, "
+                    f"chat_history_length={len(chat_history)}, recipients={len(all_recipients.get('to', [])) + len(all_recipients.get('cc', [])) + len(all_recipients.get('bcc', []))}")
         
         unread_emails.append(email_object)
         processed_message_ids.add(msg_id)
@@ -398,28 +445,16 @@ def branch_function(**kwargs):
     email_details = []
     for idx, email in enumerate(unread_emails, 1):
         headers = email.get("headers", {})
-        chat_history = email.get("chat_history", [])
-        logging.info(f"Chat history is: {chat_history}")
-        # Format ALL messages in chat history for context
-        conversation_history = []
-        for msg in chat_history:  # ALL messages, not just last 3
-            conversation_history.append({
-                "role": msg.get("role", "unknown"),
-                "content": msg.get("content", ""),
-                "from": msg.get("from", "Unknown"),
-                "timestamp": msg.get("timestamp", 0)
-            })
         
         email_info = {
             "email_number": idx,
             "from": headers.get("From", "Unknown"),
             "subject": headers.get("Subject", "No Subject"),
             "latest_message": email.get("content", ""),  # Full latest user message
-            "is_reply": email.get("is_reply", False),
-            "thread_length": email.get("thread_length", 1),
-            "conversation_history": conversation_history  # COMPLETE conversation context
+            "is_reply": email.get("is_reply", False)
         }
         email_details.append(email_info)
+        logging.info(f"email details is: {email_details}")
     
     # Enhanced routing prompt with FULL conversation context
     prompt = f'''You are an AI assistant that routes emails to the appropriate workflow. You have access to the COMPLETE conversation history and the user's latest message. Analyze the full context to determine the correct action.
@@ -479,7 +514,25 @@ Analyze the conversation context and respond with JSON:'''
     
     logging.info(f"Sending routing prompt to AI with {len(email_details)} emails and conversation context")
     
-    response = get_ai_response(prompt, expect_json=True)
+    conversation_history_for_ai = []
+    for email in unread_emails:
+        chat_history = email.get("chat_history", [])
+        for i in range(0, len(chat_history), 2):
+            if i + 1 < len(chat_history):
+                user_msg = chat_history[i]
+                assistant_msg = chat_history[i + 1]
+                if user_msg["role"] == "user" and assistant_msg["role"] == "assistant":
+                    conversation_history_for_ai.append({
+                        "prompt": user_msg["content"],
+                        "response": assistant_msg["content"]
+                    })
+
+    # === Call AI with full history ===
+    response = get_ai_response(
+        prompt=prompt,
+        conversation_history=conversation_history_for_ai,
+        expect_json=True
+    )
     logging.info(f"AI routing response: {response}")
     
     # Parse JSON response
@@ -517,7 +570,54 @@ Analyze the conversation context and respond with JSON:'''
         return "trigger_meeting_minutes"
 
     return "no_email_found_task"
-
+def extract_latest_reply(email_content):
+    """
+    Extract only the latest reply from an email, removing quoted conversation history.
+    
+    Args:
+        email_content: Full email body text
+    
+    Returns:
+        String containing only the latest message content
+    """
+    if not email_content:
+        return ""
+    
+    # Split by common reply separators
+    separators = [
+        '\r\n\r\nOn ',  # Gmail style: "On Wed, Oct 22, 2025..."
+        '\n\nOn ',
+        '\r\n\r\n>',  # Quoted text starting with >
+        '\n\n>',
+        '\r\n\r\nFrom:',  # Outlook style
+        '\n\nFrom:',
+        '________________________________',  # Outlook horizontal line
+    ]
+    
+    latest_content = email_content
+    earliest_position = len(email_content)
+    
+    # Find the earliest occurrence of any separator
+    for separator in separators:
+        pos = email_content.find(separator)
+        if pos != -1 and pos < earliest_position:
+            earliest_position = pos
+            latest_content = email_content[:pos]
+    
+    # Clean up the extracted content
+    latest_content = latest_content.strip()
+    
+    # Remove leading ">" quoted lines if any remain
+    lines = latest_content.split('\n')
+    clean_lines = []
+    for line in lines:
+        stripped = line.lstrip()
+        if not stripped.startswith('>'):
+            clean_lines.append(line)
+        else:
+            break  # Stop at first quoted line
+    
+    return '\n'.join(clean_lines).strip()
 def extract_json_from_text(text):
     """Extract JSON from text with markdown or other wrappers."""
     try:
