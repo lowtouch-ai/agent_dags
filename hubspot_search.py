@@ -48,64 +48,11 @@ def authenticate_gmail():
         logging.error(f"Failed to authenticate Gmail: {str(e)}")
         return None
 
-def get_thread_context():
-    try:
-        if os.path.exists(THREAD_CONTEXT_FILE):
-            with open(THREAD_CONTEXT_FILE, "r") as f:
-                content = f.read().strip()
-                if content:  # Check if file is not empty
-                    return json.loads(content)
-                else:
-                    logging.warning(f"{THREAD_CONTEXT_FILE} is empty, returning empty dict")
-                    return {}
-        else:
-            logging.info(f"{THREAD_CONTEXT_FILE} does not exist, returning empty dict")
-            return {}
-    except json.JSONDecodeError as e:
-        logging.error(f"Invalid JSON in {THREAD_CONTEXT_FILE}: {e}")
-        return {}
-    except Exception as e:
-        logging.error(f"Error reading {THREAD_CONTEXT_FILE}: {e}")
-        return {}
-
-def update_thread_context(thread_id, context_data):
-    os.makedirs(os.path.dirname(THREAD_CONTEXT_FILE), exist_ok=True)
-    try:
-        contexts = get_thread_context()
-        if contexts is None:
-            logging.warning(f"get_thread_context returned None, initializing empty dict")
-            contexts = {}
-        contexts[thread_id] = context_data
-        with open(THREAD_CONTEXT_FILE, "w") as f:
-            json.dump(contexts, f)
-    except Exception as e:
-        logging.error(f"Error writing to {THREAD_CONTEXT_FILE}: {e}")
-        raise  # Re-raise to ensure the task fails and is retried
-
-def decode_email_payload(msg):
-    try:
-        if msg.is_multipart():
-            for part in msg.walk():
-                content_type = part.get_content_type()
-                if content_type in ["text/plain", "text/html"]:
-                    try:
-                        return part.get_payload(decode=True).decode()
-                    except UnicodeDecodeError:
-                        return part.get_payload(decode=True).decode('latin-1')
-        else:
-            try:
-                return msg.get_payload(decode=True).decode()
-            except UnicodeDecodeError:
-                return msg.get_payload(decode=True).decode('latin-1')
-        return ""
-    except Exception as e:
-        logging.error(f"Error decoding email payload: {e}")
-        return ""
-
 def get_ai_response(prompt, conversation_history=None, expect_json=False):
     try:
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
         messages = []
+        
 
         if expect_json:
             messages.append({
@@ -238,11 +185,7 @@ def analyze_thread_entities(ti, **context):
         content = msg.get("content", "")
         chat_context += f"[{role.upper()}]: {content}\n\n"
     
-    prompt = f"""You are a HubSpot API assistant. Analyze this latest message to determine which entities (deals, contacts, companies) are mentioned or need to be processed, and whether the user is requesting a summary of a client or deal before their next meeting.
-
-
-CONVERSATION HISTORY:
-{chat_context}
+    prompt = f"""You are a HubSpot API assistant. Analyze this latest message to determine which entities (deals, contacts, companies) are mentioned or need to be processed, and whether the user is requesting a summary of a client or deal before their next meeting. 
 
 LATEST USER MESSAGE:
 {latest_message}
@@ -327,6 +270,8 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
 
     response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    logging.info(f"Prompt is : {prompt}")
+    logging.info(f"Conversation history to AI: {chat_history}")
     logging.info(f"Raw AI response for entity analysis: {response[:1000]}...")
 
     try:
@@ -417,7 +362,8 @@ Steps:
       - Anticipated objections and tailored responses to address them.
       - A step-by-step plan for the call, including opening, value proposition, handling questions, and closing with clear next steps.
       - Ensure the strategy is actionable, spans at least 3-5 paragraphs, and incorporates specific examples or data where applicable.
-
+Important Instructions:
+- use the first name and lastname both to search for contacts, if given.
 Return this exact JSON structure:
 {{
     "contact_summary": {{
@@ -465,18 +411,11 @@ def determine_owner(ti, **context):
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
     
-    conversation_context = ""
-    for msg in chat_history:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        conversation_context += f"[{role.upper()}]: {content}\n\n"
-    
-    conversation_context += f"[USER - LATEST]: {latest_message}\n"
 
     prompt = f"""You are a HubSpot API assistant. Analyze this conversation to identify deal owner and task owners.
 
-FULL CONVERSATION:
-{conversation_context}
+LATEST USER MESSAGE:
+{latest_message}
 
 IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
 
@@ -510,15 +449,15 @@ Steps:
 
 Return this exact JSON structure:
 {{
-    "deal_owner_id": "71346067",
-    "deal_owner_name": "Kishore",
-    "deal_owner_message": "No deal owner specified, so assigning to default owner Kishore." OR "The specified deal owner is not valid, so assigning to default owner Kishore." OR "Deal owner specified as [name]",
+    "deal_owner_id": "",
+    "deal_owner_name": "",
+    "deal_owner_message": "",
     "task_owners": [
         {{
             "task_index": 1,
-            "task_owner_id": "71346067",
-            "task_owner_name": "Kishore",
-            "task_owner_message": "No task owner specified for task [task_index], so assigning to default owner Kishore." OR "The specified task owner is not valid for task [task_index], so assigning to default owner Kishore." OR "Task owner for task [task_index] specified as [name]"
+            "task_owner_id": "",
+            "task_owner_name": "",
+            "task_owner_message": ""
         }}
     ],
     "all_owners_table": [
@@ -533,6 +472,8 @@ Return this exact JSON structure:
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
     response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    logging.info(f"Prompt is : {prompt}")
+    logging.info(f"Conversation history to AI: {chat_history}")
     logging.info(f"Raw AI response for owner: {response[:1000]}...")
 
     try:
@@ -568,14 +509,6 @@ def search_deals(ti, **context):
     deal_owner_id = owner_info.get('deal_owner_id', '71346067')
     deal_owner_name = owner_info.get('deal_owner_name', 'Kishore')
     
-    conversation_context = ""
-    for msg in chat_history:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        conversation_context += f"[{role.upper()}]: {content}\n\n"
-    
-    conversation_context += f"[USER - LATEST]: {latest_message}\n"
-    logging.info(f"conversation context is: {conversation_context}")
 
     prompt = f"""You are a HubSpot Deal Intelligence Assistant. Your role is to analyze the email conversation and:
 
@@ -585,8 +518,8 @@ def search_deals(ti, **context):
 
 ---
 
-FULL CONVERSATION:
-{conversation_context}
+LATEST USER MESSAGE:
+{latest_message}
 
 Validated Deal Owner ID: {deal_owner_id}
 Validated Deal Owner Name: {deal_owner_name}
@@ -666,13 +599,6 @@ def search_contacts(ti, **context):
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
     
-    conversation_context = ""
-    for msg in chat_history:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        conversation_context += f"[{role.upper()}]: {content}\n\n"
-    
-    conversation_context += f"[USER - LATEST]: {latest_message}\n"
 
     prompt = f"""You are a HubSpot Contact Search Assistant. Your role is to **search** for existing contacts based on the email conversation.  
 **You CANNOT create contacts in HubSpot.**  
@@ -680,8 +606,8 @@ You may only **suggest** new contact details **when no match is found and the em
 
 ---
 
-FULL CONVERSATION:
-{conversation_context}
+LATEST USER MESSAGE:
+{latest_message}
 
 ---
 
@@ -861,14 +787,7 @@ def search_companies(ti, **context):
     
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
-    
-    conversation_context = ""
-    for msg in chat_history:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        conversation_context += f"[{role.upper()}]: {content}\n\n"
-    
-    conversation_context += f"[USER - LATEST]: {latest_message}\n"
+
 
     prompt = f"""You are a HubSpot Company Search Assistant. Your role is to **search** for existing companies based on the email conversation.  
 **You CANNOT create companies in HubSpot.**  
@@ -876,8 +795,8 @@ You may only **suggest** new company details **when no match is found and the em
 
 ---
 
-FULL CONVERSATION:
-{conversation_context}
+LATEST USER MESSAGE:
+{latest_message}
 
 ---
 
@@ -1008,6 +927,14 @@ FULL CONVERSATION:
 def parse_notes_tasks_meeting(ti, **context):
     """Parse notes, tasks, and meetings from conversation"""
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    email_data = ti.xcom_pull(key="email_data", default={})
+    headers      = email_data.get("headers", {})
+    sender_raw   = headers.get("From", "")                # e.g. "John Doe <john@acme.com>"
+    # Parse a clean name and e-mail (fallback to raw string if parsing fails)
+    import email.utils
+    sender_tuple = email.utils.parseaddr(sender_raw)      # (realname, email)
+    sender_name  = sender_tuple[0].strip() or sender_raw
+    sender_email = sender_tuple[1].strip() or sender_raw
     
     should_parse_notes = entity_flags.get("parse_notes", True)
     should_parse_tasks = entity_flags.get("parse_tasks", True)
@@ -1030,14 +957,6 @@ def parse_notes_tasks_meeting(ti, **context):
     default_task_owner_id = "71346067"
     default_task_owner_name = "Kishore"
     
-    conversation_context = ""
-    for msg in chat_history:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        conversation_context += f"[{role.upper()}]: {content}\n\n"
-    
-    conversation_context += f"[USER - LATEST]: {latest_message}\n"
-    
     parsing_instructions = []
     if should_parse_notes:
         parsing_instructions.append("1. Notes - Important discussion points, decisions, general notes")
@@ -1051,9 +970,11 @@ def parse_notes_tasks_meeting(ti, **context):
 You may only **parse and structure** data that is **clearly present** in the conversation.
 
 ---
-
-FULL CONVERSATION:
-{conversation_context}
+**SENDER**  
+Name : {sender_name}  
+Email: {sender_email}
+LATEST USER MESSAGE:
+{latest_message}
 
 Task Owners:
 {json.dumps(task_owners, indent=2)}
@@ -1070,7 +991,7 @@ For notes (only if note parsing is enabled):
 
 For meetings (only if meeting parsing is enabled):
 - Extract meeting title, start time, end time, location, outcome, timestamp, attendees, meeting type, and meeting status.
-- If "I" is mentioned for attendees that refers to the email sender.
+- If "I" is mentioned for attendees that refers to the email sender name.
 
 For tasks (only if task parsing is enabled):
 - Identify all tasks and their respective owners from the email content.
@@ -1180,19 +1101,12 @@ def check_task_threshold(ti, **context):
             'task_owner_id': task.get('task_owner_id', '71346067'),
             'task_owner_name': task.get('task_owner_name', 'Kishore')
         })
-    
-    conversation_context = ""
-    for msg in chat_history:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        conversation_context += f"[{role.upper()}]: {content}\n\n"
-    
-    conversation_context += f"[USER - LATEST]: {latest_message}\n"
+
 
     prompt = f"""You are a HubSpot API assistant. Check task volume thresholds.
 
-FULL CONVERSATION:
-{conversation_context}
+LATEST USER MESSAGE:
+{latest_message}
 
 Task Owner Mapping:
 {json.dumps(task_owner_mapping, indent=2)}
@@ -1946,57 +1860,72 @@ def send_confirmation_email(ti, **context):
     email_data = ti.xcom_pull(key="email_data")
     confirmation_email = ti.xcom_pull(key="confirmation_email")
     confirmation_needed = ti.xcom_pull(key="confirmation_needed", default=False)
+    
     if not confirmation_needed:
         return "No confirmation email needed"
+
     service = authenticate_gmail()
     if not service:
         logging.error("Gmail authentication failed")
         return "Gmail authentication failed"
+
+    # Extract all recipients from original email
     all_recipients = extract_all_recipients(email_data)
+    
     sender_email = email_data["headers"].get("From", "")
     original_message_id = email_data["headers"].get("Message-ID", "")
     references = email_data["headers"].get("References", "")
+
     if original_message_id and original_message_id not in references:
         references = f"{references} {original_message_id}".strip()
-    subject = f"Re: {email_data['headers'].get('Subject', 'Meeting Minutes Request')}"
-    logging.info(f"Sending email with In-Reply-To: {original_message_id}, References: {references}")
 
-    # Prepare recipients
+    subject = f"Re: {email_data['headers'].get('Subject', 'Meeting Minutes Request')}"
+
+    # Prepare recipients for reply-all
     primary_recipient = sender_email
     cc_recipients = []
+    
     for to_addr in all_recipients["to"]:
-        if (to_addr.lower() != sender_email.lower() and HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower()):
+        if (to_addr.lower() != sender_email.lower() and 
+            HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower()):
             cc_recipients.append(to_addr)
+    
     for cc_addr in all_recipients["cc"]:
-        if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and cc_addr not in cc_recipients):
+        if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and 
+            cc_addr not in cc_recipients):
             cc_recipients.append(cc_addr)
+    
+    bcc_recipients = [addr for addr in all_recipients["bcc"] 
+                      if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()]
 
-    bcc_recipients = [addr for addr in all_recipients["bcc"] if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()]
     cc_string = ', '.join(cc_recipients) if cc_recipients else None
     bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
-    logging.info(f"Sending confirmation email to: {primary_recipient}")
+
+    logging.info(f"Sending confirmation email:")
+    logging.info(f"Primary recipient: {primary_recipient}")
+    logging.info(f"Cc recipients: {cc_string}")
+    logging.info(f"Bcc recipients: {bcc_string}")
 
     result = send_email(service, primary_recipient, subject, confirmation_email,
                        original_message_id, references, cc=cc_string, bcc=bcc_string)
 
     if result:
-        logging.info(f"Confirmation email sent successfully with message ID: {result.get('id')}")
+        logging.info(f"Confirmation email sent successfully")
+        
+        # ⭐ CRITICAL: Store recipients for the final email
+        # This is necessary because BCC recipients are not retrievable from thread
+        ti.xcom_push(key="original_all_recipients", value=all_recipients)
+        ti.xcom_push(key="original_sender", value=sender_email)
+        
         ti.xcom_push(key="confirmation_sent", value=True)
         ti.xcom_push(key="confirmation_message_id", value=result.get("id", ""))
-        # Store original thread context for reply linking
-        ti.xcom_push(key="original_thread_context", value={
-            "original_message_id": original_message_id,
-            "references": references,
-            "thread_id": ti.xcom_pull(key="thread_id")
-        })
-        logging.info(f"thread id : {ti.xcom_pull(key='thread_id')}")
     else:
         logging.error("Failed to send confirmation email")
 
     return result
 
 def compose_engagement_summary_email(ti, **context):
-    """Compose a dedicated email for engagement summary"""
+    """Compose a dedicated email for engagement summary with conditional sections"""
     engagement_summary = ti.xcom_pull(key="engagement_summary", default={})
     email_data = ti.xcom_pull(key="email_data")
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
@@ -2034,43 +1963,59 @@ def compose_engagement_summary_email(ti, **context):
     from_email = email_data["headers"].get("From", "")
     
     contact_summary = engagement_summary.get('contact_summary', {})
-    deal_summary_raw = engagement_summary.get('deal_summary', {})
+    deal_summary_raw = engagement_summary.get('deal_summary', [])
     company_summary = engagement_summary.get('company_summary', {})
     engagement_details = engagement_summary.get('engagement_summary', '')
     detailed_deal = engagement_summary.get('detailed_deal_summary', '')
     call_strategy = engagement_summary.get('call_strategy', '')
-    
-    deal_html = """
-    <h3>Deal Information</h3>
-    <table>
-        <thead>
-            <tr>
-                <th>Deal Name</th>
-                <th>Stage</th>
-                <th>Amount</th>
-                <th>Close Date</th>
-            </tr>
-        </thead>
-        <tbody>
-    """
 
-    if isinstance(deal_summary_raw, list):
-        for deal in deal_summary_raw:
-            deal_html += f"""
-            <tr>
-                <td>{deal.get("deal_name", "N/A")}</td>
-                <td>{deal.get("stage", "N/A")}</td>
-                <td>{deal.get("amount", "N/A")}</td>
-                <td>{deal.get("close_date", "N/A")}</td>
-            </tr>
-    """
-    # If not a list, tbody remains empty (no else needed for '')
+    # Helper: Check if a dict has meaningful data for given fields
+    def has_meaningful_data(entity, required_fields):
+        if not entity or not isinstance(entity, dict):
+            return False
+        return any(str(entity.get(field, "")).strip() for field in required_fields)
 
-    deal_html += """
-        </tbody>
-    </table>
-    """
-    logging.info(f"deal summary:{deal_summary_raw}")
+    # Helper: Filter list of entities
+    def filter_meaningful_entities(entities, required_fields):
+        if not entities:
+            return []
+        return [e for e in entities if has_meaningful_data(e, required_fields)]
+
+    # Filter deals with meaningful data
+    meaningful_deals = filter_meaningful_entities(
+        deal_summary_raw if isinstance(deal_summary_raw, list) else [],
+        ["deal_name", "stage", "amount", "close_date"]
+    )
+
+    # Determine which sections have content
+    has_contact = has_meaningful_data(contact_summary, ["contact_name", "email", "company_name"])
+    has_company = has_meaningful_data(company_summary, ["company_name", "domain"])
+    has_deals = len(meaningful_deals) > 0
+    has_engagement = bool(engagement_details and engagement_details.strip())
+    has_detailed_deal = bool(detailed_deal and detailed_deal.strip())
+    has_call_strategy = bool(call_strategy and call_strategy.strip())
+
+    # If no meaningful sections at all, send a minimal email
+    if not (has_contact or has_company or has_deals or has_engagement or has_detailed_deal or has_call_strategy):
+        minimal_email = f"""<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #000; }}
+    </style>
+</head>
+<body>
+    <p>Hello {from_email},</p>
+    <p>I processed your request, but no meaningful engagement data was found to summarize.</p>
+    <p>Please verify the contact or deal details and try again.</p>
+    <p>Best regards,<br>HubSpot Agent</p>
+</body>
+</html>"""
+        ti.xcom_push(key="engagement_summary_email", value=minimal_email)
+        ti.xcom_push(key="summary_email_needed", value=True)
+        return minimal_email
+
+    # Start building email
     email_content = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -2120,60 +2065,111 @@ def compose_engagement_summary_email(ti, **context):
         <p>Hello {from_email},</p>
         <p>Here is the comprehensive engagement summary you requested:</p>
     </div>
-    
-    <h3>Contact Information</h3>
-    <table>
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Email</th>
-                <th>Company</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td>{contact_summary.get('contact_name', 'N/A')}</td>
-                <td>{contact_summary.get('email', 'N/A')}</td>
-                <td>{contact_summary.get('company_name', 'N/A')}</td>
-            </tr>
-        </tbody>
-    </table>
-    
-    
-    
-    <h3>Company Information</h3>
-    <table>
-        <thead>
-            <tr>
-                <th>Company Name</th>
-                <th>Domain</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td>{company_summary.get('company_name', 'N/A')}</td>
-                <td>{company_summary.get('domain', 'N/A')}</td>
-            </tr>
-        </tbody>
-    </table>
+"""
 
-    """+deal_html+f"""
-    
-    <h3>Engagement Overview</h3>
-    <div class="section">
-        <p>{engagement_details if engagement_details else 'No engagement details available.'}</p>
-    </div>
-    
-    <h3>Detailed Deal Analysis</h3>
-    <div class="section">
-        <p>{detailed_deal if detailed_deal else 'No detailed deal analysis available.'}</p>
-    </div>
-    
-    <h3>Recommended Call Strategy</h3>
-    <div class="section">
-        <p>{call_strategy if call_strategy else 'No call strategy available.'}</p>
-    </div>
+    # === Conditionally Add Sections ===
 
+    if has_contact:
+        email_content += """
+        <h3>Contact Information</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Company</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>{}</td>
+                    <td>{}</td>
+                    <td>{}</td>
+                </tr>
+            </tbody>
+        </table>
+        """.format(
+            contact_summary.get('contact_name', 'N/A'),
+            contact_summary.get('email', 'N/A'),
+            contact_summary.get('company_name', 'N/A')
+        )
+
+    if has_company:
+        email_content += """
+        <h3>Company Information</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Company Name</th>
+                    <th>Domain</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>{}</td>
+                    <td>{}</td>
+                </tr>
+            </tbody>
+        </table>
+        """.format(
+            company_summary.get('company_name', 'N/A'),
+            company_summary.get('domain', 'N/A')
+        )
+
+    if has_deals:
+        email_content += """
+        <h3>Deal Information</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Deal Name</th>
+                    <th>Stage</th>
+                    <th>Amount</th>
+                    <th>Close Date</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+        for deal in meaningful_deals:
+            email_content += f"""
+                <tr>
+                    <td>{deal.get("deal_name", "N/A")}</td>
+                    <td>{deal.get("stage", "N/A")}</td>
+                    <td>{deal.get("amount", "N/A")}</td>
+                    <td>{deal.get("close_date", "N/A")}</td>
+                </tr>
+            """
+        email_content += """
+            </tbody>
+        </table>
+        """
+
+    if has_engagement:
+        email_content += f"""
+        <h3>Engagement Overview</h3>
+        <div class="section">
+            <p>{engagement_details}</p>
+        </div>
+        """
+
+    if has_detailed_deal:
+        email_content += f"""
+        <h3>Detailed Deal Analysis</h3>
+        <div class="section">
+            <p>{detailed_deal}</p>
+        </div>
+        """
+
+    if has_call_strategy:
+        email_content += f"""
+        <h3>Recommended Call Strategy</h3>
+        <div class="section">
+            <p>{call_strategy}</p>
+        </div>
+        """
+
+    # Closing
+    email_content += """
     <div class="closing">
         <p>This summary provides a comprehensive overview to help you prepare for your upcoming engagement.</p>
         <p>If you need any clarifications or additional information, please don't hesitate to ask.</p>
@@ -2182,15 +2178,15 @@ def compose_engagement_summary_email(ti, **context):
     </div>
 </body>
 </html>"""
-    
+
     ti.xcom_push(key="engagement_summary_email", value=email_content)
     ti.xcom_push(key="summary_email_needed", value=True)
-    logging.info("Engagement summary email composed successfully")
+    logging.info("Engagement summary email composed successfully with conditional sections")
     return email_content
 
 
 def send_engagement_summary_email(ti, **context):
-    """Send the engagement summary email"""
+    """Send the engagement summary email with multi-recipient support"""
     summary_email_needed = ti.xcom_pull(key="summary_email_needed", default=False)
     
     if not summary_email_needed:
@@ -2205,7 +2201,9 @@ def send_engagement_summary_email(ti, **context):
         logging.error("Gmail authentication failed")
         return "Gmail authentication failed"
     
+    # Extract all recipients from original email
     all_recipients = extract_all_recipients(email_data)
+    
     sender_email = email_data["headers"].get("From", "")
     original_message_id = email_data["headers"].get("Message-ID", "")
     references = email_data["headers"].get("References", "")
@@ -2215,30 +2213,53 @@ def send_engagement_summary_email(ti, **context):
     
     subject = f"Re: {email_data['headers'].get('Subject', 'Engagement Summary')}"
     
-    logging.info(f"Sending engagement summary email with In-Reply-To: {original_message_id}")
-    
-    # Prepare recipients
+    # Prepare recipients for reply-all functionality
+    # Primary recipient is the sender
     primary_recipient = sender_email
+    
+    # For Cc: Include all original To recipients (except sender) + all original Cc recipients
     cc_recipients = []
+    
+    # Add all original To recipients except the sender and bot
     for to_addr in all_recipients["to"]:
-        if (to_addr.lower() != sender_email.lower() and HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower()):
+        if (to_addr.lower() != sender_email.lower() and 
+            HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower()):
             cc_recipients.append(to_addr)
+    
+    # Add all original Cc recipients except bot
     for cc_addr in all_recipients["cc"]:
-        if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and cc_addr not in cc_recipients):
+        if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and 
+            cc_addr not in cc_recipients):  # Avoid duplicates
             cc_recipients.append(cc_addr)
     
-    bcc_recipients = [addr for addr in all_recipients["bcc"] if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()]
+    # For Bcc: Include all original Bcc recipients
+    bcc_recipients = []
+    for bcc_addr in all_recipients["bcc"]:
+        if HUBSPOT_FROM_ADDRESS.lower() not in bcc_addr.lower():
+            bcc_recipients.append(bcc_addr)
+    
+    # Convert lists to comma-separated strings
     cc_string = ', '.join(cc_recipients) if cc_recipients else None
     bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
     
-    logging.info(f"Sending engagement summary email to: {primary_recipient}")
+    logging.info(f"Sending engagement summary email:")
+    logging.info(f"Primary recipient: {primary_recipient}")
+    logging.info(f"Cc recipients: {cc_string}")
+    logging.info(f"Bcc recipients: {bcc_string}")
     
     result = send_email(service, primary_recipient, subject, engagement_summary_email,
                        original_message_id, references, cc=cc_string, bcc=bcc_string)
     
     if result:
-        logging.info(f"Engagement summary email sent successfully with message ID: {result.get('id')}")
+        logging.info(f"Engagement summary email sent to all recipients")
+        
+        # ⭐ Store recipients for potential future use in the workflow
+        # This is especially important if there are subsequent emails after this
+        ti.xcom_push(key="summary_all_recipients", value=all_recipients)
         ti.xcom_push(key="summary_email_sent", value=True)
+        ti.xcom_push(key="summary_message_id", value=result.get("id", ""))
+        
+        logging.info(f"Engagement summary email sent successfully with message ID: {result.get('id')}")
     else:
         logging.error("Failed to send engagement summary email")
     
