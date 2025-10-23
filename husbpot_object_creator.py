@@ -17,7 +17,7 @@ from email.mime.multipart import MIMEMultipart
 from googleapiclient.errors import HttpError
 from airflow.models import Variable
 import time
-
+from hubspot_email_listener import get_email_thread
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -151,6 +151,7 @@ def load_context_from_dag_run(ti, **context):
     email_data = dag_run_conf.get("email_data", {})
     chat_history = dag_run_conf.get("chat_history", [])
     thread_history = dag_run_conf.get("thread_history", [])
+    latest_message = email_data.get("content", "")
     
     logging.info(f"=== LOADING CONTEXT FROM DAG RUN ===")
     logging.info(f"Thread ID: {thread_id}")
@@ -164,6 +165,7 @@ def load_context_from_dag_run(ti, **context):
     ti.xcom_push(key="email_data", value=email_data)
     ti.xcom_push(key="chat_history", value=chat_history)
     ti.xcom_push(key="thread_history", value=thread_history)
+    ti.xcom_push(key="latest_message", value=latest_message)
     
     return {
         "thread_id": thread_id,
@@ -178,7 +180,7 @@ def analyze_user_response(ti, **context):
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     thread_history = ti.xcom_pull(key="thread_history", default=[])
     thread_id = ti.xcom_pull(key="thread_id")
-    
+    latest_user_message = ti.xcom_pull(key="latest_message", default="")
     if not thread_id:
         logging.error("No thread_id provided")
         default_result = {
@@ -196,12 +198,7 @@ def analyze_user_response(ti, **context):
     
     # Build complete conversation context
     conversation_context = ""
-    
-    # Add chat history (structured conversation between bot and user)
-    for msg in chat_history:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        conversation_context += f"[{role.upper()}]: {content}\n\n"
+
     
     # Add thread history (email messages with metadata)
     for idx, email in enumerate(thread_history, 1):
@@ -231,14 +228,12 @@ def analyze_user_response(ti, **context):
         return default_result
     
     # Get latest user message for context
-    latest_user_message = ""
     sender_email = ""
     sender_name = ""
     for email in reversed(thread_history):
         if not email.get('from_bot', True):
             if email.get("content"):
                 soup = BeautifulSoup(email.get("content", ""), "html.parser")
-                latest_user_message = soup.get_text(separator=" ", strip=True)
                 sender_email = email.get('headers', {}).get('From', '')
                 # Extract name from "Name <email>" format
                 import re
@@ -250,9 +245,6 @@ def analyze_user_response(ti, **context):
     
     # CRITICAL: Extract entities from conversation history, NOT search
     prompt = f"""You are an AI assistant analyzing an email conversation to determine user intent and extract HubSpot entities FROM THE CONVERSATION HISTORY ONLY.
-
-FULL CONVERSATION HISTORY:
-{conversation_context}
 
 LATEST USER MESSAGE:
 {latest_user_message}
@@ -335,7 +327,7 @@ Return ONLY valid JSON:
         "deals": [{{"dealId": "...", "updates": {{"field": "new_value"}}}}],
         "meetings": [],
         "notes": [],
-        "tasks": [{{"taskId": "...", "updates": {{"field": "new_value"}}}}]
+        "tasks": [{{"taskId": "...", "taskbody": "...", "task_owner_name": "...", "task_owner_id": "...", "updates": {{"field": "new_value"}}}}]
     }},
     "casual_comments_detected": true|false,
     "reasoning": "Brief explanation of intent, selections, and entity actions. For casual comments, explain why it's just a comment and not an action request."
@@ -352,7 +344,8 @@ CRITICAL REMINDERS:
 """
 
     response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    
+    logging.info(f"Prompt is :{prompt}")
+    logging.info(f"conversation_history is :{chat_history}")
     try:
         parsed_analysis = json.loads(response)
         user_intent = parsed_analysis.get("user_intent", "CONFIRM")
@@ -477,13 +470,8 @@ def determine_owner(ti, **context):
     """Determine deal and task owners from conversation"""
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     analysis_results = ti.xcom_pull(key="analysis_results", default={})
-    
-    # Build conversation context
-    conversation_context = ""
-    for msg in chat_history:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        conversation_context += f"[{role.upper()}]: {content}\n\n"
+    latest_user_message = ti.xcom_pull(key="latest_message", default="")
+
     
     # Get tasks to be created
     entities_to_create = analysis_results.get("entities_to_create", {})
@@ -491,8 +479,8 @@ def determine_owner(ti, **context):
 
     prompt = f"""You are a HubSpot API assistant. Analyze this conversation to identify deal owner and task owners.
 
-FULL CONVERSATION:
-{conversation_context}
+LATEST USER MESSAGE:
+{latest_user_message}
 
 Tasks to be created:
 {json.dumps(tasks_to_create, indent=2)}
@@ -573,6 +561,7 @@ def check_task_threshold(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results", default={})
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     owner_info = ti.xcom_pull(key="owner_info", default={})
+    latest_user_message = ti.xcom_pull(key="latest_message", default="")
     
     entities_to_create = analysis_results.get("entities_to_create", {})
     tasks_to_create = entities_to_create.get("tasks", [])
@@ -591,12 +580,6 @@ def check_task_threshold(ti, **context):
         })
         return []
     
-    # Build conversation context
-    conversation_context = ""
-    for msg in chat_history:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        conversation_context += f"[{role.upper()}]: {content}\n\n"
     
     task_owners = owner_info.get('task_owners', [])
     
@@ -617,8 +600,8 @@ def check_task_threshold(ti, **context):
 
     prompt = f"""You are a HubSpot API assistant. Check task volume thresholds.
 
-FULL CONVERSATION:
-{conversation_context}
+LATEST USER MESSAGE:
+{latest_user_message}
 
 Task Owner Mapping:
 {json.dumps(task_owner_mapping, indent=2)}
@@ -1353,12 +1336,12 @@ CRITICAL INSTRUCTIONS:
    
    update_task(task_id, {{
      "properties": {{
-       "hs_timestamp": "YYYY-MM-DDTHH:MM:SSZ",
-       "hs_task_body": "preserved_original_task_description",
-       "hs_task_subject": "preserved_original_task_description", 
-       "hs_task_priority": "HIGH",
-       "hs_task_status": "NOT_STARTED",
-       "hubspot_owner_id": "owner_id_number"
+       "hs_timestamp": "",
+       "hs_task_body": "",
+       "hs_task_subject": "", 
+       "hs_task_priority": "",
+       "hs_task_status": "",
+       "hubspot_owner_id": ""
      }}
    }})
 
@@ -1388,11 +1371,11 @@ Return ONLY this JSON format:
   "updated_tasks": [{{
     "id": "task_id",
     "details": {{
-      "task_details": "original_description_preserved",
-      "task_owner_name": "owner_name", 
-      "task_owner_id": "owner_id",
-      "due_date": "updated_date",
-      "priority": "priority_level"
+      "task_details": "",
+      "task_owner_name": "", 
+      "task_owner_id": "",
+      "due_date": "",
+      "priority": ""
     }}
   }}],
   "errors": [],
@@ -2304,7 +2287,7 @@ def compose_response_html(ti, **context):
     return email_content
 
 def send_final_email(ti, **context):
-    """Send final completion email"""
+    """Send final completion email with proper recipient handling"""
     email_data = ti.xcom_pull(key="email_data", default={})
     response_html = ti.xcom_pull(key="response_html")
     
@@ -2313,44 +2296,97 @@ def send_final_email(ti, **context):
         logging.error("Gmail authentication failed")
         raise ValueError("Gmail authentication failed")
     
-    all_recipients = extract_all_recipients(email_data)
-    sender_email = email_data["headers"].get("From", "")
-    original_subject = email_data['headers'].get('Subject', 'HubSpot Request')
+    # Get the full email thread
+    email_thread = get_email_thread(service, email_data)
     
-    subject = f"Re: {original_subject}" if not original_subject.startswith('Re:') else original_subject
-    in_reply_to = email_data["headers"].get("Message-ID", "")
-    references = email_data["headers"].get("References", "")
+    if not email_thread:
+        logging.warning("No thread found, using only current email data")
+        email_thread = [email_data]
     
-    # Prepare recipients
-    primary_recipient = sender_email
+    # Extract CC recipients from the current email headers
+    current_email_headers = email_data.get("headers", {})
+    current_cc = current_email_headers.get("Cc", "")
+    
+    # Parse CC recipients from the header string
     cc_recipients = []
+    if current_cc:
+        # Parse email addresses from CC header
+        import re
+        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+        cc_addresses = re.findall(email_pattern, current_cc)
+        cc_recipients.extend(cc_addresses)
     
-    for to_addr in all_recipients["to"]:
-        if (to_addr.lower() != sender_email.lower() and 
-            HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower()):
-            cc_recipients.append(to_addr)
+    # Collect recipients from thread
+    thread_to_recipients = set()
+    thread_cc_recipients = set()
     
-    for cc_addr in all_recipients["cc"]:
-        if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and 
-            cc_addr not in cc_recipients):
-            cc_recipients.append(cc_addr)
+    for email in email_thread:
+        thread_recipients = extract_all_recipients(email)
+        thread_to_recipients.update(thread_recipients.get("to", []))
+        thread_cc_recipients.update(thread_recipients.get("cc", []))
     
-    bcc_recipients = [addr for addr in all_recipients["bcc"] if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()]
+    # Add thread CC recipients
+    thread_cc_recipients.update(cc_recipients)
     
-    cc_string = ', '.join(cc_recipients) if cc_recipients else None
-    bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
+    # Get latest email for headers
+    latest_email = email_thread[-1]
+    sender_email = latest_email["headers"].get("From", "")
+    original_subject = latest_email['headers'].get('Subject', 'HubSpot Request')
     
-    logging.info(f"Sending final email to: {primary_recipient}")
-    
-    result = send_email(service, primary_recipient, subject, response_html, 
-                       in_reply_to, references, cc=cc_string, bcc=bcc_string)
-    
-    if result:
-        logging.info(f"Final email sent successfully")
-        return result
+    # Extract email address from "From" header (might be "Name <email@domain.com>")
+    sender_match = re.search(r'<([^>]+)>', sender_email)
+    if sender_match:
+        primary_recipient = sender_match.group(1)
     else:
-        logging.error("Failed to send final email")
-        raise ValueError("Failed to send final email")
+        primary_recipient = sender_email
+    
+    subject = f"Re: {original_subject}" if not original_subject.lower().startswith('re:') else original_subject
+    in_reply_to = latest_email["headers"].get("Message-ID", "")
+    references = latest_email["headers"].get("References", "")
+    
+    # Build final CC list (excluding sender and bot)
+    final_cc_recipients = []
+    all_cc_candidates = list(thread_to_recipients) + list(thread_cc_recipients)
+    
+    for addr in all_cc_candidates:
+        clean_addr = addr.strip()
+        if (clean_addr and 
+            clean_addr.lower() != primary_recipient.lower() and 
+            HUBSPOT_FROM_ADDRESS.lower() not in clean_addr.lower() and
+            clean_addr not in final_cc_recipients):
+            final_cc_recipients.append(clean_addr)
+    
+    cc_string = ', '.join(final_cc_recipients) if final_cc_recipients else None
+    
+    # Note: BCC cannot be retrieved from received emails
+    # If you need BCC, it must be stored when first processing the email
+    bcc_string = None
+    
+    logging.info(f"Sending final email (reply-all):")
+    logging.info(f"Thread size: {len(email_thread)} emails")
+    logging.info(f"Primary recipient: {primary_recipient}")
+    logging.info(f"Cc recipients ({len(final_cc_recipients)}): {cc_string}")
+    logging.info(f"Bcc recipients: {bcc_string}")
+    
+    # Retry logic
+    retries = 3
+    for attempt in range(retries):
+        try:
+            result = send_email(service, primary_recipient, subject, response_html, 
+                              in_reply_to, references, cc=cc_string, bcc=bcc_string)
+            if result:
+                logging.info(f"Final email sent successfully")
+                return result
+            else:
+                logging.error(f"Attempt {attempt+1} failed")
+        except Exception as e:
+            logging.error(f"Attempt {attempt+1} failed: {e}")
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                raise
+    
+    raise ValueError("Failed to send final email")
 
 def branch_to_creation_tasks(ti, **context):
     """Branch to appropriate creation/update tasks"""
