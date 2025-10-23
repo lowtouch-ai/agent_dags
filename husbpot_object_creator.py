@@ -2313,7 +2313,6 @@ def send_final_email(ti, **context):
     cc_recipients = []
     if current_cc:
         # Parse email addresses from CC header
-        import re
         email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
         cc_addresses = re.findall(email_pattern, current_cc)
         cc_recipients.extend(cc_addresses)
