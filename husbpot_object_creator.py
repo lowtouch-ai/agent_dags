@@ -2290,6 +2290,7 @@ def compose_response_html(ti, **context):
 
 def send_final_email(ti, **context):
     """Send final completion email with proper recipient handling"""
+    import re
     email_data = ti.xcom_pull(key="email_data", default={})
     response_html = ti.xcom_pull(key="response_html")
     
