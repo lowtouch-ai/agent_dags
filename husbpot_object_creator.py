@@ -1519,8 +1519,6 @@ CRITICAL ASSOCIATION RULES:
     
 TOOL CALL FORMAT - Use this exact structure when calling create_multi_association:
 {{
-    "association_requests": [
-        {{
     "single": {{
         "deal_id": "string_or_empty",
         "contact_id": "string_or_empty",
@@ -1529,16 +1527,6 @@ TOOL CALL FORMAT - Use this exact structure when calling create_multi_associatio
         "task_id": "string_or_empty",
         "meeting_id": "string_or_empty"
     }}
-}}
-    ],
-    "reasoning": "Explain why these associations make sense",
-    "extracted_ids_from_conversation": {{
-        "contact_ids": [],
-        "company_ids": [],
-        "deal_ids": []
-    }},
-    "errors": [],
-    "error": null
 }}
 
 Remember: Empty string "" for non-applicable fields, comma-separated for multiple IDs.
