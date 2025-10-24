@@ -1499,7 +1499,7 @@ FULL CHAT HISTORY:
 LATEST USER MESSAGE:
 {latest_user_message}
 
-How to create associations: Always and strictly call create_multi_association API/Tool.
+How to create associations: Always and strictly call create_multi_association API/Tool to create association.
 
 AVAILABLE ENTITY IDS:
 - NEW Contact IDs (just created): {new_contact_ids}
@@ -1511,7 +1511,6 @@ AVAILABLE ENTITY IDS:
 - EXISTING Contact IDs (from conversation): {existing_contact_ids}
 - EXISTING Company IDs (from conversation): {existing_company_ids}
 - EXISTING Deal IDs (from conversation): {existing_deal_ids}
-
 CRITICAL ASSOCIATION RULES:
 
 1. **Associate NEW entities with EXISTING entities**:
