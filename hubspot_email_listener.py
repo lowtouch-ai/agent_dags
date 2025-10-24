@@ -572,7 +572,7 @@ Return ONLY valid JSON:
         elif "no_action" in task_type:
             ti.xcom_push(key="no_action_emails", value=unread_emails)
             logging.info("→ No action needed for the emails")
-            return "handle_no_action_emails"
+            return "handle_general_queries"
     
     # Fallback logic
     logging.warning("AI failed to provide valid response, using fallback")
@@ -709,7 +709,7 @@ def trigger_continuation_dag(**kwargs):
 
     logging.info(f"Triggered continuation for {len(reply_emails)} emails")
 
-def handle_no_action_emails(**kwargs):
+def handle_general_queries(**kwargs):
     """Handle emails requiring no action by sending a friendly response."""
     ti = kwargs['ti']
     unread_emails = ti.xcom_pull(task_ids="branch_task", key="no_action_emails") or []
@@ -879,8 +879,8 @@ with DAG(
     )
 
     handle_no_action_task = PythonOperator(
-    task_id="handle_no_action_emails",
-    python_callable=handle_no_action_emails,
+    task_id="handle_general_queries",
+    python_callable=handle_general_queries,
     provide_context=True
     )
 
