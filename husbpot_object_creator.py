@@ -1491,7 +1491,7 @@ def create_associations(ti, **context):
             conversation_context += f"[{role_label} EMAIL {idx} - From: {sender}]: {clean_content}\n\n"
     
     # FIXED: Enhanced prompt with clearer instructions
-    prompt = f"""You are a HubSpot API assistant responsible for creating associations between entities using create_multi_association tool.
+    prompt = f"""You are a HubSpot API assistant responsible for creating associations between entities using the `create_multi_association` tool.
 
 FULL CHAT HISTORY:
 {conversation_context}
@@ -1499,70 +1499,92 @@ FULL CHAT HISTORY:
 LATEST USER MESSAGE:
 {latest_user_message}
 
-Important Instruction: Create associations using `create_multi_association` tool.
+How to create association requests: You can only create association by calling the tool `create_multi_association`
+═══════════════════════════════════════════════════════════════════════
+CRITICAL: ONLY USE THE EXACT IDs PROVIDED BELOW - DO NOT INVENT OR GUESS ANY IDs
+═══════════════════════════════════════════════════════════════════════
 
-AVAILABLE ENTITY IDS:
-- NEW Contact IDs (just created): {new_contact_ids}
-- NEW Company IDs (just created): {new_company_ids}
-- NEW Deal IDs (just created): {new_deal_ids}
-- NEW Meeting IDs (just created): {new_meeting_ids}
-- NEW Note IDs (just created): {new_note_ids}
-- NEW Task IDs (just created): {new_task_ids}
-- EXISTING Contact IDs (from conversation): {existing_contact_ids}
-- EXISTING Company IDs (from conversation): {existing_company_ids}
-- EXISTING Deal IDs (from conversation): {existing_deal_ids}
+NEWLY CREATED ENTITIES (JUST NOW):
+- Contact IDs: {new_contact_ids}
+- Company IDs: {new_company_ids}
+- Deal IDs: {new_deal_ids}
+- Meeting IDs: {new_meeting_ids}
+- Note IDs: {new_note_ids}
+- Task IDs: {new_task_ids}
 
-CRITICAL ASSOCIATION RULES:
+EXISTING ENTITIES (FROM CONVERSATION CONTEXT):
+- Contact IDs: {existing_contact_ids}
+- Company IDs: {existing_company_ids}
+- Deal IDs: {existing_deal_ids}
 
-1. **Associate NEW entities with EXISTING entities**:
-   - If a new note/task/meeting is created, associate it with ALL relevant existing contacts/companies/deals from the conversation
-   - If a new contact is created, associate it with existing companies/deals if mentioned
+UPDATED ENTITIES (MODIFIED):
+- Contact IDs: {updated_contact_ids}
+- Company IDs: {updated_company_ids}
+- Deal IDs: {updated_deal_ids}
 
-2. **Extract Additional IDs from Conversation**:
-   - Look for entity IDs in HTML tables from bot responses
-   - Look for IDs mentioned by user (e.g., "associate with deal 12345")
-   - Common patterns: "contactId: 12345", "Deal ID: 67890", "associate with contact 99999"
+ALL VALID IDs FOR ASSOCIATIONS:
+- All Contact IDs: {all_contact_ids}
+- All Company IDs: {all_company_ids}
+- All Deal IDs: {all_deal_ids}
 
-3. **Create Comprehensive Associations**:
-   - New notes should be associated with ALL relevant entities (both new and existing)
-   - New tasks should be associated with relevant deals/contacts/companies
-   - Don't just associate new with new - connect to the full context
+═══════════════════════════════════════════════════════════════════════
+ASSOCIATION RULES - READ CAREFULLY:
+═══════════════════════════════════════════════════════════════════════
 
-4. **Association Priority**:
-   - If user mentions specific entities to associate → Use those
-   - If context implies relationships → Create those associations
-   - If a note mentions people/companies → Associate with their records
+1. **USE ONLY THE IDs LISTED ABOVE**
+   - Do NOT use any note/task/meeting IDs from the chat history
+   - Do NOT invent or guess any IDs
+   - If a note was just created, use ONLY the ID from "Note IDs: [...]" above
 
-EXAMPLE SCENARIOS:
+2. **For NEWLY Created Notes/Tasks/Meetings**:
+   - Associate them with ALL relevant existing and updated entities
+   - Example: New note → associate with existing contacts, companies, deals mentioned in context
+   
+3. **For NEWLY Created Contacts/Companies/Deals**:
+   - Associate new contacts with existing/new companies and deals
+   - Associate new companies with existing/new contacts and deals
+   - Associate new deals with existing/new contacts and companies
 
-Scenario 1: New note created about existing deal
-- Existing Deal ID: 11223344 (from conversation)
-- New Note ID: 234458809069
-- Action: Associate note with deal
+4. **ID Extraction from Conversation**:
+   - Look for entity IDs in HTML tables in bot responses
+   - Look for explicit user mentions: "associate with deal 12345"
+   - Common patterns: "contactId: 12345", "Deal ID: 67890"
+   - ONLY extract contact/company/deal IDs (NOT note/task/meeting IDs)
 
-Scenario 2: New task created for existing contact
-- Existing Contact ID: 556677 (from conversation)
-- New Task ID: 998877
-- Action: Associate task with contact
+═══════════════════════════════════════════════════════════════════════
+CRITICAL VALIDATION CHECKLIST:
+═══════════════════════════════════════════════════════════════════════
 
-**IMPORTANT**: For each new entity created, think about what existing entities it should be connected to based on the conversation context.
+Before returning each association, verify:
+✓ Is the note_id in the "Note IDs: {new_note_ids}" list above? 
+✓ Is the task_id in the "Task IDs: {new_task_ids}" list above?
+✓ Is the meeting_id in the "Meeting IDs: {new_meeting_ids}" list above?
+✓ Are the contact/company/deal IDs in the valid lists above?
 
-Return ONLY valid JSON with multiple association requests if needed:
+If NO to any question → DO NOT include that association
+
+
+═══════════════════════════════════════════════════════════════════════
+RESPONSE FORMAT:
+═══════════════════════════════════════════════════════════════════════
+
+Return ONLY valid JSON (no markdown, no code blocks):
+
 {{
     "association_requests": [
         {{
-            "description": "What this association is for",
+            "description": "Clear description of what entities are being associated and why",
             "single": {{
-                "deal_id": "existing_or_new_deal_id",
-                "contact_id": "existing_or_new_contact_id",
-                "company_id": "existing_or_new_company_id",
-                "note_id": "new_note_id",
-                "task_id": "new_task_id",
-                "meeting_id": "new_meeting_id"
+                "deal_id": "string or empty",
+                "contact_id": "string or comma-separated IDs or empty",
+                "company_id": "string or comma-separated IDs or empty",
+                "note_id": "string or empty",
+                "task_id": "string or empty",
+                "meeting_id": "string or empty"
             }}
         }}
     ],
-    "reasoning": "Explain why these associations make sense",
+    "reasoning": "Explain your association decisions. Reference the SPECIFIC IDs from the lists provided above.",
     "extracted_ids_from_conversation": {{
         "contact_ids": [],
         "company_ids": [],
@@ -1572,7 +1594,9 @@ Return ONLY valid JSON with multiple association requests if needed:
     "error": null
 }}
 
-Remember: Empty string "" for non-applicable fields, comma-separated for multiple IDs.
+REMINDER: Use empty string "" for non-applicable fields. For multiple IDs of the same type, use comma-separated values like "123,456,789".
+
+NOW, analyze the conversation and create the appropriate associations using ONLY the IDs provided above.
 """
     
     response = get_ai_response(prompt, expect_json=True)
