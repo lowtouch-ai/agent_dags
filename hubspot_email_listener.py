@@ -419,7 +419,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
                 messages.append({"role": "user", "content": item["prompt"]})
                 messages.append({"role": "assistant", "content": item["response"]})
         messages.append({"role": "user", "content": prompt})
-        response = client.chat(model='hubspot:v4', messages=messages, stream=False)
+        response = client.chat(model='hubspot:v6af', messages=messages, stream=False)
         ai_content = response.message.content
 
         ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
