@@ -1521,16 +1521,15 @@ TOOL CALL FORMAT - Use this exact structure when calling create_multi_associatio
 {{
     "association_requests": [
         {{
-            "description": "What this association is for",
-            "single": {{
-                "deal_id": "existing_or_new_deal_id",
-                "contact_id": "existing_or_new_contact_id",
-                "company_id": "existing_or_new_company_id",
-                "note_id": "new_note_id",
-                "task_id": "new_task_id",
-                "meeting_id": "new_meeting_id"
-            }}
-        }}
+    "single": {{
+        "deal_id": "string_or_empty",
+        "contact_id": "string_or_empty",
+        "company_id": "string_or_empty",
+        "note_id": "string_or_empty",
+        "task_id": "string_or_empty",
+        "meeting_id": "string_or_empty"
+    }}
+}}
     ],
     "reasoning": "Explain why these associations make sense",
     "extracted_ids_from_conversation": {{
