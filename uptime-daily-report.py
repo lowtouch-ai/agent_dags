@@ -195,21 +195,23 @@ def parse_monitor_data(monitor):
 def step_1_fetch_data(ti, **context):
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = now.timestamp()
-    start = today_start.timestamp()
+    end = int(now.timestamp())
+    start = int(today_start.timestamp())
     prev_day_end = start
-    prev_day_start = (today_start - timedelta(days=1)).timestamp()
+    prev_day_start = int((today_start - timedelta(days=1)).timestamp())
     prev_week_end = start
-    prev_week_start = (today_start - timedelta(days=7)).timestamp()
-
+    prev_week_start = int((today_start - timedelta(days=7)).timestamp())
+    
     logging.info(f"Fetching time periods: Current Day {start} to {end}, Previous Day {prev_day_start} to {prev_day_end}, Previous Week {prev_week_start} to {prev_week_end}")
     
     monitor = fetch_monitor_data(start, end)
+    logging.info(f"Monitor data fetched for current day: {monitor}")
     structured_current, rt_current, logs = parse_monitor_data(monitor)
     df_current_list = [{'datetime': datetime.fromtimestamp(r['datetime']).isoformat(), 'value': r['value']} for r in rt_current]
     df_current = pd.DataFrame(df_current_list)
     
     prev_monitor = fetch_monitor_data(prev_day_start, prev_day_end)
+    logging.info(f"Monitor data fetched for current day: {prev_monitor}")
     structured_prev_day, rt_prev_day, _ = parse_monitor_data(prev_monitor)
     df_prev_day_list = [{'datetime': datetime.fromtimestamp(r['datetime']).isoformat(), 'value': r['value']} for r in rt_prev_day]
     df_prev_day = pd.DataFrame(df_prev_day_list)
@@ -266,20 +268,20 @@ def step_2a_anomaly_detection(ti, **context):
     })
     
     prompt = f"""
-Analyze the following uptime and response time data for the monitor over the current day, previous day, and previous 7 days (excluding current day) to detect anomalies. Always provide a concise summary in 1-3 sentences, using exact phrasing for missing data (e.g., "No data available for [period]").
+Analyze the following uptime and response time data for the monitor over the current day, previous day, and previous 7 days (excluding current day) to detect anomalies. Always provide a concise summary in 1-3 sentences, starting with key findings (e.g., spikes or patterns), including percentage changes where applicable, and ending with an overall assessment. Use exact phrasing for missing data (e.g., "No data available for [period]").
 
 Current day data: {current_data_str}
 Previous day data: {prev_day_data_str}
 Previous week data: {prev_week_data_str}
 
-Logic for analysis:
-- Identify spikes in response time where value >100ms in current day; count and describe them (e.g., time, duration).
-- Detect unusual patterns: Compare response time distribution (min, max, avg) to previous day and week; flag if current avg >10% higher than previous.
-- Scan logs for frequent down events or unusual reasons; note clusters (e.g., multiple in short time).
-- If no anomalies (no spikes, patterns match historical, no unusual logs), return 'No significant anomalies detected.'.
-- Handle missing data: If a period has no data, note 'No data available for [period]' and proceed with available comparisons.
+Logic for analysis (follow steps in order):
+1. Identify spikes: Scan current day's response_times for values >100ms; count them, describe top 3 by time (use datetime).
+2. Detect unusual patterns: Compute distributions—min/max/avg from response_times['value'] (or structured['avg_response_time'] if available). Compare current vs previous day/week: Flag if current avg > baseline avg by 10%+ (calc: (current_avg - baseline_avg)/baseline_avg * 100); include exact % change for each baseline.
+3. Scan logs: For down events (type=1), check frequency (e.g., >2 in 1 hour = cluster) and reasons (e.g., code 500=server error, 408=timeout, 0=unknown); note unusual if not in baselines.
+4. Edge cases: If response_times or logs empty, note "No response times/logs available"; if baseline missing, use "No baseline for comparison".
+5. Overall: If no spikes, <10% avg change, and no clusters/unusual logs, conclude 'No significant anomalies detected.'.
 
-Return ONLY a single JSON object with the key "anomaly_detection" and its value as a concise summary string (1-3 sentences). Do not include any additional text, explanations, or markdown. Example: {{"anomaly_detection": "No data available for previous day. Current day shows no spikes >100ms and consistent response times; average response time is slightly lower than the previous week. No significant anomalies detected."}}
+Return ONLY a single JSON object with the key "anomaly_detection" and its value as a concise summary string (1-3 sentences). Do not include any additional text, explanations, or markdown. Example: {{"anomaly_detection": "No data available for previous day. Detected 1 spike >100ms at 2025-10-24 09:15:00 (isolated); current day's average response time is 5.2% higher than previous week (from 68.1ms to 71.6ms). No down log clusters. No significant anomalies detected."}}
 """
     
     response = get_ai_response(prompt)
@@ -326,20 +328,21 @@ def step_2b_rca(ti, **context):
     })
     
     prompt = f"""
-Analyze the following uptime and response time data for the monitor over the current day, previous day, and previous 7 days (excluding current day) for root cause analysis (RCA) of incidents. Always provide a concise summary using bullet points for incidents or a single statement if none, with exact phrasing for missing data (e.g., "No data available for [period]").
+Analyze the following uptime and response time data for the monitor over the current day, previous day, and previous 7 days (excluding current day) for root cause analysis (RCA) of incidents. Always provide a concise summary in bulleted format: Use bullets for each incident (format: '- [Time]: [Reason] (duration [X]s) - [Root cause inference]; [Recommendation].'), or a single bullet '- No incidents requiring RCA.' if none. Do not mention missing data unless it directly impacts analysis.
 
 Current day data: {current_data_str}
 Previous day data: {prev_day_data_str}
 Previous week data: {prev_week_data_str}
 
-Logic for analysis:
-- Focus on down logs (type=1) in current day logs; for each, analyze reason code/detail (e.g., 500=server error, 404=not found) and duration.
-- Infer root cause: Correlate with response times (e.g., high response before down suggests overload); compare to previous periods for recurrence.
-- Recommendations: Specific actions (e.g., 'Check server logs for errors; add autoscaling if overload'). Bullet points for multiple incidents; summarize common causes.
-- If no down logs in current day, return 'No incidents requiring RCA.'.
-- Handle missing data: If logs empty for a period, note 'No data available for [period]' and proceed with available analysis.
+Logic for analysis (follow steps in order):
+1. Extract down logs: Filter current day's logs where type=1; sort by datetime descending. If none, output single bullet '- No incidents requiring RCA.' and stop.
+2. For each: Analyze reason (code/detail: e.g., 500=server error → overload; 404=not found → config issue; 408=timeout → network; 0=unknown → investigate API).
+3. Infer root cause: Correlate with preceding response_times (e.g., if avg >200ms in 30min before down → overload; check baselines for recurrence (count matching reasons >1 in prev day/week)).
+4. Recommendations: Tailor per cause (e.g., overload: 'Scale resources'; timeout: 'Check network latency'; config: 'Verify endpoints'). Limit to 1-2 actionable steps.
+5. Edge cases: If logs empty, treat as no incidents (single bullet); if baselines missing, skip recurrence without noting.
+6. Overall: If multiple, add final bullet summarizing common causes.
 
-Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bullet points or single statement). Do not include any additional text, explanations, or markdown. Example: {{"rca": "No incidents requiring RCA. No data available for current day, previous day, and previous week."}}
+Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bulleted points). Do not include any additional text, explanations, or markdown. Example: {{"rca": "- 2025-10-24 09:00:00: Code 408 timeout (duration 45s) - Root cause: Network issue inferred from response spike; no recurrence in baselines. Recommendation: Monitor bandwidth and retry logic.\\n- Common cause: Isolated timeout - No further action needed."}} or {{"rca": "- No incidents requiring RCA."}}
 """
     
     response = get_ai_response(prompt)
@@ -386,20 +389,20 @@ def step_2c_comparative_analysis(ti, **context):
     })
     
     prompt = f"""
-Analyze the following uptime and response time data for the monitor over the current day, previous day, and previous 7 days (excluding current day) for comparative analysis. Always provide a concise summary in bullet points, using exact phrasing for missing data or baselines (e.g., "No data available for [period]" or "N/A - no baseline").
+Analyze the following uptime and response time data for the monitor over the current day, previous day, and previous 7 days (excluding current day) for comparative analysis. Always provide a concise summary in bullet points (one per metric, format: '- [Metric] [comparison]: [change value] ([direction: improvement/degradation/no change] from [prev] to [current]).'), using exact phrasing for missing data or baselines (e.g., "No data available for [period]" or "N/A - no baseline").
 
 Current day data: {current_data_str}
 Previous day data: {prev_day_data_str}
 Previous week data: {prev_week_data_str}
 
-Logic for analysis:
-- Day-over-day: Calculate uptime % change = ((current uptime - prev day uptime) / prev day uptime) * 100; avg response change = current avg - prev day avg; incidents change = current incidents - prev day incidents.
-- Current vs prev week avg: Similar calculations using prev week as baseline.
-- Highlight: If change >0 for uptime or <0 for response/incidents, note 'improvement'; else 'degradation'. Include absolute values.
-- Handle N/A or zero: If baseline=0, note 'N/A - no baseline'; use floats for %.
-- Summarize in bullet points, e.g., 'Uptime day-over-day: +0.5% (improvement from 99.5% to 100%)'.
+Logic for analysis (follow steps in order):
+1. Extract metrics: Uptime = structured['24hrs']['uptime'] (day-over-day) or ['7days']['uptime'] (vs week); Avg response = structured['avg_response_time'] or mean(response_times['value']); Incidents = len([log for log in logs if log['type']==1]).
+2. Calculate changes: Uptime % = ((current - prev) / prev * 100) if prev >0 else 'N/A - no baseline'; Avg response delta = current - prev (ms); Incidents delta = current - prev.
+3. Highlight direction: Uptime >0 = 'improvement'; <0 = 'degradation'; =0 = 'no change'. For response/incidents: <0 = 'improvement'; >0 = 'degradation'; =0 = 'no change'.
+4. Edge cases: If prev=0 or missing, use 'N/A - no baseline'; round % to 2 decimals, deltas to 1 decimal; if current/prev empty, note "No data available".
+5. Order bullets: Uptime day-over-day, Avg response day-over-day, Incidents day-over-day, Avg response vs week, Incidents vs week.
 
-Return ONLY a single JSON object with the key "comparative_analysis" and its value as a concise summary string (bullet points, one per metric). Do not include any additional text, explanations, or markdown. Example: {{"comparative_analysis": "- Uptime day-over-day: N/A - no baseline (previous day data was not available).\n- Avg response day-over-day: N/A - no baseline (previous day data was not available).\n- Incidents day-over-day: +0 (no change).\n- Avg response vs week: -0.91ms (improvement from 74.95ms to 74.04ms).\n- Incidents vs week: +0 (no change)."}}
+Return ONLY a single JSON object with the key "comparative_analysis" and its value as a concise summary string (bullet points, one per metric). Do not include any additional text, explanations, or markdown. Example: {{"comparative_analysis": "- Uptime day-over-day: N/A - no baseline (previous day data was not available).\\n- Avg response day-over-day: N/A - no baseline (previous day data was not available).\\n- Incidents day-over-day: +0 (no change from 0 to 0).\\n- Uptime vs week: +0.1% (improvement from 99.9% to 100.0%).\\n- Avg response vs week: -0.9ms (improvement from 74.9ms to 74.0ms).\\n- Incidents vs week: +0 (no change from 0 to 0)."}}
 """
     
     response = get_ai_response(prompt)
@@ -660,6 +663,16 @@ def step_4_compose_email(ti, **context):
             margin: 0;
             white-space: pre-wrap; /* Renders newline characters */
         }
+        .ai-bullets {
+            list-style-type: disc;
+            padding-left: 20px;
+            font-size: 14px;
+            line-height: 1.6;
+            margin: 0;
+        }
+        .ai-bullets li {
+            margin-bottom: 5px;
+        }
         .chart-container {
             text-align: center;
             margin-top: 20px;
@@ -860,13 +873,22 @@ def step_4_compose_email(ti, **context):
         if content and content_str != "N/A" and "error" not in content_str.lower():
             has_ai_content = True
             
-            # This handles newlines ('\n') in the AI response
-            content_html = content_str.replace('\n', '<br>')
+            # Detect and format bullets vs paragraphs
+            if title in ["Root Cause Analysis", "Comparative Analysis"] or content_str.startswith('-') or '\n-' in content_str:
+                # Parse bullets: split by \n, strip '-', wrap in <li>
+                lines = [line.strip() for line in content_str.split('\n') if line.strip().startswith('-')]
+                if lines:
+                    bullet_html = '<ul class="ai-bullets">' + ''.join(f'<li>{line[1:].strip()}</li>' for line in lines) + '</ul>'
+                else:
+                    bullet_html = '<p>' + content_str.replace('\n', '<br>') + '</p>'
+            else:
+                # Paragraph/sentences for anomaly
+                bullet_html = '<p>' + content_str.replace('\n', '<br>') + '</p>'
 
             html += f"""
                     <div class="ai-section">
                         <h3>{title}</h3>
-                        <p>{content_html}</p>
+                        {bullet_html}
                     </div>
             """
     
