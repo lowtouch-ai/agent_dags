@@ -1558,7 +1558,6 @@ Return ONLY valid JSON:
 The "ids_from_conversation" field should list any IDs you extracted from the conversation history (not from AVAILABLE ENTITY IDS).
 
 If error, set error message and include individual errors in the errors array.
-"""
 
 Remember: Empty string "" for non-applicable fields, comma-separated for multiple IDs.
 
