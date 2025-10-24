@@ -1500,7 +1500,7 @@ LATEST USER MESSAGE:
 {latest_user_message}
 
 How to create associations: Always and strictly call create_multi_association API/Tool to create association.
-
+CRITICAL: You MUST call the create_multi_association tool. Do NOT just return JSON text. CALL THE TOOL.
 AVAILABLE ENTITY IDS:
 - NEW Contact IDs (just created): {new_contact_ids}
 - NEW Company IDs (just created): {new_company_ids}
@@ -1547,7 +1547,9 @@ Scenario 2: New task created for existing contact
 **IMPORTANT**: 
     - For each new entity created, think about what existing entities it should be connected to based on the conversation context.
     - You can only create asssociation using tool `create_multi_association`
-Return ONLY valid JSON with multiple association requests if needed:
+    - You MUST actually CALL the tool, not just output JSON
+    
+TOOL CALL FORMAT - Use this exact structure when calling create_multi_association:
 {{
     "association_requests": [
         {{
@@ -1573,6 +1575,8 @@ Return ONLY valid JSON with multiple association requests if needed:
 }}
 
 Remember: Empty string "" for non-applicable fields, comma-separated for multiple IDs.
+
+NOW TAKE ACTION: Based on the conversation above, CALL the create_multi_association tool with the appropriate associations.
 """
     
     response = get_ai_response(prompt, expect_json=True)
