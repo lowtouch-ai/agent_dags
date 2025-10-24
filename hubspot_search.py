@@ -210,8 +210,9 @@ def analyze_thread_entities(ti, **context):
 LATEST USER MESSAGE:
 {latest_message}
 
-IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
-
+IMPORTANT: 
+    - You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
+    - You are not capable of calling any APIs or Tool. You should answer based on your knowledge.
 Analyze the content and determine:
 1. Is the user requesting a summary of a client or deal before their next meeting? Look for phrases like "summarize details for contact name", "summary for deal name", or explicit mentions of preparing for an upcoming meeting.
 2. If a summary is requested, set ALL other flags (search_deals, search_contacts, search_companies, parse_notes, parse_tasks, parse_meetings) to false.
@@ -439,8 +440,9 @@ LATEST USER MESSAGE:
 
 IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
 
-Steps:
+DEFAULT OWNER: Kishore (ID: 71346067)
 
+Steps:
 1. Parse the Deal Owner and Task Owners from the conversation.
 2. Invoke get_all_owners Tool to retrieve the list of available owners.
 3. Parse and validate the deal owner against the available owners list:

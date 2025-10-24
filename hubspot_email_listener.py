@@ -3,6 +3,8 @@ from email import message_from_bytes
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from airflow.models import Variable
 from datetime import datetime, timedelta
 import os
@@ -457,60 +459,71 @@ def branch_function(**kwargs):
         logging.info(f"email details is: {email_details}")
     
     # Enhanced routing prompt with FULL conversation context
-    prompt = f'''You are an AI assistant that routes emails to the appropriate workflow. You have access to the COMPLETE conversation history and the user's latest message. Analyze the full context to determine the correct action.
+    prompt = f"""You are an AI email router that determines which workflow to execute based on user messages.
+
+ANALYZE THE LATEST MESSAGE AND ROUTE APPROPRIATELY:
 
 EMAILS TO CLASSIFY:
-{json.dumps(email_details, indent=2)}
+{email_details}
+Important Instructions:
+    - You are not capable of calling any APIs or tools.
+    - You should only answer based on your knowledge and the provided email details.
+SEARCH_DAG CAPABILITIES:
+- Searches for existing contacts, companies, deals in HubSpot
+- Extracts entity information from conversations
+- Determines what needs to be created vs what exists
+- Generates engagement summaries for meetings
+- Prepares confirmation emails for user review
+- Routes to create_dag when user confirms
 
-ROUTING RULES (Execute in priority order - ANALYZE CONTENT IN CONTEXT):
+CONTINUATION_DAG CAPABILITIES:
+- Creates new contacts, companies, deals in HubSpot
+- Updates existing entities based on user modifications
+- Logs meeting notes and minutes
+- Creates tasks with owners and due dates
+- Records engagements and associations
+- Handles user confirmations and modifications
+- Processes casual comments as notes
 
-1. **NEW ACTION REQUEST (Search first, then create)** ⚠️ HIGHEST PRIORITY
-   - User requests to CREATE new entities: deals, contacts, companies, meetings
-   - User wants to LOG meeting minutes or discussion notes
-   - User assigns NEW TASKS with due dates and owners
-   - Keywords: "create", "add", "open", "log meeting", "schedule task", "new deal", "add contact", "second deal", "another deal"
-   - Example: Even in a reply thread, if user says "open a second deal" or "create another task" → Route to search_dag
-   → Route to: search_dag
+ROUTING DECISION TREE:
 
-2. **CONTINUATION (Reply to confirmation or follow-up actions)**
-   - User is responding to bot's confirmation request (check conversation_history for bot's questions)
-   - User provides clarifications, corrections, or approvals to previous bot messages
-   - Simple confirmations: "proceed", "confirm", "looks good", "yes", "correct", "that's right"
-   - User making minor corrections to bot's proposed actions
-   - Check conversation_history: if bot asked for confirmation and user is responding → continuation_dag
-   → Route to: continuation_dag
+1. **NO ACTION NEEDED** (Return: no_action)
+   - Greetings: "hi", "hello", "good morning", "hey there"
+   - Closings: "thanks", "thank you", "goodbye", "bye", "have a good day"
+   - Simple acknowledgments: "ok", "got it", "understood", "sounds good"
+   - Questions about bot capabilities or general chat
+   → Response: {{"task_type": "no_action", "message": "friendly_response"}}
 
-3. **CASUAL COMMENTS (Add as notes)**
-   - Informal updates about clients/deals/meetings without action requests
-   - No explicit action verbs
-   - Conversational tone without specific requests
-   → Route to: continuation_dag
+2. **SEARCH & ANALYZE** (Route to: search_dag)
+   When user needs to:
+   - Search for existing contacts, companies, or deals
+   - Create NEW entities (deals, contacts, companies, meetings, tasks)
+   - Log meeting minutes or notes from discussions
+   - Request summaries of clients/deals before meetings
+   - Any FIRST message in a new conversation thread other than greetings or general chats.
+   
+   Keywords: "create", "add", "new", "log meeting", "find", "search", "summarize", "what do we know about"
+   → Response: {{"task_type": "search_dag", "reasoning": "..."}}
 
-4. **UPDATE EXISTING ENTITIES**
-   - User explicitly asks to UPDATE or MODIFY existing records
-   - Keywords: "update", "modify", "change", "edit", "correct"
-   - References specific entity IDs or names
-   - NO new entity creation requested
-   → Route to: continuation_dag
+3. **CONFIRM & EXECUTE** (Route to: continuation_dag)  
+   When user is:
+   - Responding to bot's confirmation request ("proceed", "yes", "confirm", "looks good")
+   - Making corrections to bot's proposed actions
+   - Adding casual comments about existing deals/clients (no new entities)
+   - Updating existing records without creating new ones
+   
+   Keywords: "proceed", "confirm", "yes", "update", "modify", "change"
+   → Response: {{"task_type": "continuation_dag", "reasoning": "..."}}
 
-5. **ENGAGEMENT SUMMARY REQUEST**
-   - User requests summary of contact/deal before meeting
-   - Keywords: "summarize", "summary for", "prepare summary", "what do we know about"
-   → Route to: search_dag
+DECISION LOGIC:
+- Check if message requires ANY action (if not → no_action)
+- For action requests: Is this creating/searching NEW entities? → search_dag
+- For action requests: Is this confirming/modifying bot's proposal? → continuation_dag
+- When unclear: Default to search_dag for safety
 
-CRITICAL DECISION LOGIC:
-- Look at conversation_history to understand what the bot previously said/asked
-- Look at latest_message to see what the user is requesting NOW
-- If latest_message contains NEW creation requests (deals, tasks, contacts) → search_dag (even if is_reply=true)
-- If latest_message is confirming/responding to bot's previous question → continuation_dag
-- If latest_message has no conversation_history (thread_length=1) → search_dag (new conversation)
-- When in doubt between new vs continuation, prefer search_dag for action requests
-
-RESPONSE FORMAT (JSON only):
-{{"task_type": "continuation_dag", "reasoning": "User confirming bot's previous confirmation request"}}
-{{"task_type": "search_dag", "reasoning": "User requesting new deal creation in follow-up message"}}
-
-Analyze the conversation context and respond with JSON:'''
+Return ONLY valid JSON:
+{{"task_type": "no_action|search_dag|continuation_dag", "reasoning": "brief explanation"}}
+"""
     
     logging.info(f"Sending routing prompt to AI with {len(email_details)} emails and conversation context")
     
@@ -527,7 +540,6 @@ Analyze the conversation context and respond with JSON:'''
                         "response": assistant_msg["content"]
                     })
 
-    # === Call AI with full history ===
     response = get_ai_response(
         prompt=prompt,
         conversation_history=conversation_history_for_ai,
@@ -556,6 +568,11 @@ Analyze the conversation context and respond with JSON:'''
             ti.xcom_push(key="new_emails", value=unread_emails)
             logging.info(f"→ Routing {len(unread_emails)} emails to search_dag")
             return "trigger_meeting_minutes"
+        
+        elif "no_action" in task_type:
+            ti.xcom_push(key="no_action_emails", value=unread_emails)
+            logging.info("→ No action needed for the emails")
+            return "handle_general_queries"
     
     # Fallback logic
     logging.warning("AI failed to provide valid response, using fallback")
@@ -692,6 +709,131 @@ def trigger_continuation_dag(**kwargs):
 
     logging.info(f"Triggered continuation for {len(reply_emails)} emails")
 
+def handle_general_queries(**kwargs):
+    """Handle emails requiring no action by sending a friendly response."""
+    ti = kwargs['ti']
+    unread_emails = ti.xcom_pull(task_ids="branch_task", key="no_action_emails") or []
+    
+    if not unread_emails:
+        logging.info("No emails requiring friendly response")
+        return
+    
+    service = authenticate_gmail()
+    if not service:
+        logging.error("Gmail authentication failed, cannot send friendly responses")
+        return
+    
+    for email in unread_emails:
+        try:
+            # Get AI response for friendly reply
+            prompt = f"""You are a friendly AI assistant. The user sent: '{email.get("content", "")}'. 
+            Provide a polite, friendly response acknowledging their message. Keep it concise, professional, and appropriate for email.
+            Return only the plain text response, no markdown or HTML."""
+            
+            friendly_response = get_ai_response(prompt=prompt, expect_json=False)
+            
+            # Strip any HTML tags if present
+            if friendly_response.startswith('<html'):
+                friendly_response = re.sub(r'<[^>]+>', '', friendly_response)
+            
+            # Get headers for reply
+            headers = email.get("headers", {})
+            sender_email = headers.get("From", "")
+            original_message_id = headers.get("Message-ID", "")
+            references = headers.get("References", "")
+            
+            # Build references header for threading
+            if original_message_id:
+                if references:
+                    references = f"{references} {original_message_id}".strip()
+                else:
+                    references = original_message_id
+            
+            # Build subject with Re: prefix if not already present
+            subject = headers.get("Subject", "No Subject")
+            if not subject.lower().startswith("re:"):
+                subject = f"Re: {subject}"
+            
+            # Extract all recipients
+            all_recipients = extract_all_recipients(email)
+            
+            # Prepare recipients for reply-all
+            # Primary recipient is the sender
+            primary_recipient = sender_email
+            
+            # Build Cc list (original To recipients + original Cc recipients, excluding sender and bot)
+            cc_recipients = []
+            
+            # Add original To recipients (except sender and bot)
+            for to_addr in all_recipients["to"]:
+                if (to_addr.lower() != sender_email.lower() and 
+                    HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower() and
+                    to_addr not in cc_recipients):
+                    cc_recipients.append(to_addr)
+            
+            # Add original Cc recipients (except bot)
+            for cc_addr in all_recipients["cc"]:
+                if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and 
+                    cc_addr not in cc_recipients):
+                    cc_recipients.append(cc_addr)
+            
+            # Build Bcc list (original Bcc recipients, excluding bot)
+            bcc_recipients = []
+            for bcc_addr in all_recipients["bcc"]:
+                if HUBSPOT_FROM_ADDRESS.lower() not in bcc_addr.lower():
+                    bcc_recipients.append(bcc_addr)
+            
+            # Convert lists to comma-separated strings (None if empty)
+            cc_string = ', '.join(cc_recipients) if cc_recipients else None
+            bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
+            
+            logging.info(f"Sending friendly response:")
+            logging.info(f"  To: {primary_recipient}")
+            logging.info(f"  Cc: {cc_string}")
+            logging.info(f"  Bcc: {bcc_string}")
+            logging.info(f"  Subject: {subject}")
+            
+            # Compose the email using MIMEMultipart for proper formatting
+
+            
+            msg = MIMEMultipart()
+            msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
+            msg["To"] = primary_recipient
+            
+            if cc_string:
+                msg["Cc"] = cc_string
+            
+            if bcc_string:
+                msg["Bcc"] = bcc_string
+            
+            msg["Subject"] = subject
+            
+            # Add threading headers
+            if original_message_id:
+                msg["In-Reply-To"] = original_message_id
+            if references:
+                msg["References"] = references
+            
+            # Attach the body
+            msg.attach(MIMEText(friendly_response, "plain"))
+            
+            # Send the email
+            raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
+            result = service.users().messages().send(
+                userId="me", 
+                body={"raw": raw_msg}
+            ).execute()
+            
+            if result:
+                # Mark the original email as read
+                mark_message_as_read(service, email["id"])
+                logging.info(f"✓ Sent friendly response for email {email['id']} and marked as read")
+            else:
+                logging.error(f"Failed to send friendly response for email {email['id']}")
+                
+        except Exception as e:
+            logging.error(f"Error processing email {email.get('id', 'unknown')}: {e}", exc_info=True)
+            continue
 def no_email_found(**kwargs):
     logging.info("No new emails or replies found to process.")
 
@@ -736,10 +878,16 @@ with DAG(
         provide_context=True
     )
 
+    handle_general_queries_task = PythonOperator(
+    task_id="handle_general_queries",
+    python_callable=handle_general_queries,
+    provide_context=True
+    )
+
     no_email_found_task = PythonOperator(
         task_id="no_email_found_task",
         python_callable=no_email_found,
         provide_context=True
     )
 
-    fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, no_email_found_task]
+    fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_general_queries_task,no_email_found_task]
