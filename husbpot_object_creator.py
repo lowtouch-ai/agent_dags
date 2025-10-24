@@ -1491,13 +1491,15 @@ def create_associations(ti, **context):
             conversation_context += f"[{role_label} EMAIL {idx} - From: {sender}]: {clean_content}\n\n"
     
     # FIXED: Enhanced prompt with clearer instructions
-    prompt = f"""You are a HubSpot API assistant responsible for creating associations between entities.
+    prompt = f"""You are a HubSpot API assistant responsible for creating associations between entities using create_multi_association tool.
 
 FULL CHAT HISTORY:
 {conversation_context}
 
 LATEST USER MESSAGE:
 {latest_user_message}
+
+Important Instruction: Create associations using `create_multi_association` tool.
 
 AVAILABLE ENTITY IDS:
 - NEW Contact IDs (just created): {new_contact_ids}
