@@ -1520,14 +1520,45 @@ CRITICAL ASSOCIATION RULES:
 TOOL CALL FORMAT - Use this exact structure when calling create_multi_association:
 {{
     "single": {{
-        "deal_id": "string_or_empty",
-        "contact_id": "string_or_empty",
-        "company_id": "string_or_empty",
-        "note_id": "string_or_empty",
-        "task_id": "string_or_empty",
-        "meeting_id": "string_or_empty"
+        "deal_id": "",
+        "contact_id": "",
+        "company_id": "",
+        "note_id": "",
+        "task_id": "",
+        "meeting_id": ""
     }}
 }}
+
+Return ONLY valid JSON:
+{{
+    "association_requests": [
+        {{
+            "single": {{
+                "deal_id": "123",
+                "contact_id": "456", 
+                "company_id": "789",
+                "note_id": "101",
+                "task_id": "202",
+                "meeting_id": "303"
+            }}
+        }}
+    ],
+    "ids_from_conversation": {{
+        "contact_ids": [],
+        "company_ids": [],
+        "deal_ids": ["123"],
+        "note_ids": [],
+        "task_ids": [],
+        "meeting_ids": []
+    }},
+    "errors": [],
+    "error": null
+}}
+
+The "ids_from_conversation" field should list any IDs you extracted from the conversation history (not from AVAILABLE ENTITY IDS).
+
+If error, set error message and include individual errors in the errors array.
+"""
 
 Remember: Empty string "" for non-applicable fields, comma-separated for multiple IDs.
 
