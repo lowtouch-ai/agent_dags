@@ -122,7 +122,7 @@ def fetch_monitor_data(start_ts, end_ts):
         'api_key': UPTIME_API_KEY,
         'format': 'json',
         'logs': '1',
-        'logs_limit': '100',
+        'logs_limit': '500',
         'response_times': '1',
         'custom_uptime_ratios': '1-7-30-365',
         'ssl': '1',
@@ -194,29 +194,66 @@ def parse_monitor_data(monitor):
 
 def step_1_fetch_data(ti, **context):
     now = datetime.now(timezone.utc)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = int(now.timestamp())
-    start = int(today_start.timestamp())
-    prev_day_end = start
-    prev_day_start = int((today_start - timedelta(days=1)).timestamp())
-    prev_week_end = start
-    prev_week_start = int((today_start - timedelta(days=7)).timestamp())
+    today_start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Previous Day (strict 00:00:00 to 23:59:59 UTC)
+    report_day_start_dt = today_start_dt - timedelta(days=1)
+    report_day_end_dt = report_day_start_dt + timedelta(days=1) - timedelta(microseconds=1)
+    report_day_start_ts = int(report_day_start_dt.timestamp())
+    report_day_end_ts = int(report_day_end_dt.timestamp())
+
+    # Day Before Previous (strict 00:00:00 to 23:59:59 UTC)
+    prev_day_start_dt = report_day_start_dt - timedelta(days=1)
+    prev_day_end_dt = prev_day_start_dt + timedelta(days=1) - timedelta(microseconds=1)
+    prev_day_start_ts = int(prev_day_start_dt.timestamp())
+    prev_day_end_ts = int(prev_day_end_dt.timestamp())
+
+    # Previous Calendar Week (strict Sunday 00:00:00 to Saturday 23:59:59 UTC)
+    # Find start of week containing report_day_start_dt (Sunday)
+    days_to_sunday = (report_day_start_dt.weekday() + 1) % 7
+    current_week_start_dt = report_day_start_dt - timedelta(days=days_to_sunday)
+    # Previous week: 7 days before current week start, ending just before current week start
+    prev_week_start_dt = current_week_start_dt - timedelta(days=7)
+    prev_week_end_dt = current_week_start_dt - timedelta(microseconds=1)
+    prev_week_start_ts = int(prev_week_start_dt.timestamp())
+    prev_week_end_ts = int(prev_week_end_dt.timestamp())
     
-    logging.info(f"Fetching time periods: Current Day {start} to {end}, Previous Day {prev_day_start} to {prev_day_end}, Previous Week {prev_week_start} to {prev_week_end}")
+    logging.info(f"Fetching time periods: Previous Day {report_day_start_ts} ({report_day_start_dt}) to {report_day_end_ts} ({report_day_end_dt}), "
+                 f"Day Before {prev_day_start_ts} ({prev_day_start_dt}) to {prev_day_end_ts} ({prev_day_end_dt}), "
+                 f"Prev Calendar Week {prev_week_start_ts} ({prev_week_start_dt}) to {prev_week_end_ts} ({prev_week_end_dt})")
     
-    monitor = fetch_monitor_data(start, end)
-    logging.info(f"Monitor data fetched for current day: {monitor}")
+    # Fetch 1: Main Report (Yesterday) - Filter post-API to enforce bounds
+    monitor = fetch_monitor_data(report_day_start_ts, report_day_end_ts)
+    logging.info(f"Fetched monitor data: {monitor}")
+    # Client-side filter to handle API's loose range enforcement
+    filtered_rt = [r for r in monitor.get('response_times', []) if report_day_start_ts <= r.get('datetime', 0) <= report_day_end_ts]
+    filtered_logs = [l for l in monitor.get('logs', []) if report_day_start_ts <= l.get('datetime', 0) <= report_day_end_ts]
+    monitor['response_times'] = filtered_rt
+    monitor['logs'] = filtered_logs
+    logging.info(f"Monitor data fetched and filtered for main report day: {len(filtered_rt)} response times, {len(filtered_logs)} logs")
     structured_current, rt_current, logs = parse_monitor_data(monitor)
     df_current_list = [{'datetime': datetime.fromtimestamp(r['datetime']).isoformat(), 'value': r['value']} for r in rt_current]
     df_current = pd.DataFrame(df_current_list)
     
-    prev_monitor = fetch_monitor_data(prev_day_start, prev_day_end)
-    logging.info(f"Monitor data fetched for current day: {prev_monitor}")
+    # Fetch 2: Baseline 1 (Day-before-yesterday) - Filter post-API
+    prev_monitor = fetch_monitor_data(prev_day_start_ts, prev_day_end_ts)
+    logging.info(f"Fetched monitor data: {prev_monitor}")
+    filtered_rt_prev = [r for r in prev_monitor.get('response_times', []) if prev_day_start_ts <= r.get('datetime', 0) <= prev_day_end_ts]
+    filtered_logs_prev = [l for l in prev_monitor.get('logs', []) if prev_day_start_ts <= l.get('datetime', 0) <= prev_day_end_ts]
+    prev_monitor['response_times'] = filtered_rt_prev
+    prev_monitor['logs'] = filtered_logs_prev
+    logging.info(f"Monitor data fetched and filtered for previous day baseline: {len(filtered_rt_prev)} response times, {len(filtered_logs_prev)} logs")
     structured_prev_day, rt_prev_day, _ = parse_monitor_data(prev_monitor)
     df_prev_day_list = [{'datetime': datetime.fromtimestamp(r['datetime']).isoformat(), 'value': r['value']} for r in rt_prev_day]
     df_prev_day = pd.DataFrame(df_prev_day_list)
     
-    prev_week_monitor = fetch_monitor_data(prev_week_start, prev_week_end)
+    # Fetch 3: Baseline 2 (Previous Calendar Week) - Filter post-API
+    prev_week_monitor = fetch_monitor_data(prev_week_start_ts, prev_week_end_ts)
+    filtered_rt_week = [r for r in prev_week_monitor.get('response_times', []) if prev_week_start_ts <= r.get('datetime', 0) <= prev_week_end_ts]
+    filtered_logs_week = [l for l in prev_week_monitor.get('logs', []) if prev_week_start_ts <= l.get('datetime', 0) <= prev_week_end_ts]
+    prev_week_monitor['response_times'] = filtered_rt_week
+    prev_week_monitor['logs'] = filtered_logs_week
+    logging.info(f"Monitor data fetched and filtered for previous week baseline: {len(filtered_rt_week)} response times, {len(filtered_logs_week)} logs")
     structured_prev_week, rt_prev_week, _ = parse_monitor_data(prev_week_monitor)
     df_prev_week_list = [{'datetime': datetime.fromtimestamp(r['datetime']).isoformat(), 'value': r['value']} for r in rt_prev_week]
     df_prev_week = pd.DataFrame(df_prev_week_list)
@@ -281,9 +318,10 @@ Logic for analysis (follow steps in order):
 4. Edge cases: If response_times or logs empty, note "No response times/logs available"; if baseline missing, use "No baseline for comparison".
 5. Overall: If no spikes, <10% avg change, and no clusters/unusual logs, conclude 'No significant anomalies detected.'.
 
-Return ONLY a single JSON object with the key "anomaly_detection" and its value as a concise summary string (1-3 sentences). Do not include any additional text, explanations, or markdown. Example: {{"anomaly_detection": "No data available for previous day. Detected 1 spike >100ms at 2025-10-24 09:15:00 (isolated); current day's average response time is 5.2% higher than previous week (from 68.1ms to 71.6ms). No down log clusters. No significant anomalies detected."}}
-"""
-    
+Return ONLY a single JSON object with the key "anomaly_detection" and its value as a concise summary string (1-3 sentences). Do not include any additional text, explanations, or markdown.
+Example 1 (Normal): {{"anomaly_detection": "Detected 1 isolated spike (>100ms) at 2025-10-24 09:15:00; average response time increased 5.2% (71.6ms) vs the previous week (68.1ms) but no significant anomalies were found."}}
+Example 2 (Edge Case): {{"anomaly_detection": "No current data available for anomaly detection."}}
+"""    
     response = get_ai_response(prompt)
     cleaned_response = re.sub(r'```json\n?|```\n?', '', response, flags=re.DOTALL).strip()
     try:
@@ -389,20 +427,29 @@ def step_2c_comparative_analysis(ti, **context):
     })
     
     prompt = f"""
-Analyze the following uptime and response time data for the monitor over the current day, previous day, and previous 7 days (excluding current day) for comparative analysis. Always provide a concise summary in bullet points (one per metric, format: '- [Metric] [comparison]: [change value] ([direction: improvement/degradation/no change] from [prev] to [current]).'), using exact phrasing for missing data or baselines (e.g., "No data available for [period]" or "N/A - no baseline").
+Analyze the following uptime and response time data for the monitor over the current day, previous day, and previous 7 days (excluding current day) for comparative analysis. Always provide a concise summary in bullet points (one per metric, format: '- [Metric] [comparison]: [change value] ([direction: improvement/degradation/no change] from [prev] to [current]).'), using exact phrasing for missing data or baselines.
 
 Current day data: {current_data_str}
 Previous day data: {prev_day_data_str}
 Previous week data: {prev_week_data_str}
 
 Logic for analysis (follow steps in order):
-1. Extract metrics: Uptime = structured['24hrs']['uptime'] (day-over-day) or ['7days']['uptime'] (vs week); Avg response = structured['avg_response_time'] or mean(response_times['value']); Incidents = len([log for log in logs if log['type']==1]).
-2. Calculate changes: Uptime % = ((current - prev) / prev * 100) if prev >0 else 'N/A - no baseline'; Avg response delta = current - prev (ms); Incidents delta = current - prev.
-3. Highlight direction: Uptime >0 = 'improvement'; <0 = 'degradation'; =0 = 'no change'. For response/incidents: <0 = 'improvement'; >0 = 'degradation'; =0 = 'no change'.
-4. Edge cases: If prev=0 or missing, use 'N/A - no baseline'; round % to 2 decimals, deltas to 1 decimal; if current/prev empty, note "No data available".
-5. Order bullets: Uptime day-over-day, Avg response day-over-day, Incidents day-over-day, Avg response vs week, Incidents vs week.
+1. Edge cases (Check first): If the 'current day data' (specifically 'structured' data or 'response_times') is empty or missing, stop analysis and return 'No current data available for comparative analysis.'.
+2. Extract metrics: (Only if current data exists) Uptime = structured['24hrs']['uptime'] (day-over-day) or ['7days']['uptime'] (vs week); Avg response = structured['avg_response_time'] or mean(response_times['value']); Incidents = len([log for log in logs if log['type']==1]).
+3. Calculate changes: For each metric, calculate the change. Uptime % = ((current - prev) / prev * 100) if prev >0; Avg response delta = current - prev (ms); Incidents delta = current - prev.
+4. Highlight direction: Uptime >0 = 'improvement'; <0 = 'degradation'; =0 = 'no change'. For response/incidents: <0 = 'improvement'; >0 = 'degradation'; =0 = 'no change'.
+5. Handle Missing Baselines: If a baseline (prev_day or prev_week) is missing for a specific metric, output: '- [Metric] [comparison]: N/A - no baseline.' Round % to 2 decimals, deltas to 1 decimal.
+6. Order bullets: Always return all 6 bullets in this order:
+   - Uptime day-over-day
+   - Avg response day-over-day
+   - Incidents day-over-day
+   - Uptime vs week
+   - Avg response vs week
+   - Incidents vs week
 
-Return ONLY a single JSON object with the key "comparative_analysis" and its value as a concise summary string (bullet points, one per metric). Do not include any additional text, explanations, or markdown. Example: {{"comparative_analysis": "- Uptime day-over-day: N/A - no baseline (previous day data was not available).\\n- Avg response day-over-day: N/A - no baseline (previous day data was not available).\\n- Incidents day-over-day: +0 (no change from 0 to 0).\\n- Uptime vs week: +0.1% (improvement from 99.9% to 100.0%).\\n- Avg response vs week: -0.9ms (improvement from 74.9ms to 74.0ms).\\n- Incidents vs week: +0 (no change from 0 to 0)."}}
+Return ONLY a single JSON object with the key "comparative_analysis" and its value as a concise summary string (bullet points, one per metric, or the single edge case string). Do not include any additional text, explanations, or markdown.
+Example 1 (Normal with missing baseline): {{"comparative_analysis": "- Uptime day-over-day: N/A - no baseline.\\n- Avg response day-over-day: N/A - no baseline.\\n- Incidents day-over-day: N/A - no baseline.\\n- Uptime vs week: +0.1% (improvement from 99.9% to 100.0%).\\n- Avg response vs week: -0.9ms (improvement from 74.9ms to 74.0ms).\\n- Incidents vs week: +0 (no change from 0 to 0)."}}
+Example 2 (No Current Data): {{"comparative_analysis": "No current data available for comparative analysis."}}
 """
     
     response = get_ai_response(prompt)
@@ -464,12 +511,12 @@ def step_3_generate_plot(ti, **context):
         
         # Plot current day if data available
         if not df_current.empty and 'datetime' in df_current.columns and 'value' in df_current.columns:
-            ax.plot(df_current['datetime'], df_current['value'], color='green', linewidth=1.5, label='Today\'s Response Time')
+            ax.plot(df_current['datetime'], df_current['value'], color='green', linewidth=1.5, label='Previous Day (Main)')
         
         # Plot dashed averages
-        ax.axhline(prev_day_avg, color='blue', linestyle='--', label=f'Previous Day Avg ({prev_day_avg:.2f}ms)')
-        ax.axhline(prev_week_avg, color='orange', linestyle='--', label=f'Previous Week Avg ({prev_week_avg:.2f}ms)')
-        
+        ax.axhline(prev_day_avg, color='blue', linestyle='--', label=f'Day Before (Baseline) Avg ({prev_day_avg:.2f}ms)')
+        ax.axhline(prev_week_avg, color='orange', linestyle='--', label=f'Prev. Calendar Week (Baseline) Avg ({prev_week_avg:.2f}ms)')
+
         # Highlight high responses if data available
         if 'value' in df_current.columns:
             high_current = df_current[df_current['value'] > 100]
@@ -497,7 +544,7 @@ def step_3_generate_plot(ti, **context):
             ax.set_ylim(bottom=0, top=100)
         
         ax.set_title(
-            f"Today's Response Time with Previous Day and Week Averages for {monitor_name}",
+            f"Previous Day's Response Time with Baselines for {monitor_name}",
             fontsize=18, fontweight='bold', color='white'
         )
         ax.set_xlabel("Datetime", fontsize=14)

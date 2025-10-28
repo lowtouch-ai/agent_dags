@@ -15,7 +15,8 @@ import os
 import pandas as pd
 import plotly.express as px
 import matplotlib.pyplot as plt
-from matplotlib.dates import HourLocator, MinuteLocator, DateFormatter, DayLocator
+# MODIFIED: Matched weekly imports
+from matplotlib.dates import DayLocator, HourLocator, DateFormatter
 import io
 import requests
 
@@ -37,7 +38,7 @@ UPTIME_API_KEY = Variable.get("UPTIME_API_KEY")
 
 MONITOR_ID = Variable.get("UPTIME_MONITOR_ID")
 RECIPIENT_EMAIL = Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL")
-REPORT_PERIOD = "last 7 days"
+REPORT_PERIOD = "last 30 days"
 
 def authenticate_gmail():
     try:
@@ -58,21 +59,18 @@ def get_ai_response(prompt, conversation_history=None):
     try:
         logging.debug(f"Query received: {prompt}")
         
-        # Validate input
         if not prompt or not isinstance(prompt, str):
             return "Invalid input provided. Please enter a valid query."
 
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'uptime-agent'})
         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'uptime_agent:0.3'")
 
-        # Build messages array with conversation history
         messages = []
         if conversation_history:
             for history_item in conversation_history:
                 messages.append({"role": "user", "content": history_item["prompt"]})
                 messages.append({"role": "assistant", "content": history_item["response"]})
         
-        # Add current prompt
         messages.append({"role": "user", "content": prompt})
 
         response = client.chat(
@@ -82,14 +80,12 @@ def get_ai_response(prompt, conversation_history=None):
         )
         logging.info(f"Raw response from agent: {str(response)[:500]}...")
 
-        # Extract content
         if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
             logging.error("Response lacks expected 'message.content' structure")
             return "Invalid response format from AI. Please try again later."
         
         ai_content = response.message.content
         logging.info(f"Full message content from agent: {ai_content[:500]}...")
-
         return ai_content.strip()
 
     except Exception as e:
@@ -116,24 +112,22 @@ def send_email(service, recipient, subject, body, in_reply_to="", references="")
         logging.error(f"Failed to send email: {str(e)}")
         return None
 
-def fetch_monitor_data(start_ts, end_ts):
+def fetch_main_monitor_data(start_ts, end_ts):
+    """
+    Fetches main monitor data (logs, uptime, ssl) WITHOUT response_times.
+    """
     url = "https://api.uptimerobot.com/v2/getMonitors"
     payload = {
         'api_key': UPTIME_API_KEY,
         'format': 'json',
         'logs': '1',
-        'logs_limit': '500',
-        'response_times': '1',
+        'logs_limit': '1000', # Increased limit for monthly
         'custom_uptime_ratios': '1-7-30-365',
         'ssl': '1',
         'alert_contacts': '1',
-        'mwindows': '1',
-        'response_times_average': '30',
         'monitors': MONITOR_ID,
         'logs_start_date': str(int(start_ts)),
         'logs_end_date': str(int(end_ts)),
-        'response_times_start_date': str(int(start_ts)),
-        'response_times_end_date': str(int(end_ts)),
     }
     resp = requests.post(url, data=payload)
     if resp.status_code != 200:
@@ -145,14 +139,73 @@ def fetch_monitor_data(start_ts, end_ts):
         raise ValueError("No monitor data found")
     return data['monitors'][0]
 
-def parse_monitor_data(monitor):
-    # Filter non-empty parts to avoid ValueError on float('')
-    custom_uptime = [x.strip() for x in monitor.get('custom_uptime_ratio', '').split('-') if x.strip()]
-    custom_down = [x.strip() for x in monitor.get('custom_down_durations', '').split('-') if x.strip()]
-    # Use index [1] for 7-day data (indices: [0]=1d, [1]=7d, [2]=30d, [3]=365d)
-    uptime_7d = f"{float(custom_uptime[1]):.3f}%" if len(custom_uptime) > 1 else "N/A"
-    down_sec_7d = int(custom_down[1]) if len(custom_down) > 1 else 0
-    downtime_7d = f"{down_sec_7d / 60:.1f} minutes" if down_sec_7d > 0 else "0 minutes"
+def fetch_chunked_response_times(start_dt, end_dt):
+    """
+    Fetches response_times in 7-day chunks to bypass API limits.
+    """
+    url = "https://api.uptimerobot.com/v2/getMonitors"
+    all_response_times = []
+    chunk_start_dt = start_dt
+    
+    logging.info(f"Starting chunked fetch for response times from {start_dt} to {end_dt}")
+    
+    # Use 6-day intervals to be safe with the <= 7-day limit
+    chunk_interval_days = 6 
+    
+    while chunk_start_dt < end_dt:
+        # Ensure the chunk end date doesn't exceed the final end_dt
+        chunk_end_dt = min(chunk_start_dt + timedelta(days=chunk_interval_days), end_dt)
+        
+        start_ts = int(chunk_start_dt.timestamp())
+        end_ts = int(chunk_end_dt.timestamp())
+
+        # Avoid making a request for a zero-width time range
+        if start_ts >= end_ts:
+             break
+
+        logging.info(f"Fetching response time chunk: {chunk_start_dt} to {chunk_end_dt}")
+
+        payload = {
+            'api_key': UPTIME_API_KEY,
+            'format': 'json',
+            'response_times': '1',
+            'response_times_average': '30', # Use 30-min avg for granularity
+            'monitors': MONITOR_ID,
+            'response_times_start_date': str(start_ts),
+            'response_times_end_date': str(end_ts),
+        }
+        resp = requests.post(url, data=payload)
+        
+        if resp.status_code != 200:
+            logging.warning(f"API request failed for chunk {chunk_start_dt}-{chunk_end_dt}: {resp.text}")
+            chunk_start_dt += timedelta(days=chunk_interval_days, seconds=1) # Move to next chunk
+            continue
+            
+        data = resp.json()
+        if data.get('stat') == 'ok' and data.get('monitors'):
+            all_response_times.extend(data['monitors'][0].get('response_times', []))
+        else:
+            logging.warning(f"API error for chunk {chunk_start_dt}-{chunk_end_dt}: {data}")
+            
+        # Move start time to 1 second after the end of the last chunk
+        chunk_start_dt = chunk_end_dt + timedelta(seconds=1) 
+        
+    logging.info(f"Chunked fetch completed. Got {len(all_response_times)} response time entries.")
+    return all_response_times
+
+def parse_monitor_data(monitor, rt_list):
+    """
+    Parses the main monitor data and the separately-fetched response time list.
+    """
+    custom_uptime = monitor.get('custom_uptime_ratio', '').split('-')
+    custom_down = monitor.get('custom_down_durations', '').split('-')
+    
+    # Use index [2] for 30-day data (indices: [0]=1d, [1]=7d, [2]=30d, [3]=365d)
+    uptime_30d = f"{float(custom_uptime[2]):.3f}%" if len(custom_uptime) > 2 else "N/A"
+    down_sec_30d = int(custom_down[2]) if len(custom_down) > 2 else 0
+    # Convert to hours for readability
+    downtime_30d = f"{down_sec_30d / 3600:.1f} hours" if down_sec_30d > 0 else "0 hours"
+    
     logs = monitor.get('logs', [])
     incidents = sum(1 for log in logs if log.get('type') == 1)
     status_map = {0: 'Paused', 1: 'Down', 2: 'Up', 9: 'Pending'}
@@ -161,7 +214,8 @@ def parse_monitor_data(monitor):
     brand = ssl.get('brand', 'N/A')
     expires = ssl.get('expires', 0)
     expiry_date = datetime.fromtimestamp(expires).strftime('%Y-%m-%d') if expires else 'N/A'
-    rt_list = monitor.get('response_times', [])
+    
+    # rt_list is now passed in from the chunked fetch
     if rt_list:
         values = [r['value'] for r in rt_list if 'value' in r and r['value'] is not None]
         min_rt = min(values) if values else 0
@@ -169,8 +223,10 @@ def parse_monitor_data(monitor):
         avg_rt = sum(values) / len(values) if values else 0
     else:
         min_rt = max_rt = avg_rt = 0
+        
     alert_contacts = [c.get('value', '') for c in monitor.get('alert_contacts', [])]
     to_be_notified = ', '.join(alert_contacts) if alert_contacts else 'N/A'
+    
     structured = {
         "monitor_information": {
             "monitor_name": monitor.get('friendly_name', 'N/A'),
@@ -179,69 +235,53 @@ def parse_monitor_data(monitor):
         },
         "uptime_status": {
             "status": status,
-            "uptime_last_7days": uptime_7d,
-            "downtime_last_7days": downtime_7d,
-            "incidents_last_7days": str(incidents)
+            "uptime_last_30days": uptime_30d,
+            "downtime_last_30days": downtime_30d,
+            "incidents_last_30days": str(incidents)
         },
         "ssl_information": {"brand": brand, "expiry_date": expiry_date},
         "response_time": {"min": f"{min_rt:.2f}", "max": f"{max_rt:.2f}", "avg": f"{avg_rt:.2f}"},
         "notifications": {"to_be_notified": to_be_notified},
         "logs_summary": {"summary": f"Total logs: {len(logs)}. Incidents: {incidents}."}
     }
-    return structured, rt_list, logs
+    return structured
 
 def step_1_fetch_data(ti, **context):
     now = datetime.now(timezone.utc)
-    today_start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    # Previous Calendar Week (strict Sun 00:00:00 to Sat 23:59:59 UTC)
-    days_since_sunday = (today_start_dt.weekday() + 1) % 7  # Days to current Sun 00:00
-    current_week_start_dt = today_start_dt - timedelta(days=days_since_sunday)
-    report_week_end_dt = current_week_start_dt - timedelta(microseconds=1)  # Prev Sat 23:59:999999
-    report_week_start_dt = current_week_start_dt - timedelta(days=7)         # Prev Sun 00:00
-
-    # Baseline: Week before
-    prev_week_end_dt = report_week_start_dt - timedelta(microseconds=1)
-    prev_week_start_dt = report_week_start_dt - timedelta(days=7)
-
-    report_week_start_ts = int(report_week_start_dt.timestamp())
-    report_week_end_ts = int(report_week_end_dt.timestamp())
-    prev_week_start_ts = int(prev_week_start_dt.timestamp())
-    prev_week_end_ts = int(prev_week_end_dt.timestamp())
-
-    logging.info(f"Fetching: Main Week {report_week_start_ts} ({report_week_start_dt}) to {report_week_end_ts} ({report_week_end_dt}), "
-                 f"Baseline {prev_week_start_ts} ({prev_week_start_dt}) to {prev_week_end_ts} ({prev_week_end_dt}), ")
     
-    # Fetch + Filter Main
-    monitor = fetch_monitor_data(report_week_start_ts, report_week_end_ts)
-    logging.info(f"Fetched monitor data: {monitor}")
-    filtered_rt = [r for r in monitor.get('response_times', []) if report_week_start_ts <= r.get('datetime', 0) <= report_week_end_ts]
-    filtered_logs = [l for l in monitor.get('logs', []) if report_week_start_ts <= l.get('datetime', 0) <= report_week_end_ts]
-    monitor['response_times'] = filtered_rt  # For parse min/max/avg
-    monitor['logs'] = filtered_logs
-    logging.info(f"Main: {len(filtered_rt)} RTs, {len(filtered_logs)} logs")
-    structured_current, rt_current, logs = parse_monitor_data(monitor)
-    df_current = pd.DataFrame([{'datetime': datetime.fromtimestamp(r['datetime']).isoformat(), 'value': r['value']} for r in rt_current])
+    # Current 30-day period
+    current_end_dt = now
+    current_start_dt = now - timedelta(days=30)
     
-    # Fetch + Filter Baseline
-    prev_monitor = fetch_monitor_data(prev_week_start_ts, prev_week_end_ts)
-    logging.info(f"Fetched baseline response times: {len(prev_monitor.get('response_times', []))}, logs: {len(prev_monitor.get('logs', []))}")
-    filtered_rt_prev = [r for r in prev_monitor.get('response_times', []) if prev_week_start_ts <= r.get('datetime', 0) <= prev_week_end_ts]
-    filtered_logs_prev = [l for l in prev_monitor.get('logs', []) if prev_week_start_ts <= l.get('datetime', 0) <= prev_week_end_ts]
-    prev_monitor['response_times'] = filtered_rt_prev
-    prev_monitor['logs'] = filtered_logs_prev
-    logging.info(f"Baseline: {len(filtered_rt_prev)} RTs, {len(filtered_logs_prev)} logs")
-    structured_prev, rt_prev, _ = parse_monitor_data(prev_monitor)
-    df_prev = pd.DataFrame([{'datetime': datetime.fromtimestamp(r['datetime']).isoformat(), 'value': r['value']} for r in rt_prev])
+    # Previous 30-day period
+    prev_end_dt = current_start_dt - timedelta(microseconds=1)
+    prev_start_dt = prev_end_dt - timedelta(days=30)
+
+    logging.info(f"Fetching time periods: Current {current_start_dt} to {current_end_dt}, Previous {prev_start_dt} to {prev_end_dt}")
     
-    # XCom push
+    # Fetch current period data
+    monitor_current = fetch_main_monitor_data(int(current_start_dt.timestamp()), int(current_end_dt.timestamp()))
+    rt_current = fetch_chunked_response_times(current_start_dt, current_end_dt)
+    structured_current = parse_monitor_data(monitor_current, rt_current)
+    logs = monitor_current.get('logs', [])
+    df_current_list = [{'datetime': datetime.fromtimestamp(r['datetime']).isoformat(), 'value': r['value']} for r in rt_current]
+    df_current = pd.DataFrame(df_current_list)
+    
+    # Fetch previous period data
+    monitor_prev = fetch_main_monitor_data(int(prev_start_dt.timestamp()), int(prev_end_dt.timestamp()))
+    rt_prev = fetch_chunked_response_times(prev_start_dt, prev_end_dt)
+    structured_prev = parse_monitor_data(monitor_prev, rt_prev)
+    df_prev_list = [{'datetime': datetime.fromtimestamp(r['datetime']).isoformat(), 'value': r['value']} for r in rt_prev]
+    df_prev = pd.DataFrame(df_prev_list)
+    
+    # Push all data to XCom
     ti.xcom_push(key="structured_current", value=json.dumps(structured_current))
     ti.xcom_push(key="df_current", value=df_current.to_json(orient='records', date_format='iso'))
     ti.xcom_push(key="logs", value=json.dumps(logs))
     ti.xcom_push(key="structured_prev", value=json.dumps(structured_prev))
     ti.xcom_push(key="df_prev", value=df_prev.to_json(orient='records', date_format='iso'))
     
-    logging.info("Data fetch completed.")
+    logging.info("Monthly data fetch completed.")
     return structured_current
 
 def step_2a_anomaly_detection(ti, **context):
@@ -257,7 +297,6 @@ def step_2a_anomaly_detection(ti, **context):
     df_prev_json = ti.xcom_pull(key="df_prev")
     df_prev = pd.read_json(io.StringIO(df_prev_json), orient='records')
     
-    # Convert datetime to str to make JSON serializable, but only if column exists (handles empty DataFrames)
     current_data_str = json.dumps({
         "structured": structured_current,
         "response_times": (df_current.astype({'datetime': 'str'}) if 'datetime' in df_current.columns else df_current).to_dict('records'),
@@ -269,20 +308,20 @@ def step_2a_anomaly_detection(ti, **context):
     })
     
     prompt = f"""
-Analyze the following uptime and response time data for the monitor over the current week and previous week to detect anomalies. Always provide a concise summary in 1-3 sentences, starting with key findings (e.g., spikes or patterns), including percentage changes where applicable, and ending with an overall assessment. Use exact phrasing for missing data (e.g., "No data available for [period]").
+Analyze the following uptime and response time data for the monitor over the current 30-day period and previous 30-day period to detect anomalies. Always provide a concise summary in 1-3 sentences, starting with key findings (e.g., spikes or patterns), including percentage changes where applicable, and ending with an overall assessment. Use exact phrasing for missing data (e.g., "No data available for [period]").
 
-Current week data: {current_data_str}
-Previous week data: {prev_data_str}
+Current 30-day period data: {current_data_str}
+Previous 30-day period data: {prev_data_str}
 
 Logic for analysis (follow steps in order):
-1. Edge cases (Check first): If the 'current week data' (specifically 'response_times' or 'structured' data) is empty or missing, stop analysis and return 'No current data available for anomaly detection.'. If 'previous week data' is missing, note this (e.g., "No baseline for comparison.") but proceed with the current week's analysis.
-2. Identify spikes: (Only if current data exists) Scan current week's response_times for values >100ms; count them, describe top 3 by time (use datetime).
-3. Detect unusual patterns: (Only if current data exists) Compute distributions—min/max/avg from response_times['value'] (or structured['avg_response_time'] if available). If previous week data is available, compare current vs previous: Flag if current avg > previous avg by 10%+; include exact % change.
-4. Scan logs: (Only if current data exists) For down events (type=1), check frequency (e.g., >2 in 1 hour = cluster) and reasons (e.g., code 500=server error, 408=timeout, 0=unknown); note unusual if not in previous week.
+1. Edge cases (Check first): If the 'current 30-day period data' (specifically 'response_times' or 'structured' data) is empty or missing, stop analysis and return 'No current data available for anomaly detection.'. If 'previous 30-day period data' is missing, note this (e.g., "No baseline for comparison.") but proceed with the current period's analysis.
+2. Identify spikes: (Only if current data exists) Scan current 30-day period's response_times for values >100ms; count them, describe top 3 by time (use datetime).
+3. Detect unusual patterns: (Only if current data exists) Compute distributions—min/max/avg from response_times['value'] (or structured['response_time']['avg'] if available). If previous period data is available, compare current vs previous: Flag if current avg > previous avg by 10%+; include exact % change.
+4. Scan logs: (Only if current data exists) For down events (type=1), check frequency (e.g., >2 in 1 hour = cluster) and reasons (e.g., code 500=server error, 408=timeout, 0=unknown); note unusual if not in previous 30-day period.
 5. Overall: (Only if current data exists) If no spikes, <10% avg change, and no clusters/unusual logs, conclude 'No significant anomalies detected.'.
 
 Return ONLY a single JSON object with the key "anomaly_detection" and its value as a concise summary string (1-3 sentences). Do not include any additional text, explanations, or markdown.
-Example 1 (Normal): {{"anomaly_detection": "Detected one down log cluster (2 events, code 408 timeout) and a 9.12% lower average response time (74.7ms) compared to the previous week (82.2ms), but no significant anomalies were found."}}
+Example 1 (Normal): {{"anomaly_detection": "Detected 2 spikes >100ms and one down log cluster (2 events, code 408 timeout); however, the average response time improved, dropping 9.12% (from 82.2ms to 74.7ms) compared to the previous 30-day period."}}
 Example 2 (Edge Case): {{"anomaly_detection": "No current data available for anomaly detection."}}
 """
     
@@ -308,8 +347,7 @@ def step_2b_rca(ti, **context):
     structured_prev = json.loads(structured_prev_str)
     df_prev_json = ti.xcom_pull(key="df_prev")
     df_prev = pd.read_json(io.StringIO(df_prev_json), orient='records')
-    
-    # Convert datetime to str to make JSON serializable, but only if column exists (handles empty DataFrames)
+
     current_data_str = json.dumps({
         "structured": structured_current,
         "response_times": (df_current.astype({'datetime': 'str'}) if 'datetime' in df_current.columns else df_current).to_dict('records'),
@@ -321,20 +359,20 @@ def step_2b_rca(ti, **context):
     })
     
     prompt = f"""
-Analyze the following uptime and response time data for the monitor over the current week and previous week for root cause analysis (RCA) of incidents. Always provide a concise summary in bulleted format: Use bullets for each incident (format: '- [Time]: [Reason] (duration [X]s) - [Root cause inference]; [Recommendation].'), or a single bullet '- No incidents requiring RCA.' if none. Do not mention missing data unless it directly impacts analysis.
+Analyze the following uptime and response time data for the monitor over the current 30-day period and previous 30-day period for root cause analysis (RCA) of incidents. Always provide a concise summary in bulleted format: Use bullets for each incident (format: '- [Time]: [Reason] (duration [X]s) - [Root cause inference]; [Recommendation].'), or a single bullet '- No incidents requiring RCA.' if none. Do not mention missing data unless it directly impacts analysis.
 
-Current week data: {current_data_str}
-Previous week data: {prev_data_str}
+Current 30-day period data: {current_data_str}
+Previous 30-day period data: {prev_data_str}
 
 Logic for analysis (follow steps in order):
-1. Extract down logs: Filter current week's logs where type=1; sort by datetime descending. If none, output single bullet '- No incidents requiring RCA.' and stop.
+1. Extract down logs: Filter current 30-day period's logs where type=1; sort by datetime descending. If none, output single bullet '- No incidents requiring RCA.' and stop.
 2. For each: Analyze reason (code/detail: e.g., 500=server error → overload; 404=not found → config issue; 408=timeout → network; 0=unknown → investigate API).
-3. Infer root cause: Correlate with preceding response_times (e.g., if avg >200ms in 30min before down → overload; check if similar in previous week for recurrence (count matching reasons >1)).
+3. Infer root cause: Correlate with preceding response_times (e.g., if avg >200ms in 30min before down → overload; check if similar in previous 30-day period for recurrence (count matching reasons >1)).
 4. Recommendations: Tailor per cause (e.g., overload: 'Scale resources'; timeout: 'Check network latency'; config: 'Verify endpoints'). Limit to 1-2 actionable steps.
 5. Edge cases: If logs empty, treat as no incidents (single bullet); if previous missing, skip recurrence without noting.
 6. Overall: If multiple, add final bullet summarizing common causes.
 
-Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bulleted points). Do not include any additional text, explanations, or markdown. Example: {{"rca": "- 2025-10-17 10:00:00: Code 500 server error (duration 120s) - Root cause: Overload inferred from preceding high response times (avg 250ms); recurred from previous week (2 similar). Recommendation: Add autoscaling and monitor CPU usage.\\n- Common cause: Server overload - Implement load balancing."}} or {{"rca": "- No incidents requiring RCA."}}
+Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bulleted points). Do not include any additional text, explanations, or markdown. Example: {{"rca": "- 2025-10-17 10:00:00: Code 500 server error (duration 120s) - Root cause: Overload inferred from preceding high response times (avg 250ms); recurred from previous 30-day period (2 similar). Recommendation: Add autoscaling and monitor CPU usage.\\n- Common cause: Server overload - Implement load balancing."}} or {{"rca": "- No incidents requiring RCA."}}
 """
     
     response = get_ai_response(prompt)
@@ -359,8 +397,7 @@ def step_2c_comparative_analysis(ti, **context):
     structured_prev = json.loads(structured_prev_str)
     df_prev_json = ti.xcom_pull(key="df_prev")
     df_prev = pd.read_json(io.StringIO(df_prev_json), orient='records')
-    
-    # Convert datetime to str to make JSON serializable, but only if column exists (handles empty DataFrames)
+
     current_data_str = json.dumps({
         "structured": structured_current,
         "response_times": (df_current.astype({'datetime': 'str'}) if 'datetime' in df_current.columns else df_current).to_dict('records'),
@@ -372,21 +409,21 @@ def step_2c_comparative_analysis(ti, **context):
     })
     
     prompt = f"""
-Analyze the following uptime and response time data for the monitor over the current week and previous week for comparative analysis. Always provide a concise summary in bullet points (one per metric, format: '- [Metric] week-over-week: [change value] ([direction: improvement/degradation/no change] from [prev] to [current]).'), using exact phrasing for missing data or baselines (e.g., "No data available for [period]" or "N/A - no baseline").
+Analyze the following uptime and response time data for the monitor over the current 30-day period and previous 30-day period for comparative analysis. Always provide a concise summary in bullet points (one per metric, format: '- [Metric] month-over-month: [change value] ([direction: improvement/degradation/no change] from [prev] to [current]).'), using exact phrasing for missing data or baselines (e.g., "No data available for [period]" or "N/A - no baseline").
 
-Current week data: {current_data_str}
-Previous week data: {prev_data_str}
+Current 30-day period data: {current_data_str}
+Previous 30-day period data: {prev_data_str}
 
 Logic for analysis (follow steps in order):
-1. Edge cases (Check first): If the 'current week data' (specifically 'structured' data or 'response_times') is empty or missing, stop analysis and return 'No current data available for comparative analysis.'.
-2. Extract metrics: (Only if current data exists) Uptime = structured['7days']['uptime']; Avg response = structured['avg_response_time'] or mean(response_times['value']); Incidents = len([log for log in logs if log['type']==1]).
+1. Edge cases (Check first): If the 'current 30-day period data' (specifically 'structured' data or 'response_times') is empty or missing, stop analysis and return 'No current data available for comparative analysis.'.
+2. Extract metrics: (Only if current data exists) Uptime = structured['uptime_status']['uptime_last_30days']; Avg response = structured['response_time']['avg'] or mean(response_times['value']); Incidents = structured['uptime_status']['incidents_last_30days'].
 3. Calculate changes: For each metric, calculate the change. Uptime % = ((current - prev) / prev * 100) if prev >0; Avg response delta = current - prev (ms); Incidents delta = current - prev.
 4. Highlight direction: Uptime >0 = 'improvement'; <0 = 'degradation'; =0 = 'no change'. For response/incidents: <0 = 'improvement'; >0 = 'degradation'; =0 = 'no change'.
-5. Handle Missing Baselines: If 'previous week data' is missing for a specific metric, output: '- [Metric] week-over-week: N/A - no baseline.' Round % to 2 decimals, deltas to 1 decimal.
+5. Handle Missing Baselines: If 'previous 30-day period data' is missing for a specific metric, output: '- [Metric] month-over-month: N/A - no baseline.' Round % to 2 decimals, deltas to 1 decimal.
 6. Order bullets: Always return all 3 bullets in this order: Uptime, Avg response, Incidents.
 
 Return ONLY a single JSON object with the key "comparative_analysis" and its value as a concise summary string (bullet points, one per metric, or the single edge case string). Do not include any additional text, explanations, or markdown.
-Example 1 (Normal): {{"comparative_analysis": "- Uptime week-over-week: +0.0% (no change from 100.0% to 100.0%).\\n- Avg response week-over-week: -7.5ms (improvement from 82.2ms to 74.7ms).\\n- Incidents week-over-week: +0 (no change from 0 to 0)."}}
+Example 1 (Normal): {{"comparative_analysis": "- Uptime month-over-month: +0.0% (no change from 100.0% to 100.0%).\\n- Avg response month-over-month: -7.5ms (improvement from 82.2ms to 74.7ms).\\n- Incidents month-over-month: +0 (no change from 0 to 0)."}}
 Example 2 (Edge Case): {{"comparative_analysis": "No current data available for comparative analysis."}}
 """
     
@@ -426,32 +463,29 @@ def step_3_generate_plot(ti, **context):
         df_current = pd.read_json(io.StringIO(df_current_json), orient='records')
         if 'datetime' in df_current.columns:
             df_current['datetime'] = pd.to_datetime(df_current['datetime'])
-            df_current = df_current.sort_values('datetime')  # Sort for proper plotting
+            df_current = df_current.sort_values('datetime')
         
         df_prev_json = ti.xcom_pull(key="df_prev")
         df_prev = pd.read_json(io.StringIO(df_prev_json), orient='records')
         if 'datetime' in df_prev.columns:
             df_prev['datetime'] = pd.to_datetime(df_prev['datetime'])
         
-        # Compute previous week average safely
+        # Compute previous month average safely
         prev_avg = df_prev['value'].mean() if 'value' in df_prev.columns and not df_prev.empty else 0
         
         fig, ax = plt.subplots(figsize=(15, 6), dpi=120)
         ax.set_facecolor('#1a1a1a')
         fig.set_facecolor('#1a1a1a')
         
-        # Plot current week if data available
         if not df_current.empty and 'datetime' in df_current.columns and 'value' in df_current.columns:
-            ax.plot(df_current['datetime'], df_current['value'], color='#28a745', linewidth=1.5, label='This Week\'s Response Time')
+            ax.plot(df_current['datetime'], df_current['value'], color='#28a745', linewidth=1.5, label='This Month\'s Response Time')
         
-        # Plot dashed previous week average
-        ax.axhline(y=prev_avg, color='#6c757d', linestyle='--', label=f'Previous Week Avg ({prev_avg:.2f}ms)')
+        ax.axhline(y=prev_avg, color='#6c757d', linestyle='--', label=f'Previous Month Avg ({prev_avg:.2f}ms)')
         
-        # Highlight high responses if data available
         if 'value' in df_current.columns:
-            high_current = df_current[df_current['value'] > 100]
+            high_current = df_current[df_current['value'] > 100] # Highlight threshold
             if not high_current.empty:
-                ax.scatter(high_current['datetime'], high_current['value'], color='#dc3545', s=80, label='High Response (Current)', zorder=5)
+                ax.scatter(high_current['datetime'], high_current['value'], color='#dc3545', s=80, label='High Response (>100ms)', zorder=5)
         
         ax.grid(True, linestyle='--', alpha=0.2, color='gray')
         ax.tick_params(axis='x', colors='white', which='major', labelsize=10)
@@ -459,18 +493,21 @@ def step_3_generate_plot(ti, **context):
         ax.xaxis.label.set_color('white')
         ax.yaxis.label.set_color('white')
         
-        # Day labels for x-axis
-        ax.xaxis.set_major_locator(DayLocator())
+        # Day labels for x-axis (e.g., every 3 days)
+        ax.xaxis.set_major_locator(DayLocator(interval=3))
         ax.xaxis.set_major_formatter(DateFormatter('%Y-%m-%d'))
-        ax.xaxis.set_minor_locator(HourLocator(interval=6))
+        ax.xaxis.set_minor_locator(DayLocator(interval=1))
         
         fig.autofmt_xdate(rotation=45)
         
         if not df_current.empty and 'value' in df_current.columns:
-            ax.set_ylim(bottom=0, top=df_current['value'].max() * 1.2)
-        
+            max_val = df_current['value'].max()
+            ax.set_ylim(bottom=0, top=max(100, max_val * 1.2))
+        else:
+             ax.set_ylim(bottom=0, top=100)
+
         ax.set_title(
-            f"Response Time: Week-over-Week Comparison for {monitor_name}",
+            f"Response Time: Month-over-Month Comparison for {monitor_name}",
             fontsize=18, fontweight='bold', color='white'
         )
         ax.set_xlabel("Datetime", fontsize=14)
@@ -495,20 +532,17 @@ def step_3_generate_plot(ti, **context):
     
     except Exception as e:
         logging.error(f"Error generating plot: {str(e)}", exc_info=True)
-        error_html = '<p style="color:red;font-weight:bold;">Could not generate chart.</p>'
+        error_html = '<p style="color:#dc3545;font-weight:bold;">Could not generate chart.</p>'
         ti.xcom_push(key="chart_html", value=error_html)
         return error_html
 
 def step_4_compose_email(ti, **context):
     """
-    Composes the hardcoded WEEKLY uptime report with professional styling.
-    
-    This version is corrected to match the data structure provided by
-    the 'parse_monitor_data' function in the weekly DAG file.
+    Composes the hardcoded MONTHLY uptime report with professional styling.
     """
     
     # 1. Hardcode Report Type
-    report_type = "Weekly"
+    report_type = "Monthly"
 
     # 2. Pull data from XCom
     try:
@@ -630,21 +664,14 @@ def step_4_compose_email(ti, **context):
             color: #004a99;
             font-size: 16px;
         }
-        .ai-section p {
+        .ai-section p, .ai-section ul {
             font-size: 14px;
             line-height: 1.6;
             margin: 0;
             white-space: pre-wrap; /* Renders newline characters */
         }
-        .ai-bullets {
-            list-style-type: disc;
-            padding-left: 20px;
-            font-size: 14px;
-            line-height: 1.6;
-            margin: 0;
-        }
-        .ai-bullets li {
-            margin-bottom: 5px;
+        .ai-section ul {
+            padding-left: 20px; /* Indent bullets */
         }
         .chart-container {
             text-align: center;
@@ -664,7 +691,6 @@ def step_4_compose_email(ti, **context):
     """
 
     # 4. Build HTML Body
-    # Get nested dictionaries safely
     monitor_info = structured.get('monitor_information', {})
     uptime = structured.get('uptime_status', {})
     ssl_info = structured.get('ssl_information', {})
@@ -712,23 +738,23 @@ def step_4_compose_email(ti, **context):
                 </div>
                 
                 <div class="section">
-                    <h2>Uptime Status (Last 7 Days)</h2>
+                    <h2>Uptime Status (Last 30 Days)</h2>
                     <table class="info-table">
                         <tr>
                             <td>Overall Status</td>
                             <td><span class="{ 'status-up' if uptime.get('status') == 'Up' else 'status-down' }">{uptime.get('status', 'N/A')}</span></td>
                         </tr>
                         <tr>
-                            <td>Uptime (Last 7d)</td>
-                            <td>{uptime.get('uptime_last_7days', 'N/A')}</td>
+                            <td>Uptime (Last 30d)</td>
+                            <td>{uptime.get('uptime_last_30days', 'N/A')}</td>
                         </tr>
                         <tr>
-                            <td>Total Downtime (Last 7d)</td>
-                            <td>{uptime.get('downtime_last_7days', 'N/A')}</td>
+                            <td>Total Downtime (Last 30d)</td>
+                            <td>{uptime.get('downtime_last_30days', 'N/A')}</td>
                         </tr>
                         <tr>
-                            <td>Incidents (Last 7d)</td>
-                            <td>{uptime.get('incidents_last_7days', 'N/A')}</td>
+                            <td>Incidents (Last 30d)</td>
+                            <td>{uptime.get('incidents_last_30days', 'N/A')}</td>
                         </tr>
                     </table>
                 </div>
@@ -748,21 +774,21 @@ def step_4_compose_email(ti, **context):
                 </div>
                 
                 <div class="section">
-                    <h2>Response Time (Last 7 Days)</h2>
+                    <h2>Response Time (Last 30 Days)</h2>
                     <div class="chart-container">
                         {chart_html}
                     </div>
                     <table class="info-table" style="margin-top: 20px;">
                         <tr>
-                            <td>Average (Last 7d)</td>
+                            <td>Average (Last 30d)</td>
                             <td>{rt.get('avg', 'N/A')} ms</td>
                         </tr>
                         <tr>
-                            <td>Min (Last 7d)</td>
+                            <td>Min (Last 30d)</td>
                             <td>{rt.get('min', 'N/A')} ms</td>
                         </tr>
                         <tr>
-                            <td>Max (Last 7d)</td>
+                            <td>Max (Last 30d)</td>
                             <td>{rt.get('max', 'N/A')} ms</td>
                         </tr>
                     </table>
@@ -795,9 +821,8 @@ def step_4_compose_email(ti, **context):
                         </thead>
                         <tbody>
         """
-        for log in logs[-10:]:
+        for log in logs[-10:]: # Show only the last 10 logs for brevity
             try:
-                # Use .get() for 'datetime' for safety
                 dt = datetime.fromtimestamp(log.get('datetime', 0)).strftime('%Y-%m-%d %H:%M:%S')
             except:
                 dt = "Invalid Date"
@@ -827,35 +852,31 @@ def step_4_compose_email(ti, **context):
                 <div class="section">
                     <h2>AI Analysis</h2>
     """
+    
     sections = [
         ("Anomaly Detection", analysis.get("anomaly_detection", "N/A")),
         ("Root Cause Analysis", analysis.get("rca", "N/A")),
-        ("Comparative Analysis", analysis.get("comparative_analysis", "N/A"))
+        ("Comparative Analysis", analysis.get("comparative_analysis", "N/A")),
     ]
     
     has_ai_content = False
     for title, content in sections:
-        # Ensure content is a string before checking
         content_str = str(content)
         if content and content_str != "N/A" and "error" not in content_str.lower():
             has_ai_content = True
             
-            # Detect and format bullets vs paragraphs
-            if title in ["Root Cause Analysis", "Comparative Analysis"] or content_str.startswith('-') or '\n-' in content_str:
-                # Parse bullets: split by \n, strip '-', wrap in <li>
-                lines = [line.strip() for line in content_str.split('\n') if line.strip().startswith('-')]
-                if lines:
-                    bullet_html = '<ul class="ai-bullets">' + ''.join(f'<li>{line[1:].strip()}</li>' for line in lines) + '</ul>'
-                else:
-                    bullet_html = '<p>' + content_str.replace('\n', '<br>') + '</p>'
+            # Format as bullets if content contains newlines or hyphens
+            if '\n' in content_str or content_str.strip().startswith('-'):
+                 # Split by newline, strip, remove empty lines, and wrap in <li>
+                bullets = [f"<li>{line.strip().lstrip('- ')}</li>" for line in content_str.split('\n') if line.strip()]
+                content_html = f"<ul>{''.join(bullets)}</ul>"
             else:
-                # Paragraph/sentences for anomaly
-                bullet_html = '<p>' + content_str.replace('\n', '<br>') + '</p>'
-
+                content_html = f"<p>{content_str}</p>"
+                
             html += f"""
                     <div class="ai-section">
                         <h3>{title}</h3>
-                        {bullet_html}
+                        {content_html}
                     </div>
             """
     
@@ -897,7 +918,7 @@ def step_5_send_report_email(ti, **context):
             logging.error("Gmail authentication failed, aborting email response.")
             return "Gmail authentication failed"
         
-        subject = f"Weekly Uptime Report with Insights for {monitor_name}"
+        subject = f"Monthly Uptime Report with Insights for {monitor_name}"
         
         result = send_email(
             service, RECIPIENT_EMAIL, subject, final_html_content
@@ -914,22 +935,22 @@ def step_5_send_report_email(ti, **context):
         logging.error(f"Error in send_report_email: {str(e)}")
         return f"Error sending email: {str(e)}"
 
-# Read README if available
-readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'uptime_weekly_report.md')
+# Read README if available (adapt as needed)
+readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'uptime_monthly_report.md')
 readme_content = ""
 try:
     with open(readme_path, 'r') as file:
         readme_content = file.read()
 except FileNotFoundError:
-    readme_content = "Daily uptime report generation and email DAG with AI insights"
+    readme_content = "Monthly uptime report generation and email DAG with AI insights"
 
 with DAG(
-    "uptime_weekly_data_report", 
+    "uptime_monthly_data_report", 
     default_args=default_args, 
-    schedule_interval="0 0 * * 1",  # Run every Monday at midnight, 
+    schedule_interval="@monthly", 
     catchup=False, 
     doc_md=readme_content, 
-    tags=["uptime", "report", "weekly", "ai-insights"]
+    tags=["uptime", "report", "monthly", "ai-insights"]
 ) as dag:
     
     fetch_data_task = PythonOperator(
@@ -980,5 +1001,4 @@ with DAG(
         provide_context=True
     )
     
-    # Set up task dependencies serially for analysis steps
     fetch_data_task >> anomaly_detection_task >> rca_task >> comparative_analysis_task >> combine_analysis_task >> generate_plot_task >> compose_email_task >> send_report_email_task
