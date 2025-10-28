@@ -293,6 +293,7 @@ ENTITY EXTRACTION RULES:
      - Include speaker name and email from SENDER INFO
      - Use current timestamp
      - DO NOT create contacts, companies, deals, tasks, or meetings
+     - **IMPORTANT: Still populate selected_entities with ALL existing entities id from the conversation history**
      - Set casual_comments_detected to true
    - Examples of casual comments:
      * "It was great to have this deal and I think its an interesting one"
@@ -1515,17 +1516,18 @@ CRITICAL ASSOCIATION RULES:
 - Associate with all available ids.
 **IMPORTANT**: 
     - You can only create asssociation using tool `create_multi_association`
+    - You can only create asssociation using tool `create_multi_association`
     - You MUST actually CALL the tool, not just output JSON
     
 TOOL CALL FORMAT - Use this exact structure when calling create_multi_association:
 {{
     "single": {{
-        "deal_id": "",
-        "contact_id": "",
-        "company_id": "",
-        "note_id": "",
-        "task_id": "",
-        "meeting_id": ""
+        "deal_id": "existing_or_new_deal_id",
+        "contact_id": "existing_or_new_contact_id",
+        "company_id": "existing_or_new_company_id",
+        "note_id": "new_note_id",
+        "task_id": "new_task_id",
+        "meeting_id": "new_meeting_id"
     }}
 }}
 
