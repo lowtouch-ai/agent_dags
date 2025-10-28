@@ -6,18 +6,17 @@ import base64
 import json
 import logging
 import re
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 from ollama import Client
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
 import os
 import pandas as pd
-import plotly.express as px
 import matplotlib.pyplot as plt
-from matplotlib.dates import HourLocator, MinuteLocator, DateFormatter, DayLocator
+from matplotlib.dates import HourLocator, DateFormatter, DayLocator
 import io
 import requests
+import smtplib
 
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -30,28 +29,17 @@ default_args = {
     "retry_delay": timedelta(seconds=15),
 }
 
-UPTIME_FROM_ADDRESS = Variable.get("UPTIME_FROM_ADDRESS")
-GMAIL_CREDENTIALS = Variable.get("UPTIME_GMAIL_CREDENTIALS")
+SMTP_USER = Variable.get("SMTP_USER")
+SMTP_PASSWORD = Variable.get("SMTP_PASSWORD")
+SMTP_HOST = Variable.get("SMTP_HOST", default_var="mail.authsmtp.com")
+SMTP_PORT = int(Variable.get("SMTP_PORT", default_var="2525"))
+SMTP_SUFFIX = Variable.get("SMTP_FROM_SUFFIX", default_var="via lowtouch.ai <webmaster@ecloudcontrol.com>")
 OLLAMA_HOST = "http://agentomatic:8000/"
 UPTIME_API_KEY = Variable.get("UPTIME_API_KEY")
 
 MONITOR_ID = Variable.get("UPTIME_MONITOR_ID")
 RECIPIENT_EMAIL = Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL")
 REPORT_PERIOD = "last 7 days"
-
-def authenticate_gmail():
-    try:
-        creds = Credentials.from_authorized_user_info(GMAIL_CREDENTIALS)
-        service = build("gmail", "v1", credentials=creds)
-        profile = service.users().getProfile(userId="me").execute()
-        logged_in_email = profile.get("emailAddress", "")
-        if logged_in_email.lower() != UPTIME_FROM_ADDRESS.lower():
-            raise ValueError(f"Wrong Gmail account! Expected {UPTIME_FROM_ADDRESS}, but got {logged_in_email}")
-        logging.info(f"Authenticated Gmail account: {logged_in_email}")
-        return service
-    except Exception as e:
-        logging.error(f"Failed to authenticate Gmail: {str(e)}")
-        return None
 
 def get_ai_response(prompt, conversation_history=None):
     """Get AI response with conversation history context"""
@@ -96,22 +84,51 @@ def get_ai_response(prompt, conversation_history=None):
         logging.error(f"Error in get_ai_response: {str(e)}")
         return f"An error occurred while processing your request: {str(e)}"
 
-def send_email(service, recipient, subject, body, in_reply_to="", references=""):
+def send_email(recipient, subject, body, in_reply_to="", references="", img_b64=None):
     try:
+        # Initialize SMTP server
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+    
+        # Create MIME message
         logging.debug(f"Preparing email to {recipient} with subject: {subject}")
-        msg = MIMEMultipart()
-        msg["From"] = f"Uptime Reports via lowtouch.ai <{UPTIME_FROM_ADDRESS}>"
-        msg["To"] = recipient
-        msg["Subject"] = subject
+        msg = MIMEMultipart('related')
+        msg['Subject'] = subject
+        msg['From'] = f"Uptime Reports {SMTP_SUFFIX}"
+        msg['To'] = recipient
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to
         if references:
             msg["References"] = references
-        msg.attach(MIMEText(body, "html"))
-        raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
-        result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
-        logging.info(f"Email sent successfully: {result}")
-        return result
+        
+        # Attach the HTML content
+        msg.attach(MIMEText(body, 'html'))
+
+        if img_b64:
+            try:
+                # Decode the base64 string
+                img_data = base64.b64decode(img_b64)
+                
+                # Create the image part
+                img_part = MIMEImage(img_data, 'png')
+                
+                # Add Content-ID header to be referenced by <img src="cid:response_chart">
+                img_part.add_header('Content-ID', '<response_chart>')
+                img_part.add_header('Content-Disposition', 'inline', filename='response_chart.png')
+                
+                # Attach the image to the message
+                msg.attach(img_part)
+                logging.info("Successfully attached CID image to email.")
+                
+            except Exception as e:
+                logging.error(f"Failed to attach image to email: {str(e)}")
+                
+        # Send the email
+        server.sendmail("webmaster@ecloudcontrol.com", recipient, msg.as_string())
+        logging.info(f"Email sent successfully: {recipient}")
+        server.quit()
+        return True
     except Exception as e:
         logging.error(f"Failed to send email: {str(e)}")
         return None
@@ -487,15 +504,17 @@ def step_3_generate_plot(ti, **context):
         img_b64 = base64.b64encode(buf.read()).decode('utf-8')
         plt.close(fig)
         img_html = (
-            f'<img src="data:image/png;base64,{img_b64}" alt="Response Time Chart" '
+            f'<img src="cid:response_chart" alt="Response Time Chart" '
             'style="max-width:100%;height:auto;border-radius:8px;" />'
         )
+        ti.xcom_push(key="chart_b64", value=img_b64)
         ti.xcom_push(key="chart_html", value=img_html)
         return img_html
     
     except Exception as e:
         logging.error(f"Error generating plot: {str(e)}", exc_info=True)
         error_html = '<p style="color:red;font-weight:bold;">Could not generate chart.</p>'
+        ti.xcom_push(key="chart_b64", value=None)
         ti.xcom_push(key="chart_html", value=error_html)
         return error_html
 
@@ -892,15 +911,14 @@ def step_5_send_report_email(ti, **context):
             logging.error("No final HTML content found from previous steps")
             return "Error: No content to send"
         
-        service = authenticate_gmail()
-        if not service:
-            logging.error("Gmail authentication failed, aborting email response.")
-            return "Gmail authentication failed"
-        
+        chart_b64 = ti.xcom_pull(key="chart_b64")
+        if not chart_b64:
+            logging.warning("No chart data found, sending email without image.")
+               
         subject = f"Weekly Uptime Report with Insights for {monitor_name}"
         
         result = send_email(
-            service, RECIPIENT_EMAIL, subject, final_html_content
+            RECIPIENT_EMAIL, subject, final_html_content, img_b64=chart_b64
         )
         
         if result:
