@@ -293,6 +293,7 @@ ENTITY EXTRACTION RULES:
      - Include speaker name and email from SENDER INFO
      - Use current timestamp
      - DO NOT create contacts, companies, deals, tasks, or meetings
+     - **IMPORTANT: Still populate selected_entities with ALL existing entities id from the conversation history**
      - Set casual_comments_detected to true
    - Examples of casual comments:
      * "It was great to have this deal and I think its an interesting one"
@@ -1500,7 +1501,7 @@ LATEST USER MESSAGE:
 {latest_user_message}
 
 How to create associations: Always and strictly call create_multi_association API/Tool to create association.
-
+CRITICAL: You MUST call the create_multi_association tool. Do NOT just return JSON text. CALL THE TOOL.
 AVAILABLE ENTITY IDS:
 - NEW Contact IDs (just created): {new_contact_ids}
 - NEW Company IDs (just created): {new_company_ids}
@@ -1547,32 +1548,54 @@ Scenario 2: New task created for existing contact
 **IMPORTANT**: 
     - For each new entity created, think about what existing entities it should be connected to based on the conversation context.
     - You can only create asssociation using tool `create_multi_association`
-Return ONLY valid JSON with multiple association requests if needed:
+    - You can only create asssociation using tool `create_multi_association`
+    - You MUST actually CALL the tool, not just output JSON
+    
+TOOL CALL FORMAT - Use this exact structure when calling create_multi_association:
+{{
+    "single": {{
+        "deal_id": "existing_or_new_deal_id",
+        "contact_id": "existing_or_new_contact_id",
+        "company_id": "existing_or_new_company_id",
+        "note_id": "new_note_id",
+        "task_id": "new_task_id",
+        "meeting_id": "new_meeting_id"
+    }}
+}}
+
+Return ONLY valid JSON:
 {{
     "association_requests": [
         {{
-            "description": "What this association is for",
             "single": {{
-                "deal_id": "existing_or_new_deal_id",
-                "contact_id": "existing_or_new_contact_id",
-                "company_id": "existing_or_new_company_id",
-                "note_id": "new_note_id",
-                "task_id": "new_task_id",
-                "meeting_id": "new_meeting_id"
+                "deal_id": "123",
+                "contact_id": "456", 
+                "company_id": "789",
+                "note_id": "101",
+                "task_id": "202",
+                "meeting_id": "303"
             }}
         }}
     ],
-    "reasoning": "Explain why these associations make sense",
-    "extracted_ids_from_conversation": {{
+    "ids_from_conversation": {{
         "contact_ids": [],
         "company_ids": [],
-        "deal_ids": []
+        "deal_ids": ["123"],
+        "note_ids": [],
+        "task_ids": [],
+        "meeting_ids": []
     }},
     "errors": [],
     "error": null
 }}
 
+The "ids_from_conversation" field should list any IDs you extracted from the conversation history (not from AVAILABLE ENTITY IDS).
+
+If error, set error message and include individual errors in the errors array.
+
 Remember: Empty string "" for non-applicable fields, comma-separated for multiple IDs.
+
+NOW TAKE ACTION: Based on the conversation above, CALL the create_multi_association tool with the appropriate associations.
 """
     
     response = get_ai_response(prompt, expect_json=True)
