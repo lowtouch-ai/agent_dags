@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import re
+from email.message import EmailMessage  # Add this import
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
@@ -14,6 +15,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 import os
+from email.utils import parsedate_to_datetime
 
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,6 +30,8 @@ default_args = {
 
 ODOO_FROM_ADDRESS = Variable.get("INVOFLUX_FROM_ADDRESS")
 GMAIL_CREDENTIALS = Variable.get("INVOFLUX_GMAIL_CREDENTIALS")
+LAST_PROCESSED_EMAIL_FILE = "/appz/cache/last_processed_email.json"
+ATTACHMENT_DIR = "/appz/data/attachments/"
 OLLAMA_HOST = "http://agentomatic:8000/"
 
 def authenticate_gmail():
@@ -68,44 +72,105 @@ def decode_email_payload(msg):
         logging.error(f"Error decoding email payload: {str(e)}")
         return ""
 
-def get_email_thread(service, email_data):
+def remove_quoted_text(text):
+    """
+    Remove quoted email thread history from the email body, keeping only the current message.
+    Handles common email client quote patterns (e.g., 'On ... wrote:', '>', '---').
+    """
+    try:
+        logging.info("Removing quoted text from email body")
+        # Common patterns for quoted text
+        patterns = [
+            r'On\s.*?\swrote:',  # Standard 'On ... wrote:'
+            r'-{2,}\s*Original Message\s*-{2,}',  # Outlook-style
+            r'_{2,}\s*',  # Some clients use underscores
+            r'From:\s*.*?\n',  # Quoted 'From:' headers
+            r'>.*?\n'  # Lines starting with '>' (quoted replies)
+        ]
+        
+        # Split text by any of the patterns
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                text = text[:match.start()].strip()
+        
+        # Remove any remaining lines starting with '>'
+        lines = text.split('\n')
+        cleaned_lines = [line for line in lines if not line.strip().startswith('>')]
+        text = '\n'.join(cleaned_lines).strip()
+        logging.info(f"Text after removing quoted text: {text[:100] if text else ''}...")
+        return text if text else "No content after removing quoted text"
+    except Exception as e:
+        logging.error(f"Error in remove_quoted_text: {str(e)}")
+        return text.strip()
+
+def get_email_thread(service, email_data, from_address):
+    """Retrieve and format the email thread as a conversation list with user and response roles."""
     try:
         thread_id = email_data.get("threadId")
         message_id = email_data["headers"].get("Message-ID", "")
-        
+        logging.info(f"Processing email thread for message ID: {message_id}")
+
         if not thread_id:
             query_result = service.users().messages().list(userId="me", q=f"rfc822msgid:{message_id}").execute()
             messages = query_result.get("messages", [])
             if messages:
                 message = service.users().messages().get(userId="me", id=messages[0]["id"]).execute()
                 thread_id = message.get("threadId")
-        
+
         if not thread_id:
             logging.warning(f"No thread ID found for message ID {message_id}. Treating as a single email.")
             raw_message = service.users().messages().get(userId="me", id=email_data["id"], format="raw").execute()
             msg = message_from_bytes(base64.urlsafe_b64decode(raw_message["raw"]))
-            return [{
-                "headers": {header["name"]: header["value"] for header in email_data.get("payload", {}).get("headers", [])},
-                "content": decode_email_payload(msg)
-            }]
+            content = decode_email_payload(msg)
+            headers = {header["name"]: header["value"] for header in email_data.get("payload", {}).get("headers", [])}
+            sender = headers.get("From", "").lower()
+            role = "user" if sender != from_address.lower() else "assistant"
+            return [{"role": role, "content": content.strip()}] if content.strip() else []
 
         thread = service.users().threads().get(userId="me", id=thread_id).execute()
-        email_thread = []
+        conversation = []
+        logging.info(f"Retrieved thread with ID: {thread_id} containing {len(thread.get('messages', []))} messages")
+        messages_with_dates = []
         for msg in thread.get("messages", []):
             raw_msg = base64.urlsafe_b64decode(msg["raw"]) if "raw" in msg else None
             if not raw_msg:
                 raw_message = service.users().messages().get(userId="me", id=msg["id"], format="raw").execute()
                 raw_msg = base64.urlsafe_b64decode(raw_message["raw"])
+            
             email_msg = message_from_bytes(raw_msg)
             headers = {header["name"]: header["value"] for header in msg.get("payload", {}).get("headers", [])}
             content = decode_email_payload(email_msg)
-            email_thread.append({
-                "headers": headers,
-                "content": content.strip()
+            
+            if not content.strip():
+                continue
+                
+            sender = headers.get("From", "").lower()
+            role = "user" if sender != from_address.lower() else "assistant"
+            date_str = headers.get("Date", "")
+            
+            messages_with_dates.append({
+                "role": role,
+                "content": content.strip(),
+                "date": date_str,
+                "message_id": headers.get("Message-ID", "")
             })
-        email_thread.sort(key=lambda x: x["headers"].get("Date", ""), reverse=False)
-        logging.debug(f"Retrieved thread with {len(email_thread)} messages")
-        return email_thread
+
+        try:
+            messages_with_dates.sort(key=lambda x: parsedate_to_datetime(x["date"]) if x["date"] else datetime.min)
+        except Exception as e:
+            logging.warning(f"Error sorting by date, using original order: {str(e)}")
+        
+        for msg in messages_with_dates:
+            conversation.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+
+        logging.info(f"Retrieved complete thread with {len(conversation)} messages")
+        logging.info(f"Full conversation {conversation}")
+        return conversation
+        
     except Exception as e:
         logging.error(f"Error retrieving email thread: {str(e)}")
         return []
@@ -117,14 +182,17 @@ def get_ai_response(prompt, images=None, conversation_history=None):
         if not prompt or not isinstance(prompt, str):
             return "<html><body>Invalid input provided. Please enter a valid query.</body></html>"
 
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'Invoflux-email'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'InvoFlux'})
         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'InvoFlux:0.3'")
 
         messages = []
         if conversation_history:
             for history_item in conversation_history:
-                messages.append({"role": "user", "content": history_item["prompt"]})
-                messages.append({"role": "assistant", "content": history_item["response"]})
+                # Handle email thread history format
+                messages.append({
+                    "role": history_item["role"],
+                    "content": history_item["content"]
+                })
         
         user_message = {"role": "user", "content": prompt}
         if images:
@@ -133,7 +201,7 @@ def get_ai_response(prompt, images=None, conversation_history=None):
         messages.append(user_message)
 
         response = client.chat(
-            model='invoflux-email:0.3',
+            model='InvoFlux:0.3',
             messages=messages,
             stream=False
         )
@@ -146,9 +214,6 @@ def get_ai_response(prompt, images=None, conversation_history=None):
         ai_content = response.message.content
         logging.info(f"Full message content from agent: {ai_content[:500]}...")
 
-        if "technical difficulties" in ai_content.lower() or "error" in ai_content.lower():
-            logging.warning("AI response contains potential error message")
-            return "<html><body>Unexpected response received. Please contact support.</body></html>"
 
         ai_content = re.sub(r'```html\n|```', '', ai_content).strip()
         if not ai_content.strip():
@@ -192,9 +257,21 @@ def step_1_process_email(ti, **context):
         logging.error("Gmail authentication failed, aborting.")
         return "Gmail authentication failed"
     
-    email_thread = get_email_thread(service, email_data)
+    complete_email_thread = get_email_thread(service, email_data,ODOO_FROM_ADDRESS)
     image_attachments = []
     
+    from_header = email_data["headers"].get("From", "Unknown <unknown@example.com>")
+    sender_name = "Unknown"
+    sender_email = "unknown@example.com"
+    name_email_match = re.match(r'^(.*?)\s*<(.*?@.*?)>$', from_header)
+    if name_email_match:
+        sender_name = name_email_match.group(1).strip() or "Unknown"
+        sender_email = name_email_match.group(2).strip()
+    elif re.match(r'^.*?@.*?$', from_header):
+        sender_email = from_header.strip()
+        sender_name = sender_email.split('@')[0]
+
+    # Collect image attachments
     if email_data.get("attachments"):
         logging.info(f"Number of attachments: {len(email_data['attachments'])}")
         for attachment in email_data["attachments"]:
@@ -202,76 +279,147 @@ def step_1_process_email(ti, **context):
                 image_attachments.append(attachment["base64_content"])
                 logging.info(f"Found base64 image attachment: {attachment['filename']}")
     
-    thread_history = ""
-    for idx, email in enumerate(email_thread, 1):
-        email_content = email.get("content", "").strip()
-        email_from = email["headers"].get("From", "Unknown")
-        email_date = email["headers"].get("Date", "Unknown date")
-        if email_content:
-            soup = BeautifulSoup(email_content, "html.parser")
-            email_content = soup.get_text(separator=" ", strip=True)
-        thread_history += f"Email {idx} (From: {email_from}, Date: {email_date}):\n{email_content}\n\n"
+    # Extract attachment content (e.g., from PDFs)
+    attachment_content = ""
+    if email_data.get("attachments"):
+        for attachment in email_data["attachments"]:
+            if "extracted_content" in attachment and "content" in attachment["extracted_content"]:
+                attachment_content += f"\nAttachment :\n{attachment['extracted_content']['content']}\n"
     
-    current_content = email_data.get("content", "").strip()
+    # ADDED: Split thread into history and current content
+    if complete_email_thread :
+        conversation_history = [] # All previous messages
+        current_content = complete_email_thread[-1]["content"] if len(complete_email_thread) > 0 else email_data.get("content", "").strip()  # Current message
+    else:
+        conversation_history = []  # No previous conversation
+        current_content = email_data.get("content", "").strip()
+    
+    # ADDED: Log conversation history
+    logging.info(f"Complete conversation history contains {len(conversation_history)} messages")
+    logging.info(f"Current content: {current_content}...")
+    for i, msg in enumerate(conversation_history[:3]):  # Log first 3 for brevity
+        logging.info(f"History message {i+1}: Role={msg['role']}, Content={msg['content'][:100]}...")
+    
+    # ADDED: Clean current content
     if current_content:
         soup = BeautifulSoup(current_content, "html.parser")
         current_content = soup.get_text(separator=" ", strip=True)
-    thread_history += f"Current Email (From: {email_data['headers'].get('From', 'Unknown')}):\n{current_content}\n"
+        current_content = remove_quoted_text(current_content)
     
-    if email_data.get("attachments"):
-        attachment_content = ""
-        for attachment in email_data["attachments"]:
-            if "extracted_content" in attachment and "content" in attachment["extracted_content"]:
-                attachment_content += f"\nAttachment ({attachment['filename']}):\n{attachment['extracted_content']['content']}\n"
-        thread_history += f"\n{attachment_content}" if attachment_content else ""
+    # ADDED: Append attachment content to current content
+    if attachment_content:
+        current_content += f"\n{attachment_content}"
+
+    logging.info(f"final current content: {current_content}")
+
+    prompt = f"Extract the invoice and prepare for system entry:\n\n{current_content}\n\nNote: Extract the invoice details from the image is enough and ask for confirmation"
+
+    logging.info(f"Final prompt to AI: {prompt}...")
     
-    prompt = f"extract the invoice and prepare for system entry :\n\n{thread_history} \n\n Note : Here Extract the invoice details from the Image is enough and ask for confirmation"
-    
-    response = get_ai_response(prompt, images=image_attachments if image_attachments else None)
-    
+    response = get_ai_response(prompt, images=image_attachments if image_attachments else None, conversation_history=conversation_history)
+
     ti.xcom_push(key="step_1_prompt", value=prompt)
     ti.xcom_push(key="step_1_response", value=response)
-    ti.xcom_push(key="conversation_history", value=[{"prompt": prompt, "response": response}])
+    ti.xcom_push(key="conversation_history", value=conversation_history + [{"role": "user", "content": prompt}, {"role": "assistant", "content": response}])
+    ti.xcom_push(key="email content", value=current_content)
+    ti.xcom_push(key="complete_email_thread", value=complete_email_thread)
     
     logging.info(f"Step 1 completed: {response[:200]}...")
     return response
 
 def step_2_create_vendor_bill(ti, **context):
     """Step 2: Extract and prepare for system entry"""
-    history = ti.xcom_pull(key="conversation_history")
+    step_1_response = ti.xcom_pull(key="step_1_response")
     
     prompt = "Create the Vendor bill"
     
+    # Pass only the previous step's response as history
+    history = [{"role": "assistant", "content": step_1_response}] if step_1_response else []
     response = get_ai_response(prompt, conversation_history=history)
     
-    history.append({"prompt": prompt, "response": response})
+    # Append to history for consistency with downstream tasks
+    full_history = ti.xcom_pull(key="conversation_history") or []
+    full_history.append({"role": "user", "content": prompt})
+    full_history.append({"role": "assistant", "content": response})
     ti.xcom_push(key="step_2_prompt", value=prompt)
     ti.xcom_push(key="step_2_response", value=response)
-    ti.xcom_push(key="conversation_history", value=history)
+    ti.xcom_push(key="conversation_history", value=full_history)
     
     logging.info(f"Step 2 completed: {response[:200]}...")
     return response
 
 def step_3_compose_email(ti, **context):
     """Step 3: Create the vendor bill"""
-    history = ti.xcom_pull(key="conversation_history")
+    step_1_response = ti.xcom_pull(key="step_1_response")
+    step_2_response = ti.xcom_pull(key="step_2_response")
+    if step_1_response:
+        # Remove the specific confirmation sentence, case-insensitive
+        confirmation_pattern = r'Please confirm the extracted details\. Would you like to create the vendor bill by performing three-way matching\?'
+        step_1_response = re.sub(confirmation_pattern, '', step_1_response, flags=re.IGNORECASE).strip()
+        # Also remove any trailing whitespace or newlines
+        step_1_response = re.sub(r'\n\s*\n\s*$', '', step_1_response)
+    content_appended = step_1_response + "\n\n" + step_2_response if step_1_response and step_2_response else step_1_response or step_2_response or ""
+    sender_name = context['dag_run'].conf.get("email_data", {}).get("headers", {}).get("From", "Valued Customer")
+    name_email_match = re.match(r'^(.*?)\s*<(.*?@.*?)>$', sender_name)
+    if name_email_match:
+        sender_name = name_email_match.group(1).strip() or "Valued Customer"
+    else:
+        sender_name = "Valued Customer"
+    logging.info(f"Sender name extracted: {sender_name}")
     
-    prompt = """
-        Compose a professional and human-like business email in American English, written in the tone of a senior Customer Success Manager, to notify a vendor about the outcome of an invoice submission (Posted, Draft, or Failed).
-        The email must include:
-        - A clear introductory line acknowledging the invoice receipt with the invoice number and vendor name (if available), followed by a short sentence stating the current status of the invoice (Posted, Draft, or Failed).
-        - A natural explanation of the status outcome (including Invoice Number and, for Draft or Failed, specific issues like price mismatch, missing PO, unreadable file, duplicate invoice, or unrecognized product in a bulleted list).
-        - A concise summary of invoice details (Invoice Number, Invoice Date, Due Date, Internal Invoice ID, Status, Vendor Name if available, Purchase Order if available, Currency, Subtotal, Tax with rate if available, Total Amount) in paragraph or bullet format.
-        - A product line item table **with borders** (including Item Description, Quantity, Unit Price, Tax, Total Price), placed immediately after the invoice summary.
-        - If the invoice status is Draft or Failed, include a short, natural-language paragraph below the product table briefly summarizing the **validation issues**.
-        - A naturally worded sentence or short paragraph explaining the next steps based on the invoice status:
-            - For **Posted**, confirm the invoice has been successfully entered into the payment cycle.
-            - For **Draft** or **Failed**, kindly request corrections and resubmission to invoflux-agent-8013@lowtouch.ai.
-        - A polite closing paragraph offering further assistance, mentioning the contact email invoflux-agent-8013@lowtouch.ai, and signed with 'Invoice Processing Team, InvoFlux'.
-        Use only clean, valid HTML for the email body without any section headers (e.g., no 'Status-Based Message', 'Invoice Summary', or 'Validation Issues Identified'). Avoid technical or template-style formatting and placeholders (e.g., '[Invoice Number]'). The email should read as if it was personally written.
-        Return only the HTML body, and nothing else.
-    """
-    
+    prompt=f"""
+        Generate a professional, human-like business email in American English, written in the tone of a senior Customer Success Manager, to notify a vendor, addressed by name '{sender_name}', about the status of their invoice submission (Posted or Draft), including any duplicate invoice detections.
+
+        Content: {content_appended}
+
+        Follow this exact structure for the email body, using clean, valid HTML without any additional wrappers like <html> or <body>. Do not omit any sections or elements listed below. Use natural, professional wording but adhere strictly to the format. Extract all details from the provided Content; use 'N/A' if a value is not available. For the due date, if not mentioned in the Content, specify '30 days from the invoice date'.
+
+        1. Greeting: <p>Dear {sender_name},</p>
+
+        2. Opening paragraph: If the Content does not indicate a duplicate (e.g., no 'Duplicate invoice number found' in validation issues): 
+           - If Status is Posted, use: We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name if available, else omit 'from [Vendor Name]']. It has been created in the Posted status.
+           - If Status is Draft, use: We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name if available, else omit 'from [Vendor Name]']. The invoice has been recorded in our system; however, it currently remains in Draft status due to the following validation issues.
+
+        If the Content indicates a duplicate (e.g., 'Duplicate invoice number found' in validation issues), use: 'We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name]. However, this invoice is a duplicate. The existing invoice is in [Posted/Draft] status, and no new invoice was created' [due to the following validation issues: only if the existing status is Draft and there are other non-duplicate validation issues, else omit this part]. Use the existing status from Content if available, else infer from context (e.g., Draft if validation failed).
+        
+        3. Issues list (only if Draft or if duplicate with other validation issues): If there are validation issues, include only non-duplicate issues, do not include duplicate issues:
+        *  followed by
+        * [each specific issue].
+        
+        4. Invoice Summary section: <p><strong>Invoice Summary</strong></p> followed by a list in paragraph form (each on new line with <br>): 
+           Invoice Number: [value]<br>
+           Invoice Date: [value]<br>
+           Due Date: [value if available, else '30 days from the invoice date']<br>
+           Internal Invoice ID: [value]<br>
+           Status: [value]<br>
+           Vendor Name: [value]<br>
+           Purchase Order: [value]<br>
+           Currency: [value]<br>
+           Subtotal: [value]<br>
+           Tax ([rate if available]%): [amount if available]<br>
+           Total Amount: [value]<br>
+
+        For duplicates, label this as 'Existing Invoice Summary' or 'Existing Draft Invoice Summary' based on the existing status, and populate with the existing invoice's details.
+
+        5. Product Details section: <p><strong>Product Details</strong></p> followed immediately by a table: <table border="1" cellspacing="0" cellpadding="5"><tr><th>Item Description</th><th>Quantity</th><th>Unit Price</th><th>Tax</th><th>Total Price</th></tr> [rows with <tr><td>[desc]</td><td>[qty]</td><td>[price]</td><td>[tax]</td><td>[total]</td></tr> for each item] </table>
+
+        6. Closing statement paragraph: <p>[A concise natural statement based on the invoice status:
+           - Posted: The invoice is now in our payment cycle and will be processed accordingly.
+           - Draft: Please review the issues above, make the necessary corrections, and resubmit the updated invoice to <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>.
+           - Duplicate (Posted): Please review the existing invoice details above. If this was submitted in error, no further action is needed; otherwise, contact us for support.
+           - Duplicate (Draft): Please review the existing draft details above, correct any issues, and resubmit to <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>.
+           ]</p>
+
+        7. Assistance paragraph: <p>Please let us know if you need any assistance. You can reach us at <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>.</p>
+
+        8. Signature: <p>Best regards,<br>Invoice Processing Team,<br>InvoFlux</p>
+
+        Ensure the email is natural, professional, and concise. Avoid rigid or formulaic language to maintain a human-like tone. Do not use placeholders; replace with actual extracted values. Return only the HTML content as specified, without <!DOCTYPE>, <html>, or <body> tags.
+
+        Return only the HTML body of the email.
+        """
+    # Pass only the previous step's response as history
+    history = [{"role": "assistant", "content": content_appended}] if content_appended else []
     response = get_ai_response(prompt, conversation_history=history)
     # Clean the HTML response
     cleaned_response = re.sub(r'```html\n|```', '', response).strip()
@@ -280,10 +428,14 @@ def step_3_compose_email(ti, **context):
         if not cleaned_response.strip().startswith('<'):
             cleaned_response = f"<html><body>{cleaned_response}</body></html>"
     
-    history.append({"prompt": prompt, "response": response})
+    # Append to history for consistency with downstream tasks
+    full_history = ti.xcom_pull(key="conversation_history") or []
+    full_history.append({"role": "user", "content": prompt})
+    full_history.append({"role": "assistant", "content": response})
+    ti.xcom_push(key="email content", value=content_appended)
     ti.xcom_push(key="step_3_prompt", value=prompt)
     ti.xcom_push(key="step_3_response", value=response)
-    ti.xcom_push(key="conversation_history", value=history)
+    ti.xcom_push(key="conversation_history", value=full_history)
     ti.xcom_push(key="final_html_content", value=cleaned_response)
     
     logging.info(f"Step 3 completed: {response[:200]}...")

@@ -9,6 +9,8 @@ import org.testng.annotations.*;
 import utils.ConfigReader;
 
 import java.io.*;
+import java.text.SimpleDateFormat;
+import java.util.*;
 
 public class ChatAPIContentValidationTest {
 
@@ -18,6 +20,9 @@ public class ChatAPIContentValidationTest {
     private static final String BEARER_TOKEN = System.getenv("API_TOKEN");
     private static ExtentReports extent;
     private static ThreadLocal<ExtentTest> testReport = new ThreadLocal<>();
+
+    // Collect failed tests
+    private static List<String> failedTests = new ArrayList<>();
 
     @BeforeSuite
     public void setupReport() {
@@ -30,8 +35,26 @@ public class ChatAPIContentValidationTest {
     }
 
     @AfterSuite
-    public void flushReport() {
+    public void flushReportAndWriteFailures() {
         extent.flush();
+
+        if (!failedTests.isEmpty()) {
+            // Add timestamp to filename
+            String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+            File outFile = new File("failed_tests_" + timestamp + ".txt");
+
+            try (FileWriter fw = new FileWriter(outFile)) {
+                for (String fail : failedTests) {
+                    fw.write(fail + System.lineSeparator());
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+            System.out.println("Failed test summary written to: " + outFile.getAbsolutePath());
+        } else {
+            System.out.println("All tests passed. No failed_tests file generated.");
+        }
     }
 
     @DataProvider(name = "messagePayloads")
@@ -40,7 +63,7 @@ public class ChatAPIContentValidationTest {
             {
                 "Show me order details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock",
                 new String[]{
-                    "Patricia Montgomery",
+					"Patricia Montgomery",
                     "patricia.montgomery@example.com",
                     "Gym Bag Muneca"
                 }
@@ -62,10 +85,11 @@ public class ChatAPIContentValidationTest {
 
     @Test(dataProvider = "messagePayloads")
     public void testChatAPIResponseValidation(String message, String[] expectedFragments) throws Exception {
-
         ExtentTest test = extent.createTest("Prompt: " + message);
         testReport.set(test);
         test.info("Prompt: " + message);
+        System.out.println("url: " + API_URL);
+        System.out.println("Token: " + BEARER_TOKEN);
 
         // Create JSON payload
         JsonObject messageObj = new JsonObject();
@@ -118,15 +142,28 @@ public class ChatAPIContentValidationTest {
 
         test.info("Parsed Content:<br><pre>" + escapeHtml(content) + "</pre>");
 
-        // Assertion check
+     // Assertion check with detailed logging
         boolean allPassed = true;
+        StringBuilder missingFragments = new StringBuilder();
+
         for (String expected : expectedFragments) {
             if (content.contains(expected)) {
                 test.pass("Found: **" + expected + "**");
+                System.out.println("[PASS] Found: " + expected);
             } else {
                 test.fail("Missing: **" + expected + "**");
+                System.out.println("[FAIL] Missing: " + expected);
                 allPassed = false;
+                missingFragments.append(expected).append(", ");
             }
+        }
+
+        if (allPassed) {
+            System.out.println("Prompt PASSED: " + message);
+        } else {
+            String failSummary = "Prompt FAILED: " + message + " | Missing: " + missingFragments;
+            failedTests.add(failSummary);
+            System.out.println(failSummary);
         }
 
         Assert.assertTrue(allPassed, "One or more expected fragments were not found in the response.");
@@ -134,7 +171,7 @@ public class ChatAPIContentValidationTest {
 
     private String escapeHtml(String input) {
         return input.replaceAll("&", "&amp;")
-                    .replaceAll("<", "&lt;")
-                    .replaceAll(">", "&gt;");
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;");
     }
 }

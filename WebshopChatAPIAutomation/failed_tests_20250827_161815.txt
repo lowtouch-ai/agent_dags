@@ -1,0 +1,1 @@
+Prompt FAILED: Show me order details of 788, including stock availability and customer details, and highlight the articles that are low or out of stock | Missing: Gym Bag Muneca2, 

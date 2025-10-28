@@ -30,8 +30,7 @@ default_args = {
 HUBSPOT_FROM_ADDRESS = Variable.get("HUBSPOT_FROM_ADDRESS")
 GMAIL_CREDENTIALS = Variable.get("HUBSPOT_GMAIL_CREDENTIALS")
 LAST_PROCESSED_EMAIL_FILE = "/appz/cache/hubspot_last_processed_email.json"
-THREAD_CONTEXT_FILE = "/appz/cache/hubspot_thread_context.json"
-
+OLLAMA_HOST = "http://agentomatic:8000/"
 def authenticate_gmail():
     try:
         creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
