@@ -484,6 +484,13 @@ CONTINUATION_DAG CAPABILITIES:
 - Handles user confirmations and modifications
 - Processes casual comments as notes
 
+NO_ACTION CAPABILITIES:
+- Recognizes greetings, closings, and simple acknowledgments
+- Outputs friendly responses without further action
+- Handles questions about bot capabilities or general chat
+- Does not perform any HubSpot operations
+- Dont have the capability to respond to casual comments.
+
 ROUTING DECISION TREE:
 
 1. **NO ACTION NEEDED** (Return: no_action)
