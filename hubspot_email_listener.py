@@ -81,6 +81,21 @@ def decode_email_payload(msg):
         logging.error(f"Error decoding email payload: {e}")
         return ""
 
+def is_email_whitelisted(sender_email):
+    """Check if sender email is in the whitelist."""
+    try:
+        whitelisted = json.loads(Variable.get("whitelisted_emails", default_var="[]"))
+        # Extract email from "Name <email@domain.com>" format
+        email_match = re.search(r'<(.+?)>', sender_email)
+        clean_email = email_match.group(1).lower() if email_match else sender_email.lower()
+        
+        is_allowed = clean_email in [email.lower() for email in whitelisted]
+        logging.info(f"Email validation - Sender: {clean_email}, Whitelisted: {is_allowed}")
+        return is_allowed
+    except Exception as e:
+        logging.error(f"Error checking whitelist: {e}")
+        return False
+
 def get_email_thread(service, email_data):
     """
     Retrieve full email thread by reconstructing from References header and searching for each message.
@@ -299,10 +314,34 @@ def fetch_unread_emails(**kwargs):
             continue
             
         headers = {h["name"]: h["value"] for h in msg_data["payload"]["headers"]}
-        sender = headers.get("From", "").lower()
+        sender = headers.get("From", "")
+        
+        # Validate sender is whitelisted
+        if not is_email_whitelisted(sender):
+            logging.warning(f"Unauthorized email from {sender} - marking as read and skipping")
+            mark_message_as_read(service, msg_id)
+            continue
+        
+        sender = sender.lower()
         timestamp = int(msg_data["internalDate"])
         thread_id = msg_data.get("threadId", "")
         
+        logging.info(f"Processing message ID: {msg_id}, From: {sender}, Timestamp: {timestamp}, Thread ID: {thread_id}")
+        
+        # Skip old messages
+        if timestamp <= last_checked_timestamp:
+            logging.info(f"Skipping old message {msg_id} - timestamp {timestamp} <= {last_checked_timestamp}")
+            continue
+        
+        # Skip no-reply emails
+        if "no-reply" in sender or "noreply" in sender:
+            logging.info(f"Skipping no-reply email from: {sender}")
+            continue
+        
+        # Skip emails from bot itself
+        if sender == HUBSPOT_FROM_ADDRESS.lower():
+            logging.info(f"Skipping email from bot: {sender}")
+            continue
         logging.info(f"Processing message ID: {msg_id}, From: {sender}, Timestamp: {timestamp}, Thread ID: {thread_id}")
         
         # Skip old messages
