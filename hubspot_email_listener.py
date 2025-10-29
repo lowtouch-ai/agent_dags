@@ -344,21 +344,6 @@ def fetch_unread_emails(**kwargs):
             continue
         logging.info(f"Processing message ID: {msg_id}, From: {sender}, Timestamp: {timestamp}, Thread ID: {thread_id}")
         
-        # Skip old messages
-        if timestamp <= last_checked_timestamp:
-            logging.info(f"Skipping old message {msg_id} - timestamp {timestamp} <= {last_checked_timestamp}")
-            continue
-        
-        # Skip no-reply emails
-        if "no-reply" in sender or "noreply" in sender:
-            logging.info(f"Skipping no-reply email from: {sender}")
-            continue
-        
-        # Skip emails from bot itself
-        if sender == HUBSPOT_FROM_ADDRESS.lower():
-            logging.info(f"Skipping email from bot: {sender}")
-            continue
-        
         # ✅ Construct email_object with all headers INCLUDING recipient headers
         email_object = {
             "id": msg_id,
