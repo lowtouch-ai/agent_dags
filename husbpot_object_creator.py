@@ -313,12 +313,12 @@ Return ONLY valid JSON:
     "user_intent": "CONFIRM|MODIFY|CREATE_NEW|SELECT_SPECIFIC|CLARIFY|CANCEL",
     "confidence_level": "high|medium|low",
     "selected_entities": {{
-        "contacts": [{{"contactId": "...", "firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "..."}}],
+        "contacts": [{{"contactId": "...", "firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "...", "contactOwnerName": "..."}}],
         "companies": [{{"companyId": "...", "name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
         "deals": [{{"dealId": "...", "dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}]
     }},
     "entities_to_create": {{
-        "contacts": [{{"firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "..."}}],
+        "contacts": [{{"firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "...", "contactOwnerName": "..."}}],
         "companies": [{{"name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
         "deals": [{{"dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}],
         "meetings": [{{"meeting_title": "...", "start_time": "...", "end_time": "...", "location": "...", "outcome": "...", "timestamp": "...", "attendees": [], "meeting_type": "...", "meeting_status": "..."}}],
@@ -493,7 +493,7 @@ IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanati
 
 Steps:
 
-1. Parse the Deal Owner and Task Owners from the email thread.
+1. Parse the contact Owner, Deal Owner and Task Owners from the email thread.
 2. Invoke get_all_owners Tool to retrieve the list of available owners.
 3. Parse and validate the deal owner against the available owners list:
     - If deal owner is NOT specified at all:
@@ -517,10 +517,21 @@ Steps:
         - If task owner IS specified and IS found in available owners list:
             - Use the matched owner (with correct casing from the available owners list)
             - Message: "Task owner for task [task_index] specified as [matched_owner_name]"
-5. Return a list of task owners with their validation details for ALL tasks to be created.
+5. Parse and validate the contact owner against the available owners list:
+    - If the deal details are not given and contact owner is also not specified:
+        - Default to: "Kishore"
+        - Message: "No contact owner specified, so assigning to default owner Kishore."
+    - If the deal details are not given and also contact owner IS specified but NOT found in available owners list:
+        - Default to: "Kishore"
+        - Message: "The specified contact owner '[parsed_owner]' is not valid, so assigning to default owner Kishore."
+    - If the deal details are given then contact owner is same as deal owner.
+6. Return a list of task owners with their validation details for ALL tasks to be created.
 
 Return this exact JSON structure:
 {{
+    "contact_owner_id": "71346067",
+    "contact_owner_name": "Kishore",
+    "contact_owner_message": "No contact owner specified, so assigning to default owner Kishore." OR "The specified contact owner '[parsed_owner]' is not valid, so assigning to default owner Kishore." OR "Contact owner specified as [name]",
     "deal_owner_id": "71346067",
     "deal_owner_name": "Kishore",
     "deal_owner_message": "No deal owner specified, so assigning to default owner Kishore." OR "The specified deal owner '[parsed_owner]' is not valid, so assigning to default owner Kishore." OR "Deal owner specified as [name]",
@@ -679,17 +690,26 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 def create_contacts(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_contacts = analysis_results.get("entities_to_create", {}).get("contacts", [])
-    
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    owner_info = ti.xcom_pull(key="owner_info", default={})
     if not to_create_contacts:
         logging.info("No contacts to create")
         ti.xcom_push(key="created_contacts", value=[])
         ti.xcom_push(key="contacts_errors", value=[])
         return []
-    
+    # Add owner info to each contact
+    contact_owner_id = owner_info.get("contact_owner_id", "71346067")
+    contact_owner_name = owner_info.get("contact_owner_name", "Kishore")
+    for contact in to_create_contacts:
+        if not contact.get("contactOwnerName"):
+            contact["contactOwnerName"] = contact_owner_name
+        if not contact.get("contactOwnerId"):
+            contact["contactOwnerId"] = contact_owner_id
     prompt = f"""Create contacts in HubSpot.
 
 Contact Details to Create:
 {json.dumps(to_create_contacts, indent=2)}
+Contact Owner: {contact_owner_name} (ID: {contact_owner_id})
 
 Steps:
 1. For each contact, invoke create_contact tool with the provided properties
@@ -706,14 +726,15 @@ Return ONLY this JSON structure (no other text):
                 "email": "value",
                 "phone": "value",
                 "address": "value",
-                "jobtitle": "value"
+                "jobtitle": "value",
+                "contactOwnerName": "value"
             }}
         }}
     ],
     "errors": []
 }}"""
 
-    response = get_ai_response(prompt, expect_json=True)
+    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
     
     try:
         parsed = json.loads(response)
@@ -1762,6 +1783,7 @@ def compose_response_html(ti, **context):
                     <th>Phone</th>
                     <th>Address</th>
                     <th>Job Title</th>
+                    <th>Contact Owner</th>
                     <th>Status</th>
                 </tr>
             </thead>
@@ -1778,6 +1800,7 @@ def compose_response_html(ti, **context):
                     <td>{details.get("phone", "")}</td>
                     <td>{details.get("address", "")}</td>
                     <td>{details.get("jobtitle", "")}</td>
+                    <td>{details.get("contactOwnerName", "")}</td>
                     <td>Existing</td>
                 </tr>
             """
@@ -1792,6 +1815,7 @@ def compose_response_html(ti, **context):
                     <td>{details.get("phone", "")}</td>
                     <td>{details.get("address", "")}</td>
                     <td>{details.get("jobtitle", "")}</td>
+                    <td>{details.get("contactOwnerName", "")}</td>
                     <td>Updated</td>
                 </tr>
             """
@@ -1918,6 +1942,7 @@ def compose_response_html(ti, **context):
                     <th>Phone</th>
                     <th>Address</th>
                     <th>Job Title</th>
+                    <th>Contact Owner</th>
                 </tr>
             </thead>
             <tbody>
@@ -1933,6 +1958,7 @@ def compose_response_html(ti, **context):
                     <td>{details.get("phone", "")}</td>
                     <td>{details.get("address", "")}</td>
                     <td>{details.get("jobtitle", "")}</td>
+                    <td>{details.get("contactOwnerName", "")}</td>
                 </tr>
             """
         email_content += "</tbody></table>"
