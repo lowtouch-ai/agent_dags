@@ -443,9 +443,10 @@ IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanati
 DEFAULT OWNER: Kishore (ID: 71346067)
 
 Steps:
-1. Parse the Deal Owner and Task Owners from the conversation.
+1. Parse the Deal Owner and Task Owners and contact Owners from the conversation.
 2. Invoke get_all_owners Tool to retrieve the list of available owners.
-3. Parse and validate the deal owner against the available owners list:
+3. The contact owner is the same as the deal owner. If deal is not given take the contact owner as the default one.
+4. Parse and validate the deal owner against the available owners list:
     - If deal owner is NOT specified at all:
         - Default to: "Kishore"
         - Message: "No deal owner specified, so assigning to default owner Kishore."
@@ -455,7 +456,7 @@ Steps:
     - If deal owner IS specified and IS found in available owners list:
         - Use the matched owner (with correct casing from the available owners list)
         - Message: "Deal owner specified as [matched_owner_name]"
-4. Parse and validate each task owner against the available owners list:
+5. Parse and validate each task owner against the available owners list:
     - Identify all tasks and their respective owners from the email content.
     - For each task owner:
         - If task owner is NOT specified for a task:
@@ -467,10 +468,21 @@ Steps:
         - If task owner IS specified and IS found in available owners list:
             - Use the matched owner (with correct casing from the available owners list)
             - Message: "Task owner for task [task_index] specified as [matched_owner_name]"
-5. Return a list of task owners with their validation details.
+6. Parse and validate each contact owner against the available owners list:
+    - If the deal details are not given and contact owner is also not specified:
+        - Default to: "Kishore"
+        - Message: "No contact owner specified, so assigning to default owner Kishore."
+    - If the deal details are not given and also contact owner IS specified but NOT found in available owners list:
+        - Default to: "Kishore"
+        - Message: "The specified contact owner '[parsed_owner]' is not valid, so assigning to default owner Kishore."
+    - If the deal details are given then contact owner is same as deal owner.
+7. Return a list of task owners with their validation details.
 
 Return this exact JSON structure:
 {{
+    "contact_owner_id": "",
+    "contact_owner_name": "",
+    "contact_owner_message": "",
     "deal_owner_id": "",
     "deal_owner_name": "",
     "deal_owner_message": "",
@@ -620,7 +632,10 @@ def search_contacts(ti, **context):
     
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
+    owner_info = ti.xcom_pull(key="owner_info")
     
+    contact_owner_id = owner_info.get('contact_owner_id', '71346067')
+    contact_owner_name = owner_info.get('contact_owner_name', 'Kishore')
 
     prompt = f"""You are a HubSpot Contact Search Assistant. Your role is to **search** for existing contacts based on the email conversation.  
 **You CANNOT create contacts in HubSpot.**  
@@ -630,7 +645,8 @@ You may only **suggest** new contact details **when no match is found and the em
 
 LATEST USER MESSAGE:
 {latest_message}
-
+Validated Contact Owner ID: {contact_owner_id}
+Validated Contact Owner Name: {contact_owner_name}
 ---
 
 **STRICT INSTRUCTIONS (execute in order):**
@@ -736,7 +752,7 @@ LATEST USER MESSAGE:
 5. If no matches for any contact: Move those to new_contacts, extracting proposed details (firstname/lastname from step 1, email/phone/jobtitle/address from thread context like signatures). For contacts with role indicators, populate jobtitle appropriately (e.g., if "(Ops)" was mentioned, set jobtitle to operations-related role). Fill ALL fields; use "" for missing.
 
 6. If no contacts extracted: Set contact_results total=0, results=[], new_contacts=[].
-
+7. For new contacts, use the validated contact owner name in contactOwnerName.
 
 Return this exact JSON structure:
 {{
@@ -771,7 +787,8 @@ Return this exact JSON structure:
             "email": "proposed_email",
             "phone": "proposed_phone",
             "address": "proposed_address",
-            "jobtitle": "proposed_job_title"
+            "jobtitle": "proposed_job_title",
+            "contactOwnerName": "{contact_owner_name}"
         }}
     ]
 }}
@@ -1229,6 +1246,9 @@ def compile_search_results(ti, **context):
             "tasks": notes_tasks_meeting.get("tasks", []),
             "meeting_details": notes_tasks_meeting.get("meeting_details", {})
         },
+        "contact_owner_id": owner_info.get("contact_owner_id", "71346067"),
+        "contact_owner_name": owner_info.get("contact_owner_name", "Kishore"),
+        "contact_owner_message": owner_info.get("contact_owner_message", ""),
         "deal_owner_id": owner_info.get("deal_owner_id", "71346067"),
         "deal_owner_name": owner_info.get("deal_owner_name", "Kishore"),
         "deal_owner_message": owner_info.get("deal_owner_message", ""),
@@ -1328,6 +1348,7 @@ def compose_confirmation_email(ti, **context):
                     <th>Phone</th>
                     <th>Address</th>
                     <th>Job Title</th>
+                    <th>Owner</th>
                 </tr>
             </thead>
             <tbody>
@@ -1342,6 +1363,7 @@ def compose_confirmation_email(ti, **context):
                     <td>{contact.get("phone", "")}</td>
                     <td>{contact.get("address", "")}</td>
                     <td>{contact.get("jobtitle", "")}</td>
+                    <td>{contact.get("contactOwnerName", "")}</td>
                 </tr>
             """
         email_content += "</tbody></table><hr>"
@@ -1454,6 +1476,7 @@ def compose_confirmation_email(ti, **context):
                         <th>Phone</th>
                         <th>Address</th>
                         <th>Job Title</th>
+                        <th>Owner</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1467,6 +1490,7 @@ def compose_confirmation_email(ti, **context):
                         <td>{contact.get("phone", "")}</td>
                         <td>{contact.get("address", "")}</td>
                         <td>{contact.get("jobtitle", "")}</td>
+                        <td>{contact.get("contactOwnerName", "")}</td>
                     </tr>
                 """
             email_content += "</tbody></table>"
@@ -1733,17 +1757,46 @@ def compose_confirmation_email(ti, **context):
     chosen_deal_owner_name = search_results.get("deal_owner_name", "Kishore")
     chosen_deal_owner_id = search_results.get("deal_owner_id", "71346067")
     deal_owner_msg = search_results.get("deal_owner_message", "")
+    contact_owner_id = search_results.get("contact_owner_id", "71346067")
+    contact_owner_name = search_results.get("contact_owner_name", "Kishore")
+    contact_owner_msg = search_results.get("contact_owner_message", "")
 
-    has_deals_or_tasks = (
+    has_deals_or_tasks_or_contacts = (
         deal_results.get("total", 0) > 0 or
         len(new_deals) > 0 or
-        len(meaningful_tasks) > 0
+        len(meaningful_tasks) > 0 or
+        contact_results.get("total", 0) > 0 or
+        len(new_contacts) > 0
     )
 
-    if has_deals_or_tasks:
+    if has_deals_or_tasks_or_contacts:
         has_content_sections = True
         email_content += "<h3>Owner Assignment Details</h3>"
         
+        # Contact Owner
+        if contact_results.get("total", 0) > 0 or len(new_contacts) > 0:
+            email_content += "<div style='margin-bottom: 15px;'>"
+            email_content += ""
+            
+            contact_msg_lower = contact_owner_msg.lower()
+            
+            if "no contact owner specified" in contact_msg_lower:
+                email_content += f"""
+                <h4 style='color: #2c5aa0;'>Contact Owner Assignment:</h4>
+                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
+                    <strong>Reason:</strong> Contact owner not specified.
+                    <br><strong>Action:</strong> Assigning to default owner '{contact_owner_name}'.
+                </p>
+                """
+            elif "not valid" in contact_msg_lower:
+                email_content += f"""
+                <h4 style='color: #2c5aa0;'>Contact Owner Assignment:</h4>
+                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
+                    <strong>Reason:</strong> Contact owner not found in available owners.
+                    <br><strong>Action:</strong> Assigning to default owner '{contact_owner_name}'.
+                </p>
+                """
+            email_content += "</div>"
         # Deal Owner
         if deal_results.get("total", 0) > 0 or len(new_deals) > 0:
             email_content += "<div style='margin-bottom: 15px;'>"
@@ -1827,6 +1880,8 @@ def compose_confirmation_email(ti, **context):
                 owner_email = owner.get("email", "")
                 
                 assignments = []
+                if owner_id == contact_owner_id and (contact_results.get("total", 0) > 0 or len(new_contacts) > 0):
+                    assignments.append("Contact Owner")
                 if owner_id == chosen_deal_owner_id and (deal_results.get("total", 0) > 0 or len(new_deals) > 0):
                     assignments.append("Deal Owner")
                 
@@ -1835,7 +1890,9 @@ def compose_confirmation_email(ti, **context):
                     assignments.append(f"Task Owner (Tasks {', '.join(task_indices)})")
                 
                 assignment_text = ", ".join(assignments) if assignments else ""
-                
+
+                if "Contact Owner" in assignments and "Task Owner" in assignments:
+                    row_style = ' style="background-color: #c3e6cb; border-left: 4px solid #155724;"'
                 if "Deal Owner" in assignments and "Task Owner" in assignments:
                     row_style = ' style="background-color: #d1ecf1; border-left: 4px solid #0c5460;"'
                 elif "Deal Owner" in assignments:
