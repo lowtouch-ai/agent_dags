@@ -84,7 +84,7 @@ def decode_email_payload(msg):
 def is_email_whitelisted(sender_email):
     """Check if sender email is in the whitelist."""
     try:
-        whitelisted = json.loads(Variable.get("ltai.v3.hubspot.email.whitelisted", default_var="[]"))
+        whitelisted = json.loads(Variable.get("ltai.v3.hubspot.email.whitelist", default_var="[]"))
         # Extract email from "Name <email@domain.com>" format
         email_match = re.search(r'<(.+?)>', sender_email)
         clean_email = email_match.group(1).lower() if email_match else sender_email.lower()
