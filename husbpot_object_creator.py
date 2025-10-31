@@ -1534,40 +1534,8 @@ AVAILABLE ENTITY IDS:
 - EXISTING Company IDs (from conversation): {existing_company_ids}
 - EXISTING Deal IDs (from conversation): {existing_deal_ids}
 CRITICAL ASSOCIATION RULES:
-
-1. **Associate NEW entities with EXISTING entities**:
-   - If a new note/task/meeting is created, associate it with ALL relevant existing contacts/companies/deals from the conversation
-   - If a new contact is created, associate it with existing companies/deals if mentioned
-
-2. **Extract Additional IDs from Conversation**:
-   - Look for entity IDs in HTML tables from bot responses
-   - Look for IDs mentioned by user (e.g., "associate with deal 12345")
-   - Common patterns: "contactId: 12345", "Deal ID: 67890", "associate with contact 99999"
-
-3. **Create Comprehensive Associations**:
-   - New notes should be associated with ALL relevant entities (both new and existing)
-   - New tasks should be associated with relevant deals/contacts/companies
-   - Don't just associate new with new - connect to the full context
-
-4. **Association Priority**:
-   - If user mentions specific entities to associate → Use those
-   - If context implies relationships → Create those associations
-   - If a note mentions people/companies → Associate with their records
-
-EXAMPLE SCENARIOS:
-
-Scenario 1: New note created about existing deal
-- Existing Deal ID: 11223344 (from conversation)
-- New Note ID: 234458809069
-- Action: Associate note with deal
-
-Scenario 2: New task created for existing contact
-- Existing Contact ID: 556677 (from conversation)
-- New Task ID: 998877
-- Action: Associate task with contact
-
+- Associate with all available ids.
 **IMPORTANT**: 
-    - For each new entity created, think about what existing entities it should be connected to based on the conversation context.
     - You can only create asssociation using tool `create_multi_association`
     - You can only create asssociation using tool `create_multi_association`
     - You MUST actually CALL the tool, not just output JSON
@@ -2406,6 +2374,7 @@ def compose_response_html(ti, **context):
 
 def send_final_email(ti, **context):
     """Send final completion email with proper recipient handling"""
+    import re
     email_data = ti.xcom_pull(key="email_data", default={})
     response_html = ti.xcom_pull(key="response_html")
     
