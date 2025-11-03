@@ -276,19 +276,15 @@ Based on the conversation, identify:
    If user wants to modify existing entities, identify which entities and what changes.
 
 5. **Selected Entities**:
-   Which existing entities should be used in this operation?
    
-   Selection rules:
-   - **Single-entry entities** (e.g., only one company): Include by default automatically
-   - **Multi-entry entities** (e.g., multiple contacts/deals): 
-     * If user mentions specific entities by name/ID, select only those
-     * If user says "proceed" or approves without specifics, select ALL
-     * If user excludes something, remove only that from selection
+   CRITICAL AUTO-INCLUSION RULE:
+   - If an entity type has ONLY ONE item, ALWAYS include it automatically
+   - Only apply selective inclusion for entity types with MULTIPLE items
    
    Example:
-   - Existing entities: Company "Acme Corp" (1), Contacts "John" & "Jane" (2), Deals "Q1" & "Q2" (2)
-   - User says "update the deal Q1"
-   - Selection: Company "Acme Corp" (auto-included), Contact "John" & "Jane", Deal "Q1" only
+   - 1 Company, 2 Contacts, 2 Deals
+   - User says "proceed with contact John and deal Q1"
+   - Result: Include ALL of: Company (auto), Contact John (specified), Deal Q1 (specified)
 
 GENERAL RULES:
 - Default behavior: Include everything (all existing entities + all proposed new objects)
