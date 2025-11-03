@@ -387,31 +387,30 @@ Return ONLY valid JSON:
 {{
     "user_intent": "PROCEED|MODIFY|EXCLUDE|CASUAL_COMMENT|CLARIFY|CANCEL",
     "confidence_level": "high|medium|low",
-    "selected_entities": {{
-        "contacts": [{{"contactId": "...", "firstname": "...", ...}}],
-        "companies": [{{"companyId": "...", "name": "...", ...}}],
-        "deals": [{{"dealId": "...", "dealName": "...", ...}}]
+    selected_entities": {{
+        "contacts": [{{"contactId": "...", "firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "...", "contactOwnerName": "..."}}],
+        "companies": [{{"companyId": "...", "name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
+        "deals": [{{"dealId": "...", "dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}]
     }},
     "entities_to_create": {{
-        "contacts": [...],
-        "companies": [...],
-        "deals": [...],
-        "meetings": [...],
-        "notes": [...],
-        "tasks": [...]
+        "contacts": [{{"firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "...", "contactOwnerName": "..."}}],
+        "companies": [{{"name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
+        "deals": [{{"dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}],
+        "meetings": [{{"meeting_title": "...", "start_time": "...", "end_time": "...", "location": "...", "outcome": "...", "timestamp": "...", "attendees": [], "meeting_type": "...", "meeting_status": "..."}}],
+        "notes": [{{"note_content": "...", "timestamp": "...", "note_type": "...", "speaker_name": "{{sender_name}}", "speaker_email": "{{sender_email}}"}}],
+        "tasks": [{{"task_details": "...", "task_owner_name": "...", "task_owner_id": "...", "due_date": "...", "priority": "...", "task_index": 1}}]
     }},
     "entities_to_update": {{
-        "contacts": [...],
-        "companies": [...],
-        "deals": [...],
-        "meetings": [...],
-        "notes": [...],
-        "tasks": [...]
+        "contacts": [{{"contactId": "...", "updates": {{"field": "new_value"}}}}],
+        "companies": [{{"companyId": "...", "updates": {{"field": "new_value"}}}}],
+        "deals": [{{"dealId": "...", "updates": {{"field": "new_value"}}}}],
+        "meetings": [],
+        "notes": [],
+        "tasks": [{{"taskId": "...", "taskbody": "...", "task_owner_name": "...", "task_owner_id": "...", "updates": {{"field": "new_value"}}}}]
     }},
     "casual_comments_detected": true|false,
-    "reasoning": "Explain what you extracted and why"
+    "reasoning": "Brief explanation of intent, selections, and entity actions. For casual comments, explain why it's just a comment and not an action request."
 }}
-
 REMEMBER:
 - Mentioning entity names = Select those specific existing entities, but CREATE all proposed objects
 - "Skip X" = Exclude only X, keep everything else
