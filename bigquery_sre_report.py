@@ -99,13 +99,13 @@ def check_slot_usage(ti, **context):
         threshold = Variable.get("BQ_SLOT_USAGE_THRESHOLD", 50)
         prompt = f"""
         Use the queryInstantMetric Tool to retrieve the highest slot usage in the last 1 hour for project 'sre-agent-9809', dataset 'webshop'.
-        Query to use: `max_over_time(bigquery_query_slot_time_seconds{{project_id=\"sre-agent-9809\", dataset_id=\"webshop\"}}[1h]) > {threshold}`
+        Query to use: `round(max_over_time(bigquery_query_slot_time_seconds{{project_id=\"sre-agent-9809\", dataset_id=\"webshop\"}}[1h])) > {threshold}`
         Analyze the result to:
         1. Report the peak slot usage.
         2. List the problematic queries causing the issue.
         3. Identify potential causes (e.g., complex queries, large joins).
         Present the response in markdown format with:
-        - **Peak Slot Usage**: Maximum slots used.
+        - **Peak Slot Usage**: Maximum slots used (include percentage comparison, e.g., `186 slots (x% more than the set threshold)`).
         - **Problematic Queries**: List of queries (with exact SQL text ) that contributed to high usage.
         - **Analysis**: Brief explanation of findings and potential issues, referencing schema if relevant  (e.g., joins on `articles.productid` or `order.customerid`) , provide the percentage of cost saving based on the findings.
         """
@@ -122,13 +122,13 @@ def check_execution_time(ti, **context):
         threshold = Variable.get("BQ_EXECUTION_TIME_THRESHOLD", 10.0)
         prompt = f"""
         Use the queryInstantMetric Tool to retrieve the maximum query execution time in the last 1 hour for project 'sre-agent-9809', dataset 'webshop'.
-        Query to use: `max_over_time(bigquery_query_execution_time_seconds{{project_id=\"sre-agent-9809\", dataset_id=\"webshop\"}}[1h]) > {threshold}`
+        Query to use: `round(max_over_time(bigquery_query_execution_time_seconds{{project_id=\"sre-agent-9809\", dataset_id=\"webshop\"}}[1h])) > {threshold}`
         Analyze the result to:
         1. Report the highest execution time.
         2. List the problematic queries causing the issue.
         3. Identify potential causes (e.g., unoptimized queries, lack of partitioning on `order.ordertimestamp`).
         Present the response in markdown format with:
-        - **Max Execution Time**: Highest execution time observed.
+        - **Max Execution Time**: Highest execution time observed (include percentage comparison, e.g., `19 seconds (x% more than the set threshold)`).
         - **Problematic Queries**: List of queries (with exact SQL text) that contributed to high execution times.
         - **Analysis**: Brief explanation of findings and potential issues, referencing schema if relevant , provide the percentage of cost saving based on the findings.
         """
@@ -144,15 +144,15 @@ def check_memory_usage(ti, **context):
     try:
         threshold = Variable.get("BQ_MEMORY_USAGE_THRESHOLD", 19)  # 19MB
         prompt = f"""
-        Use the queryInstantMetric Tool to retrieve the maximum memory usage (bytes scanned) in the last 1 hour for project 'sre-agent-9809', dataset 'webshop'.
+        Use the queryInstantMetric Tool to retrieve the maximum bytes processed (bytes scanned) in the last 1 hour for project 'sre-agent-9809', dataset 'webshop'.
         Query to use: `max_over_time(bigquery_data_scanned_bytes{{project_id=\"sre-agent-9809\", dataset_id=\"webshop\"}}[1h]) / 1024 / 1024 > {threshold}`
         Analyze the result to:
-        1. Report the peak memory usage in MB.
+        1. Report the peak bytes processed  in MB.
         2. List the problematic queries causing the issue.
         3. If the threshold is exceeded, identify potential causes (e.g., full table scans on `articles` or `order`).
         Present the response in markdown format with:
-        - **Peak Memory Usage**: Maximum bytes scanned (in MB).
-        - **Problematic Queries**: List of queries (with exact SQL text) that contributed to high memory usage.
+        - **Peak Bytes Processed**: Maximum bytes scanned (in MB) (include percentage comparison, e.g., `20 MB (x% more than the set threshold)`).
+        - **Problematic Queries**: List of queries (with exact SQL text) that contributed to high bytes processed.
         - **Analysis**: Brief explanation of findings and potential issues, referencing schema if relevant , provide the percentage of cost saving based on the findings.
         """
         response = get_ai_response(prompt)
@@ -168,7 +168,7 @@ def compile_analysis_report(ti, **context):
         execution_count = ti.xcom_pull(key="execution_count") or "No execution count data available."
         slot_usage = ti.xcom_pull(key="slot_usage") or "No slot usage data available."
         execution_time = ti.xcom_pull(key="execution_time") or "No execution time data available."
-        memory_usage = ti.xcom_pull(key="memory_usage") or "No memory usage data available."
+        memory_usage = ti.xcom_pull(key="memory_usage") or "No bytes processed data available."
 
         prompt = f"""
             
@@ -180,7 +180,7 @@ def compile_analysis_report(ti, **context):
         - Execution Count: {execution_count}
         - Slot Usage: {slot_usage}
         - Execution Time: {execution_time}
-        - Memory Usage: {memory_usage}
+        - bytes processed: {memory_usage}
 
         Your goal is **not** to rewrite or summarize these sections — instead:
         - Keep each section’s content **exactly as provided**.
@@ -200,7 +200,7 @@ def compile_analysis_report(ti, **context):
         Provide a concise but technically detailed overview including:
         - Total number of queries executed (from Execution Count section).
         - Count of total *unique* problematic queries across all sections (deduplicate any repeated ones).
-        - Key threshold exceedances (slot usage, execution time, memory usage) and their operational or cost implications.
+        - Key threshold exceedances (slot usage, execution time, bytes processed) and their operational or cost implications.
         - Brief summary of the main causes (e.g., large joins, lack of partitioning, self-joins, unoptimized filters).
         - Overall impact and high-level conclusion (performance degradation, slot inefficiency, cost increase).
 
@@ -228,10 +228,10 @@ def compile_analysis_report(ti, **context):
 
         
 
-        ### **Memory Usage**
-        - Include the **exact content** from the provided Memory Usage section ({memory_usage}).
+        ### **Bytes Processed**
+        - Include the **exact content** from the provided Bytes Processed section ({memory_usage}).
         - Then, add a **section summary** detailing:
-        - How memory usage correlates with scan size and complex computations.
+        - How bytes processed correlates with scan size and complex computations.
         - Impact on overall query efficiency and cost.
         - Technical recommendations (filter refinement, window function optimization, clustering).
 
@@ -384,7 +384,7 @@ def send_email(ti, **context):
             raise ValueError("Sender or receiver email not configured")
 
         msg = MIMEMultipart()
-        msg["From"] = f"BigQuery SRE agent via lowtouch.ai <{sender_email}>"
+        msg["From"] = f"BigQuery SRE agent powered by lowtouch.ai <{sender_email}>"
         msg["To"] = receiver_email
         msg["Subject"] = f"BigQuery SRE Report - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         msg.attach(MIMEText(cleaned_response, "html"))
