@@ -190,7 +190,6 @@ def analyze_user_response(ti, **context):
             "status": "error",
             "error_message": "No thread_id provided",
             "user_intent": "ERROR",
-            "confidence_level": "low",
             "entities_to_create": {},
             "entities_to_update": {},
             "selected_entities": {},
@@ -219,23 +218,20 @@ def analyze_user_response(ti, **context):
             "status": "error",
             "error_message": "No valid conversation content found",
             "user_intent": "ERROR",
-            "confidence_level": "low",
             "entities_to_create": {},
             "entities_to_update": {},
             "selected_entities": {},
             "tasks_to_execute": ["compose_response_html", "collect_and_save_results", "send_final_email"]
         }
         ti.xcom_push(key="analysis_results", value=default_result)
-        logging.info(f"Analysis results pushed to XCom: {default_result}")
         return default_result
     
-    # Get latest user message for context
+    # Get sender information
     sender_email = ""
     sender_name = ""
     for email in reversed(thread_history):
         if not email.get('from_bot', True):
             if email.get("content"):
-                soup = BeautifulSoup(email.get("content", ""), "html.parser")
                 sender_email = email.get('headers', {}).get('From', '')
                 # Extract name from "Name <email>" format
                 import re
@@ -245,146 +241,66 @@ def analyze_user_response(ti, **context):
                     sender_email = match.group(2).strip()
                 break
     
-    # SIMPLIFIED PROMPT - Focus on what user wants to change
-    prompt = f"""You are an AI assistant analyzing an email conversation to understand what the user wants to do with HubSpot entities.
+    prompt = f"""You are a HubSpot assistant analyzing an email conversation to understand what actions to take.
 
-LATEST USER MESSAGE:
-{latest_user_message}
 
 SENDER INFO:
 Name: {sender_name}
 Email: {sender_email}
 
 YOUR TASK:
-Parse the conversation history to extract:
-1. ALL existing entities from bot's confirmation email tables
-2. ALL proposed new entities from "Objects to be Created" tables
-3. Understand what user wants to do with them based on their latest message
+Based on the conversation, identify:
+1. **User Intent**: What does the user want to do?
+   - PROCEED: User wants to proceed with operations (approve, confirm, go ahead, yes, etc.)
+   - MODIFY: User wants to change something (update, change, modify, etc.)
+   - EXCLUDE: User wants to skip/exclude something (skip, don't create, exclude, etc.)
+   - CASUAL_COMMENT: Just making a comment/observation without requesting actions
+   - CLARIFY: User has questions or needs clarification
+   - CANCEL: User wants to stop/cancel the process
 
-EXTRACTION FROM CONVERSATION:
+2. **Existing Entities** (from bot's previous confirmation emails):
+   Extract IDs and details from tables showing:
+   - "Existing Contact Details" → contactId, firstname, lastname, email, phone, address, jobtitle, contactOwnerName
+   - "Existing Company Details" → companyId, name, domain, address, city, state, zip, country, phone, description, type
+   - "Existing Deal Details" → dealId, dealName, dealLabelName, dealAmount, closeDate, dealOwnerName
 
-**Existing Entities** (from bot's tables):
-- "Existing Contact Details" → contactId, firstname, lastname, email, phone, address, jobtitle, contactOwnerName
-- "Existing Company Details" → companyId, name, domain, address, city, state, zip, country, phone, description, type
-- "Existing Deal Details" → dealId, dealName, dealLabelName, dealAmount, closeDate, dealOwnerName
+3. **Entities to Create** (from bot's "Objects to be Created" tables):
+   - New Contacts → firstname, lastname, email, phone, address, jobtitle, contactOwnerName
+   - New Companies → name, domain, address, city, state, zip, country, phone, description, type
+   - New Deals → dealName, dealLabelName, dealAmount, closeDate, dealOwnerName
+   - Notes → note_content, timestamp, note_type, speaker_name, speaker_email
+   - Tasks → task_details, task_owner_name, task_owner_id, due_date, priority, task_index
+   - Meetings → meeting_title, start_time, end_time, location, outcome, attendees
 
-**Proposed New Objects** (from "Objects to be Created"):
-- "New Contacts" → firstname, lastname, email, phone, address, jobtitle, contactOwnerName
-- "New Companies" → name, domain, address, city, state, zip, country, phone, description, type
-- "New Deals" → dealName, dealLabelName, dealAmount, closeDate, dealOwnerName
-- "Notes" → note_content, timestamp, note_type
-- "Tasks" → task_details, task_owner_name, task_owner_id, due_date, priority, task_index
-- "Meeting Details" → meeting_title, start_time, end_time, location, outcome, attendees
+4. **Entities to Update**:
+   If user wants to modify existing entities, identify which entities and what changes.
 
-SIMPLE RULES:
+5. **Selected Entities**:
+   Which existing entities should be used in this operation?
+   
+   Selection rules:
+   - **Single-entry entities** (e.g., only one company): Include by default automatically
+   - **Multi-entry entities** (e.g., multiple contacts/deals): 
+     * If user mentions specific entities by name/ID, select only those
+     * If user says "proceed" or approves without specifics, select ALL
+     * If user excludes something, remove only that from selection
+   
+   Example:
+   - Existing entities: Company "Acme Corp" (1), Contacts "John" & "Jane" (2), Deals "Q1" & "Q2" (2)
+   - User says "update the deal Q1"
+   - Selection: Company "Acme Corp" (auto-included), Contact "John" & "Jane", Deal "Q1" only
 
-**Rule 1: Default Behavior (No specific inclusions/exclusions mentioned)**
-- If user just says "proceed", "go ahead", "yes", "looks good", "ok"
-- Action: Include ALL existing entities + ALL proposed new objects
-- Example: "proceed" → Use everything
+GENERAL RULES:
+- Default behavior: Include everything (all existing entities + all proposed new objects)
+- If user mentions specific entities: Select only those entities, but still create all proposed new objects
+- If user says to skip/exclude something: Remove only that item
+- If user wants to modify: Identify the changes needed
+- For casual comments: Create a note with the comment
+- Current timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-**Rule 2: Specific Selection (User mentions specific entities to use)**
-- If user mentions specific contacts/companies/deals by name or ID
-- Action: 
-  * selected_entities: ONLY the mentioned existing entities
-  * entities_to_create: ALL proposed new objects (unchanged)
-- Example: "proceed with Kunal and the TCW deal" → 
-  * Use only Kunal contact + TCW deal from existing
-  * Still create all proposed objects (company, notes, tasks)
-
-**Rule 3: Exclusions (User says to skip/exclude/ignore something)**
-- If user says "skip X", "exclude X", "don't create X", "ignore X", "without X"
-- Action: Remove ONLY the excluded items, keep everything else
-- Example: "proceed but skip the tasks" →
-  * Use all existing entities
-  * Create all proposed objects EXCEPT tasks
-
-**Rule 4: Modifications (User wants to change something)**
-- If user says "change X to Y", "update X", "make X = Y"
-- Action:
-  * entities_to_update: Put the specific changes
-  * selected_entities: All existing entities
-  * entities_to_create: All proposed objects that aren't being updated
-
-**Rule 5: Casual Comments (Just observations, no actions)**
-- If user is just commenting without any action words
-- Examples: "this looks interesting", "great opportunity", "I like this client"
-- Action:
-  * Create a note with the comment
-  * selected_entities: All existing entities
-  * entities_to_create: Only the note
-
-**Rule 6: Cancel/Clarify**
-- Cancel: "cancel", "stop", "never mind" → Empty everything
-- Clarify: Questions or confusion → Empty everything
-
-INTENT CLASSIFICATION:
-- PROCEED: User approves (with or without mentioning specific entities)
-- MODIFY: User requests changes to specific fields
-- EXCLUDE: User wants to skip specific items
-- CASUAL_COMMENT: Just commenting, no action
-- CLARIFY: User asking questions
-- CANCEL: User stopping the process
-
-CRITICAL LOGIC:
-```
-IF user mentions specific contact/company/deal names:
-    selected_entities = ONLY those specific entities
-    entities_to_create = ALL proposed new objects (no change)
-    
-IF user says "skip/exclude [something]":
-    Remove only that something from entities_to_create
-    selected_entities = ALL existing entities
-    entities_to_create = ALL proposed objects EXCEPT excluded ones
-    
-IF user says "proceed" or "yes" (no specifics):
-    selected_entities = ALL existing entities
-    entities_to_create = ALL proposed new objects
-    
-IF user says "change [field]":
-    entities_to_update = The specific change
-    selected_entities = ALL existing entities
-    entities_to_create = ALL proposed objects except the one being updated
-```
-
-EXAMPLES:
-
-1. "proceed with Kunal and the deal"
-   - Intent: PROCEED
-   - selected_entities: {{"contacts": [Kunal], "companies": [], "deals": [TCW deal]}}
-   - entities_to_create: {{"companies": [TCW company], "notes": [meeting note], "tasks": [follow-up task], ...}}
-   - Reasoning: "User selected specific existing entities but didn't exclude any proposed objects"
-
-2. "proceed but skip the tasks"
-   - Intent: EXCLUDE
-   - selected_entities: {{"contacts": [ALL], "companies": [], "deals": [ALL]}}
-   - entities_to_create: {{"companies": [TCW], "notes": [note], "tasks": [], ...}}
-   - Reasoning: "User excluded tasks, keep everything else"
-
-3. "yes, go ahead"
-   - Intent: PROCEED
-   - selected_entities: {{"contacts": [ALL], "companies": [], "deals": [ALL]}}
-   - entities_to_create: {{"companies": [ALL], "notes": [ALL], "tasks": [ALL], ...}}
-   - Reasoning: "User approved everything"
-
-4. "change the task due date to Nov 10"
-   - Intent: MODIFY
-   - selected_entities: {{"contacts": [ALL], "companies": [], "deals": [ALL]}}
-   - entities_to_update: {{"tasks": [{{"taskId": "...", "updates": {{"due_date": "2025-11-10"}}}}]}}
-   - entities_to_create: {{"companies": [ALL], "notes": [ALL], "tasks": [], ...}}
-   - Reasoning: "User modifying existing task, create other proposed objects"
-
-5. "this looks great"
-   - Intent: CASUAL_COMMENT
-   - selected_entities: {{"contacts": [ALL], "companies": [], "deals": [ALL]}}
-   - entities_to_create: {{"notes": [{{"note_content": "this looks great", "speaker_name": "{sender_name}"}}]}}
-   - Reasoning: "Just a comment, create note only, keep existing entities"
-
-Return ONLY valid JSON:
+Return ONLY valid JSON (no markdown, no explanations):
 {{
-    "user_intent": "PROCEED|MODIFY|EXCLUDE|CASUAL_COMMENT|CLARIFY|CANCEL",
-    "confidence_level": "high|medium|low",
-    selected_entities": {{
+    "selected_entities": {{
         "contacts": [{{"contactId": "...", "firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "...", "contactOwnerName": "..."}}],
         "companies": [{{"companyId": "...", "name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
         "deals": [{{"dealId": "...", "dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}]
@@ -394,7 +310,7 @@ Return ONLY valid JSON:
         "companies": [{{"name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
         "deals": [{{"dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}],
         "meetings": [{{"meeting_title": "...", "start_time": "...", "end_time": "...", "location": "...", "outcome": "...", "timestamp": "...", "attendees": [], "meeting_type": "...", "meeting_status": "..."}}],
-        "notes": [{{"note_content": "...", "timestamp": "...", "note_type": "...", "speaker_name": "{{sender_name}}", "speaker_email": "{{sender_email}}"}}],
+        "notes": [{{"note_content": "...", "timestamp": "...", "note_type": "...", "speaker_name": "{sender_name}", "speaker_email": "{sender_email}"}}],
         "tasks": [{{"task_details": "...", "task_owner_name": "...", "task_owner_id": "...", "due_date": "...", "priority": "...", "task_index": 1}}]
     }},
     "entities_to_update": {{
@@ -405,132 +321,97 @@ Return ONLY valid JSON:
         "notes": [],
         "tasks": [{{"taskId": "...", "taskbody": "...", "task_owner_name": "...", "task_owner_id": "...", "updates": {{"field": "new_value"}}}}]
     }},
-    "casual_comments_detected": true|false,
-    "reasoning": "Brief explanation of intent, selections, and entity actions. For casual comments, explain why it's just a comment and not an action request."
+    "reasoning": "Brief explanation of what you understood from the conversation and what actions you're taking"
 }}
-REMEMBER:
-- Mentioning entity names = Select those specific existing entities, but CREATE all proposed objects
-- "Skip X" = Exclude only X, keep everything else
-- "Proceed" alone = Use all existing + create all proposed
-- Always preserve entity IDs exactly as found in tables
-- Current timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
 
     response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    logging.info(f"Prompt is :{prompt}")
-    logging.info(f"conversation_history is :{chat_history}")
     
     try:
         parsed_analysis = json.loads(response)
         user_intent = parsed_analysis.get("user_intent", "PROCEED")
-        confidence_level = parsed_analysis.get("confidence_level", "medium")
         entities_to_create = parsed_analysis.get("entities_to_create", {})
         entities_to_update = parsed_analysis.get("entities_to_update", {})
         selected_entities = parsed_analysis.get("selected_entities", {})
         
-        # Task determination logic remains exactly the same
+        # Simple task determination based on what entities exist
         tasks_to_execute = []
         should_determine_owner = False
         should_check_task_threshold = False
         
-        if user_intent == "CASUAL_COMMENT":
-            if entities_to_create.get("notes"):
-                tasks_to_execute.append("create_notes")
-            tasks_to_execute.extend(["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"])
-            
-        elif user_intent in ["MODIFY", "PROCEED", "EXCLUDE"]:
-            # Check for updates first
-            if entities_to_update.get("tasks"):
-                tasks_to_execute.append("update_tasks")
-            if entities_to_update.get("contacts"):
-                tasks_to_execute.append("update_contacts")
-            if entities_to_update.get("companies"):
-                tasks_to_execute.append("update_companies")
-            if entities_to_update.get("deals"):
-                tasks_to_execute.append("update_deals")
-            if entities_to_update.get("meetings"):
-                tasks_to_execute.append("update_meetings")
-            if entities_to_update.get("notes"):
-                tasks_to_execute.append("update_notes")
-            
-            # Check for creates
-            if entities_to_create.get("contacts"):
-                tasks_to_execute.append("create_contacts")
-            if entities_to_create.get("companies"):
-                tasks_to_execute.append("create_companies")
-            if entities_to_create.get("deals"):
-                tasks_to_execute.append("create_deals")
-                should_determine_owner = True
-            if entities_to_create.get("meetings"):
-                tasks_to_execute.append("create_meetings")
-            if entities_to_create.get("notes"):
-                tasks_to_execute.append("create_notes")
-            if entities_to_create.get("tasks"):
-                tasks_to_execute.append("create_tasks")
-                should_determine_owner = True
-                should_check_task_threshold = True
-                
-            tasks_to_execute.extend(["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"])
+        # Check if we need owner determination
+        if entities_to_create.get("deals") or entities_to_create.get("tasks"):
+            should_determine_owner = True
+            tasks_to_execute.append("determine_owner")
         
-        elif user_intent == "CLARIFY":
-            tasks_to_execute = ["compose_response_html", "collect_and_save_results", "send_final_email"]
-        elif user_intent == "CANCEL":
-            tasks_to_execute = ["compose_response_html", "collect_and_save_results", "send_final_email"]
-        else:
-            tasks_to_execute = ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
+        # Check if we need task threshold checking
+        if entities_to_create.get("tasks"):
+            should_check_task_threshold = True
+            tasks_to_execute.append("check_task_threshold")
         
-        # Insert owner determination and threshold checks at the beginning if needed
-        if should_check_task_threshold:
-            tasks_to_execute.insert(0, "check_task_threshold")
-        if should_determine_owner:
-            tasks_to_execute.insert(0, "determine_owner")
+        # Add update tasks
+        if entities_to_update.get("contacts"):
+            tasks_to_execute.append("update_contacts")
+        if entities_to_update.get("companies"):
+            tasks_to_execute.append("update_companies")
+        if entities_to_update.get("deals"):
+            tasks_to_execute.append("update_deals")
+        if entities_to_update.get("meetings"):
+            tasks_to_execute.append("update_meetings")
+        if entities_to_update.get("notes"):
+            tasks_to_execute.append("update_notes")
+        if entities_to_update.get("tasks"):
+            tasks_to_execute.append("update_tasks")
+        
+        # Add create tasks
+        if entities_to_create.get("contacts"):
+            tasks_to_execute.append("create_contacts")
+        if entities_to_create.get("companies"):
+            tasks_to_execute.append("create_companies")
+        if entities_to_create.get("deals"):
+            tasks_to_execute.append("create_deals")
+        if entities_to_create.get("meetings"):
+            tasks_to_execute.append("create_meetings")
+        if entities_to_create.get("notes"):
+            tasks_to_execute.append("create_notes")
+        if entities_to_create.get("tasks"):
+            tasks_to_execute.append("create_tasks")
+        
+        # Always add these mandatory tasks at the end
+        tasks_to_execute.extend(["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"])
         
         results = {
             "status": "success",
             "user_intent": user_intent,
-            "confidence_level": confidence_level,
             "entities_to_create": entities_to_create,
             "entities_to_update": entities_to_update,
             "selected_entities": selected_entities,
             "reasoning": parsed_analysis.get("reasoning", ""),
             "tasks_to_execute": tasks_to_execute,
             "should_determine_owner": should_determine_owner,
-            "should_check_task_threshold": should_check_task_threshold,
-            "casual_comments_detected": parsed_analysis.get("casual_comments_detected", False)
+            "should_check_task_threshold": should_check_task_threshold
         }
         
-        logging.info(f"Analysis completed: Intent={user_intent}, Confidence={confidence_level}")
+        logging.info(f"Analysis completed: Intent={user_intent}")
         logging.info(f"Tasks to execute: {tasks_to_execute}")
-        logging.info(f"Selected entities: Contacts={len(selected_entities.get('contacts', []))}, "
-                    f"Companies={len(selected_entities.get('companies', []))}, "
-                    f"Deals={len(selected_entities.get('deals', []))}")
-        logging.info(f"Entities to create: Contacts={len(entities_to_create.get('contacts', []))}, "
-                    f"Companies={len(entities_to_create.get('companies', []))}, "
-                    f"Deals={len(entities_to_create.get('deals', []))}, "
-                    f"Meetings={len(entities_to_create.get('meetings', []))}, "
-                    f"Notes={len(entities_to_create.get('notes', []))}, "
-                    f"Tasks={len(entities_to_create.get('tasks', []))}")
+        logging.info(f"Reasoning: {results['reasoning']}")
         
     except json.JSONDecodeError as e:
         logging.error(f"Failed to parse AI analysis: {e}")
         logging.error(f"Raw AI response: {response}")
         
-        # Fallback analysis
-        user_intent = "PROCEED"
-        
+        # Fallback
         results = {
             "status": "error",
             "error_message": f"Failed to parse AI analysis: {str(e)}",
-            "user_intent": user_intent,
-            "confidence_level": "low",
+            "user_intent": "PROCEED",
             "entities_to_create": {},
             "entities_to_update": {},
             "selected_entities": {},
             "reasoning": "Fallback analysis due to AI parsing error",
             "tasks_to_execute": ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"],
             "should_determine_owner": False,
-            "should_check_task_threshold": False,
-            "casual_comments_detected": False
+            "should_check_task_threshold": False
         }
     
     ti.xcom_push(key="analysis_results", value=results)
