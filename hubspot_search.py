@@ -850,10 +850,9 @@ LATEST USER MESSAGE:
    - Extract **one company per distinct entity**.
 
 2. **For each extracted company name**:
-   - **Simulate a HubSpot `search_companies` API call** using exact match on `name`.
-   - Use **EQ operator** on `name` property for precision.
-   - Assume API returns matching records or empty list.
-
+   - **Simulate a HubSpot `search_companies` API call** using 90 percent match on `name`.
+   - Use **CONTAINS_TOKEN operator** on `name` property for precision. 
+   - Assume API returns matching records or empty list. Display only the most matching results in the matching records 
    **Search payload template**:
    {{{{
        "filterGroups": [
@@ -861,7 +860,7 @@ LATEST USER MESSAGE:
                "filters": [
                    {{{{
                        "propertyName": "name",
-                       "operator": "EQ",
+                       "operator": "CONTAINS_TOKEN",
                        "value": "{{{{extracted_company_name}}}}"
                    }}}}
                ]
