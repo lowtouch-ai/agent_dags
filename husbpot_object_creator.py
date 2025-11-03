@@ -248,9 +248,6 @@ def analyze_user_response(ti, **context):
     # SIMPLIFIED PROMPT - Focus on what user wants to change
     prompt = f"""You are an AI assistant analyzing an email conversation to understand what the user wants to do with HubSpot entities.
 
-CONVERSATION HISTORY:
-{conversation_context}
-
 LATEST USER MESSAGE:
 {latest_user_message}
 
