@@ -285,7 +285,19 @@ Based on the conversation, identify:
    - 1 Company, 2 Contacts, 2 Deals
    - User says "proceed with contact John and deal Q1"
    - Result: Include ALL of: Company (auto), Contact John (specified), Deal Q1 (specified)
-
+   
+6. **Casual Comment Handling**:
+   - If the latest message is a casual comment (opinion, feedback, observation) with NO action requests:
+     - Create a note with the comment text
+     - Include speaker name and email from SENDER INFO
+     - Use current timestamp
+     - DO NOT create contacts, companies, deals, tasks, or meetings
+     - **IMPORTANT: Still populate selected_entities with ALL existing entities id from the conversation history**
+   - Examples of casual comments:
+     * "It was great to have this deal and I think its an interesting one"
+     * "This client is really engaged"
+     * "Looking forward to working with them"
+     * "Great progress on this deal"
 GENERAL RULES:
 - Default behavior: Include everything (all existing entities + all proposed new objects)
 - If user mentions specific entities: Select only those entities, but still create all proposed new objects
@@ -293,8 +305,7 @@ GENERAL RULES:
 - If user wants to modify: Identify the changes needed
 - For casual comments: Create a note with the comment
 - Current timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-IMPORTANT RULES:
-- Always create notes when user adds a casual comment. Include the comment as note_content in notes section in entities_to_create. 
+
 Return ONLY valid JSON (no markdown, no explanations):
 {{
     "selected_entities": {{
