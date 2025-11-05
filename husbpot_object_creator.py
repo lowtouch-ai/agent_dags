@@ -293,7 +293,8 @@ GENERAL RULES:
 - If user wants to modify: Identify the changes needed
 - For casual comments: Create a note with the comment
 - Current timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
+IMPORTANT RULES:
+- Always create notes when user adds a casual comment. Include the comment as note_content in notes section in entities_to_create. 
 Return ONLY valid JSON (no markdown, no explanations):
 {{
     "selected_entities": {{
