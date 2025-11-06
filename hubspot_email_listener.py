@@ -344,6 +344,7 @@ def fetch_unread_emails(**kwargs):
             continue
         logging.info(f"Processing message ID: {msg_id}, From: {sender}, Timestamp: {timestamp}, Thread ID: {thread_id}")
         
+        
         # ✅ Construct email_object with all headers INCLUDING recipient headers
         email_object = {
             "id": msg_id,
@@ -491,6 +492,7 @@ EMAILS TO CLASSIFY:
 Important Instructions:
     - You are not capable of calling any APIs or tools.
     - You should only answer based on your knowledge and the provided email details.
+    - Hubspot functions include: searching and creating contacts, companies, deals, meetings, tasks, logging notes, and summarizing engagements, casual comments based on context etc.
 SEARCH_DAG CAPABILITIES:
 - Searches for existing contacts, companies, deals in HubSpot
 - Extracts entity information from conversations
@@ -506,15 +508,16 @@ CONTINUATION_DAG CAPABILITIES:
 - Creates tasks with owners and due dates
 - Records engagements and associations
 - Handles user confirmations and modifications
-- Processes casual comments as notes
+- Parses the latest_message and if it is casual comment for the conversation history add it as notes.
 
 NO_ACTION CAPABILITIES:
 - Recognizes greetings, closings, and simple acknowledgments
 - Outputs friendly responses without further action
 - Handles questions about bot capabilities or general chat
 - Does not perform any HubSpot operations
-- Dont have the capability to respond to casual comments.
-
+- Ignore casual comments about hubspot context.
+- Handles blank emails without content or context. 
+- Handles any queries out of hubspot.
 ROUTING DECISION TREE:
 
 1. **NO ACTION NEEDED** (Return: no_action)
@@ -522,6 +525,8 @@ ROUTING DECISION TREE:
    - Closings: "thanks", "thank you", "goodbye", "bye", "have a good day"
    - Simple acknowledgments: "ok", "got it", "understood", "sounds good"
    - Questions about bot capabilities or general chat
+   - If the email lacks content or context.
+   - If the email is about topics outside HubSpot functionalities. 
    → Response: {{"task_type": "no_action", "message": "friendly_response"}}
 
 2. **SEARCH & ANALYZE** (Route to: search_dag)
@@ -539,7 +544,7 @@ ROUTING DECISION TREE:
    When user is:
    - Responding to bot's confirmation request ("proceed", "yes", "confirm", "looks good")
    - Making corrections to bot's proposed actions
-   - Adding casual comments about existing deals/clients (no new entities)
+   - Adding casual comments about existing deals/clients (no new entities) or between the conversation.
    - Updating existing records without creating new ones
    
    Keywords: "proceed", "confirm", "yes", "update", "modify", "change"
@@ -576,7 +581,6 @@ Return ONLY valid JSON:
         expect_json=True
     )
     logging.info(f"AI routing response: {response}")
-    
     # Parse JSON response
     try:
         json_response = json.loads(response)
@@ -757,6 +761,10 @@ def handle_general_queries(**kwargs):
         try:
             # Get AI response for friendly reply
             prompt = f"""You are a friendly AI assistant. The user sent: '{email.get("content", "")}'. 
+
+            General Instructions :
+                - If the query is out of HubSpot context, politely inform the user that you are specialized in HubSpot-related tasks.
+                - If the email lacks content or context, ask the user for more information.
             Provide a polite, friendly response acknowledging their message. Keep it concise, professional, and appropriate for email.
             Return only the plain text response, no markdown or HTML."""
             
@@ -908,7 +916,7 @@ with DAG(
         provide_context=True
     )
 
-    handle_general_queries_task = PythonOperator(
+    handle_no_action_task = PythonOperator(
     task_id="handle_general_queries",
     python_callable=handle_general_queries,
     provide_context=True
@@ -920,4 +928,4 @@ with DAG(
         provide_context=True
     )
 
-    fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_general_queries_task,no_email_found_task]
+    fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_no_action_task,no_email_found_task]
