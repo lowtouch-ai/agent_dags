@@ -841,7 +841,7 @@ LATEST USER MESSAGE:
 
 **STRICT INSTRUCTIONS (execute in order):**
 
-1. **Extract company name(s)** from the conversation:
+1. **Extract company name(s) and email** from the conversation:
    - Look for formal company names (e.g., "Acme Corp", "TechFlow Inc.", "Neha's Startup").
    - **Exclude**:
      - Internal references to your own company.
@@ -861,7 +861,12 @@ LATEST USER MESSAGE:
                    {{{{
                        "propertyName": "name",
                        "operator": "CONTAINS_TOKEN",
-                       "value": "{{{{extracted_company_name}}}}"
+                       "value": "{{{{extracted_company_name}}}}",
+
+                       "propertyName": "email",
+                       "operator": "CONTAINS_TOKEN",
+                       "value": "{{{{extracted_company_email}}}}"
+
                    }}}}
                ]
            }}}}
