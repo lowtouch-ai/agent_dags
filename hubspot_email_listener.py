@@ -916,7 +916,7 @@ with DAG(
         provide_context=True
     )
 
-    handle_no_action_task = PythonOperator(
+    handle_general_queries_task = PythonOperator(
     task_id="handle_general_queries",
     python_callable=handle_general_queries,
     provide_context=True
@@ -928,4 +928,4 @@ with DAG(
         provide_context=True
     )
 
-    fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_no_action_task,no_email_found_task]
+    fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_general_queries_task,no_email_found_task]
