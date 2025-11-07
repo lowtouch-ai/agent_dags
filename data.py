@@ -14,8 +14,8 @@ default_args = {
 }
 
 dbt_project_dir = "/appz/home/airflow/dags/agent_dags/dbt/webshop"
-dbt_executable_path = "/dbt_venv/bin/dbt"
-dbt_venv_path = "/dbt_venv/bin/activate"
+dbt_executable_path = "/opt/venv/bin/dbt"
+dbt_venv_path = "/opt/venv/bin/activate"
 
 postgres_user = Variable.get("WEBSHOP_POSTGRES_USER")
 postgres_password = Variable.get("WEBSHOP_POSTGRES_PASSWORD")
