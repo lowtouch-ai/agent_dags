@@ -167,7 +167,7 @@ def parse_monitor_data(monitor):
     custom_uptime = [x.strip() for x in monitor.get('custom_uptime_ratio', '').split('-') if x.strip()]
     custom_down = [x.strip() for x in monitor.get('custom_down_durations', '').split('-') if x.strip()]
     # Use index [1] for 7-day data (indices: [0]=1d, [1]=7d, [2]=30d, [3]=365d)
-    uptime_7d = f"{float(custom_uptime[1]):.3f}%" if len(custom_uptime) > 1 else "N/A"
+    uptime_7d = f"{float(custom_uptime[1]):.2f}%" if len(custom_uptime) > 1 else "N/A"
     down_sec_7d = int(custom_down[1]) if len(custom_down) > 1 else 0
     downtime_7d = f"{down_sec_7d / 60:.1f} minutes" if down_sec_7d > 0 else "0 minutes"
     logs = monitor.get('logs', [])
@@ -257,6 +257,9 @@ def step_1_fetch_data(ti, **context):
     ti.xcom_push(key="logs", value=json.dumps(logs))
     ti.xcom_push(key="structured_prev", value=json.dumps(structured_prev))
     ti.xcom_push(key="df_prev", value=df_prev.to_json(orient='records', date_format='iso'))
+    ti.xcom_push(key="report_week_start_dt", value=report_week_start_dt.strftime('%Y-%m-%d'))
+    ti.xcom_push(key="report_week_end_dt", value=report_week_end_dt.strftime('%Y-%m-%d'))
+
     
     logging.info("Data fetch completed.")
     return structured_current
@@ -438,6 +441,8 @@ def step_3_generate_plot(ti, **context):
         structured_str = ti.xcom_pull(key="structured_current")
         structured = json.loads(structured_str)
         monitor_name = structured.get("monitor_information", {}).get("monitor_name", "Default Monitor")
+        report_week_start_dt = ti.xcom_pull(key="report_week_start_dt")
+        report_week_end_dt = ti.xcom_pull(key="report_week_end_dt")
         
         df_current_json = ti.xcom_pull(key="df_current")
         df_current = pd.read_json(io.StringIO(df_current_json), orient='records')
@@ -487,7 +492,7 @@ def step_3_generate_plot(ti, **context):
             ax.set_ylim(bottom=0, top=df_current['value'].max() * 1.2)
         
         ax.set_title(
-            f"Response Time: Week-over-Week Comparison for {monitor_name}",
+            f"Response Time: Week-over-Week Comparison for {monitor_name} from {report_week_start_dt} to {report_week_end_dt}",
             fontsize=18, fontweight='bold', color='white'
         )
         ax.set_xlabel("Datetime", fontsize=14)
@@ -533,6 +538,8 @@ def step_4_compose_email(ti, **context):
     try:
         structured_str = ti.xcom_pull(key="structured_current")
         structured = json.loads(structured_str)
+        report_week_start_date = ti.xcom_pull(key="report_week_start_dt", default="N/A")
+        report_week_end_date = ti.xcom_pull(key="report_week_end_dt", default="N/A")
         
         analysis_str = ti.xcom_pull(key="analysis")
         analysis = json.loads(analysis_str)
@@ -548,6 +555,8 @@ def step_4_compose_email(ti, **context):
         structured = {}
         analysis = {}
         logs = []
+        report_week_start_date = "N/A"
+        report_week_end_date = "N/A"
         chart_html = '<p style="color: #dc3545; font-weight: bold;">Failed to load report data.</p>'
 
     # 3. Define Embedded CSS Styles
@@ -643,6 +652,10 @@ def step_4_compose_email(ti, **context):
             border: 1px solid #e0eafc;
             border-radius: 5px;
         }
+        .ai-section.alert-section {
+            border-left: 4px solid #dc3545;
+            background-color: #f8d7da33;
+        }
         .ai-section h3 {
             margin-top: 0;
             margin-bottom: 10px;
@@ -692,7 +705,6 @@ def step_4_compose_email(ti, **context):
     
     monitor_name = monitor_info.get('monitor_name', 'N/A')
     monitor_id = monitor_info.get('monitor_id', 'N/A')
-    monitor_url = monitor_info.get('monitor_url', 'N/A')
 
     html = f"""
     <!DOCTYPE html>
@@ -706,11 +718,11 @@ def step_4_compose_email(ti, **context):
     <body>
         <div class="container">
             <div class="header">
-                <h1>{report_type} Uptime Report</h1>
+                <h1>{report_type} Uptime Report - {report_week_start_date} to {report_week_end_date}</h1>
             </div>
             <div class="content">
                 <p>Dear Team,</p>
-                <p>Please find below the {report_type.lower()} uptime report for the monitor: <strong>{monitor_name}</strong>.</p>
+                <p>Please find below the {report_type.lower()} uptime report for the date <strong>{report_week_start_date}</strong> to <strong>{report_week_end_date}</strong> for the monitor: <strong>{monitor_name}</strong>.</p>
                 
                 <div class="section">
                     <h2>Monitor Information</h2>
@@ -722,10 +734,6 @@ def step_4_compose_email(ti, **context):
                         <tr>
                             <td>Monitor ID</td>
                             <td>{monitor_id}</td>
-                        </tr>
-                        <tr>
-                            <td>URL</td>
-                            <td>{monitor_url}</td>
                         </tr>
                     </table>
                 </div>
@@ -847,7 +855,7 @@ def step_4_compose_email(ti, **context):
                     <h2>AI Analysis</h2>
     """
     sections = [
-        ("Anomaly Detection", analysis.get("anomaly_detection", "N/A")),
+        ("Anomaly Detection (Response Time)", analysis.get("anomaly_detection", "N/A")),
         ("Root Cause Analysis", analysis.get("rca", "N/A")),
         ("Comparative Analysis", analysis.get("comparative_analysis", "N/A"))
     ]
@@ -858,6 +866,18 @@ def step_4_compose_email(ti, **context):
         content_str = str(content)
         if content and content_str != "N/A" and "error" not in content_str.lower():
             has_ai_content = True
+
+            content_lower = content_str.lower()
+            class_add = ""
+            if title == "Anomaly Detection (Response Time)":
+                if any(word in content_lower for word in ["detected", "spike", "unusual"]):
+                    class_add = "alert-section"
+            elif title == "Root Cause Analysis":
+                if "no incidents requiring rca" not in content_lower:
+                    class_add = "alert-section"
+            elif title == "Comparative Analysis":
+                if "degradation" in content_lower:
+                    class_add = "alert-section"
             
             # Detect and format bullets vs paragraphs
             if title in ["Root Cause Analysis", "Comparative Analysis"] or content_str.startswith('-') or '\n-' in content_str:
@@ -872,7 +892,7 @@ def step_4_compose_email(ti, **context):
                 bullet_html = '<p>' + content_str.replace('\n', '<br>') + '</p>'
 
             html += f"""
-                    <div class="ai-section">
+                    <div class="ai-section" {class_add}>
                         <h3>{title}</h3>
                         {bullet_html}
                     </div>
