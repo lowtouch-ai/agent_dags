@@ -3553,6 +3553,7 @@ with DAG(
         task_id="create_contacts",
         python_callable=create_contacts,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3560,6 +3561,7 @@ with DAG(
         task_id="create_companies",
         python_callable=create_companies,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3567,6 +3569,7 @@ with DAG(
         task_id="create_deals",
         python_callable=create_deals,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3574,6 +3577,7 @@ with DAG(
         task_id="create_meetings",
         python_callable=create_meetings,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3581,6 +3585,7 @@ with DAG(
         task_id="create_notes",
         python_callable=create_notes,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3588,6 +3593,7 @@ with DAG(
         task_id="create_tasks",
         python_callable=create_tasks,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3595,6 +3601,7 @@ with DAG(
         task_id="update_contacts",
         python_callable=update_contacts,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3602,6 +3609,7 @@ with DAG(
         task_id="update_companies",
         python_callable=update_companies,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3609,6 +3617,7 @@ with DAG(
         task_id="update_deals",
         python_callable=update_deals,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3616,6 +3625,7 @@ with DAG(
         task_id="update_meetings",
         python_callable=update_meetings,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3623,6 +3633,7 @@ with DAG(
         task_id="update_notes",
         python_callable=update_notes,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3630,6 +3641,7 @@ with DAG(
         task_id="update_tasks",
         python_callable=update_tasks,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
