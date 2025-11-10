@@ -3649,28 +3649,28 @@ with DAG(
         task_id="create_associations",
         python_callable=create_associations,
         provide_context=True,
-        trigger_rule="none_failed_min_one_success"
+        trigger_rule="all_done"
     )
 
     collect_results_task = PythonOperator(
         task_id="collect_and_save_results",
         python_callable=collect_and_save_results,
         provide_context=True,
-        trigger_rule="none_failed_min_one_success"
+        trigger_rule="all_done"
     )
 
     compose_response_task = PythonOperator(
         task_id="compose_response_html",
         python_callable=compose_response_html,
         provide_context=True,
-        trigger_rule="none_failed_min_one_success"
+        trigger_rule="all_done"
     )
 
     send_final_email_task = PythonOperator(
         task_id="send_final_email",
         python_callable=send_final_email,
         provide_context=True,
-        trigger_rule="none_failed_min_one_success"
+        trigger_rule="all_done"
     )
 
     end_task = DummyOperator(
