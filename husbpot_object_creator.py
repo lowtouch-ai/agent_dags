@@ -1143,7 +1143,7 @@ Return JSON:
     "created_deals": [{{
         "id": "123", 
         "details": {{ 
-            "dealName": "ClientName-DealPurpose",
+            "dealName": "ClientName-DealPurpose", // or "PartnerName-ClientName-DealPurpose",
             "dealLabelName": "...",
             "dealAmount": "...",
             "closeDate": "...",
@@ -1197,7 +1197,7 @@ Return JSON:
     "created_deals": [{{
         "id": "123", 
         "details": {{ 
-            "dealName": "ClientName-DealPurpose",
+            "dealName": "ClientName-DealPurpose", // or "PartnerName-ClientName-DealPurpose",
             "dealLabelName": "...",
             "dealAmount": "...",
             "closeDate": "...",
