@@ -35,6 +35,27 @@ HUBSPOT_FROM_ADDRESS = Variable.get("HUBSPOT_FROM_ADDRESS")
 GMAIL_CREDENTIALS = Variable.get("HUBSPOT_GMAIL_CREDENTIALS")
 OLLAMA_HOST = "http://agentomatic:8000/"
 TASK_THRESHOLD = 15
+PENDING_VAR_KEY = "ltai.v3.hubspot.pending_reprocess"
+def _get_pending_records():
+    try:
+        data = Variable.get(PENDING_VAR_KEY, default_var="[]")
+        return json.loads(data)
+    except Exception as e:
+        logging.error(f"Failed to load pending records: {e}")
+        return []
+def _set_pending_records(records):
+    try:
+        Variable.set(PENDING_VAR_KEY, json.dumps(records))
+        return True
+    except Exception as e:
+        logging.error(f"Failed to save pending records: {e}")
+        return False
+def _add_pending_record(record):
+    records = _get_pending_records()
+    key = (record.get("message_id"), record.get("dag_id"))
+    records = [r for r in records if (r.get("message_id"), r.get("dag_id")) != key]
+    records.append(record)
+    _set_pending_records(records)
 
 def authenticate_gmail():
     try:
@@ -503,6 +524,23 @@ Lowtouch.ai"""
 
         except Exception as send_error:
             logging.error(f"Failed to send fallback email: {send_error}", exc_info=True)
+
+        # Save for reprocessing when AI is back
+        try:
+            _add_pending_record({
+                "dag_id": "hubspot_create_objects",
+                "pending_type": "create_flow",
+                "thread_id": thread_id,
+                "message_id": email_data.get("id", ""),
+                "email_data": email_data,
+                "chat_history": chat_history,
+                "thread_history": thread_history,
+                "timestamp": int(time.time() * 1000),
+                "reason": "ai_error"
+            })
+            logging.info(f"Saved pending create reprocess for message {email_data.get('id', '')}")
+        except Exception as save_err:
+            logging.error(f"Failed to save pending create reprocess: {save_err}")
 
     ti.xcom_push(key="analysis_results", value=results)
     logging.info(f"Analysis completed for thread {thread_id}")
