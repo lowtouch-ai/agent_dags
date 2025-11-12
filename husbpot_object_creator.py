@@ -2539,34 +2539,24 @@ LATEST USER MESSAGE:
 How to create associations: Always and strictly call create_multi_association API/Tool to create association.
 CRITICAL: You MUST call the create_multi_association tool. Do NOT just return JSON text. CALL THE TOOL.
 AVAILABLE ENTITY IDS:
-- NEW Contact IDs (just created): {new_contact_ids}
-- NEW Company IDs (just created): {new_company_ids}
-- NEW Deal IDs (just created): {new_deal_ids}
-- NEW Meeting IDs (just created): {new_meeting_ids}
-- NEW Note IDs (just created): {new_note_ids}
-- NEW Task IDs (just created): {new_task_ids}
-- EXISTING Contact IDs (from conversation): {existing_contact_ids}
-- EXISTING Company IDs (from conversation): {existing_company_ids}
-- EXISTING Deal IDs (from conversation): {existing_deal_ids}
+- Contact IDs (just created): {all_contact_ids}
+- Company IDs (just created): {all_company_ids}
+- Deal IDs (just created): {all_deal_ids}
+- Meeting IDs (just created): {new_meeting_ids}
+- Note IDs (just created): {new_note_ids}
+- Task IDs (just created): {new_task_ids}
 CRITICAL ASSOCIATION RULES:
 - Associate with all available ids.
 **IMPORTANT**: 
     - You can only create asssociation using tool `create_multi_association`
     - You can only create asssociation using tool `create_multi_association`
     - You MUST actually CALL the tool, not just output JSON
+    - Always parse all the new and existing ids from conversation and use it in the given request bodies.
+    - If any entity is blank then fill it with `''`.
     
-TOOL CALL FORMAT - Use this exact structure when calling create_multi_association:
-{{
-    "single": {{
-        "deal_id": "existing_or_new_deal_id",
-        "contact_id": "existing_or_new_contact_id",
-        "company_id": "existing_or_new_company_id",
-        "note_id": "new_note_id",
-        "task_id": "new_task_id",
-        "meeting_id": "new_meeting_id"
-    }}
-}}
-
+Below request body should be used as input for create_multi_association tool:
+    - Always use this exact structure when calling create_multi_association, Never deviate from this structure:
+{{"single":{{"deal_id":"string1, string2","contact_id":"string1, string2,...","company_id":"string1, string2,..","note_id":"string1, string2,..","task_id":"string1, string2..","meeting_id":"string1, string2,.."}}}}
 Return ONLY valid JSON:
 {{
     "association_requests": [
