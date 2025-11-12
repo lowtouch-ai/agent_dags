@@ -285,7 +285,89 @@ Based on the conversation, and Latest User message identify:
    - CLARIFY: User has questions or needs clarification
    - CANCEL: User wants to stop/cancel the process
 
-[... rest of prompt unchanged ...]
+2. **Existing Entities** (from bot's previous confirmation emails):
+   Extract IDs and details from tables showing:
+   - "Existing Contact Details" → contactId, firstname, lastname, email, phone, address, jobtitle, contactOwnerName
+   - "Existing Company Details" → companyId, name, domain, address, city, state, zip, country, phone, description, type
+   - "Existing Deal Details" → dealId, dealName, dealLabelName, dealAmount, closeDate, dealOwnerName
+
+3. **Entities to Create** (from bot's "Objects to be Created" tables):
+   - New Contacts → firstname, lastname, email, phone, address, jobtitle, contactOwnerName
+   - New Companies → name, domain, address, city, state, zip, country, phone, description, type
+   - New Deals → dealName, dealLabelName, dealAmount, closeDate, dealOwnerName
+   - Notes → note_content, timestamp, note_type, speaker_name, speaker_email
+   - Tasks → task_details, task_owner_name, task_owner_id, due_date, priority, task_index
+   - Meetings → meeting_title, start_time, end_time, location, outcome, attendees
+
+4. **Entities to Update**:
+   If user wants to modify existing entities, identify which entities and what changes.
+
+5. **Selected Entities**:
+   
+   CRITICAL AUTO-INCLUSION RULE:
+   - If an entity type has ONLY ONE item, ALWAYS include it automatically
+   - Only apply selective inclusion for entity types with MULTIPLE items
+   
+   Example:
+   - 1 Company, 2 Contacts, 2 Deals
+   - User says "proceed with contact John and deal Q1"
+   - Result: Include ALL of: Company (auto), Contact John (specified), Deal Q1 (specified)
+
+6. **Casual Comment Handling**:
+   - If the latest message is a casual comment (opinion, feedback, observation) with NO action requests:
+     - Create a note with the comment text
+     - Include speaker name and email from SENDER INFO
+     - Use current timestamp
+     - DO NOT create contacts, companies, deals, tasks, or meetings
+     - **IMPORTANT: Still populate selected_entities with ALL existing entities id from the conversation history**
+   - Examples of casual comments:
+     * "It was great to have this deal and I think its an interesting one"
+     * "This client is really engaged"
+     * "Looking forward to working with them"
+     * "Great progress on this deal"
+
+GENERAL RULES:
+- Default behavior: Include everything (all existing entities + all proposed new objects)
+- If user mentions specific entities: Select only those entities, but still create all proposed new objects
+- If user says to skip/exclude something: Remove only that item
+- If user wants to modify: Identify the changes needed
+- For casual comments: Create a note with the comment
+- Current timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 
+Return ONLY valid JSON (no markdown, no explanations):
+{{
+     "casual_comments_detected": true|false,
+    "selected_entities": {{
+        "contacts": [{{"contactId": "...", "firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "...", "contactOwnerName": "..."}}],
+        "companies": [{{"companyId": "...", "name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
+        "deals": [{{"dealId": "...", "dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}]
+    }},
+    "entities_to_create": {{
+        "contacts": [{{"firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "...", "contactOwnerName": "..."}}],
+        "companies": [{{"name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
+        "deals": [{{"dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}],
+        "meetings": [{{"meeting_title": "...", "start_time": "...", "end_time": "...", "location": "...", "outcome": "...", "timestamp": "...", "attendees": [], "meeting_type": "...", "meeting_status": "..."}}],
+        "notes": [{{"note_content": "...", "timestamp": "...", "note_type": "...", "speaker_name": "{sender_name}", "speaker_email": "{sender_email}"}}],
+        "tasks": [{{"task_details": "...", "task_owner_name": "...", "task_owner_id": "...", "due_date": "...", "priority": "...", "task_index": 1}}]
+    }},
+    "entities_to_update": {{
+        "contacts": [{{"contactId": "...", "updates": {{"field": "new_value"}}}}],
+        "companies": [{{"companyId": "...", "updates": {{"field": "new_value"}}}}],
+        "deals": [{{"dealId": "...", "updates": {{"field": "new_value"}}}}],
+        "meetings": [],
+        "notes": [],
+        "tasks": [{{"taskId": "...", "taskbody": "...", "task_owner_name": "...", "task_owner_id": "...", "updates": {{"field": "new_value"}}}}]
+    }},
+    "reasoning": "Brief explanation of what you understood from the conversation and what actions you're taking"
+}}
+
+CRITICAL REMINDERS:
+- Extract entities FROM conversation history tables, NOT by searching
+- Parse HTML tables in bot messages to extract entity details
+- For CASUAL_COMMENT intent: Create ONLY a note, no other entities
+- For other intents: Default to including ALL entities if user confirms without specifics
+- Always preserve entity IDs from existing entities
+- Use empty arrays [] for entity types not mentioned
+- Current timestamp format: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
 
     try:
