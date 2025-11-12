@@ -74,423 +74,306 @@ def get_ai_response(prompt, conversation_history=None):
         logging.error(f"Error in get_ai_response: {str(e)}")
         raise
 
-# === t1: Node CPU – Last 24h ===
-def node_cpu_today(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete node-level CPU utilization report for today**
+# === Generic helper to generate SRE reports ===
+def generate_sre_report(ti, key, description, period=None):
     """
+    Generic function to generate SRE TradeIdeas reports.
+
+    Args:
+        ti: Airflow TaskInstance for pushing XCom.
+        key: The key under which the response is stored (used for XCom).
+        description: A short description of what report to generate.
+        period: 'today', 'yesterday', or None (default: None).
+    """
+    if period:
+        prompt = f"""
+        You are the SRE TradeIdeas agent.
+        Generate a **complete {description} report for {period}**
+        """
+    else:
+        prompt = f"""
+        You are the SRE TradeIdeas agent.
+        Generate a **complete {description} report**
+        """
+
     response = get_ai_response(prompt)
-    ti.xcom_push(key="node_cpu_today", value=response)
+    ti.xcom_push(key=key, value=response)
     return response
+
+
+# === Node CPU ===
+def node_cpu_today(ti, **context):
+    return generate_sre_report(ti, "node_cpu_today", "node-level CPU utilization", "today")
 
 def node_cpu_yesterday(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete node-level CPU utilization report for yesterday**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="node_cpu_yesterday", value=response)
-    return response
+    return generate_sre_report(ti, "node_cpu_yesterday", "node-level CPU utilization", "yesterday")
 
 
-# === t2: Node Memory – Last 24h ===
+# === Node Memory ===
 def node_memory_today(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete node-level memory utilization report for today**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="node_memory_today", value=response)
-    return response
+    return generate_sre_report(ti, "node_memory_today", "node-level memory utilization", "today")
 
 def node_memory_yesterday(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete node-level memory utilization report for yesterday**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="node_memory_yesterday", value=response)
-    return response
+    return generate_sre_report(ti, "node_memory_yesterday", "node-level memory utilization", "yesterday")
 
 
-# === t3: Node Disk – Last 24h ===
+# === Node Disk ===
 def node_disk_today(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete node-level disk utilization report for today**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="node_disk_today", value=response)
-    return response
+    return generate_sre_report(ti, "node_disk_today", "node-level disk utilization", "today")
 
 def node_disk_yesterday(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete node-level disk utilization report for yesterday**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="node_disk_yesterday", value=response)
-    return response
+    return generate_sre_report(ti, "node_disk_yesterday", "node-level disk utilization", "yesterday")
 
+
+# === Node Readiness ===
 def node_readiness_check(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete node readiness check report for today**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="node_readiness_check", value=response)
-    return response
+    return generate_sre_report(ti, "node_readiness_check", "node readiness check")
 
-# === t4: Pod CPU – Last 24h ===
+
+# === Pod CPU ===
 def pod_cpu_today(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete pod-level CPU utilization report for today**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="pod_cpu_today", value=response)
-    return response
+    return generate_sre_report(ti, "pod_cpu_today", "pod-level CPU utilization", "today")
 
 def pod_cpu_yesterday(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete pod-level CPU utilization report for yesterday**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="pod_cpu_yesterday", value=response)
-    return response
+    return generate_sre_report(ti, "pod_cpu_yesterday", "pod-level CPU utilization", "yesterday")
 
 
-# === t5: Pod Memory – Last 24h ===
+# === Pod Memory ===
 def pod_memory_today(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete pod-level memory utilization report for today**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="pod_memory_today", value=response)
-    return response
+    return generate_sre_report(ti, "pod_memory_today", "pod-level memory utilization", "today")
 
 def pod_memory_yesterday(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete pod-level memory utilization report for yesterday**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="pod_memory_yesterday", value=response)
-    return response
+    return generate_sre_report(ti, "pod_memory_yesterday", "pod-level memory utilization", "yesterday")
 
-# === t6: Pod Restart Count – Last 24h ===
+
+# === Pod Restart ===
 def pod_restart_today(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete pod restart count report for today**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="pod_restart_today", value=response)
-    return response
+    return generate_sre_report(ti, "pod_restart_today", "pod restart count", "today")
 
-# === t7: MySQL Health Status ===
+
+# === MySQL Health ===
 def mysql_health_today(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete MySQL health status report for today**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="mysql_health_today", value=response)
-    return response
+    return generate_sre_report(ti, "mysql_health_today", "MySQL health status", "today")
 
 def mysql_health_yesterday(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete MySQL health status report for yesterday**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="mysql_health_yesterday", value=response)
-    return response
+    return generate_sre_report(ti, "mysql_health_yesterday", "MySQL health status", "yesterday")
 
+
+# === MicroK8s Checks ===
 def microk8s_version_check(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete MicroK8s version check report**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="microk8s_version_check", value=response)
-    return response
+    return generate_sre_report(ti, "microk8s_version_check", "MicroK8s version check")
 
-# === t8: MicroK8s Expiry Check ===
 def microk8s_expiry_check(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete MicroK8s master node certificate expiry check report**
-    """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="microk8s_expiry_check", value=response)
-    return response
+    return generate_sre_report(ti, "microk8s_expiry_check", "MicroK8s master node certificate expiry check")
 
-# === t9: LKE PVC Storage Details ===
+
+# === LKE PVC Storage Details ===
 def lke_pvc_storage_details(ti, **context):
-    prompt = """
-    You are the SRE TradeIdeas agent.
-    Generate a **complete LKE PVC storage details report with disk sizes**
+    return generate_sre_report(ti, "lke_pvc_storage_details", "LKE PVC storage details with disk sizes")
+
+
+def generate_sre_comparison(
+    ti,
+    key,
+    report_name,
+    data_today_key,
+    data_yesterday_key,
+    instructions
+):
     """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="lke_pvc_storage_details", value=response)
-    return response
+    Generic function to compare 'today' vs 'yesterday' SRE reports.
 
+    Args:
+        ti: Airflow TaskInstance.
+        key: XCom key to push the result under.
+        report_name: Name/title of the report (e.g., "Node CPU Utilization").
+        data_today_key: XCom key for today's data.
+        data_yesterday_key: XCom key for yesterday's data.
+        instructions: String containing the AI comparison instructions (specific to each metric).
+    """
+    data_today = ti.xcom_pull(key=data_today_key)
+    data_yesterday = ti.xcom_pull(key=data_yesterday_key)
 
-# === YESTERDAY: Node CPU ===
-def node_cpu_today_vs_yesterday(ti, **context):
-    node_cpu_today = ti.xcom_pull(key="node_cpu_today")
-    node_cpu_yesterday = ti.xcom_pull(key="node_cpu_yesterday")
     prompt = f"""
 You are the SRE TradeIdeas agent.
 
-Here is **today's node-level CPU data**:
-{node_cpu_today}
+**Today's {report_name} Data:**
+{data_today}
 
-Here is **yesterday's node-level CPU data**:
-{node_cpu_yesterday}
+**Yesterday's {report_name} Data:**
+{data_yesterday}
 
 ---
 
-**Task**:
-1. Parse both datasets (list of dicts with `instance_ip`, `avg_cpu`, `max_cpu`).
-2. Compute:
-   - `avg_cpu_diff = today.avg_cpu - yesterday.avg_cpu`
-   - `max_cpu_diff = today.max_cpu - yesterday.max_cpu` (round to 2 decimals)
-3. Output **only** the following:
-
-### CPU Utilization Comparison - Node Level (Period1: 2025-11-07, Period2: 2025-11-06)
-| Instance IP | Node Name | Avg CPU (%) - Period1 | Avg CPU (%) - Period2 | Avg CPU Diff (%) | Max CPU (%) - Period1 | Max CPU (%) - Period2 | Max CPU Diff (%) |
-|-------------|-----------|-----------------------|-----------------------|------------------|-----------------------|-----------------------|------------------|
-| [ip]        | [node]    | [today_avg]           | [yest_avg]            | [avg_cpu_diff]   | [today_max]           | [yest_max]            | [max_cpu_diff]   |
-
-### Summary
-- [ip]: [max_cpu_diff]%  *(only if |max_cpu_diff| > 20%)*  
-*or*  
-No significant CPU changes.
-
-
+{instructions}
 """
+
     response = get_ai_response(prompt)
-    ti.xcom_push(key="node_cpu_today_vs_yesterday", value=response)
+    ti.xcom_push(key=key, value=response)
     return response
 
 
-# === YESTERDAY: Node Memory ===
+def node_cpu_today_vs_yesterday(ti, **context):
+    instructions = """
+Each record contains: `instance_ip`, `node_name`, `avg_cpu`, `max_cpu`.
+
+**Compute**:
+- `avg_cpu_diff = today.avg_cpu - yesterday.avg_cpu`
+- `max_cpu_diff = today.max_cpu - yesterday.max_cpu` (round 4 decimals)
+
+**Output exactly this:**
+
+### CPU Utilization Comparison - Node Level (Period1: 2025-11-07, Period2: 2025-11-06)
+| Instance IP | Node Name | Avg CPU (%) - P1 | Avg CPU (%) - P2 | Avg Diff (%) | Max CPU (%) - P1 | Max CPU (%) - P2 | Max Diff (%) |
+|-------------|-----------|------------------|------------------|---------------|------------------|------------------|---------------|
+| [ip]        | [node]    | [p1_avg]         | [p2_avg]         | [avg_diff]    | [p1_max]         | [p2_max]         | [max_diff]    |
+
+### Summary
+List nodes with |max_diff| > 20%, else “No significant CPU changes.”
+"""
+    return generate_sre_comparison(
+        ti,
+        key="node_cpu_today_vs_yesterday",
+        report_name="Node-Level CPU Utilization",
+        data_today_key="node_cpu_today",
+        data_yesterday_key="node_cpu_yesterday",
+        instructions=instructions
+    )
+
+
 def node_memory_today_vs_yesterday(ti, **context):
-    node_memory_today = ti.xcom_pull(key="node_memory_today")
-    node_memory_yesterday = ti.xcom_pull(key="node_memory_yesterday")
-    prompt = f"""
-You are the SRE TradeIdeas agent.
-
-**Today's Node Memory Data**:
-{node_memory_today}
-
-**Yesterday's Node Memory Data**:
-{node_memory_yesterday}
-
-Each record contains: `instance_ip`, `node_name`, `total_memory_gb`, `avg_available_gb`, `max_usage_percent`
+    instructions = """
+Each record contains: `instance_ip`, `node_name`, `total_memory_gb`, `avg_available_gb`, `max_usage_percent`.
 
 **Compute**:
 - `avg_avail_diff = today.avg_available_gb - yesterday.avg_available_gb`
-- `max_usage_diff = today.max_usage_percent - yesterday.max_usage_percent` (round to 2 decimals)
+- `max_usage_diff = today.max_usage_percent - yesterday.max_usage_percent` (round 2 decimals)
 
-**Output exactly this format**:
+**Output exactly this:**
 
 ### Memory Utilization Comparison - Node Level (Period1: 2025-11-07, Period2: 2025-11-06)
-| Instance IP | Node Name | Total Memory (GB) - Period1 | Total Memory (GB) - Period2 | Avg Available (GB) - Period1 | Avg Available (GB) - Period2 | Avg Available Diff (GB) | Max Usage (%) - Period1 | Max Usage (%) - Period2 | Max Usage Diff (%) |
-|-------------|-----------|-----------------------------|-----------------------------|------------------------------|------------------------------|-------------------------|-------------------------|-------------------------|--------------------|
-| [ip]        | [node]    | [p1_total]                  | [p2_total]                  | [p1_avg]                     | [p2_avg]                     | [avg_diff]              | [p1_max]                | [p2_max]                | [max_diff]         |
+| Instance IP | Node Name | Total Mem (GB) - P1 | Total Mem (GB) - P2 | Avg Avail (GB) - P1 | Avg Avail (GB) - P2 | Avg Diff (GB) | Max Usage (%) - P1 | Max Usage (%) - P2 | Max Diff (%) |
+|-------------|-----------|---------------------|---------------------|--------------------|--------------------|----------------|--------------------|--------------------|---------------|
 
 ### Summary
-[List instances with |max_usage_diff| > 20% as: "- [ip] ([node]): [max_diff]%" or "No significant memory issues."]
-
-**Rules**:
-- Sort by absolute `max_usage_diff` descending
-- Round all values to 2 decimal places
-- Show `+` or `-` in diffs
-- No extra text, code, or explanation
+List instances with |max_diff| > 20%, else “No significant memory issues.”
 """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="node_memory_today_vs_yesterday", value=response)
-    return response
+    return generate_sre_comparison(
+        ti,
+        key="node_memory_today_vs_yesterday",
+        report_name="Node-Level Memory Utilization",
+        data_today_key="node_memory_today",
+        data_yesterday_key="node_memory_yesterday",
+        instructions=instructions
+    )
 
 
-# === YESTERDAY: Node Disk ===
 def node_disk_today_vs_yesterday(ti, **context):
-    node_disk_today = ti.xcom_pull(key="node_disk_today")
-    node_disk_yesterday = ti.xcom_pull(key="node_disk_yesterday")
-    prompt = f"""
-You are the SRE TradeIdeas agent.
-
-**Today's Node Disk Data**:
-{node_disk_today}
-
-**Yesterday's Node Disk Data**:
-{node_disk_yesterday}
-
-Each record contains: `instance_ip`, `node_name`, `mountpoint`, `used_percent`
+    instructions = """
+Each record contains: `instance_ip`, `node_name`, `mountpoint`, `used_percent`.
 
 **Compute**:
-- `used_percent_diff = today.used_percent - yesterday.used_percent` (round to 2 decimals)
+- `used_diff = today.used_percent - yesterday.used_percent` (round 2 decimals)
 
-**Output exactly this format**:
+**Output exactly this:**
 
 ### Disk Utilization Comparison - Node Level (Period1: 2025-11-07, Period2: 2025-11-06)
-| Instance IP | Node Name | Mountpoint | Used (%) - Period1 | Used (%) - Period2 | Used Diff (%) |
-|-------------|-----------|------------|--------------------|--------------------|---------------|
-| [ip]        | [node]    | [mp]       | [p1_used]          | [p2_used]          | [diff]        |
+| Instance IP | Node Name | Mountpoint | Used (%) - P1 | Used (%) - P2 | Diff (%) |
+|-------------|-----------|------------|---------------|---------------|-----------|
 
 ### Summary
-- [ip] ([node]) [mp]: [diff]%  *(only if |used_percent_diff| > 20%)*  
-*or*  
-No significant disk issues.
-
-**Rules**:
-- Sort by absolute `used_percent_diff` descending
-- Round to 2 decimal places
-- Show `+` or `-` in diff
-- No extra text or code
+Show entries with |used_diff| > 20%, else “No significant disk issues.”
 """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="node_disk_today_vs_yesterday", value=response)
-    return response
+    return generate_sre_comparison(
+        ti,
+        key="node_disk_today_vs_yesterday",
+        report_name="Node-Level Disk Utilization",
+        data_today_key="node_disk_today",
+        data_yesterday_key="node_disk_yesterday",
+        instructions=instructions
+    )
 
-# === YESTERDAY: Pod CPU ===
+
 def pod_cpu_today_vs_yesterday(ti, **context):
-    pod_cpu_today     = ti.xcom_pull(key="pod_cpu_today")
-    pod_cpu_yesterday = ti.xcom_pull(key="pod_cpu_yesterday")
-    prompt = f"""
-You are the SRE TradeIdeas agent.
+    instructions = """
+Each record contains: `namespace`, `pod`, `avg_cpu_cores`, `max_cpu_cores`.
 
-**Today's Pod CPU Data**:
-{pod_cpu_today}
+Compute:
+- `avg_cpu_diff` and `max_cpu_diff` (round 4 decimals).
 
-**Yesterday's Pod CPU Data**:
-{pod_cpu_yesterday}
+Output: one table per namespace.
 
-Each record contains: `namespace`, `pod`, `avg_cpu_cores`, `max_cpu_cores`
+**Output exactly this:**
 
-**Compute** (per pod):
-- `avg_cpu_diff = today.avg_cpu_cores - yesterday.avg_cpu_cores`
-- `max_cpu_diff = today.max_cpu_cores - yesterday.max_cpu_cores` (round to 2 decimals)
-
-**Output exactly** (one table per namespace, sorted by |max_cpu_diff| desc):
-
-### [namespace] Pods CPU Utilization Comparison - Node Level (Period1: 2025-11-07, Period2: 2025-11-06)
-| Pod Name | Avg CPU (cores) - Period1 | Avg CPU (cores) - Period2 | Avg CPU Diff (cores) | Max CPU (cores) - Period1 | Max CPU (cores) - Period2 | Max CPU Diff (cores) |
-|----------|---------------------------|---------------------------|----------------------|---------------------------|---------------------------|----------------------|
-| [pod]    | [p1_avg]                  | [p2_avg]                  | [avg_diff]           | [p1_max]                  | [p2_max]                  | [max_diff]           |
+### [namespace] Pod CPU Comparison (P1: 2025-11-07, P2: 2025-11-06)
+| Pod Name | Avg CPU (cores) - P1 | Avg CPU (cores) - P2 | Avg Diff | Max CPU (cores) - P1 | Max CPU (cores) - P2 | Max Diff |
+|-----------|---------------------|---------------------|----------|----------------------|----------------------|----------|
 
 ### Summary
-- [pod]: [max_cpu_diff]  *(only if |max_cpu_diff| > 0.8 cores)*  
-*or*  
-No CPU spikes.
-
-**Rules**:
-- Group by `namespace`
-- Within each namespace, sort by absolute `max_cpu_diff` descending
-- Round all values to 2 decimal places
-- Show `+` or `-` in diffs
-- No extra text, code, or explanation
+List pods with |max_diff| > 0.8 cores, else “No CPU spikes.”
 """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="pod_cpu_today_vs_yesterday", value=response)
-    return response
+    return generate_sre_comparison(
+        ti,
+        key="pod_cpu_today_vs_yesterday",
+        report_name="Pod-Level CPU Utilization",
+        data_today_key="pod_cpu_today",
+        data_yesterday_key="pod_cpu_yesterday",
+        instructions=instructions
+    )
 
-# === YESTERDAY: Pod Memory ===
+
 def pod_memory_today_vs_yesterday(ti, **context):
-    pod_memory_today     = ti.xcom_pull(key="pod_memory_today")
-    pod_memory_yesterday = ti.xcom_pull(key="pod_memory_yesterday")
-    prompt = f"""
-You are the SRE TradeIdeas agent.
+    instructions = """
+Each record contains: `namespace`, `pod`, `avg_memory_gb`, `max_memory_gb`.
 
-**Today's Pod Memory Data**:
-{pod_memory_today}
+Compute:
+- `avg_memory_diff` and `max_memory_diff` (round 4 decimals).
 
-**Yesterday's Pod Memory Data**:
-{pod_memory_yesterday}
+Output: one table per namespace.
 
-Each record contains: `namespace`, `pod`, `avg_memory_gb`, `max_memory_gb`
+**Output exactly this:**
 
-**Compute** (per pod):
-- `avg_memory_diff = today.avg_memory_gb - yesterday.avg_memory_gb`
-- `max_memory_diff = today.max_memory_gb - yesterday.max_memory_gb` (round to 2 decimals)
-
-**Output exactly** (one table per namespace, sorted by |max_memory_diff| desc):
-
-### [namespace] Pods Memory Utilization Comparison - Node Level (Period1: 2025-11-07, Period2: 2025-11-06)
-| Pod Name | Avg Memory (GB) - Period1 | Avg Memory (GB) - Period2 | Avg Memory Diff (GB) | Max Memory (GB) - Period1 | Max Memory (GB) - Period2 | Max Memory Diff (GB) |
-|----------|---------------------------|---------------------------|----------------------|---------------------------|---------------------------|----------------------|
-| [pod]    | [p1_avg]                  | [p2_avg]                  | [avg_diff]           | [p1_max]                  | [p2_max]                  | [max_diff]           |
+### [namespace] Pod Memory Comparison (P1: 2025-11-07, P2: 2025-11-06)
+| Pod Name | Avg Memory (GB) - P1 | Avg Memory (GB) - P2 | Avg Diff (GB) | Max Memory (GB) - P1 | Max Memory (GB) - P2 | Max Diff (GB) |
+|-----------|---------------------|---------------------|----------------|----------------------|----------------------|----------------|
 
 ### Summary
-- [pod]: [max_memory_diff] GB  *(only if |max_memory_diff| > 1.0 GB)*  
-*or*  
-No memory pressure.
-
-**Rules**:
-- Group by `namespace`
-- Within each namespace, sort by absolute `max_memory_diff` descending
-- Round all values to 2 decimal places
-- Show `+` or `-` in diffs
-- No extra text, code, or explanation
+List pods with |max_diff| > 1.0 GB, else “No memory pressure.”
 """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="pod_memory_today_vs_yesterday", value=response)
-    return response
+    return generate_sre_comparison(
+        ti,
+        key="pod_memory_today_vs_yesterday",
+        report_name="Pod-Level Memory Utilization",
+        data_today_key="pod_memory_today",
+        data_yesterday_key="pod_memory_yesterday",
+        instructions=instructions
+    )
 
 
-# === YESTERDAY: MySQL Health ===
 def mysql_health_today_vs_yesterday(ti, **context):
-    mysql_health_today     = ti.xcom_pull(key="mysql_health_today")
-    mysql_health_yesterday = ti.xcom_pull(key="mysql_health_yesterday")
-    prompt = f"""
-You are the SRE TradeIdeas agent.
+    instructions = """
+Each record contains: `status`, `downtime_count`, `total_downtime_seconds`, `avg_probe_duration_seconds`.
 
-**Today's MySQL Health Data**:
-{mysql_health_today}
+Compute:
+- `count_diff` and `duration_diff` (round 1 decimal).
 
-**Yesterday's MySQL Health Data**:
-{mysql_health_yesterday}
+**Output exactly this:**
 
-Each record is a dict with:
-- `status`: "UP" or "DOWN"
-- `downtime_count`: int
-- `total_downtime_seconds`: float
-- `avg_probe_duration_seconds`: float
-
-**Compute**:
-- `downtime_count_diff = today.downtime_count - yesterday.downtime_count`
-- `downtime_duration_diff = today.total_downtime_seconds - yesterday.total_downtime_seconds` (round to 1 decimal)
-
-**Output exactly**:
-
-### MySQL Health Status Comparison - Node Level (Period1: 2025-11-07, Period2: 2025-11-06)
-| Endpoint | Status - Period1 | Status - Period2 | Downtime Count - P1 | Downtime Count - P2 | Count Diff | Total Downtime (s) - P1 | Total Downtime (s) - P2 | Downtime Diff (s) | Probe Duration (s) - P1 | Probe Duration (s) - P2 |
-|----------|------------------|------------------|---------------------|---------------------|------------|--------------------------|--------------------------|-------------------|--------------------------|--------------------------|
-| MySQL    | [p1_status]      | [p2_status]      | [p1_count]          | [p2_count]          | [count_diff] | [p1_duration]            | [p2_duration]            | [duration_diff]   | [p1_probe]               | [p2_probe]               |
+### MySQL Health Comparison (Period1: 2025-11-07, Period2: 2025-11-06)
+| Endpoint | Status P1 | Status P2 | Count P1 | Count P2 | Diff | Duration P1 | Duration P2 | Duration Diff (s) | Probe P1 | Probe P2 |
+|-----------|------------|------------|----------|----------|------|--------------|--------------|-------------------|----------|----------|
 
 ### Summary
-- Downtime changed by [count_diff] events, [duration_diff]s
-*or*
-No change in downtime.
-**MySQL ended [p1_status] in Period1 and [p2_status] in Period2.**
-
-**Rules**:
-- Use `UP` or `DOWN` exactly as in data
-- Show `+` or `-` in diffs (except 0)
-- Round `Downtime Diff (s)` to 1 decimal
-- If `count_diff == 0`, use "No change in downtime."
-- Final status line: "**MySQL ended UP in both periods.**" or similar
-- No extra text
+Describe downtime and final status comparison.
 """
-    response = get_ai_response(prompt)
-    ti.xcom_push(key="mysql_health_today_vs_yesterday", value=response)
-    return response
+    return generate_sre_comparison(
+        ti,
+        key="mysql_health_today_vs_yesterday",
+        report_name="MySQL Health Status",
+        data_today_key="mysql_health_today",
+        data_yesterday_key="mysql_health_yesterday",
+        instructions=instructions
+    )
 
 # === tX: Overall Summary (Today + Comparison) ===
 def overall_summary(ti, **context):
