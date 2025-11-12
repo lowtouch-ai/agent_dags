@@ -470,22 +470,16 @@ Lowtouch.ai"""
                 bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
 
                 # === Compose and send ===
-                from email.mime.text import MIMEText
-                from email.mime.multipart import MIMEMultipart
-                import base64
-
-                msg = MIMEMultipart()
-                msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
-                msg["To"] = primary_recipient
-                if cc_string: msg["Cc"] = cc_string
-                if bcc_string: msg["Bcc"] = bcc_string
-                msg["Subject"] = subject
-                if original_message_id: msg["In-Reply-To"] = original_message_id
-                if references: msg["References"] = references
-                msg.attach(MIMEText(fallback_body, "plain"))
-
-                raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
-                service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
+                send_email(
+                service=service,
+                recipient=primary_recipient,
+                subject=subject,
+                body=fallback_body,
+                in_reply_to=original_message_id,
+                references=references,
+                cc=cc_string,
+                bcc=bcc_string
+            )
 
                 # === Mark as read ===
                 try:
