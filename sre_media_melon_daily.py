@@ -91,8 +91,7 @@ def get_ai_response(prompt, conversation_history=None):
 # === t1: Node CPU – Last 24h ===
 def node_cpu_today(ti, **context):
     prompt = """
-    You are the SRE Mediamelon agent.
-    Generate the **node level cpu utilisation for the last 7 days**
+    Generate the **node level cpu utilisation for the last 24 hours**
     """
     response = get_ai_response(prompt)
     ti.xcom_push(key="node_cpu_today", value=response)
@@ -100,7 +99,6 @@ def node_cpu_today(ti, **context):
 
 def node_cpu_yesterday(ti, **context):
     prompt = """
-    You are the SRE Mediamelon agent.
     Generate the **node level cpu utilisation for yesterday**
     """
     response = get_ai_response(prompt)
@@ -111,8 +109,7 @@ def node_cpu_yesterday(ti, **context):
 # === t2: Node Memory – Last 24h ===
 def node_memory_today(ti, **context):
     prompt = """
-    You are the SRE Mediamelon agent.
-    Generate the **node level memory utilisation for today**
+    Generate the **node level memory utilisation for last 24 hours**
     """
     response = get_ai_response(prompt)
     ti.xcom_push(key="node_memory_today", value=response)
@@ -120,8 +117,7 @@ def node_memory_today(ti, **context):
 
 def node_memory_yesterday(ti, **context):
     prompt = """
-    You are the SRE Mediamelon agent.
-    Generate the **node level memory utilisation for yesterday**
+    Generate the **node level memory utilisation for last 24 hours**
     """
     response = get_ai_response(prompt)
     ti.xcom_push(key="node_memory_yesterday", value=response)
@@ -131,7 +127,7 @@ def node_memory_yesterday(ti, **context):
 # === t3: Node Disk – Last 24h ===
 def node_disk_today(ti, **context):
     prompt = """
-    Generate the **node level disk utilisation for today**
+    Generate the **node level disk utilisation for last 24 hours**
     """
     response = get_ai_response(prompt)
     ti.xcom_push(key="node_disk_today", value=response)
@@ -139,7 +135,7 @@ def node_disk_today(ti, **context):
 
 def node_disk_yesterday(ti, **context):
     prompt = """
-    Generate the **node level disk utilisation for yesterday**
+    Generate the **node level disk utilisation for last 24 hours**
     """
     response = get_ai_response(prompt)
     ti.xcom_push(key="node_disk_yesterday", value=response)
@@ -148,7 +144,7 @@ def node_disk_yesterday(ti, **context):
 # === t4: Pod CPU – Last 24h ===
 def pod_cpu_today(ti, **context):
     prompt = """
-    Generate the **pod level cpu utilisation for today**
+    Generate the **pod level cpu utilisation for last 24 hours**
     """
     response = get_ai_response(prompt)
     ti.xcom_push(key="pod_cpu_today", value=response)
@@ -156,7 +152,7 @@ def pod_cpu_today(ti, **context):
 
 def pod_cpu_yesterday(ti, **context):
     prompt = """
-    Generate the **pod level cpu utilisation for yesterday**
+    Generate the **pod level cpu utilisation for last 24 hours**
     """
     response = get_ai_response(prompt)
     ti.xcom_push(key="pod_cpu_yesterday", value=response)
@@ -166,8 +162,7 @@ def pod_cpu_yesterday(ti, **context):
 # === t5: Pod Memory – Last 24h ===
 def pod_memory_today(ti, **context):
     prompt = """
-    You are the SRE Mediamelon agent.
-    Generate the **pod level memory utilisation for today**
+    Generate the **pod level memory utilisation for last 24 hours**
     """
     response = get_ai_response(prompt)
     ti.xcom_push(key="pod_memory_today", value=response)
@@ -175,8 +170,7 @@ def pod_memory_today(ti, **context):
 
 def pod_memory_yesterday(ti, **context):
     prompt = """
-    You are the SRE Mediamelon agent.
-    Generate the **pod level memory utilisation for yesterday**
+    Generate the **pod level memory utilisation for last 24 hours**
     """
     response = get_ai_response(prompt)
     ti.xcom_push(key="pod_memory_yesterday", value=response)
@@ -191,15 +185,7 @@ def node_cpu_today_vs_yesterday(ti, **kwargs):
         logging.error("Missing XCom data from previous tasks.")
         return "Comparison failed: Missing data."
     prompt = f"""
-You are the SRE Mediamelon agent.
-
-Here is **today's node-level CPU data**:
-{node_cpu_today}
-
-Here is **yesterday's node-level CPU data**:
-{node_cpu_yesterday}
-
-Provide a tabular comparison as instructed earlier.
+Compare today's and yesterday's node CPU.
 """
     response = get_ai_response(prompt)
     ti.xcom_push(key="node_cpu_today_vs_yesterday", value=response)
@@ -271,12 +257,10 @@ output_format:["namespace1", "namespace2", .....].
         
         # Your logic to get CPU and memory metrics for this namespace
         cpu_prompt = f"""
-Get CPU usage for namespace {ns}:
-sum(rate(container_cpu_usage_seconds_total{{namespace="{ns}"}}[5m])) by (pod)
+Get CPU usage for namespace {ns} for the last 24 hours:
 """
         memory_prompt = f"""
-Get memory usage for namespace {ns}:
-sum(container_memory_working_set_bytes{{namespace="{ns}"}}) by (pod)
+Get memory usage for namespace {ns} for the last 24 hours:
 """
         
         try:
@@ -377,6 +361,72 @@ sum(container_memory_working_set_bytes{{namespace="{ns}"}}) by (pod)
     namespace_data = collect_namespace_results(namespace_results)
     namespace_markdown = compile_namespace_report(namespace_data)
 
+    # === NEW ADDITION ===
+    @task
+    def compile_node_report(ti=None):
+        """Compile node-level CPU, Memory, and Disk comparison markdown"""
+        node_cpu_cmp = ti.xcom_pull(task_ids="node_cpu_compare")
+        node_mem_cmp = ti.xcom_pull(task_ids="node_memory_compare")
+        node_disk_cmp = ti.xcom_pull(task_ids="node_disk_compare")
+
+        markdown_sections = []
+        markdown_sections.append("## Node-Level Metrics Summary\n")
+
+        if node_cpu_cmp:
+            markdown_sections.append("### Node CPU Utilization (Today vs Yesterday)\n")
+            markdown_sections.append(node_cpu_cmp + "\n")
+
+        if node_mem_cmp:
+            markdown_sections.append("### Node Memory Utilization (Today vs Yesterday)\n")
+            markdown_sections.append(node_mem_cmp + "\n")
+
+        if node_disk_cmp:
+            markdown_sections.append("### Node Disk Utilization (Today vs Yesterday)\n")
+            markdown_sections.append(node_disk_cmp + "\n")
+
+        return "\n".join(markdown_sections)
+
+    node_markdown = compile_node_report()
+
+    # === UPDATED: Combine node + pod markdown before converting to HTML ===
+    @task
+    def combine_reports(node_md: str, pod_md: str):
+        logging.info("Combining node-level and pod-level markdown reports")
+        return f"# Mediamelon SRE Daily Report\n\n{node_md}\n\n---\n\n{pod_md}"
+
+    combined_markdown = combine_reports(node_markdown, namespace_markdown)
+
+    # === NEW SUMMARY SECTION ===
+    @task
+    def extract_and_combine_summary(node_md: str, pod_md: str):
+        """Extract summary highlights from node and pod markdown reports"""
+        logging.info("Extracting combined summary from all reports")
+
+        def summarize(text):
+            try:
+                prompt = f"Summarize this performance report in 5 concise bullet points highlighting CPU, Memory, and Disk trends:\n{text[:5000]}"
+                summary = get_ai_response(prompt)
+                return summary.strip()
+            except Exception as e:
+                logging.error(f"Summary extraction failed: {e}")
+                return "Summary unavailable."
+
+        node_summary = summarize(node_md)
+        pod_summary = summarize(pod_md)
+
+        combined_summary = f""" 
+        Nod Level Overview
+        {node_summary}
+
+        Pod Namespace-Level Overview
+        {pod_summary}
+        """
+
+        logging.info("Summary successfully generated")
+        return combined_summary
+
+    summary_section = extract_and_combine_summary(node_markdown, namespace_markdown)
+    # === END SUMMARY SECTION ===
 
     # === Markdown to HTML Conversion ===
     def preprocess_markdown(markdown_text):
@@ -403,18 +453,18 @@ sum(container_memory_working_set_bytes{{namespace="{ns}"}}) by (pod)
         return '\n'.join(processed)
 
     @task
-    def convert_to_html(markdown_report: str):
-        """Convert Markdown report to HTML"""
-        logging.info(f"Converting markdown to HTML, length: {len(markdown_report)}")
-        
+    def convert_to_html(markdown_report: str, summary_md: str):
+        """Convert Markdown report to HTML with summary included"""
+        logging.info(f"Converting markdown + summary to HTML, length: {len(markdown_report)}")
+        full_md = f"{summary_md}\n\n---\n\n{markdown_report}"
         # Preprocess markdown
-        markdown_report = preprocess_markdown(markdown_report)
+        markdown_text = preprocess_markdown(full_md)
         html_body = None
 
         # Try python-markdown (best support for tables)
         try:
             html_body = markdown.markdown(
-                markdown_report,
+                markdown_text,
                 extensions=[
                     'tables',
                     'fenced_code',
@@ -423,7 +473,7 @@ sum(container_memory_working_set_bytes{{namespace="{ns}"}}) by (pod)
                     'attr_list'
                 ]
             )
-            logging.info("✅ Used 'markdown' library for conversion")
+            logging.info("Used 'markdown' library for conversion")
         except Exception as e:
             logging.error(f"Markdown conversion error: {e}")
             # Fallback to escaped text
@@ -549,7 +599,7 @@ a:hover {{
 </body>
 </html>"""
 
-        logging.info(f"✅ HTML generated, length: {len(full_html)}")
+        logging.info(f"HTML generated, length: {len(full_html)}")
         return full_html
 
 
@@ -594,12 +644,25 @@ a:hover {{
             logging.error(f"Failed to send email report: {str(e)}")
             raise
 
-    # Connect all tasks in the pipeline
-    html_report = convert_to_html(namespace_markdown)
+    # === UPDATED PIPELINE ===
+    html_report = convert_to_html(combined_markdown, summary_section)
     email_task = send_email_report(html_report)
 
-    # Node level tasks (commented out in original, keeping them commented)
+    # Node level tasks
     t1_today = PythonOperator(task_id="node_cpu_today", python_callable=node_cpu_today, provide_context=True)
     t1_yesterday = PythonOperator(task_id="node_cpu_yesterday", python_callable=node_cpu_yesterday, provide_context=True)
     t1_compare = PythonOperator(task_id="node_cpu_compare", python_callable=node_cpu_today_vs_yesterday, provide_context=True)
-    [t1_today, t1_yesterday] >> t1_compare >> email_task
+    [t1_today, t1_yesterday] >> t1_compare >> node_markdown
+
+    t1_today_mem = PythonOperator(task_id="node_memory_today", python_callable=node_memory_today, provide_context=True)
+    t1_yesterday_mem = PythonOperator(task_id="node_memory_yesterday", python_callable=node_memory_yesterday, provide_context=True)
+    t1_compare_mem = PythonOperator(task_id="node_memory_compare", python_callable=node_memory_today_vs_yesterday, provide_context=True)
+    [t1_today_mem, t1_yesterday_mem] >> t1_compare_mem >> node_markdown
+
+    t1_today_disk = PythonOperator(task_id="node_disk_today", python_callable=node_disk_today, provide_context=True)
+    t1_yesterday_disk = PythonOperator(task_id="node_disk_yesterday", python_callable=node_disk_yesterday, provide_context=True)
+    t1_compare_disk = PythonOperator(task_id="node_disk_compare", python_callable=node_disk_today_vs_yesterday, provide_context=True)
+    [t1_today_disk, t1_yesterday_disk] >> t1_compare_disk >> node_markdown
+
+    # Final dependencies
+    [namespace_markdown, node_markdown] >> combined_markdown >> summary_section >> html_report >> email_task
