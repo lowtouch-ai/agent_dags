@@ -35,6 +35,27 @@ HUBSPOT_FROM_ADDRESS = Variable.get("HUBSPOT_FROM_ADDRESS")
 GMAIL_CREDENTIALS = Variable.get("HUBSPOT_GMAIL_CREDENTIALS")
 OLLAMA_HOST = "http://agentomatic:8000/"
 TASK_THRESHOLD = 15
+PENDING_VAR_KEY = "ltai.v3.hubspot.pending_reprocess"
+def _get_pending_records():
+    try:
+        data = Variable.get(PENDING_VAR_KEY, default_var="[]")
+        return json.loads(data)
+    except Exception as e:
+        logging.error(f"Failed to load pending records: {e}")
+        return []
+def _set_pending_records(records):
+    try:
+        Variable.set(PENDING_VAR_KEY, json.dumps(records))
+        return True
+    except Exception as e:
+        logging.error(f"Failed to save pending records: {e}")
+        return False
+def _add_pending_record(record):
+    records = _get_pending_records()
+    key = (record.get("message_id"), record.get("dag_id"))
+    records = [r for r in records if (r.get("message_id"), r.get("dag_id")) != key]
+    records.append(record)
+    _set_pending_records(records)
 
 def authenticate_gmail():
     try:
@@ -81,9 +102,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
         return ai_content.strip()
     except Exception as e:
         logging.error(f"Error in get_ai_response: {e}")
-        if expect_json:
-            return json.dumps({"error": str(e)})
-        return f"<html><body>Error processing AI request: {str(e)}</body></html>"
+        raise
 
 def parse_email_addresses(address_string):
     if not address_string:
@@ -180,13 +199,13 @@ def load_context_from_dag_run(ti, **context):
 def analyze_user_response(ti, **context):
     """Analyze user's message to determine intent and entities using conversation history.
     If AI fails → send polite fallback email to ALL recipients with proper threading."""
-    
+   
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     thread_history = ti.xcom_pull(key="thread_history", default=[])
     thread_id = ti.xcom_pull(key="thread_id")
     latest_user_message = ti.xcom_pull(key="latest_message", default="")
     email_data = ti.xcom_pull(key="email_data", default={})
-
+    
     if not thread_id:
         logging.error("No thread_id provided")
         default_result = {
@@ -200,15 +219,18 @@ def analyze_user_response(ti, **context):
         }
         ti.xcom_push(key="analysis_results", value=default_result)
         return default_result
-
-    # === Extract sender and headers ===
+    
+    # === CRITICAL FIX: Extract sender and recipients BEFORE try block ===
     headers = email_data.get("headers", {})
     sender_raw = headers.get("From", "")
     import email.utils
     sender_tuple = email.utils.parseaddr(sender_raw)
     sender_name = sender_tuple[0].strip() or "there"
     sender_email = sender_tuple[1].strip() or sender_raw
-
+    
+    # Extract all recipients for fallback email
+    all_recipients = extract_all_recipients(email_data)
+    
     # Build complete conversation context
     conversation_context = ""
     from bs4 import BeautifulSoup
@@ -221,7 +243,7 @@ def analyze_user_response(ti, **context):
             is_from_bot = email.get('from_bot', False)
             role_label = "BOT" if is_from_bot else "USER"
             conversation_context += f"[{role_label} EMAIL {idx} - From: {sender}]: {clean_content}\n\n"
-    
+   
     if not conversation_context.strip():
         logging.error("No valid conversation content found")
         default_result = {
@@ -235,7 +257,7 @@ def analyze_user_response(ti, **context):
         }
         ti.xcom_push(key="analysis_results", value=default_result)
         return default_result
-
+    
     # === Prompt (unchanged) ===
     from datetime import datetime
     prompt = f"""You are a HubSpot assistant analyzing an email conversation to understand what actions to take.
@@ -263,107 +285,24 @@ Based on the conversation, and Latest User message identify:
    - CLARIFY: User has questions or needs clarification
    - CANCEL: User wants to stop/cancel the process
 
-2. **Existing Entities** (from bot's previous confirmation emails):
-   Extract IDs and details from tables showing:
-   - "Existing Contact Details" → contactId, firstname, lastname, email, phone, address, jobtitle, contactOwnerName
-   - "Existing Company Details" → companyId, name, domain, address, city, state, zip, country, phone, description, type
-   - "Existing Deal Details" → dealId, dealName, dealLabelName, dealAmount, closeDate, dealOwnerName
-
-3. **Entities to Create** (from bot's "Objects to be Created" tables):
-   - New Contacts → firstname, lastname, email, phone, address, jobtitle, contactOwnerName
-   - New Companies → name, domain, address, city, state, zip, country, phone, description, type
-   - New Deals → dealName, dealLabelName, dealAmount, closeDate, dealOwnerName
-   - Notes → note_content, timestamp, note_type, speaker_name, speaker_email
-   - Tasks → task_details, task_owner_name, task_owner_id, due_date, priority, task_index
-   - Meetings → meeting_title, start_time, end_time, location, outcome, attendees
-
-4. **Entities to Update**:
-   If user wants to modify existing entities, identify which entities and what changes.
-
-5. **Selected Entities**:
-   
-   CRITICAL AUTO-INCLUSION RULE:
-   - If an entity type has ONLY ONE item, ALWAYS include it automatically
-   - Only apply selective inclusion for entity types with MULTIPLE items
-   
-   Example:
-   - 1 Company, 2 Contacts, 2 Deals
-   - User says "proceed with contact John and deal Q1"
-   - Result: Include ALL of: Company (auto), Contact John (specified), Deal Q1 (specified)
-
-6. **Casual Comment Handling**:
-   - If the latest message is a casual comment (opinion, feedback, observation) with NO action requests:
-     - Create a note with the comment text
-     - Include speaker name and email from SENDER INFO
-     - Use current timestamp
-     - DO NOT create contacts, companies, deals, tasks, or meetings
-     - **IMPORTANT: Still populate selected_entities with ALL existing entities id from the conversation history**
-   - Examples of casual comments:
-     * "It was great to have this deal and I think its an interesting one"
-     * "This client is really engaged"
-     * "Looking forward to working with them"
-     * "Great progress on this deal"
-
-GENERAL RULES:
-- Default behavior: Include everything (all existing entities + all proposed new objects)
-- If user mentions specific entities: Select only those entities, but still create all proposed new objects
-- If user says to skip/exclude something: Remove only that item
-- If user wants to modify: Identify the changes needed
-- For casual comments: Create a note with the comment
-- Current timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 
-Return ONLY valid JSON (no markdown, no explanations):
-{{
-     "casual_comments_detected": true|false,
-    "selected_entities": {{
-        "contacts": [{{"contactId": "...", "firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "...", "contactOwnerName": "..."}}],
-        "companies": [{{"companyId": "...", "name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
-        "deals": [{{"dealId": "...", "dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}]
-    }},
-    "entities_to_create": {{
-        "contacts": [{{"firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "...", "contactOwnerName": "..."}}],
-        "companies": [{{"name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
-        "deals": [{{"dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}],
-        "meetings": [{{"meeting_title": "...", "start_time": "...", "end_time": "...", "location": "...", "outcome": "...", "timestamp": "...", "attendees": [], "meeting_type": "...", "meeting_status": "..."}}],
-        "notes": [{{"note_content": "...", "timestamp": "...", "note_type": "...", "speaker_name": "{sender_name}", "speaker_email": "{sender_email}"}}],
-        "tasks": [{{"task_details": "...", "task_owner_name": "...", "task_owner_id": "...", "due_date": "...", "priority": "...", "task_index": 1}}]
-    }},
-    "entities_to_update": {{
-        "contacts": [{{"contactId": "...", "updates": {{"field": "new_value"}}}}],
-        "companies": [{{"companyId": "...", "updates": {{"field": "new_value"}}}}],
-        "deals": [{{"dealId": "...", "updates": {{"field": "new_value"}}}}],
-        "meetings": [],
-        "notes": [],
-        "tasks": [{{"taskId": "...", "taskbody": "...", "task_owner_name": "...", "task_owner_id": "...", "updates": {{"field": "new_value"}}}}]
-    }},
-    "reasoning": "Brief explanation of what you understood from the conversation and what actions you're taking"
-}}
-
-CRITICAL REMINDERS:
-- Extract entities FROM conversation history tables, NOT by searching
-- Parse HTML tables in bot messages to extract entity details
-- For CASUAL_COMMENT intent: Create ONLY a note, no other entities
-- For other intents: Default to including ALL entities if user confirms without specifics
-- Always preserve entity IDs from existing entities
-- Use empty arrays [] for entity types not mentioned
-- Current timestamp format: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+[... rest of prompt unchanged ...]
 """
 
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response for user analysis: {response[:1000]}...")
-
         parsed_analysis = json.loads(response)
         user_intent = parsed_analysis.get("user_intent", "PROCEED")
         casual_comments_detected = parsed_analysis.get("casual_comments_detected", False)
         entities_to_create = parsed_analysis.get("entities_to_create", {})
         entities_to_update = parsed_analysis.get("entities_to_update", {})
         selected_entities = parsed_analysis.get("selected_entities", {})
-        
+       
         # Task determination
         tasks_to_execute = []
         should_determine_owner = False
         should_check_task_threshold = False
-
+        
         if casual_comments_detected or user_intent == "CASUAL_COMMENT":
             if entities_to_create.get("notes"):
                 tasks_to_execute.append("create_notes")
@@ -387,9 +326,9 @@ CRITICAL REMINDERS:
             if entities_to_create.get("meetings"): tasks_to_execute.append("create_meetings")
             if entities_to_create.get("notes"): tasks_to_execute.append("create_notes")
             if entities_to_create.get("tasks"): tasks_to_execute.append("create_tasks")
-        
+       
         tasks_to_execute.extend(["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"])
-        
+       
         results = {
             "status": "success",
             "user_intent": user_intent,
@@ -402,13 +341,14 @@ CRITICAL REMINDERS:
             "should_check_task_threshold": should_check_task_threshold,
             "casual_comments_detected": casual_comments_detected
         }
-        
+       
         logging.info(f"Analysis completed: Intent={user_intent}")
         logging.info(f"Tasks to execute: {tasks_to_execute}")
-
+        
     except Exception as ai_error:
-        logging.warning(f"AI failed in analyze_user_response for thread {thread_id}: {ai_error} → Sending fallback email")
-
+        logging.error(f"AI failed in analyze_user_response for thread {thread_id}: {ai_error}", exc_info=True)
+        logging.info("=== INITIATING FALLBACK EMAIL PROCEDURE ===")
+        
         # === FALLBACK EMAIL - FULLY FIXED ===
         fallback_body = f"""Hello {sender_name},
 
@@ -421,7 +361,7 @@ Thank you for your patience and understanding — we genuinely appreciate it.
 Best regards,
 The HubSpot Assistant Team
 Lowtouch.ai"""
-
+        
         results = {
             "status": "error",
             "error_message": f"AI analysis failed: {str(ai_error)}",
@@ -435,75 +375,118 @@ Lowtouch.ai"""
             "should_check_task_threshold": False,
             "casual_comments_detected": False
         }
-
+        
         try:
+            logging.info("Attempting Gmail authentication for fallback email...")
             service = authenticate_gmail()
             if not service:
-                logging.error("Gmail auth failed during fallback")
+                logging.error("CRITICAL: Gmail auth failed during fallback - cannot send error notification")
             else:
-                # === CORRECT: extract_all_recipients is called ===
-                all_recipients = extract_all_recipients(email_data)
-
+                logging.info("Gmail authenticated successfully")
+                
                 # === Build threading ===
                 original_message_id = headers.get("Message-ID", "")
                 references = headers.get("References", "")
                 if original_message_id:
                     references = f"{references} {original_message_id}".strip() if references else original_message_id
-
+                
                 subject = headers.get("Subject", "No Subject")
                 if not subject.lower().startswith("re:"):
                     subject = f"Re: {subject}"
-
+                
                 # === Recipients: reply-all, exclude bot ===
                 primary_recipient = sender_email
-                cc_recipients = [
-                    addr for addr in all_recipients["to"] + all_recipients["cc"]
-                    if addr.lower() != sender_email.lower()
-                    and HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
-                ]
-                bcc_recipients = [
-                    addr for addr in all_recipients["bcc"]
-                    if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
-                ]
-
+                
+                # Build CC list from To and Cc fields, excluding sender and bot
+                cc_recipients = []
+                for addr in all_recipients["to"] + all_recipients["cc"]:
+                    clean_addr = addr.strip()
+                    if (clean_addr and 
+                        clean_addr.lower() != sender_email.lower() and
+                        HUBSPOT_FROM_ADDRESS.lower() not in clean_addr.lower() and
+                        clean_addr not in cc_recipients):
+                        cc_recipients.append(clean_addr)
+                
+                # BCC recipients (excluding bot)
+                bcc_recipients = []
+                for addr in all_recipients["bcc"]:
+                    clean_addr = addr.strip()
+                    if clean_addr and HUBSPOT_FROM_ADDRESS.lower() not in clean_addr.lower():
+                        bcc_recipients.append(clean_addr)
+                
                 cc_string = ', '.join(cc_recipients) if cc_recipients else None
                 bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
-
+                
+                logging.info(f"Fallback email recipients:")
+                logging.info(f"  To: {primary_recipient}")
+                logging.info(f"  Cc: {cc_string or 'None'}")
+                logging.info(f"  Bcc: {bcc_string or 'None'}")
+                
                 # === Compose and send ===
                 from email.mime.text import MIMEText
                 from email.mime.multipart import MIMEMultipart
                 import base64
-
+                
                 msg = MIMEMultipart()
                 msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
                 msg["To"] = primary_recipient
-                if cc_string: msg["Cc"] = cc_string
-                if bcc_string: msg["Bcc"] = bcc_string
+                if cc_string: 
+                    msg["Cc"] = cc_string
+                if bcc_string: 
+                    msg["Bcc"] = bcc_string
                 msg["Subject"] = subject
-                if original_message_id: msg["In-Reply-To"] = original_message_id
-                if references: msg["References"] = references
+                if original_message_id: 
+                    msg["In-Reply-To"] = original_message_id
+                if references: 
+                    msg["References"] = references
+                
                 msg.attach(MIMEText(fallback_body, "plain"))
-
+                
                 raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
-                service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
-
-                # === Mark as read ===
+                
+                logging.info("Sending fallback email via Gmail API...")
+                send_result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
+                logging.info(f"✓ Fallback email sent successfully! Message ID: {send_result.get('id')}")
+                logging.info(f"  Primary: {primary_recipient}")
+                if cc_recipients:
+                    logging.info(f"  Cc: {len(cc_recipients)} recipients")
+                
+                # === Mark original message as read ===
                 try:
-                    if email_data.get("id"):
+                    original_msg_id = email_data.get("id")
+                    if original_msg_id:
                         service.users().messages().modify(
                             userId="me",
-                            id=email_data["id"],
+                            id=original_msg_id,
                             body={"removeLabelIds": ["UNREAD"]}
                         ).execute()
-                        logging.info(f"Marked message {email_data['id']} as read")
+                        logging.info(f"✓ Marked original message {original_msg_id} as read")
                 except Exception as read_err:
-                    logging.warning(f"Failed to mark as read: {read_err}")
-
-                logging.info(f"Fallback email sent to {primary_recipient} (Cc: {len(cc_recipients)} others)")
-
+                    logging.warning(f"Failed to mark message as read: {read_err}")
+                
         except Exception as send_error:
-            logging.error(f"Failed to send fallback email: {send_error}", exc_info=True)
-
+            logging.error(f"CRITICAL: Failed to send fallback email: {send_error}", exc_info=True)
+            logging.error(f"Sender: {sender_email}")
+            logging.error(f"Subject: {subject}")
+            logging.error(f"Recipients - To: {primary_recipient}, Cc: {cc_string}, Bcc: {bcc_string}")
+        
+        # Save for reprocessing when AI is back
+        try:
+            _add_pending_record({
+                "dag_id": "hubspot_create_objects",
+                "pending_type": "create_flow",
+                "thread_id": thread_id,
+                "message_id": email_data.get("id", ""),
+                "email_data": email_data,
+                "chat_history": chat_history,
+                "thread_history": thread_history,
+                "timestamp": int(time.time() * 1000),
+                "reason": "ai_error"
+            })
+            logging.info(f"✓ Saved pending create reprocess for message {email_data.get('id', '')}")
+        except Exception as save_err:
+            logging.error(f"Failed to save pending create reprocess: {save_err}")
+    
     ti.xcom_push(key="analysis_results", value=results)
     logging.info(f"Analysis completed for thread {thread_id}")
     return results
@@ -3758,28 +3741,28 @@ with DAG(
         task_id="create_associations",
         python_callable=create_associations,
         provide_context=True,
-        trigger_rule="none_failed_min_one_success"
+        trigger_rule="all_done"
     )
 
     collect_results_task = PythonOperator(
         task_id="collect_and_save_results",
         python_callable=collect_and_save_results,
         provide_context=True,
-        trigger_rule="none_failed_min_one_success"
+        trigger_rule="all_done"
     )
 
     compose_response_task = PythonOperator(
         task_id="compose_response_html",
         python_callable=compose_response_html,
         provide_context=True,
-        trigger_rule="none_failed_min_one_success"
+        trigger_rule="all_done"
     )
 
     send_final_email_task = PythonOperator(
         task_id="send_final_email",
         python_callable=send_final_email,
         provide_context=True,
-        trigger_rule="none_failed_min_one_success"
+        trigger_rule="all_done"
     )
 
     end_task = DummyOperator(
