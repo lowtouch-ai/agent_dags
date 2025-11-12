@@ -492,6 +492,86 @@ No change in downtime.
     ti.xcom_push(key="mysql_health_today_vs_yesterday", value=response)
     return response
 
+# === tX: Overall Summary (Today + Comparison) ===
+def overall_summary(ti, **context):
+    """
+    Generate an overall summary combining today's metrics and comparisons
+    across all monitored components.
+    """
+
+    # --- Today's Data ---
+    node_cpu       = ti.xcom_pull(key="node_cpu_today") or "No CPU data"
+    node_memory    = ti.xcom_pull(key="node_memory_today") or "No memory data"
+    node_disk      = ti.xcom_pull(key="node_disk_today") or "No disk data"
+    node_readiness = ti.xcom_pull(key="node_readiness_check") or "No readiness data"
+    pod_cpu        = ti.xcom_pull(key="pod_cpu_today") or "No pod CPU data"
+    pod_memory     = ti.xcom_pull(key="pod_memory_today") or "No pod memory data"
+    pod_restart    = ti.xcom_pull(key="pod_restart_today") or "No restart data"
+    mysql_health   = ti.xcom_pull(key="mysql_health_today") or "No MySQL data"
+    microk8s_ver   = ti.xcom_pull(key="microk8s_version_check") or "No MicroK8s version data"
+    microk8s_exp   = ti.xcom_pull(key="microk8s_expiry_check") or "No certificate data"
+    lke_pvc        = ti.xcom_pull(key="lke_pvc_storage_details") or "No PVC data"
+
+    # --- Comparison Data ---
+    node_cpu_cmp   = ti.xcom_pull(key="node_cpu_today_vs_yesterday") or "No comparison data"
+    node_mem_cmp   = ti.xcom_pull(key="node_memory_today_vs_yesterday") or "No comparison data"
+    node_disk_cmp  = ti.xcom_pull(key="node_disk_today_vs_yesterday") or "No comparison data"
+    pod_cpu_cmp    = ti.xcom_pull(key="pod_cpu_today_vs_yesterday") or "No comparison data"
+    pod_mem_cmp    = ti.xcom_pull(key="pod_memory_today_vs_yesterday") or "No comparison data"
+    mysql_cmp      = ti.xcom_pull(key="mysql_health_today_vs_yesterday") or "No comparison data"
+
+    # --- Build Prompt for AI Summary ---
+    prompt = f"""
+    You are the SRE TradeIdeas agent.
+
+    Your task: Generate a **complete overall summary** for today's SRE report,
+    followed by a **comparative summary** analyzing performance trends versus yesterday.
+
+    ### Part 1: Today's Summary
+    Use the data below to provide a high-level assessment of current cluster health.
+
+    #### Today's Section Data:
+    - Node CPU Report: {node_cpu}
+    - Node Memory Report: {node_memory}
+    - Node Disk Report: {node_disk}
+    - Node Readiness: {node_readiness}
+    - Pod CPU Report: {pod_cpu}
+    - Pod Memory Report: {pod_memory}
+    - Pod Restart Summary: {pod_restart}
+    - MySQL Health: {mysql_health}
+    - MicroK8s Version: {microk8s_ver}
+    - MicroK8s Certificate Expiry: {microk8s_exp}
+    - LKE PVC Storage Details: {lke_pvc}
+
+    ### Part 2: Comparison Summary (Today vs Yesterday)
+    Use the comparison metrics to highlight improvements, degradations, or stability across systems.
+
+    #### Comparison Data:
+    - Node CPU Comparison: {node_cpu_cmp}
+    - Node Memory Comparison: {node_mem_cmp}
+    - Node Disk Comparison: {node_disk_cmp}
+    - Pod CPU Comparison: {pod_cpu_cmp}
+    - Pod Memory Comparison: {pod_mem_cmp}
+    - MySQL Health Comparison: {mysql_cmp}
+
+    ### Instructions:
+    1. Write two clearly separated sections:
+       - **Overall Summary (Today)**
+       - **Comparison Summary (Today vs Yesterday)**
+    2. Use professional tone, concise sentences, and structured paragraphs.
+    3. Highlight critical alerts, anomalies, and areas of improvement.
+    4. Summarize key positives and potential issues.
+    5. Avoid repeating detailed metrics — focus on interpretation and trends.
+    """
+
+    # --- Generate AI Response ---
+    response = get_ai_response(prompt)
+
+    # --- Push to XCom ---
+    ti.xcom_push(key="overall_summary", value=response)
+
+    return response
+
 # === t10: Compile SRE Report ===
 def compile_sre_report(ti, **context):
     # Pull all XComs for today
@@ -506,6 +586,9 @@ def compile_sre_report(ti, **context):
     microk8s_ver   = ti.xcom_pull(key="microk8s_version_check") or "No MicroK8s version data"
     microk8s_exp   = ti.xcom_pull(key="microk8s_expiry_check") or "No cert data"
     lke_pvc        = ti.xcom_pull(key="lke_pvc_storage_details") or "No PVC data"
+
+    # --- Generate Overall Summary ---
+    overall_summary = ti.xcom_pull(key="overall_summary") or "No overall summary available."
 
     # XComs for yesterday comparisons
     node_cpu_cmp     = ti.xcom_pull(key="node_cpu_today_vs_yesterday") or "No comparison"
@@ -594,12 +677,13 @@ def compile_sre_report(ti, **context):
 
 ---
 
-
+## 8. Database Health (Today vs Yesterday)
+{mysql_cmp}
 
 ---
 
-## 8. Database Health (Today vs Yesterday)
-{mysql_cmp}
+## 9. Overall Summary
+{overall_summary}
 
 ---
 
@@ -1019,21 +1103,26 @@ with DAG(
         provide_context=True,
     )
 
+    t24 = PythonOperator(
+        task_id="overall_summary",
+        python_callable=overall_summary,
+        provide_context=True,
+    )
 
     # FINAL REPORTING
-    t24 = PythonOperator(
+    t25 = PythonOperator(
         task_id="compile_sre_report",
         python_callable=compile_sre_report,
         provide_context=True,
     )
 
-    t25 = PythonOperator(
+    t26 = PythonOperator(
         task_id="convert_to_html",
         python_callable=convert_to_html,
         provide_context=True,
     )
 
-    t26 = PythonOperator(
+    t27 = PythonOperator(
         task_id="send_sre_email",
         python_callable=send_sre_email,
         provide_context=True,
@@ -1041,4 +1130,4 @@ with DAG(
 
 
     # FINAL DAG CHAIN
-    t1 >> t2 >> t3 >> t4 >> t5 >> t6 >> t7 >> t8 >> t9 >> t10 >> t11 >> t12 >> t13 >> t14 >> t15 >> t16 >> t17 >> t18 >> t19 >> t20 >> t21 >> t22 >> t23 >> t24 >> t25 >> t26
+    t1 >> t2 >> t3 >> t4 >> t5 >> t6 >> t7 >> t8 >> t9 >> t10 >> t11 >> t12 >> t13 >> t14 >> t15 >> t16 >> t17 >> t18 >> t19 >> t20 >> t21 >> t22 >> t23 >> t24 >> t25 >> t26 >> t27
