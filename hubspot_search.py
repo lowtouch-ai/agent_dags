@@ -460,7 +460,6 @@ Lowtouch.ai"""
                 "message_id": email_data.get("id", ""),
                 "email_data": email_data,
                 "chat_history": chat_history,
-                "thread_history": thread_history,
                 "timestamp": int(datetime.now().timestamp() * 1000),
                 "reason": "ai_error"
             })
