@@ -252,30 +252,34 @@ output_format:["namespace1", "namespace2", .....].
 
     @task
     def process_namespace(ns: str):
-        """Process a single namespace - get pod CPU/memory metrics"""
+        """Process namespace with peak metrics + limits + disk"""
         logging.info(f"Processing namespace: {ns}")
-        
-        # Your logic to get CPU and memory metrics for this namespace
-        cpu_prompt = f"""
-Get CPU usage for namespace {ns} for the last 24 hours:
+
+        cpu_peak_prompt = f"""
+Get the **peak CPU usage for every pod** in namespace `{ns}` over the last 24 hours.
+Return each entry as:
+pod_name, peak_cpu_cores, timestamp.
+Format clean JSON.
 """
-        memory_prompt = f"""
-Get memory usage for namespace {ns} for the last 24 hours:
+
+        mem_peak_prompt = f"""
+Get the **peak memory usage for every pod** in namespace `{ns}` over the last 24 hours.
+Return:
+pod_name, peak_memory_gb, timestamp.
+Format clean JSON.
 """
-        
+
         try:
-            cpu_response = get_ai_response(cpu_prompt)
-            memory_response = get_ai_response(memory_prompt)
-            
-            result = {
+            cpu_response = get_ai_response(cpu_peak_prompt)
+            memory_response = get_ai_response(mem_peak_prompt)
+
+            return {
                 "namespace": ns,
-                "cpu_metrics": cpu_response,
-                "memory_metrics": memory_response,
+                "cpu_peak": cpu_response,
+                "memory_peak": memory_response,
                 "status": "success"
             }
-            logging.info(f"Successfully processed namespace {ns}")
-            return result
-            
+
         except Exception as e:
             logging.error(f"Error processing namespace {ns}: {e}")
             return {
@@ -336,17 +340,15 @@ Get memory usage for namespace {ns} for the last 24 hours:
         # Process each namespace
         for ns, data in sorted(namespace_data.get("results", {}).items()):
             markdown_sections.append(f"\n### Namespace: `{ns}`\n")
-            
-            # CPU Metrics
-            if data.get("cpu_metrics"):
-                markdown_sections.append(f"\n#### CPU Usage\n")
-                markdown_sections.append(data["cpu_metrics"])
+
+            if data.get("cpu_peak"):
+                markdown_sections.append("\n#### Peak CPU Usage (Per Pod)\n")
+                markdown_sections.append(data["cpu_peak"])
                 markdown_sections.append("\n")
-            
-            # Memory Metrics
-            if data.get("memory_metrics"):
-                markdown_sections.append(f"\n#### Memory Usage\n")
-                markdown_sections.append(data["memory_metrics"])
+
+            if data.get("memory_peak"):
+                markdown_sections.append("\n#### Peak Memory Usage (Per Pod)\n")
+                markdown_sections.append(data["memory_peak"])
                 markdown_sections.append("\n")
             
             markdown_sections.append("---\n")
@@ -392,7 +394,7 @@ Get memory usage for namespace {ns} for the last 24 hours:
     @task
     def combine_reports(node_md: str, pod_md: str):
         logging.info("Combining node-level and pod-level markdown reports")
-        return f"# Mediamelon SRE Daily Report\n\n{node_md}\n\n---\n\n{pod_md}"
+        return f"# Mediamelon SRE Daily Report\n\n{node_md}\n\n---\n\n{pod_md}\n\n"
 
     combined_markdown = combine_reports(node_markdown, namespace_markdown)
 
@@ -404,7 +406,12 @@ Get memory usage for namespace {ns} for the last 24 hours:
 
         def summarize(text):
             try:
-                prompt = f"Summarize this performance report in 5 concise bullet points highlighting CPU, Memory, and Disk trends:\n{text[:5000]}"
+                prompt = (
+                    "From the following pod-level report, extract ONLY a clean 5-bullet summary "
+                    "highlighting: CPU trends, Memory trends, anomalies, highest usage namespaces, and actions needed. "
+                    "Do NOT include code, raw metrics, or long pod names.\n"
+                    + text[:5000]
+                )
                 summary = get_ai_response(prompt)
                 return summary.strip()
             except Exception as e:
@@ -415,9 +422,11 @@ Get memory usage for namespace {ns} for the last 24 hours:
         pod_summary = summarize(pod_md)
 
         combined_summary = f""" 
-        Nod Level Overview
+        Node Level Overview
         {node_summary}
+        """
 
+        f"""
         Pod Namespace-Level Overview
         {pod_summary}
         """
@@ -623,7 +632,7 @@ a:hover {{
 
             # Prepare email message
             sender = Variable.get("MEDIAMELON_FROM_ADDRESS", "")
-            recipients = Variable.get("MEDIAMELON_TO_ADDRESS", "").split(",")
+            recipients = Variable.get("MEDIAMELON_TO_ADDRESS", "apnair@ecloudcontrol.com").split(",")
             subject = f"Mediamelon SRE Daily Report - {datetime.now().strftime('%Y-%m-%d')}"
 
             msg = MIMEMultipart("alternative")
