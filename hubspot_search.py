@@ -252,7 +252,7 @@ Analyze the content and determine:
             - Thoughts or observations without an actual interaction
 
     - TASKS (parse_tasks):
-        - Set to TRUE ONLY if there is an EXPLICIT action item or follow-up task mentioned
+        - Set to TRUE ONLY if there is an EXPLICIT action item or follow-up task mentioned. Check for headings next steps, followup steps, if found set tasks to true.
         - Look for phrases like: "need to...", "should...", "must...", "follow up on...", "send them...", "schedule...", "remind me to..."
         - Set to FALSE for:
             - Vague possibilities (e.g., "this could turn into something", "might be good to connect")
@@ -573,7 +573,9 @@ Steps:
 5. For new deals, use the validated deal owner name in dealOwnerName.
 6. Propose an additional new deal if the email explicitly requests opening a second deal, even if one exists.
 7. Use dealLabelName for deal stages (e.g., 'Appointment Scheduled').
-8. Fill all fields in the JSON. Use empty string "" for any missing values.
+8. Always use default closeDate 90 days from today, if not specified in YYYY-MM-DD format.
+9. Always use the default deal amount as 5000 if not specified.
+10. Fill all fields in the JSON. Use empty string "" for any missing values.
 
 Return exactly this JSON structure:
 {{
@@ -602,7 +604,6 @@ Return exactly this JSON structure:
 }}
 
 RESPOND WITH ONLY THE JSON OBJECT."""
-
 
     response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
     logging.info(f"Raw AI response for deals: {response[:1000]}...")
@@ -1002,9 +1003,9 @@ def parse_notes_tasks_meeting(ti, **context):
     
     parsing_instructions = []
     if should_parse_notes:
-        parsing_instructions.append("1. Notes - Important discussion points, decisions, general notes")
+        parsing_instructions.append("1. Notes - All the email content exactly the same format except branding and signatures should be captured as notes.")
     if should_parse_tasks:
-        parsing_instructions.append("2. Tasks - Action items with owner and due dates. Adding entities to HubSpot is NOT a task.")
+        parsing_instructions.append("2. Tasks - Action items, Next steps with owner and due dates. Adding entities to HubSpot is NOT a task. All the next steps should be logged as tasks.")
     if should_parse_meetings:
         parsing_instructions.append("3. Meeting Details - Title, start time, end time, location, outcome, attendees")
 
@@ -1030,7 +1031,7 @@ PARSING INSTRUCTIONS (only parse these):
 **STRICT PARSING RULES (execute in order):**
 
 For notes (only if note parsing is enabled):
-- Extract any important discussion points, decisions made, or general notes.
+- Extract the whole email content except branding and signatures and capture it in the same format as the email came as notes. The should be captured in the email format, if there are new lines gaps headings , the same should be captured.
 
 For meetings (only if meeting parsing is enabled):
 - Extract meeting title, start time, end time, location, outcome, timestamp, attendees, meeting type, and meeting status.
@@ -1038,12 +1039,14 @@ For meetings (only if meeting parsing is enabled):
 
 For tasks (only if task parsing is enabled):
 - Identify all tasks and their respective owners from the email content.
+- Always check for headings mext steps or followup steps. All the next steps, followup steps specified in email content are considered as tasks.
 - For each task:
   - Match the task to the corresponding owner in the provided Task Owners list by task_index (1-based indexing).
   - If a specific task owner is mentioned in the email and matches an entry in the Task Owners list, use that owner's name and ID.
   - If a specific task owner is mentioned but does not match any entry in the Task Owners list, use the default task owner: {default_task_owner_name} (ID: {default_task_owner_id}).
   - If no task owner is specified, use the default task owner: {default_task_owner_name} (ID: {default_task_owner_id}).
   - If no due date is specified, use the date three business days from the current date.
+  - For due date is today is mentioned, use the current date. Tomorrow is current date + 1 day, after 2 days is current date + 2 days and so on. day after tomorrow is current date + 2 days.
   - Assign a priority (high, medium, low) based on context; default to 'medium' if not specified.
 
 Return this exact JSON structure:
