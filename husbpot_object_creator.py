@@ -404,6 +404,7 @@ CRITICAL REMINDERS:
        
         logging.info(f"Analysis completed: Intent={user_intent}")
         logging.info(f"Tasks to execute: {tasks_to_execute}")
+        logging.info(f"Reasoning: {results['reasoning']}")
         
     except Exception as ai_error:
         logging.error(f"AI failed in analyze_user_response for thread {thread_id}: {ai_error}", exc_info=True)
