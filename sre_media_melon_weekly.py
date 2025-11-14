@@ -29,11 +29,13 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
-SMTP_HOST = Variable.get("SMTP_HOST")
-SMTP_PORT = int(Variable.get("SMTP_PORT"))
-SMTP_USER = Variable.get("SMTP_USER")
-SMTP_PASSWORD = Variable.get("SMTP_PASSWORD")
-SMTP_SUFFIX = "<noreply@mediamelon.com>"
+SMTP_HOST = Variable.get("ltai.v3.mediamelon.smtp.host")
+SMTP_PORT = int(Variable.get("ltai.v3.mediamelon.smtp.port"))
+SMTP_USER = Variable.get("ltai.v3.mediamelon.smtp.user")
+SMTP_PASSWORD = Variable.get("ltai.v3.mediamelon.smtp.password")
+SMTP_SUFFIX = Variable.get("ltai.v3.mediamelon.smtp.suffix")
+MEDIAMELON_FROM_ADDRESS = Variable.get("MEDIAMELON_FROM_ADDRESS")
+MEDIAMELON_TO_ADDRESS = Variable.get("MEDIAMELON_TO_ADDRESS")
 
 OLLAMA_HOST = Variable.get("MEDIAMELON_OLLAMA_HOST", "http://agentomatic:8000/")
 
@@ -71,7 +73,8 @@ def get_ai_response(prompt, conversation_history=None):
         logging.error(f"Error in get_ai_response: {str(e)}")
         return f"An error occurred while processing your request: {str(e)}"
 
-# ------------------- Weekly Metrics Tasks -------------------
+
+# ------------------- Weekly Node & Pod compute functions -------------------
 
 # Node-level weekly metrics
 def node_cpu_week(ti, **context):
@@ -118,7 +121,7 @@ Time window: {WEEK_FROM} to {WEEK_TO}
 
 def pod_memory_week(ti, **context):
     prompt = f"""
-Generate the **pod level Memory utilisation for the last 7 days (rolling)**.
+Generate the pod level Memory utilisation for the last 7 days (rolling).
 Return per-pod daily averages and weekly peak in JSON format.
 Time window: {WEEK_FROM} to {WEEK_TO}
 """
@@ -531,6 +534,7 @@ a:hover {{
 <body>
 <div class="container">
 <h1>Mediamelon SRE Weekly Report</h1>
+<p><strong>Reporting window (rolling 7 days):</strong> {WEEK_FROM} to {WEEK_TO}</p>
 <p><strong>Generated:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
 {html_body}
 <hr>
@@ -581,7 +585,7 @@ def send_weekly_email_report(html_report: str):
 # ------------------- DAG Definition -------------------
 
 with DAG(
-    dag_id="sre-mediamelon-weekly",
+    dag_id="sre_mediamelon_sre_report_weekly_v1",
     default_args=default_args,
     # Run weekly on Fridays at 05:30 UTC (rolling 7-day window)
     schedule_interval="30 5 * * FRI",
@@ -600,7 +604,17 @@ with DAG(
     t_node_mem_cmp = PythonOperator(task_id="node_memory_week_vs_prev", python_callable=node_memory_week_vs_prev, provide_context=True)
     t_node_disk_cmp = PythonOperator(task_id="node_disk_week_vs_prev", python_callable=node_disk_week_vs_prev, provide_context=True)
 
-    # Pod weekly tasks and comparisons
+    # Wire node compute -> compare -> compile
+    [t_node_cpu_week] >> t_node_cpu_cmp
+    [t_node_mem_week] >> t_node_mem_cmp
+    [t_node_disk_week] >> t_node_disk_cmp
+
+    node_markdown = compile_node_weekly_report()
+
+    # Ensure compare tasks feed into node_markdown
+    [t_node_cpu_cmp, t_node_mem_cmp, t_node_disk_cmp] >> node_markdown
+
+    # 4) Pod weekly compute tasks (after namespace and node comparisons, same order as daily)
     t_pod_cpu_week = PythonOperator(task_id="pod_cpu_week", python_callable=pod_cpu_week, provide_context=True)
     t_pod_mem_week = PythonOperator(task_id="pod_memory_week", python_callable=pod_memory_week, provide_context=True)
     t_pod_cpu_cmp = PythonOperator(task_id="pod_cpu_week_vs_prev", python_callable=pod_cpu_week_vs_prev, provide_context=True)
@@ -615,6 +629,7 @@ with DAG(
     # Compile node & pod markdown
     node_markdown = compile_node_weekly_report()
     pod_markdown = compile_pod_weekly_report()
+    [t_pod_cpu_cmp, t_pod_mem_cmp] >> pod_markdown
 
     # Combine weekly markdowns
     @task
@@ -636,9 +651,12 @@ with DAG(
     # Node: compute -> compare -> compile
     [t_node_cpu_week, t_node_mem_week, t_node_disk_week] >> [t_node_cpu_cmp, t_node_mem_cmp, t_node_disk_cmp] >> node_markdown
 
-    # Pod: compute -> compare -> compile
-    [t_pod_cpu_week, t_pod_mem_week] >> [t_pod_cpu_cmp, t_pod_mem_cmp] >> pod_markdown
+    # Ensure node compute starts after namespace_markdown is available (as requested: namespace first)
+    namespace_markdown >> [t_node_cpu_week, t_node_mem_week, t_node_disk_week]
 
-    # Namespaces are dynamically expanded; results compiled into namespace_markdown
-    # Final flow: compile -> combine -> summary -> html -> email
-    [node_markdown, pod_markdown, namespace_markdown] >> combined_markdown >> summary_section >> html_report >> email_task
+    # Ensure node comparisons complete before compiling node markdown (already wired)
+    # Ensure pod compute runs after node_markdown compiled (to mimic daily ordering where node runs after namespace then pod)
+    node_markdown >> [t_pod_cpu_week, t_pod_mem_week]
+
+    # Ensure compile -> combine -> summary -> html -> send
+    [namespace_markdown, node_markdown, pod_markdown] >> combined_markdown >> summary_section >> html_report >> email_task

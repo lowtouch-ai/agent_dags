@@ -29,13 +29,14 @@ default_args = {
     "retries": 3,
     "retry_delay": timedelta(minutes=5),
 }
-SMTP_HOST = Variable.get("SMTP_HOST")
-SMTP_PORT = int(Variable.get("SMTP_PORT"))
-SMTP_USER = Variable.get("SMTP_USER")
-SMTP_PASSWORD = Variable.get("SMTP_PASSWORD")
-SMTP_SUFFIX = "<noreply@mediamelon.com>"
 
-
+SMTP_HOST = Variable.get("ltai.v3.mediamelon.smtp.host")
+SMTP_PORT = int(Variable.get("ltai.v3.mediamelon.smtp.port"))
+SMTP_USER = Variable.get("ltai.v3.mediamelon.smtp.user")
+SMTP_PASSWORD = Variable.get("ltai.v3.mediamelon.smtp.password")
+SMTP_SUFFIX = Variable.get("ltai.v3.mediamelon.smtp.suffix")
+MEDIAMELON_FROM_ADDRESS = Variable.get("MEDIAMELON_FROM_ADDRESS")
+MEDIAMELON_TO_ADDRESS = Variable.get("MEDIAMELON_TO_ADDRESS")
 
 OLLAMA_HOST = Variable.get("MEDIAMELON_OLLAMA_HOST", "http://agentomatic:8000/")
 
@@ -220,7 +221,7 @@ Compare today's and yesterday's node disk usage.
 
 # === DAG ===
 with DAG(
-    dag_id="sre-mediamelon-daily",
+    dag_id="sre_mediamelon_sre_report_daily_v1",
     default_args=default_args,
     schedule_interval="30 5 * * *",
     catchup=False,
@@ -326,67 +327,50 @@ Format clean JSON.
         logging.info("Compiling namespace metrics into markdown report")
         
         if not namespace_data or not namespace_data.get("results"):
-            return "## Pod-Level Metrics by Namespace\n\nNo namespace data available."
-        
-        markdown_sections = []
-        markdown_sections.append("## Pod-Level Metrics by Namespace\n")
-        markdown_sections.append(f"**Total Namespaces Analyzed**: {namespace_data.get('successful', 0)}/{namespace_data.get('total_namespaces', 0)}\n")
-        
-        if namespace_data.get('failed_namespaces'):
-            markdown_sections.append(f"**Failed Namespaces**: {', '.join(namespace_data['failed_namespaces'])}\n")
-        
-        markdown_sections.append("---\n")
-        
-        # Process each namespace
-        for ns, data in sorted(namespace_data.get("results", {}).items()):
-            markdown_sections.append(f"\n### Namespace: `{ns}`\n")
+            return "## Pod-Level Metrics by Namespace\n\nNo namespace data."
 
-            if data.get("cpu_peak"):
-                markdown_sections.append("\n#### Peak CPU Usage (Per Pod)\n")
-                markdown_sections.append(data["cpu_peak"])
-                markdown_sections.append("\n")
+        md = []
+        md.append("## Pod-Level Metrics by Namespace\n")
+        md.append(f"**Total Namespaces Analyzed**: {namespace_data['successful']}/{namespace_data['total_namespaces']}\n")
 
-            if data.get("memory_peak"):
-                markdown_sections.append("\n#### Peak Memory Usage (Per Pod)\n")
-                markdown_sections.append(data["memory_peak"])
-                markdown_sections.append("\n")
-            
-            markdown_sections.append("---\n")
-        
-        report = "\n".join(markdown_sections)
-        logging.info(f"Generated markdown report with {len(markdown_sections)} sections")
-        return report
+        if namespace_data.get("failed_namespaces"):
+            md.append(f"**Failed Namespaces**: {', '.join(namespace_data['failed_namespaces'])}\n")
 
-    # Define the dynamic task flow
-    namespaces = list_namespaces()
-    namespace_results = process_namespace.expand(ns=namespaces)
-    namespace_data = collect_namespace_results(namespace_results)
-    namespace_markdown = compile_namespace_report(namespace_data)
+        md.append("---\n")
 
-    # === NEW ADDITION ===
+        for ns, data in sorted(namespace_data["results"].items()):
+            md.append(f"\n### Namespace: `{ns}`\n")
+            md.append("\n#### Peak CPU Usage (Per Pod)\n")
+            md.append(data["cpu_peak"])
+            md.append("\n\n#### Peak Memory Usage (Per Pod)\n")
+            md.append(data["memory_peak"])
+            md.append("\n---\n")
+
+        return "\n".join(md)
+
+
+    # ---------------- NODE REPORT SECTION ----------------
+
     @task
     def compile_node_report(ti=None):
-        """Compile node-level CPU, Memory, and Disk comparison markdown"""
-        node_cpu_cmp = ti.xcom_pull(task_ids="node_cpu_compare")
-        node_mem_cmp = ti.xcom_pull(task_ids="node_memory_compare")
-        node_disk_cmp = ti.xcom_pull(task_ids="node_disk_compare")
+        cpu = ti.xcom_pull(task_ids="node_cpu_compare")
+        mem = ti.xcom_pull(task_ids="node_memory_compare")
+        disk = ti.xcom_pull(task_ids="node_disk_compare")
 
-        markdown_sections = []
-        markdown_sections.append("## Node-Level Metrics Summary\n")
+        md = []
+        md.append("## Node-Level Metrics Summary\n")
 
-        if node_cpu_cmp:
-            markdown_sections.append("### Node CPU Utilization (Today vs Yesterday)\n")
-            markdown_sections.append(node_cpu_cmp + "\n")
+        if cpu:
+            md.append("### Node CPU Today vs Yesterday\n")
+            md.append(cpu + "\n")
+        if mem:
+            md.append("### Node Memory Today vs Yesterday\n")
+            md.append(mem + "\n")
+        if disk:
+            md.append("### Node Disk Today vs Yesterday\n")
+            md.append(disk + "\n")
 
-        if node_mem_cmp:
-            markdown_sections.append("### Node Memory Utilization (Today vs Yesterday)\n")
-            markdown_sections.append(node_mem_cmp + "\n")
-
-        if node_disk_cmp:
-            markdown_sections.append("### Node Disk Utilization (Today vs Yesterday)\n")
-            markdown_sections.append(node_disk_cmp + "\n")
-
-        return "\n".join(markdown_sections)
+        return "\n".join(md)
 
     node_markdown = compile_node_report()
 
@@ -650,12 +634,15 @@ a:hover {{
             return True
 
         except Exception as e:
-            logging.error(f"Failed to send email report: {str(e)}")
-            raise
+            raise e
 
-    # === UPDATED PIPELINE ===
-    html_report = convert_to_html(combined_markdown, summary_section)
-    email_task = send_email_report(html_report)
+
+    # ---------------- DAG FLOW ----------------
+
+    namespaces = list_namespaces()
+    namespace_results = process_namespace.expand(ns=namespaces)
+    namespace_data = collect_namespace_results(namespace_results)
+    namespace_markdown = compile_namespace_report(namespace_data)
 
     # Node level tasks
     t1_today = PythonOperator(task_id="node_cpu_today", python_callable=node_cpu_today, provide_context=True)
@@ -673,5 +660,10 @@ a:hover {{
     t1_compare_disk = PythonOperator(task_id="node_disk_compare", python_callable=node_disk_today_vs_yesterday, provide_context=True)
     [t1_today_disk, t1_yesterday_disk] >> t1_compare_disk >> node_markdown
 
-    # Final dependencies
-    [namespace_markdown, node_markdown] >> combined_markdown >> summary_section >> html_report >> email_task
+    combined_markdown = combine_reports(node_markdown, namespace_markdown)
+
+    summary_section = extract_and_combine_summary(node_markdown, namespace_markdown)
+
+    html_report = convert_to_html(combined_markdown, summary_section)
+
+    send_email_report(html_report)
