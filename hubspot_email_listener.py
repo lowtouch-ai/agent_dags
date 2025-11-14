@@ -499,11 +499,11 @@ SEARCH_DAG CAPABILITIES:
 - Determines what needs to be created vs what exists
 - Generates engagement summaries for meetings
 - Prepares confirmation emails for user review
-- Routes to create_dag when user confirms
+- In context if the user has already created some entities and want to add more entities like additional contact or new deal then a search is needed to check if the entity exists before creating new ones.
 
 CONTINUATION_DAG CAPABILITIES:
 - Creates new contacts, companies, deals in HubSpot
-- Updates existing entities based on user modifications
+- Updates existing entities based on user modifications. for example, if the deal exists and we need to change the deal amount, or we need to change the task due date to a different date. These are taken as modification. 
 - Logs meeting notes and minutes
 - Creates tasks with owners and due dates
 - Records engagements and associations
@@ -546,6 +546,7 @@ ROUTING DECISION TREE:
    - Making corrections to bot's proposed actions
    - Adding casual comments about existing deals/clients (no new entities) or between the conversation.
    - Updating existing records without creating new ones
+   - If the creation of new entities is mentioned instead of proceed after the confirmation mail, then treat it as direct creation without search.
    
    Keywords: "proceed", "confirm", "yes", "update", "modify", "change"
    → Response: {{"task_type": "continuation_dag", "reasoning": "..."}}
@@ -608,19 +609,13 @@ Return ONLY valid JSON:
             logging.info("→ No action needed for the emails")
             return "handle_general_queries"
     
-    # Fallback logic
-    logging.warning("AI failed to provide valid response, using fallback")
-    replies = [e for e in unread_emails if e.get("is_reply", False)]
-    new_emails = [e for e in unread_emails if not e.get("is_reply", False)]
-    
-    if replies:
-        ti.xcom_push(key="reply_emails", value=replies)
-        return "trigger_continuation_dag"
-    if new_emails:
-        ti.xcom_push(key="new_emails", value=new_emails)
-        return "trigger_meeting_minutes"
 
-    return "no_email_found_task"
+    logging.warning("AI failed to provide valid response, using fallback routing to no_action")
+    ti.xcom_push(key="no_action_emails", value=unread_emails)
+    logging.info(f"→ Fallback: Routing {len(unread_emails)} email(s) to handle_general_queries")
+    return "handle_general_queries"
+
+
 def extract_latest_reply(email_content):
     """
     Extract only the latest reply from an email, removing quoted conversation history.
@@ -744,7 +739,9 @@ def trigger_continuation_dag(**kwargs):
     logging.info(f"Triggered continuation for {len(reply_emails)} emails")
 
 def handle_general_queries(**kwargs):
-    """Handle emails requiring no action by sending a friendly response."""
+    """Send a friendly AI response if possible.
+    If AI fails → send a polite 'technical issue' apology."""
+    
     ti = kwargs['ti']
     unread_emails = ti.xcom_pull(task_ids="branch_task", key="no_action_emails") or []
     
@@ -754,123 +751,173 @@ def handle_general_queries(**kwargs):
     
     service = authenticate_gmail()
     if not service:
-        logging.error("Gmail authentication failed, cannot send friendly responses")
+        logging.error("Gmail authentication failed, cannot send responses")
         return
     
+    # Define signature once
+    EMAIL_SIGNATURE = "HubSpot via lowtouch.ai Team"
+    AGENT_NAME = "HubSpot Assistant"
+
     for email in unread_emails:
         try:
-            # Get AI response for friendly reply
-            prompt = f"""You are a friendly AI assistant. The user sent: '{email.get("content", "")}'. 
-
-            General Instructions :
-                - If the query is out of HubSpot context, politely inform the user that you are specialized in HubSpot-related tasks.
-                - If the email lacks content or context, ask the user for more information.
-            Provide a polite, friendly response acknowledging their message. Keep it concise, professional, and appropriate for email.
-            Return only the plain text response, no markdown or HTML."""
-            
-            friendly_response = get_ai_response(prompt=prompt, expect_json=False)
-            
-            # Strip any HTML tags if present
-            if friendly_response.startswith('<html'):
-                friendly_response = re.sub(r'<[^>]+>', '', friendly_response)
-            
-            # Get headers for reply
             headers = email.get("headers", {})
             sender_email = headers.get("From", "")
-            original_message_id = headers.get("Message-ID", "")
-            references = headers.get("References", "")
+            email_id = email.get("id", "unknown")
             
-            # Build references header for threading
-            if original_message_id:
-                if references:
-                    references = f"{references} {original_message_id}".strip()
-                else:
-                    references = original_message_id
-            
-            # Build subject with Re: prefix if not already present
-            subject = headers.get("Subject", "No Subject")
-            if not subject.lower().startswith("re:"):
-                subject = f"Re: {subject}"
-            
-            # Extract all recipients
-            all_recipients = extract_all_recipients(email)
-            
-            # Prepare recipients for reply-all
-            # Primary recipient is the sender
-            primary_recipient = sender_email
-            
-            # Build Cc list (original To recipients + original Cc recipients, excluding sender and bot)
-            cc_recipients = []
-            
-            # Add original To recipients (except sender and bot)
-            for to_addr in all_recipients["to"]:
-                if (to_addr.lower() != sender_email.lower() and 
-                    HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower() and
-                    to_addr not in cc_recipients):
-                    cc_recipients.append(to_addr)
-            
-            # Add original Cc recipients (except bot)
-            for cc_addr in all_recipients["cc"]:
-                if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and 
-                    cc_addr not in cc_recipients):
-                    cc_recipients.append(cc_addr)
-            
-            # Build Bcc list (original Bcc recipients, excluding bot)
-            bcc_recipients = []
-            for bcc_addr in all_recipients["bcc"]:
-                if HUBSPOT_FROM_ADDRESS.lower() not in bcc_addr.lower():
-                    bcc_recipients.append(bcc_addr)
-            
-            # Convert lists to comma-separated strings (None if empty)
-            cc_string = ', '.join(cc_recipients) if cc_recipients else None
-            bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
-            
-            logging.info(f"Sending friendly response:")
-            logging.info(f"  To: {primary_recipient}")
-            logging.info(f"  Cc: {cc_string}")
-            logging.info(f"  Bcc: {bcc_string}")
-            logging.info(f"  Subject: {subject}")
-            
-            # Compose the email using MIMEMultipart for proper formatting
+            # Extract sender name
+            sender_name = "there"
+            name_match = re.search(r'^([^<]+)', sender_email)
+            if name_match:
+                sender_name = name_match.group(1).strip()
 
-            
-            msg = MIMEMultipart()
-            msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
-            msg["To"] = primary_recipient
-            
-            if cc_string:
-                msg["Cc"] = cc_string
-            
-            if bcc_string:
-                msg["Bcc"] = bcc_string
-            
-            msg["Subject"] = subject
-            
-            # Add threading headers
-            if original_message_id:
-                msg["In-Reply-To"] = original_message_id
-            if references:
-                msg["References"] = references
-            
-            # Attach the body
-            msg.attach(MIMEText(friendly_response, "plain"))
-            
-            # Send the email
-            raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
-            result = service.users().messages().send(
-                userId="me", 
-                body={"raw": raw_msg}
-            ).execute()
-            
-            if result:
-                # Mark the original email as read
-                mark_message_as_read(service, email["id"])
-                logging.info(f"✓ Sent friendly response for email {email['id']} and marked as read")
+            # === STEP 1: Try AI-generated response ===
+            ai_response = None
+            try:
+                prompt = f"""You are a friendly HubSpot email assistant.
+User message: "{email.get("content", "").strip()}"
+
+Reply in 1-2 short, polite, professional sentences.
+- If greeting: acknowledge warmly.
+- If out of context: say you're HubSpot-focused.
+- If no content: ask for clarification.
+- sign with:
+    Best regards, The HubSpot Assistant Team 
+    Lowtouch.ai
+Return plain text only. No HTML."""
+
+                ai_response = get_ai_response(prompt=prompt, expect_json=False)
+                ai_response = re.sub(r'<[^>]+>', '', ai_response).strip()
+
+                if not ai_response or len(ai_response) < 5 or "error" in ai_response.lower():
+                    raise ValueError("Invalid AI response")
+
+            except Exception as ai_error:
+                logging.warning(f"AI failed for {email_id}: {ai_error} → using technical fallback")
+                ai_response = None  # Force fallback
+
+            # === STEP 2: Decide final response ===
+            if ai_response:
+                final_response = ai_response
+                log_prefix = "AI"
             else:
-                logging.error(f"Failed to send friendly response for email {email['id']}")
-                
+                final_response = f"""<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{
+            margin-bottom: 20px;
+        }}
+        .message {{
+            margin: 20px 0;
+        }}
+        .closing {{
+            margin-top: 30px;
+        }}
+        .signature {{
+            margin-top: 20px;
+            font-weight: bold;
+        }}
+        .company {{
+            color: #666;
+            font-size: 0.9em;
+        }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+    </div>
+    
+    <div class="message">
+        <p>We're currently experiencing a temporary technical issue that may affect your experience with the {AGENT_NAME}.</p>
+        
+        <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
+        
+        <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
+    </div>
+    
+    <div class="closing">
+        <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
+    </div>
+    
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <span class="company">Lowtouch.ai</span></p>
+    </div>
+</body>
+</html>"""
+                log_prefix = "Fallback"
+
+            # === STEP 3: Build and Send Email ===
+            try:
+                logging.info(f"{log_prefix} response → sending to {sender_email}")
+
+                # Threading
+                original_message_id = headers.get("Message-ID", "")
+                references = headers.get("References", "")
+                if original_message_id:
+                    references = f"{references} {original_message_id}".strip() if references else original_message_id
+
+                subject = headers.get("Subject", "No Subject")
+                if not subject.lower().startswith("re:"):
+                    subject = f"Re: {subject}"
+
+                # Recipients
+                all_recipients = extract_all_recipients(email)
+                primary_recipient = sender_email
+
+                cc_recipients = [
+                    addr for addr in all_recipients["to"] + all_recipients["cc"]
+                    if addr.lower() != sender_email.lower()
+                    and HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
+                ]
+                bcc_recipients = [
+                    addr for addr in all_recipients["bcc"]
+                    if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
+                ]
+
+                cc_string = ', '.join(cc_recipients) if cc_recipients else None
+                bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
+
+                # Compose
+                msg = MIMEMultipart()
+                msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
+                msg["To"] = primary_recipient
+                if cc_string: msg["Cc"] = cc_string
+                if bcc_string: msg["Bcc"] = bcc_string
+                msg["Subject"] = subject
+                if original_message_id: msg["In-Reply-To"] = original_message_id
+                if references: msg["References"] = references
+                msg.attach(MIMEText(final_response, "html"))
+
+                # Send
+                raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
+                result = service.users().messages().send(
+                    userId="me",
+                    body={"raw": raw_msg}
+                ).execute()
+
+                mark_message_as_read(service, email_id)
+                logging.info(f"Sent {log_prefix.lower()} response for email {email_id}")
+
+            except Exception as send_error:
+                logging.error(f"Failed to send email for {email_id}: {send_error}", exc_info=True)
+                mark_message_as_read(service, email_id)
+
         except Exception as e:
-            logging.error(f"Error processing email {email.get('id', 'unknown')}: {e}", exc_info=True)
+            logging.error(f"Unexpected error for email {email.get('id', 'unknown')}: {e}", exc_info=True)
+            try:
+                mark_message_as_read(service, email["id"])
+            except:
+                pass
             continue
 def no_email_found(**kwargs):
     logging.info("No new emails or replies found to process.")

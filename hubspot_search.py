@@ -198,13 +198,25 @@ def analyze_thread_entities(ti, **context):
     """Analyze thread to determine which entities to search and actions to take"""
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
-    
+    email_data = ti.xcom_pull(key="email_data", default={})
+    thread_id = ti.xcom_pull(key="thread_id", default="unknown")
+
+    # === Extract sender and headers (same as email_listener) ===
+    headers = email_data.get("headers", {})
+    sender_raw = headers.get("From", "")
+    import email.utils
+    sender_tuple = email.utils.parseaddr(sender_raw)
+    sender_name = sender_tuple[0].strip() or "there"
+    sender_email = sender_tuple[1].strip() or sender_raw
+
+    # === Build chat context ===
     chat_context = ""
     for idx, msg in enumerate(chat_history, 1):
         role = msg.get("role", "unknown")
         content = msg.get("content", "")
         chat_context += f"[{role.upper()}]: {content}\n\n"
-    
+
+    # === Prompt (same as before) ===
     prompt = f"""You are a HubSpot API assistant. Analyze this latest message to determine which entities (deals, contacts, companies) are mentioned or need to be processed, and whether the user is requesting a summary of a client or deal before their next meeting. 
 
 LATEST USER MESSAGE:
@@ -252,7 +264,7 @@ Analyze the content and determine:
             - Thoughts or observations without an actual interaction
 
     - TASKS (parse_tasks):
-        - Set to TRUE ONLY if there is an EXPLICIT action item or follow-up task mentioned
+        - Set to TRUE ONLY if there is an EXPLICIT action item or follow-up task mentioned. Check for headings next steps, followup steps, if found set tasks to true.
         - Look for phrases like: "need to...", "should...", "must...", "follow up on...", "send them...", "schedule...", "remind me to..."
         - Set to FALSE for:
             - Vague possibilities (e.g., "this could turn into something", "might be good to connect")
@@ -289,16 +301,15 @@ Return this exact JSON structure:
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    logging.info(f"Prompt is : {prompt}")
-    logging.info(f"Conversation history to AI: {chat_history}")
-    logging.info(f"Raw AI response for entity analysis: {response[:1000]}...")
-
     try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Prompt is : {prompt}")
+        logging.info(f"Conversation history to AI: {chat_history}")
+        logging.info(f"Raw AI response for entity analysis: {response[:1000]}...")
+
         parsed_json = json.loads(response.strip())
         ti.xcom_push(key="entity_search_flags", value=parsed_json)
-        
+
         logging.info(f"=== ENTITY ANALYSIS RESULTS ===")
         logging.info(f"  - Search deals: {parsed_json.get('search_deals')} - {parsed_json.get('deals_reason')}")
         logging.info(f"  - Search contacts: {parsed_json.get('search_contacts')} - {parsed_json.get('contacts_reason')}")
@@ -307,10 +318,149 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         logging.info(f"  - Parse tasks: {parsed_json.get('parse_tasks')} - {parsed_json.get('tasks_reason')}")
         logging.info(f"  - Parse meetings: {parsed_json.get('parse_meetings')} - {parsed_json.get('meetings_reason')}")
         logging.info(f"  - Request summary: {parsed_json.get('request_summary')} - {parsed_json.get('summary_reason')}")
-        
-    except Exception as e:
-        logging.error(f"Error processing entity analysis AI response: {e}")
-        default = {
+
+    except Exception as ai_error:
+        logging.warning(f"AI failed in analyze_thread_entities for thread {thread_id}: {ai_error} → Sending fallback email")
+
+        # === FALLBACK EMAIL - FULLY INLINE ===
+        # Replace the fallback_body section in analyze_user_response function (around line 300)
+
+        fallback_body = f"""
+        <html>
+        <head>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    max-width: 600px;
+                    margin: 0 auto;
+                    padding: 20px;
+                }}
+                .greeting {{
+                    margin-bottom: 20px;
+                }}
+                .message {{
+                    margin: 20px 0;
+                }}
+                .closing {{
+                    margin-top: 30px;
+                }}
+                .signature {{
+                    margin-top: 20px;
+                    font-weight: bold;
+                }}
+                .company {{
+                    color: #666;
+                    font-size: 0.9em;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="greeting">
+                <p>Hello {sender_name},</p>
+            </div>
+            
+            <div class="message">
+                <p>We're currently experiencing a temporary technical issue that may affect your experience with the HubSpot Assistant.</p>
+                
+                <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
+                
+                <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
+            </div>
+            
+            <div class="closing">
+                <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
+            </div>
+            
+            <div class="signature">
+                <p>Best regards,<br>
+                The HubSpot Assistant Team<br>
+                <span class="company">Lowtouch.ai</span></p>
+            </div>
+        </body>
+        </html>
+        """
+
+        try:
+            service = authenticate_gmail()
+            if not service:
+                logging.error("Gmail auth failed during fallback")
+                ti.xcom_push(key="entity_search_flags", value={
+                    "search_deals": True, "search_contacts": True, "search_companies": True,
+                    "parse_notes": True, "parse_tasks": True, "parse_meetings": True,
+                    "request_summary": False,
+                    "deals_reason": "AI failed, defaulting to search",
+                    "contacts_reason": "AI failed, defaulting to search",
+                    "companies_reason": "AI failed, defaulting to search",
+                    "notes_reason": "AI failed, defaulting to parse",
+                    "tasks_reason": "AI failed, defaulting to parse",
+                    "meetings_reason": "AI failed, defaulting to parse",
+                    "summary_reason": "AI failed, no summary requested"
+                })
+                return
+
+            # Build threading
+            original_message_id = headers.get("Message-ID", "")
+            references = headers.get("References", "")
+            if original_message_id:
+                references = f"{references} {original_message_id}".strip() if references else original_message_id
+
+            subject = headers.get("Subject", "No Subject")
+            if not subject.lower().startswith("re:"):
+                subject = f"Re: {subject}"
+
+            # Recipients (reply-all)
+            all_recipients = extract_all_recipients(email_data)
+            primary_recipient = sender_email
+
+            cc_recipients = [
+                addr for addr in all_recipients["to"] + all_recipients["cc"]
+                if addr.lower() != sender_email.lower()
+                and HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
+            ]
+            bcc_recipients = [
+                addr for addr in all_recipients["bcc"]
+                if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
+            ]
+
+            cc_string = ', '.join(cc_recipients) if cc_recipients else None
+            bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
+
+            # Compose message
+            msg = MIMEMultipart()
+            msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
+            msg["To"] = primary_recipient
+            if cc_string: msg["Cc"] = cc_string
+            if bcc_string: msg["Bcc"] = bcc_string
+            msg["Subject"] = subject
+            if original_message_id: msg["In-Reply-To"] = original_message_id
+            if references: msg["References"] = references
+            msg.attach(MIMEText(fallback_body, "html"))
+
+            # Send
+            raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
+            service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
+
+            # === Mark original message as read (inline) ===
+            try:
+                if email_data.get("id"):
+                    service.users().messages().modify(
+                        userId="me",
+                        id=email_data["id"],
+                        body={"removeLabelIds": ["UNREAD"]}
+                    ).execute()
+                    logging.info(f"Marked message {email_data['id']} as read")
+            except Exception as read_err:
+                logging.warning(f"Failed to mark message as read: {read_err}")
+
+            logging.info(f"Fallback technical issue email sent for thread {thread_id}")
+
+        except Exception as send_error:
+            logging.error(f"Failed to send fallback email: {send_error}", exc_info=True)
+
+        # === Default to full search ===
+        ti.xcom_push(key="entity_search_flags", value={
             "search_deals": True,
             "search_contacts": True,
             "search_companies": True,
@@ -318,15 +468,14 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
             "parse_tasks": True,
             "parse_meetings": True,
             "request_summary": False,
-            "deals_reason": "Analysis failed, defaulting to search",
-            "contacts_reason": "Analysis failed, defaulting to search",
-            "companies_reason": "Analysis failed, defaulting to search",
-            "notes_reason": "Analysis failed, defaulting to parse",
-            "tasks_reason": "Analysis failed, defaulting to parse",
-            "meetings_reason": "Analysis failed, defaulting to parse",
-            "summary_reason": "Analysis failed, no summary requested"
-        }
-        ti.xcom_push(key="entity_search_flags", value=default)
+            "deals_reason": "AI failed, defaulting to search",
+            "contacts_reason": "AI failed, defaulting to search",
+            "companies_reason": "AI failed, defaulting to search",
+            "notes_reason": "AI failed, defaulting to parse",
+            "tasks_reason": "AI failed, defaulting to parse",
+            "meetings_reason": "AI failed, defaulting to parse",
+            "summary_reason": "AI failed, no summary requested"
+        })
 
 def summarize_engagement_details(ti, **context):
     """Retrieve and summarize engagement details based on conversation"""
@@ -573,7 +722,9 @@ Steps:
 5. For new deals, use the validated deal owner name in dealOwnerName.
 6. Propose an additional new deal if the email explicitly requests opening a second deal, even if one exists.
 7. Use dealLabelName for deal stages (e.g., 'Appointment Scheduled').
-8. Fill all fields in the JSON. Use empty string "" for any missing values.
+8. Always use default closeDate 90 days from today, if not specified in YYYY-MM-DD format.
+9. Always use the default deal amount as 5000 if not specified.
+10. Fill all fields in the JSON. Use empty string "" for any missing values.
 
 Return exactly this JSON structure:
 {{
@@ -602,7 +753,6 @@ Return exactly this JSON structure:
 }}
 
 RESPOND WITH ONLY THE JSON OBJECT."""
-
 
     response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
     logging.info(f"Raw AI response for deals: {response[:1000]}...")
@@ -1002,9 +1152,9 @@ def parse_notes_tasks_meeting(ti, **context):
     
     parsing_instructions = []
     if should_parse_notes:
-        parsing_instructions.append("1. Notes - Important discussion points, decisions, general notes")
+        parsing_instructions.append("1. Notes - All the email content exactly the same format except branding and signatures should be captured as notes.")
     if should_parse_tasks:
-        parsing_instructions.append("2. Tasks - Action items with owner and due dates. Adding entities to HubSpot is NOT a task.")
+        parsing_instructions.append("2. Tasks - Action items, Next steps with owner and due dates. Adding entities to HubSpot is NOT a task. All the next steps should be logged as tasks.")
     if should_parse_meetings:
         parsing_instructions.append("3. Meeting Details - Title, start time, end time, location, outcome, attendees")
 
@@ -1030,7 +1180,7 @@ PARSING INSTRUCTIONS (only parse these):
 **STRICT PARSING RULES (execute in order):**
 
 For notes (only if note parsing is enabled):
-- Extract any important discussion points, decisions made, or general notes.
+- Extract the whole email content except branding and signatures and capture it in the same format as the email came as notes. The should be captured in the email format, if there are new lines gaps headings , the same should be captured.
 
 For meetings (only if meeting parsing is enabled):
 - Extract meeting title, start time, end time, location, outcome, timestamp, attendees, meeting type, and meeting status.
@@ -1038,12 +1188,14 @@ For meetings (only if meeting parsing is enabled):
 
 For tasks (only if task parsing is enabled):
 - Identify all tasks and their respective owners from the email content.
+- Always check for headings mext steps or followup steps. All the next steps, followup steps specified in email content are considered as tasks.
 - For each task:
   - Match the task to the corresponding owner in the provided Task Owners list by task_index (1-based indexing).
   - If a specific task owner is mentioned in the email and matches an entry in the Task Owners list, use that owner's name and ID.
   - If a specific task owner is mentioned but does not match any entry in the Task Owners list, use the default task owner: {default_task_owner_name} (ID: {default_task_owner_id}).
   - If no task owner is specified, use the default task owner: {default_task_owner_name} (ID: {default_task_owner_id}).
   - If no due date is specified, use the date three business days from the current date.
+  - For due date is today is mentioned, use the current date. Tomorrow is current date + 1 day, after 2 days is current date + 2 days and so on. day after tomorrow is current date + 2 days.
   - Assign a priority (high, medium, low) based on context; default to 'medium' if not specified.
 
 Return this exact JSON structure:
@@ -1928,7 +2080,7 @@ def compose_confirmation_email(ti, **context):
                 <li>Specify any changes needed in your reply</li>
             </ul>
             <p>Please confirm whether this summary looks correct before I proceed.</p>
-            <p>Best regards,<br>HubSpot Agent</p>
+            <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br>Lowtouch.ai</p>
         </div>
     </body>
     </html>
@@ -2257,7 +2409,7 @@ def compose_engagement_summary_email(ti, **context):
         <p>This summary provides a comprehensive overview to help you prepare for your upcoming engagement.</p>
         <p>If you need any clarifications or additional information, please don't hesitate to ask.</p>
         <br>
-        <p><strong>Best regards,</strong><br>HubSpot Agent</p>
+        <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br>Lowtouch.ai</p>
     </div>
 </body>
 </html>"""

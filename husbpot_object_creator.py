@@ -35,7 +35,6 @@ HUBSPOT_FROM_ADDRESS = Variable.get("HUBSPOT_FROM_ADDRESS")
 GMAIL_CREDENTIALS = Variable.get("HUBSPOT_GMAIL_CREDENTIALS")
 OLLAMA_HOST = "http://agentomatic:8000/"
 TASK_THRESHOLD = 15
-
 def authenticate_gmail():
     try:
         creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
@@ -81,9 +80,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
         return ai_content.strip()
     except Exception as e:
         logging.error(f"Error in get_ai_response: {e}")
-        if expect_json:
-            return json.dumps({"error": str(e)})
-        return f"<html><body>Error processing AI request: {str(e)}</body></html>"
+        raise
 
 def parse_email_addresses(address_string):
     if not address_string:
@@ -178,11 +175,14 @@ def load_context_from_dag_run(ti, **context):
     }
 
 def analyze_user_response(ti, **context):
-    """Analyze user's message to determine intent and entities using conversation history"""
+    """Analyze user's message to determine intent and entities using conversation history.
+    If AI fails → send polite fallback email to ALL recipients with proper threading."""
+   
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     thread_history = ti.xcom_pull(key="thread_history", default=[])
     thread_id = ti.xcom_pull(key="thread_id")
     latest_user_message = ti.xcom_pull(key="latest_message", default="")
+    email_data = ti.xcom_pull(key="email_data", default={})
     
     if not thread_id:
         logging.error("No thread_id provided")
@@ -198,10 +198,20 @@ def analyze_user_response(ti, **context):
         ti.xcom_push(key="analysis_results", value=default_result)
         return default_result
     
+    # === CRITICAL FIX: Extract sender and recipients BEFORE try block ===
+    headers = email_data.get("headers", {})
+    sender_raw = headers.get("From", "")
+    import email.utils
+    sender_tuple = email.utils.parseaddr(sender_raw)
+    sender_name = sender_tuple[0].strip() or "there"
+    sender_email = sender_tuple[1].strip() or sender_raw
+    
+    # Extract all recipients for fallback email
+    all_recipients = extract_all_recipients(email_data)
+    
     # Build complete conversation context
     conversation_context = ""
-    
-    # Add thread history (email messages with metadata)
+    from bs4 import BeautifulSoup
     for idx, email in enumerate(thread_history, 1):
         content = email.get("content", "").strip()
         if content:
@@ -211,7 +221,7 @@ def analyze_user_response(ti, **context):
             is_from_bot = email.get('from_bot', False)
             role_label = "BOT" if is_from_bot else "USER"
             conversation_context += f"[{role_label} EMAIL {idx} - From: {sender}]: {clean_content}\n\n"
-    
+   
     if not conversation_context.strip():
         logging.error("No valid conversation content found")
         default_result = {
@@ -226,21 +236,8 @@ def analyze_user_response(ti, **context):
         ti.xcom_push(key="analysis_results", value=default_result)
         return default_result
     
-    # Get sender information
-    sender_email = ""
-    sender_name = ""
-    for email in reversed(thread_history):
-        if not email.get('from_bot', True):
-            if email.get("content"):
-                sender_email = email.get('headers', {}).get('From', '')
-                # Extract name from "Name <email>" format
-                import re
-                match = re.match(r'(.+?)\s*<(.+?)>', sender_email)
-                if match:
-                    sender_name = match.group(1).strip()
-                    sender_email = match.group(2).strip()
-                break
-    
+    # === Prompt (unchanged) ===
+    from datetime import datetime
     prompt = f"""You are a HubSpot assistant analyzing an email conversation to understand what actions to take.
 LATEST USER MESSAGE:
 {latest_user_message}
@@ -333,7 +330,7 @@ Return ONLY valid JSON (no markdown, no explanations):
     "entities_to_update": {{
         "contacts": [{{"contactId": "...", "updates": {{"field": "new_value"}}}}],
         "companies": [{{"companyId": "...", "updates": {{"field": "new_value"}}}}],
-        "deals": [{{"dealId": "...", "updates": {{"field": "new_value"}}}}],
+        "deals": [{{"dealId": "...", "dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "...", "updates": {{"field": "new_value"}}}}],
         "meetings": [],
         "notes": [],
         "tasks": [{{"taskId": "...", "taskbody": "...", "task_owner_name": "...", "task_owner_id": "...", "updates": {{"field": "new_value"}}}}]
@@ -351,68 +348,47 @@ CRITICAL REMINDERS:
 - Current timestamp format: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
 
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    
     try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response for user analysis: {response[:1000]}...")
         parsed_analysis = json.loads(response)
         user_intent = parsed_analysis.get("user_intent", "PROCEED")
         casual_comments_detected = parsed_analysis.get("casual_comments_detected", False)
         entities_to_create = parsed_analysis.get("entities_to_create", {})
         entities_to_update = parsed_analysis.get("entities_to_update", {})
         selected_entities = parsed_analysis.get("selected_entities", {})
-        
-        # Simple task determination based on what entities exist
+       
+        # Task determination
         tasks_to_execute = []
         should_determine_owner = False
         should_check_task_threshold = False
+        
         if casual_comments_detected or user_intent == "CASUAL_COMMENT":
-            # For casual comments, only create notes and associations
             if entities_to_create.get("notes"):
                 tasks_to_execute.append("create_notes")
             tasks_to_execute.extend(["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"])
-
         else:
-        # Check if we need owner determination
             if entities_to_create.get("deals") or entities_to_create.get("tasks"):
                 should_determine_owner = True
                 tasks_to_execute.append("determine_owner")
-            
-            # Check if we need task threshold checking
             if entities_to_create.get("tasks"):
                 should_check_task_threshold = True
                 tasks_to_execute.append("check_task_threshold")
-            
-            # Add update tasks
-            if entities_to_update.get("contacts"):
-                tasks_to_execute.append("update_contacts")
-            if entities_to_update.get("companies"):
-                tasks_to_execute.append("update_companies")
-            if entities_to_update.get("deals"):
-                tasks_to_execute.append("update_deals")
-            if entities_to_update.get("meetings"):
-                tasks_to_execute.append("update_meetings")
-            if entities_to_update.get("notes"):
-                tasks_to_execute.append("update_notes")
-            if entities_to_update.get("tasks"):
-                tasks_to_execute.append("update_tasks")
-            
-            # Add create tasks
-            if entities_to_create.get("contacts"):
-                tasks_to_execute.append("create_contacts")
-            if entities_to_create.get("companies"):
-                tasks_to_execute.append("create_companies")
-            if entities_to_create.get("deals"):
-                tasks_to_execute.append("create_deals")
-            if entities_to_create.get("meetings"):
-                tasks_to_execute.append("create_meetings")
-            if entities_to_create.get("notes"):
-                tasks_to_execute.append("create_notes")
-            if entities_to_create.get("tasks"):
-                tasks_to_execute.append("create_tasks")
-        
-        # Always add these mandatory tasks at the end
+            if entities_to_update.get("contacts"): tasks_to_execute.append("update_contacts")
+            if entities_to_update.get("companies"): tasks_to_execute.append("update_companies")
+            if entities_to_update.get("deals"): tasks_to_execute.append("update_deals")
+            if entities_to_update.get("meetings"): tasks_to_execute.append("update_meetings")
+            if entities_to_update.get("notes"): tasks_to_execute.append("update_notes")
+            if entities_to_update.get("tasks"): tasks_to_execute.append("update_tasks")
+            if entities_to_create.get("contacts"): tasks_to_execute.append("create_contacts")
+            if entities_to_create.get("companies"): tasks_to_execute.append("create_companies")
+            if entities_to_create.get("deals"): tasks_to_execute.append("create_deals")
+            if entities_to_create.get("meetings"): tasks_to_execute.append("create_meetings")
+            if entities_to_create.get("notes"): tasks_to_execute.append("create_notes")
+            if entities_to_create.get("tasks"): tasks_to_execute.append("create_tasks")
+       
         tasks_to_execute.extend(["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"])
-        
+       
         results = {
             "status": "success",
             "user_intent": user_intent,
@@ -425,28 +401,166 @@ CRITICAL REMINDERS:
             "should_check_task_threshold": should_check_task_threshold,
             "casual_comments_detected": casual_comments_detected
         }
-        
+       
         logging.info(f"Analysis completed: Intent={user_intent}")
         logging.info(f"Tasks to execute: {tasks_to_execute}")
         logging.info(f"Reasoning: {results['reasoning']}")
         
-    except json.JSONDecodeError as e:
-        logging.error(f"Failed to parse AI analysis: {e}")
-        logging.error(f"Raw AI response: {response}")
+    except Exception as ai_error:
+        logging.error(f"AI failed in analyze_user_response for thread {thread_id}: {ai_error}", exc_info=True)
+        logging.info("=== INITIATING FALLBACK EMAIL PROCEDURE ===")
         
-        # Fallback
+        # === FALLBACK EMAIL - FULLY FIXED ===
+        # Replace the fallback_body section in analyze_user_response function (around line 300)
+
+        fallback_body = f"""
+        <html>
+        <head>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    max-width: 600px;
+                    margin: 0 auto;
+                    padding: 20px;
+                }}
+                .greeting {{
+                    margin-bottom: 20px;
+                }}
+                .message {{
+                    margin: 20px 0;
+                }}
+                .closing {{
+                    margin-top: 30px;
+                }}
+                .signature {{
+                    margin-top: 20px;
+                    font-weight: bold;
+                }}
+                .company {{
+                    color: #666;
+                    font-size: 0.9em;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="greeting">
+                <p>Hello {sender_name},</p>
+            </div>
+            
+            <div class="message">
+                <p>We're currently experiencing a temporary technical issue that may affect your experience with the HubSpot Assistant.</p>
+                
+                <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
+                
+                <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
+            </div>
+            
+            <div class="closing">
+                <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
+            </div>
+            
+            <div class="signature">
+                <p>Best regards,<br>
+                The HubSpot Assistant Team<br>
+                <span class="company">Lowtouch.ai</span></p>
+            </div>
+        </body>
+        </html>
+        """
+        
         results = {
-            "status": "error",
-            "error_message": f"Failed to parse AI analysis: {str(e)}",
-            "user_intent": "PROCEED",
+            "status": "fallback_sent",
+            "error_message": f"AI analysis failed: {str(ai_error)}",
+            "user_intent": "FALLBACK",
             "entities_to_create": {},
             "entities_to_update": {},
             "selected_entities": {},
-            "reasoning": "Fallback analysis due to AI parsing error",
-            "tasks_to_execute": ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"],
+            "reasoning": "Fallback email sent due to AI failure",
+            "tasks_to_execute": [],  # Empty list to skip all downstream tasks
             "should_determine_owner": False,
-            "should_check_task_threshold": False
+            "should_check_task_threshold": False,
+            "casual_comments_detected": False,
+            "fallback_email_sent": True
         }
+        
+        try:
+            logging.info("Attempting Gmail authentication for fallback email...")
+            service = authenticate_gmail()
+            if not service:
+                logging.error("CRITICAL: Gmail auth failed during fallback - cannot send error notification")
+            else:
+                logging.info("Gmail authenticated successfully")
+                
+                # === Build threading ===
+                original_message_id = headers.get("Message-ID", "")
+                references = headers.get("References", "")
+                if original_message_id:
+                    references = f"{references} {original_message_id}".strip() if references else original_message_id
+                
+                subject = headers.get("Subject", "No Subject")
+                if not subject.lower().startswith("re:"):
+                    subject = f"Re: {subject}"
+                
+                # === Recipients: reply-all, exclude bot ===
+                primary_recipient = sender_email
+                
+                # Build CC list from To and Cc fields, excluding sender and bot
+                cc_recipients = []
+                for addr in all_recipients["to"] + all_recipients["cc"]:
+                    clean_addr = addr.strip()
+                    if (clean_addr and 
+                        clean_addr.lower() != sender_email.lower() and
+                        HUBSPOT_FROM_ADDRESS.lower() not in clean_addr.lower() and
+                        clean_addr not in cc_recipients):
+                        cc_recipients.append(clean_addr)
+                
+                # BCC recipients (excluding bot)
+                bcc_recipients = []
+                for addr in all_recipients["bcc"]:
+                    clean_addr = addr.strip()
+                    if clean_addr and HUBSPOT_FROM_ADDRESS.lower() not in clean_addr.lower():
+                        bcc_recipients.append(clean_addr)
+                
+                cc_string = ', '.join(cc_recipients) if cc_recipients else None
+                bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
+                
+                logging.info(f"Fallback email recipients:")
+                logging.info(f"  To: {primary_recipient}")
+                logging.info(f"  Cc: {cc_string or 'None'}")
+                logging.info(f"  Bcc: {bcc_string or 'None'}")
+                
+                # === Compose and send ===
+                send_email(
+                service=service,
+                recipient=primary_recipient,
+                subject=subject,
+                body=fallback_body,
+                in_reply_to=original_message_id,
+                references=references,
+                cc=cc_string,
+                bcc=bcc_string
+            )
+
+                # === Mark as read ===
+                try:
+                    original_msg_id = email_data.get("id")
+                    if original_msg_id:
+                        service.users().messages().modify(
+                            userId="me",
+                            id=original_msg_id,
+                            body={"removeLabelIds": ["UNREAD"]}
+                        ).execute()
+                        logging.info(f"✓ Marked original message {original_msg_id} as read")
+                except Exception as read_err:
+                    logging.warning(f"Failed to mark message as read: {read_err}")
+                
+        except Exception as send_error:
+            logging.error(f"CRITICAL: Failed to send fallback email: {send_error}", exc_info=True)
+            logging.error(f"Sender: {sender_email}")
+            logging.error(f"Subject: {subject}")
+            logging.error(f"Recipients - To: {primary_recipient}, Cc: {cc_string}, Bcc: {bcc_string}")
     
     ti.xcom_push(key="analysis_results", value=results)
     logging.info(f"Analysis completed for thread {thread_id}")
@@ -683,6 +797,7 @@ def create_contacts(ti, **context):
         logging.info("No contacts to create")
         ti.xcom_push(key="created_contacts", value=[])
         ti.xcom_push(key="contacts_errors", value=[])
+        ti.xcom_push(key="contact_creation_final_status", value="success")
         return []
     
     # Add owner info to each contact
@@ -773,9 +888,9 @@ Return ONLY this JSON structure (no other text):
     "reason": "error description if status is failure"
 }}"""
 
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    
+    response = None
     try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         created = parsed.get("created_contacts", [])
@@ -787,33 +902,85 @@ Return ONLY this JSON structure (no other text):
             ti.xcom_push(key="contacts_errors", value=errors)
             ti.xcom_push(key="contact_creation_status", value={"status": "success"})
             ti.xcom_push(key="contact_creation_response", value=parsed)
+            ti.xcom_push(key="contact_creation_final_status", value="success")
             logging.info(f"Created {len(created)} contacts")
             return created
         else:
-            # Push failure status and response for next retry
-            ti.xcom_push(key="created_contacts", value=[])
-            ti.xcom_push(key="contacts_errors", value=errors)
-            ti.xcom_push(key="contact_creation_status", value={"status": "failure", "reason": reason})
-            ti.xcom_push(key="contact_creation_response", value=parsed)
-            logging.error(f"Contact creation failed: {reason}")
-            raise Exception(f"create_contacts failed: {reason}")
+            # Check if this is the final retry
+            task_instance = context['task_instance']
+            current_try_number = task_instance.try_number
+            max_tries = task_instance.max_tries
+            
+            if current_try_number >= max_tries:
+                # Final failure - push status and raise to fail task
+                logging.error(f"Contact creation failed after {max_tries} attempts: {reason}")
+                ti.xcom_push(key="created_contacts", value=[])
+                ti.xcom_push(key="contacts_errors", value=errors)
+                ti.xcom_push(key="contact_creation_status", value={"status": "final_failure", "reason": reason})
+                ti.xcom_push(key="contact_creation_response", value=parsed)
+                ti.xcom_push(key="contact_creation_final_status", value="failed")
+                ti.xcom_push(key="contact_creation_failure_reason", value=reason)
+                raise Exception(f"create_contacts failed after {max_tries} attempts: {reason}")
+            else:
+                # Not final retry - raise exception to trigger retry
+                ti.xcom_push(key="created_contacts", value=[])
+                ti.xcom_push(key="contacts_errors", value=errors)
+                ti.xcom_push(key="contact_creation_status", value={"status": "failure", "reason": reason})
+                ti.xcom_push(key="contact_creation_response", value=parsed)
+                logging.error(f"Contact creation failed (attempt {current_try_number}/{max_tries}): {reason}")
+                raise Exception(f"create_contacts failed: {reason}")
             
     except json.JSONDecodeError as e:
+        # Check if this is the final retry
+        task_instance = context['task_instance']
+        current_try_number = task_instance.try_number
+        max_tries = task_instance.max_tries
+        
         logging.error(f"Error parsing JSON response: {e}")
         logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="created_contacts", value=[])
-        ti.xcom_push(key="contacts_errors", value=[str(e)])
-        ti.xcom_push(key="contact_creation_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-        ti.xcom_push(key="contact_creation_response", value={"raw_response": response})
-        raise Exception(f"create_contacts failed: JSON parsing error - {str(e)}")
+        
+        if current_try_number >= max_tries:
+            # Final failure
+            ti.xcom_push(key="created_contacts", value=[])
+            ti.xcom_push(key="contacts_errors", value=[str(e)])
+            ti.xcom_push(key="contact_creation_status", value={"status": "final_failure", "reason": f"JSON parsing error: {str(e)}"})
+            ti.xcom_push(key="contact_creation_response", value={"raw_response": response})
+            ti.xcom_push(key="contact_creation_final_status", value="failed")
+            ti.xcom_push(key="contact_creation_failure_reason", value=f"JSON parsing error: {str(e)}")
+            raise Exception(f"create_contacts failed after {max_tries} attempts: JSON parsing error - {str(e)}")
+        else:
+            # Retry
+            ti.xcom_push(key="created_contacts", value=[])
+            ti.xcom_push(key="contacts_errors", value=[str(e)])
+            ti.xcom_push(key="contact_creation_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
+            ti.xcom_push(key="contact_creation_response", value={"raw_response": response})
+            raise Exception(f"create_contacts failed: JSON parsing error - {str(e)}")
+            
     except Exception as e:
+        # Check if this is the final retry
+        task_instance = context['task_instance']
+        current_try_number = task_instance.try_number
+        max_tries = task_instance.max_tries
+        
         logging.error(f"Error creating contacts: {e}")
         logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="created_contacts", value=[])
-        ti.xcom_push(key="contacts_errors", value=[str(e)])
-        ti.xcom_push(key="contact_creation_status", value={"status": "failure", "reason": str(e)})
-        ti.xcom_push(key="contact_creation_response", value={"raw_response": response})
-        raise Exception(f"create_contacts failed: {str(e)}")
+        
+        if current_try_number >= max_tries:
+            # Final failure
+            ti.xcom_push(key="created_contacts", value=[])
+            ti.xcom_push(key="contacts_errors", value=[str(e)])
+            ti.xcom_push(key="contact_creation_status", value={"status": "final_failure", "reason": str(e)})
+            ti.xcom_push(key="contact_creation_response", value={"raw_response": response})
+            ti.xcom_push(key="contact_creation_final_status", value="failed")
+            ti.xcom_push(key="contact_creation_failure_reason", value=str(e))
+            raise Exception(f"create_contacts failed after {max_tries} attempts: {str(e)}")
+        else:
+            # Retry
+            ti.xcom_push(key="created_contacts", value=[])
+            ti.xcom_push(key="contacts_errors", value=[str(e)])
+            ti.xcom_push(key="contact_creation_status", value={"status": "failure", "reason": str(e)})
+            ti.xcom_push(key="contact_creation_response", value={"raw_response": response})
+            raise Exception(f"create_contacts failed: {str(e)}")
 
 def create_companies(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
@@ -912,9 +1079,9 @@ Return ONLY this JSON structure (no other text):
     "reason": "error description if status is failure"
 }}"""
     
-    response = get_ai_response(prompt, expect_json=True)
-    
+    response = None
     try:
+        response = get_ai_response(prompt, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         created = parsed.get("created_companies", [])
@@ -1099,9 +1266,9 @@ Return JSON:
     "reason": "error description if status is failure"
 }}"""
     
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    
+    response = None
     try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         created = parsed.get("created_deals", [])
@@ -1242,9 +1409,9 @@ Return ONLY this JSON structure (no other text):
     "reason": "error description if status is failure"
 }}"""
     
-    response = get_ai_response(prompt, expect_json=True)
-    
+    response = None
     try:
+        response = get_ai_response(prompt, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         created = parsed.get("created_meetings", [])
@@ -1433,9 +1600,9 @@ NOTES TO CREATE:
 - **RESPOND WITH ONLY THE JSON OBJECT — NO OTHER TEXT.**
 """
     
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    
+    response = None
     try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         created = parsed.get("created_notes", [])
@@ -1633,9 +1800,9 @@ Return ONLY this JSON structure (no other text):
 
 CRITICAL: Preserve the task_owner_id from the input. Do not default to Kishore (71346067) unless explicitly specified."""
     
-    response = get_ai_response(prompt, expect_json=True)
-    
+    response = None
     try:
+        response = get_ai_response(prompt, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         created = parsed.get("created_tasks", [])
@@ -1776,9 +1943,9 @@ Return ONLY this JSON structure (no other text):
     "reason": "error description if status is failure"
 }}"""
 
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    
+    response = None
     try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         updated = parsed.get("updated_contacts", [])
@@ -1883,9 +2050,9 @@ Return ONLY this JSON structure (no other text):
     "reason": "error description if status is failure"
 }}"""
 
-    response = get_ai_response(prompt, expect_json=True)
-    
+    response = None
     try:
+        response = get_ai_response(prompt, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         updated = parsed.get("updated_companies", [])
@@ -1959,7 +2126,17 @@ IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
 1. Review the previous error and identify the root cause
-2. For each deal, invoke update_deal with the id and changes
+2. For each deal, invoke update_deal with the id and changes in the exact format:
+    update_deal(task_id, {{
+     "properties": {{
+       "dealName": "",
+       "dealLabelName": "",
+       "dealAmount": "",
+       "closeDate": "",
+       "dealOwnerName": ""
+     }}
+   }})
+
 3. Collect the updated deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
 
 Return JSON:
@@ -1979,8 +2156,18 @@ If error, set status as failure, error message in reason and include individual 
 IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
-1. For each deal, invoke update_deal with the id and changes.
-2. Collect the updated deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
+1. For each deal, invoke update_deal with the id and changes in the exact format:
+    update_deal(task_id, {{
+     "properties": {{
+       "dealName": "",
+       "dealLabelName": "",
+       "dealAmount": "",
+       "closeDate": "",
+       "dealOwnerName": ""
+     }}
+   }})
+2. Deal owner Id should be used in above request body instead of name.
+3. Collect the updated deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
 
 Return JSON:
 {{
@@ -1992,9 +2179,9 @@ Return JSON:
 
 If error, set status as failure, error message in reason and include individual errors in the errors array."""
 
-    response = get_ai_response(prompt, expect_json=True)
-    
+    response = None
     try:
+        response = get_ai_response(prompt, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         updated = parsed.get("updated_deals", [])
@@ -2096,9 +2283,9 @@ Return ONLY this JSON structure (no other text):
     "reason": "error description if status is failure"
 }}"""
 
-    response = get_ai_response(prompt, expect_json=True)
-    
+    response = None
     try:
+        response = get_ai_response(prompt, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         updated = parsed.get("updated_meetings", [])
@@ -2197,9 +2384,9 @@ Return ONLY this JSON structure (no other text):
     "reason": "error description if status is failure"
 }}"""
 
-    response = get_ai_response(prompt, expect_json=True)
-    
+    response = None
     try:
+        response = get_ai_response(prompt, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         updated = parsed.get("updated_notes", [])
@@ -2399,9 +2586,9 @@ Return ONLY this JSON structure (no other text):
   "reason": "error description if status is failure"
 }}"""
     
-    response = get_ai_response(prompt, expect_json=True)
-    
+    response = None
     try:
+        response = get_ai_response(prompt, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         updated = parsed.get("updated_tasks", [])
@@ -2539,34 +2726,24 @@ LATEST USER MESSAGE:
 How to create associations: Always and strictly call create_multi_association API/Tool to create association.
 CRITICAL: You MUST call the create_multi_association tool. Do NOT just return JSON text. CALL THE TOOL.
 AVAILABLE ENTITY IDS:
-- NEW Contact IDs (just created): {new_contact_ids}
-- NEW Company IDs (just created): {new_company_ids}
-- NEW Deal IDs (just created): {new_deal_ids}
-- NEW Meeting IDs (just created): {new_meeting_ids}
-- NEW Note IDs (just created): {new_note_ids}
-- NEW Task IDs (just created): {new_task_ids}
-- EXISTING Contact IDs (from conversation): {existing_contact_ids}
-- EXISTING Company IDs (from conversation): {existing_company_ids}
-- EXISTING Deal IDs (from conversation): {existing_deal_ids}
+- Contact IDs (just created): {all_contact_ids}
+- Company IDs (just created): {all_company_ids}
+- Deal IDs (just created): {all_deal_ids}
+- Meeting IDs (just created): {new_meeting_ids}
+- Note IDs (just created): {new_note_ids}
+- Task IDs (just created): {new_task_ids}
 CRITICAL ASSOCIATION RULES:
 - Associate with all available ids.
 **IMPORTANT**: 
     - You can only create asssociation using tool `create_multi_association`
     - You can only create asssociation using tool `create_multi_association`
     - You MUST actually CALL the tool, not just output JSON
+    - Always parse all the new and existing ids from conversation and use it in the given request bodies.
+    - If any entity is blank then fill it with `''`.
     
-TOOL CALL FORMAT - Use this exact structure when calling create_multi_association:
-{{
-    "single": {{
-        "deal_id": "existing_or_new_deal_id",
-        "contact_id": "existing_or_new_contact_id",
-        "company_id": "existing_or_new_company_id",
-        "note_id": "new_note_id",
-        "task_id": "new_task_id",
-        "meeting_id": "new_meeting_id"
-    }}
-}}
-
+Below request body should be used as input for create_multi_association tool:
+    - Always use this exact structure when calling create_multi_association, Never deviate from this structure:
+{{"single":{{"deal_id":"string1, string2","contact_id":"string1, string2,...","company_id":"string1, string2,..","note_id":"string1, string2,..","task_id":"string1, string2..","meeting_id":"string1, string2,.."}}}}
 Return ONLY valid JSON:
 {{
     "association_requests": [
@@ -2735,8 +2912,15 @@ def collect_and_save_results(ti, **context):
 def compose_response_html(ti, **context):
     """Compose HTML response email with all created/updated/selected entities"""
     analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    if analysis_results.get("fallback_email_sent", False):
+        logging.info("Fallback email was already sent - skipping compose_response_html")
+        ti.xcom_push(key="response_html", value=None)
+        return None
     owner_info = ti.xcom_pull(key="owner_info", default={})
     task_threshold_info = ti.xcom_pull(key="task_threshold_info", default={})
+
+    contact_creation_final_status = ti.xcom_pull(key="contact_creation_final_status")
+    contact_creation_failure_reason = ti.xcom_pull(key="contact_creation_failure_reason")
     
     created_contacts = ti.xcom_pull(key="created_contacts", default=[])
     created_companies = ti.xcom_pull(key="created_companies", default=[])
@@ -2942,7 +3126,6 @@ def compose_response_html(ti, **context):
                 </tr>
             """
         email_content += "</tbody></table>"
-    
     # Newly Created Contacts
     if created_contacts:
         email_content += """
@@ -3375,9 +3558,7 @@ def compose_response_html(ti, **context):
     email_content += """
     <div class="closing">
         <p>Please let me know if any adjustments or corrections are needed.</p>
-        <p>Best regards,<br>
-        HubSpot Agent<br>
-        hubspot-agent-9201@lowtouch.ai</p>
+        <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br>Lowtouch.ai</p>
     </div>
 </body>
 </html>"""
@@ -3390,6 +3571,10 @@ def compose_response_html(ti, **context):
 def send_final_email(ti, **context):
     """Send final completion email with proper recipient handling"""
     import re
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    if analysis_results.get("fallback_email_sent", False):
+        logging.info("Fallback email was already sent - skipping send_final_email")
+        return None
     email_data = ti.xcom_pull(key="email_data", default={})
     response_html = ti.xcom_pull(key="response_html")
     
@@ -3495,7 +3680,9 @@ def branch_to_creation_tasks(ti, **context):
     if not analysis_results or not isinstance(analysis_results, dict):
         logging.error("Invalid analysis_results")
         return ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
-    
+    if analysis_results.get("fallback_email_sent", False):
+        logging.info("Fallback email was sent - skipping all downstream tasks")
+        return ["end_workflow"] 
     tasks_to_execute = analysis_results.get("tasks_to_execute", [])
     
     # Ensure mandatory tasks are included
@@ -3553,6 +3740,7 @@ with DAG(
         task_id="create_contacts",
         python_callable=create_contacts,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3560,6 +3748,7 @@ with DAG(
         task_id="create_companies",
         python_callable=create_companies,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3567,6 +3756,7 @@ with DAG(
         task_id="create_deals",
         python_callable=create_deals,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3574,6 +3764,7 @@ with DAG(
         task_id="create_meetings",
         python_callable=create_meetings,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3581,6 +3772,7 @@ with DAG(
         task_id="create_notes",
         python_callable=create_notes,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3588,6 +3780,7 @@ with DAG(
         task_id="create_tasks",
         python_callable=create_tasks,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3595,6 +3788,7 @@ with DAG(
         task_id="update_contacts",
         python_callable=update_contacts,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3602,6 +3796,7 @@ with DAG(
         task_id="update_companies",
         python_callable=update_companies,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3609,6 +3804,7 @@ with DAG(
         task_id="update_deals",
         python_callable=update_deals,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3616,6 +3812,7 @@ with DAG(
         task_id="update_meetings",
         python_callable=update_meetings,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3623,6 +3820,7 @@ with DAG(
         task_id="update_notes",
         python_callable=update_notes,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3630,6 +3828,7 @@ with DAG(
         task_id="update_tasks",
         python_callable=update_tasks,
         retries=3,
+        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -3637,28 +3836,28 @@ with DAG(
         task_id="create_associations",
         python_callable=create_associations,
         provide_context=True,
-        trigger_rule="none_failed_min_one_success"
+        trigger_rule="all_done"
     )
 
     collect_results_task = PythonOperator(
         task_id="collect_and_save_results",
         python_callable=collect_and_save_results,
         provide_context=True,
-        trigger_rule="none_failed_min_one_success"
+        trigger_rule="all_done"
     )
 
     compose_response_task = PythonOperator(
         task_id="compose_response_html",
         python_callable=compose_response_html,
         provide_context=True,
-        trigger_rule="none_failed_min_one_success"
+        trigger_rule="all_done"
     )
 
     send_final_email_task = PythonOperator(
         task_id="send_final_email",
         python_callable=send_final_email,
         provide_context=True,
-        trigger_rule="none_failed_min_one_success"
+        trigger_rule="all_done"
     )
 
     end_task = DummyOperator(
