@@ -31,37 +31,6 @@ HUBSPOT_FROM_ADDRESS = Variable.get("HUBSPOT_FROM_ADDRESS")
 GMAIL_CREDENTIALS = Variable.get("HUBSPOT_GMAIL_CREDENTIALS")
 LAST_PROCESSED_EMAIL_FILE = "/appz/cache/hubspot_last_processed_email.json"
 OLLAMA_HOST = "http://agentomatic:8000/"
-PENDING_VAR_KEY = "ltai.v3.hubspot.pending_reprocess"
-
-def _get_pending_records():
-    try:
-        data = Variable.get(PENDING_VAR_KEY, default_var="[]")
-        return json.loads(data)
-    except Exception as e:
-        logging.error(f"Failed to load pending records: {e}")
-        return []
-
-def _set_pending_records(records):
-    try:
-        Variable.set(PENDING_VAR_KEY, json.dumps(records))
-        return True
-    except Exception as e:
-        logging.error(f"Failed to save pending records: {e}")
-        return False
-
-def _add_pending_record(record):
-    records = _get_pending_records()
-    key = (record.get("message_id"), record.get("dag_id"))
-    records = [r for r in records if (r.get("message_id"), r.get("dag_id")) != key]
-    records.append(record)
-    _set_pending_records(records)
-
-def _remove_pending_records(keys):
-    if not keys:
-        return
-    records = _get_pending_records()
-    remaining = [r for r in records if (r.get("message_id"), r.get("dag_id")) not in keys]
-    _set_pending_records(remaining)
 def authenticate_gmail():
     try:
         creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
@@ -825,38 +794,66 @@ Return plain text only. No HTML."""
             except Exception as ai_error:
                 logging.warning(f"AI failed for {email_id}: {ai_error} → using technical fallback")
                 ai_response = None  # Force fallback
-                try:
-                    _add_pending_record({
-                        "dag_id": "hubspot_monitor_mailbox",
-                        "pending_type": "no_action_response",
-                        "thread_id": email.get("threadId", ""),
-                        "message_id": email.get("id", ""),
-                        "email_data": email,
-                        "chat_history": email.get("chat_history", []),
-                        "thread_history": email.get("thread_history", []),
-                        "timestamp": int(time.time() * 1000),
-                        "reason": "ai_error"
-                    })
-                    logging.info(f"Saved pending no_action reprocess for message {email_id}")
-                except Exception as save_err:
-                    logging.error(f"Failed to save pending no_action reprocess: {save_err}")
 
             # === STEP 2: Decide final response ===
             if ai_response:
                 final_response = ai_response
                 log_prefix = "AI"
             else:
-                final_response = f"""Hello {sender_name},
-
-We’re currently experiencing a temporary technical issue that may affect your experience with the {AGENT_NAME}. Our engineering team has already identified the cause and is actively working on a resolution.
-
-We expect regular service to resume shortly, and we’ll update you as soon as it’s fully restored. In the meantime, your data and configurations remain secure, and no action is required from your side.
-
-Thank you for your patience and understanding — we genuinely appreciate it.
-
-Best regards,
-The HubSpot Assistant Team
-Lowtouch.ai"""
+                final_response = f"""<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{
+            margin-bottom: 20px;
+        }}
+        .message {{
+            margin: 20px 0;
+        }}
+        .closing {{
+            margin-top: 30px;
+        }}
+        .signature {{
+            margin-top: 20px;
+            font-weight: bold;
+        }}
+        .company {{
+            color: #666;
+            font-size: 0.9em;
+        }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+    </div>
+    
+    <div class="message">
+        <p>We're currently experiencing a temporary technical issue that may affect your experience with the {AGENT_NAME}.</p>
+        
+        <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
+        
+        <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
+    </div>
+    
+    <div class="closing">
+        <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
+    </div>
+    
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <span class="company">Lowtouch.ai</span></p>
+    </div>
+</body>
+</html>"""
                 log_prefix = "Fallback"
 
             # === STEP 3: Build and Send Email ===
@@ -899,7 +896,7 @@ Lowtouch.ai"""
                 msg["Subject"] = subject
                 if original_message_id: msg["In-Reply-To"] = original_message_id
                 if references: msg["References"] = references
-                msg.attach(MIMEText(final_response, "plain"))
+                msg.attach(MIMEText(final_response, "html"))
 
                 # Send
                 raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
@@ -925,132 +922,6 @@ Lowtouch.ai"""
 def no_email_found(**kwargs):
     logging.info("No new emails or replies found to process.")
 
-def reprocess_pending_requests(**kwargs):
-    try:
-        pending = _get_pending_records()
-        if not pending:
-            logging.info("No pending reprocess records found")
-            return
-
-        service = authenticate_gmail()
-        processed_keys = []
-
-        for rec in pending:
-            dag_id = rec.get("dag_id")
-            message_id = rec.get("message_id")
-            thread_id = rec.get("thread_id")
-            email_data = rec.get("email_data", {})
-            chat_history = rec.get("chat_history", [])
-            thread_history = rec.get("thread_history", [])
-
-            try:
-                if dag_id == "hubspot_search_entities":
-                    trigger_conf = {
-                        "email_data": email_data,
-                        "chat_history": chat_history,
-                        "thread_history": thread_history,
-                        "thread_id": thread_id,
-                        "message_id": message_id
-                    }
-                    task_id = f"retrigger_search_{message_id.replace('-', '_')}"
-                    TriggerDagRunOperator(
-                        task_id=task_id,
-                        trigger_dag_id="hubspot_search_entities",
-                        conf=trigger_conf
-                    ).execute(context=kwargs)
-                    logging.info(f"Re-triggered search DAG for message {message_id}")
-                    processed_keys.append((message_id, dag_id))
-
-                elif dag_id == "hubspot_create_objects":
-                    trigger_conf = {
-                        "email_data": email_data,
-                        "chat_history": chat_history,
-                        "thread_history": thread_history,
-                        "thread_id": thread_id,
-                        "message_id": message_id
-                    }
-                    task_id = f"retrigger_create_{message_id.replace('-', '_')}"
-                    TriggerDagRunOperator(
-                        task_id=task_id,
-                        trigger_dag_id="hubspot_create_objects",
-                        conf=trigger_conf
-                    ).execute(context=kwargs)
-                    logging.info(f"Re-triggered create DAG for message {message_id}")
-                    processed_keys.append((message_id, dag_id))
-
-                elif dag_id == "hubspot_monitor_mailbox":
-                    if not service:
-                        logging.error("Gmail authentication failed, cannot re-send responses")
-                        continue
-
-                    headers = email_data.get("headers", {})
-                    sender_email = headers.get("From", "")
-
-                    prompt = f"""You are a friendly HubSpot email assistant.
-User message: "{email_data.get("content", "").strip()}"
-
-Reply in 1-2 short, polite, professional sentences.
-- If greeting: acknowledge warmly.
-- If out of context: say you're HubSpot-focused.
-- If no content: ask for clarification.
-- sign with:
-    Best regards, The HubSpot Assistant Team 
-    Lowtouch.ai
-Return plain text only. No HTML."""
-
-                    ai_response = get_ai_response(prompt=prompt, expect_json=False)
-                    ai_response = re.sub(r'<[^>]+>', '', ai_response).strip()
-                    if not ai_response or len(ai_response) < 5 or "error" in ai_response.lower():
-                        logging.warning(f"AI still failing for message {message_id}")
-                        continue
-
-                    original_message_id = headers.get("Message-ID", "")
-                    references = headers.get("References", "")
-                    if original_message_id:
-                        references = f"{references} {original_message_id}".strip() if references else original_message_id
-                    subject = headers.get("Subject", "No Subject")
-                    if not subject.lower().startswith("re:"):
-                        subject = f"Re: {subject}"
-
-                    all_recipients = extract_all_recipients(email_data)
-                    primary_recipient = sender_email
-                    cc_recipients = [
-                        addr for addr in all_recipients["to"] + all_recipients["cc"]
-                        if addr.lower() != sender_email.lower()
-                        and HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
-                    ]
-                    bcc_recipients = [
-                        addr for addr in all_recipients["bcc"]
-                        if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
-                    ]
-                    cc_string = ', '.join(cc_recipients) if cc_recipients else None
-                    bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
-
-                    msg = MIMEMultipart()
-                    msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
-                    msg["To"] = primary_recipient
-                    if cc_string: msg["Cc"] = cc_string
-                    if bcc_string: msg["Bcc"] = bcc_string
-                    msg["Subject"] = subject
-                    if original_message_id: msg["In-Reply-To"] = original_message_id
-                    if references: msg["References"] = references
-                    msg.attach(MIMEText(ai_response, "plain"))
-
-                    raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
-                    service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
-                    logging.info(f"Re-sent AI friendly response for message {message_id}")
-
-                    processed_keys.append((message_id, dag_id))
-
-            except Exception as e:
-                logging.error(f"Error reprocessing record {message_id}/{dag_id}: {e}", exc_info=True)
-
-        if processed_keys:
-            _remove_pending_records(processed_keys)
-            logging.info(f"Removed {len(processed_keys)} processed pending records")
-    except Exception as outer_e:
-        logging.error(f"reprocess_pending_requests failed: {outer_e}", exc_info=True)
-
 readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'hubspot_monitor_meeting_minutes.md')
 readme_content = "HubSpot Meeting Minutes Mailbox Monitor DAG"
 try:
@@ -1067,12 +938,6 @@ with DAG(
     doc_md=readme_content,
     tags=["hubspot", "monitor", "email", "mailbox"]
 ) as dag:
-
-    reprocess_pending_requests_task = PythonOperator(
-        task_id="reprocess_pending_requests",
-        python_callable=reprocess_pending_requests,
-        provide_context=True
-    )
 
     fetch_emails_task = PythonOperator(
         task_id="fetch_unread_emails",
@@ -1110,4 +975,4 @@ with DAG(
         provide_context=True
     )
 
-    reprocess_pending_requests_task >> fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_general_queries_task,no_email_found_task]
+    fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_general_queries_task,no_email_found_task]
