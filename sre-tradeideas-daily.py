@@ -375,7 +375,6 @@ Describe downtime and final status comparison.
         instructions=instructions
     )
 
-
 # === tX: Overall Summary (Today + Comparison) ===
 def overall_summary(ti, **context):
     """
@@ -986,7 +985,6 @@ with DAG(
         python_callable=mysql_health_today_vs_yesterday,
         provide_context=True,
     )
-
 
     t24 = PythonOperator(
         task_id="overall_summary",
