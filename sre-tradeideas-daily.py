@@ -680,79 +680,79 @@ with DAG(
 ) as dag:
 
    # Static Tasks - renumbered sequentially
-t1 = PythonOperator(task_id="node_cpu_today", python_callable=node_cpu_today, provide_context=True)
-t2 = PythonOperator(task_id="node_memory_today", python_callable=node_memory_today, provide_context=True)
-t3 = PythonOperator(task_id="node_disk_today", python_callable=node_disk_today, provide_context=True)
-t4 = PythonOperator(task_id="node_readiness_check", python_callable=node_readiness_check, provide_context=True)
-t5 = PythonOperator(task_id="pod_restart_today", python_callable=pod_restart_today, provide_context=True)
-t6 = PythonOperator(task_id="mysql_health_today", python_callable=mysql_health_today, provide_context=True)
-t7 = PythonOperator(task_id="kubernetes_version_check", python_callable=kubernetes_version_check, provide_context=True)
-t8 = PythonOperator(task_id="microk8s_expiry_check", python_callable=microk8s_expiry_check, provide_context=True)
-t9 = PythonOperator(task_id="lke_pvc_storage_details", python_callable=lke_pvc_storage_details, provide_context=True)
-
-t10 = PythonOperator(task_id="node_cpu_yesterday", python_callable=node_cpu_yesterday, provide_context=True)
-t11 = PythonOperator(task_id="node_memory_yesterday", python_callable=node_memory_yesterday, provide_context=True)
-t12 = PythonOperator(task_id="node_disk_yesterday", python_callable=node_disk_yesterday, provide_context=True)
-t13 = PythonOperator(task_id="lke_pvc_storage_details_yesterday", python_callable=lke_pvc_storage_details_yesterday, provide_context=True)
-t14 = PythonOperator(task_id="mysql_health_yesterday", python_callable=mysql_health_yesterday, provide_context=True)
-
-t15 = PythonOperator(task_id="node_cpu_today_vs_yesterday", python_callable=node_cpu_today_vs_yesterday, provide_context=True)
-t16 = PythonOperator(task_id="node_memory_today_vs_yesterday", python_callable=node_memory_today_vs_yesterday, provide_context=True)
-t17 = PythonOperator(task_id="node_disk_today_vs_yesterday", python_callable=node_disk_today_vs_yesterday, provide_context=True)
-t18 = PythonOperator(task_id="lke_pvc_today_vs_yesterday", python_callable=lke_pvc_today_vs_yesterday, provide_context=True)
-t19 = PythonOperator(task_id="mysql_health_today_vs_yesterday", python_callable=mysql_health_today_vs_yesterday, provide_context=True)
-
-t20 = PythonOperator(task_id="overall_summary", python_callable=overall_summary, provide_context=True)
-t21 = PythonOperator(task_id="compile_sre_report", python_callable=compile_sre_report, provide_context=True)
-t22 = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html, provide_context=True)
-t23 = PythonOperator(task_id="send_sre_email", python_callable=send_sre_email, provide_context=True)
-
-# === POD DYNAMIC FLOW (fixed) =================================================
-pod_namespaces_var = Variable.get(
-    "ltai.v1.sretradeideas.pod.namespaces",
-    default_var='["alpha-prod","tipreprod-prod"]'
-)
-try:
-    namespaces_list = json.loads(pod_namespaces_var)
-except Exception:
-    namespaces_list = ["alpha-prod", "tipreprod-prod"]
-
-# 1. TODAY
-today_results = (
-    pod_metrics_for_namespace.partial(period="last 24 hours")
-    .expand(ns=namespaces_list)
-)
-
-# 2. YESTERDAY
-yesterday_results = (
-    pod_metrics_for_namespace.partial(period="yesterday")
-    .expand(ns=namespaces_list)
-)
-
-# 3. TODAY MARKDOWN
-pod_today_markdown = compile_pod_sections_today(today_results)
-
-# 4. COMPARISON MARKDOWN
-@task
-def collect_pod_results(today_res, yesterday_res):
-    today_list = list(today_res) if not isinstance(today_res, list) else today_res
-    yesterday_list = list(yesterday_res) if not isinstance(yesterday_res, list) else yesterday_res
-    return today_list + yesterday_list
-
-all_pod_results = collect_pod_results(today_results, yesterday_results)
-pod_comparison_markdown = compile_pod_comparison(all_pod_results)
-
-# === DEPENDENCIES =====================================
-# Node + static tasks (all previous static tasks feed into comparisons)
-[t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14] >> t15 >> t16 >> t17 >> t18 >> t19
-
-# Pod flow
-t4 >> today_results
-t4 >> yesterday_results
-today_results >> pod_today_markdown
-[yesterday_results, pod_today_markdown] >> all_pod_results
-all_pod_results >> pod_comparison_markdown
-
-# Final chain
-pod_comparison_markdown >> t20
-t19 >> t20 >> t21 >> t22 >> t23
+    t1 = PythonOperator(task_id="node_cpu_today", python_callable=node_cpu_today, provide_context=True)
+    t2 = PythonOperator(task_id="node_memory_today", python_callable=node_memory_today, provide_context=True)
+    t3 = PythonOperator(task_id="node_disk_today", python_callable=node_disk_today, provide_context=True)
+    t4 = PythonOperator(task_id="node_readiness_check", python_callable=node_readiness_check, provide_context=True)
+    t5 = PythonOperator(task_id="pod_restart_today", python_callable=pod_restart_today, provide_context=True)
+    t6 = PythonOperator(task_id="mysql_health_today", python_callable=mysql_health_today, provide_context=True)
+    t7 = PythonOperator(task_id="kubernetes_version_check", python_callable=kubernetes_version_check, provide_context=True)
+    t8 = PythonOperator(task_id="microk8s_expiry_check", python_callable=microk8s_expiry_check, provide_context=True)
+    t9 = PythonOperator(task_id="lke_pvc_storage_details", python_callable=lke_pvc_storage_details, provide_context=True)
+    
+    t10 = PythonOperator(task_id="node_cpu_yesterday", python_callable=node_cpu_yesterday, provide_context=True)
+    t11 = PythonOperator(task_id="node_memory_yesterday", python_callable=node_memory_yesterday, provide_context=True)
+    t12 = PythonOperator(task_id="node_disk_yesterday", python_callable=node_disk_yesterday, provide_context=True)
+    t13 = PythonOperator(task_id="lke_pvc_storage_details_yesterday", python_callable=lke_pvc_storage_details_yesterday, provide_context=True)
+    t14 = PythonOperator(task_id="mysql_health_yesterday", python_callable=mysql_health_yesterday, provide_context=True)
+    
+    t15 = PythonOperator(task_id="node_cpu_today_vs_yesterday", python_callable=node_cpu_today_vs_yesterday, provide_context=True)
+    t16 = PythonOperator(task_id="node_memory_today_vs_yesterday", python_callable=node_memory_today_vs_yesterday, provide_context=True)
+    t17 = PythonOperator(task_id="node_disk_today_vs_yesterday", python_callable=node_disk_today_vs_yesterday, provide_context=True)
+    t18 = PythonOperator(task_id="lke_pvc_today_vs_yesterday", python_callable=lke_pvc_today_vs_yesterday, provide_context=True)
+    t19 = PythonOperator(task_id="mysql_health_today_vs_yesterday", python_callable=mysql_health_today_vs_yesterday, provide_context=True)
+    
+    t20 = PythonOperator(task_id="overall_summary", python_callable=overall_summary, provide_context=True)
+    t21 = PythonOperator(task_id="compile_sre_report", python_callable=compile_sre_report, provide_context=True)
+    t22 = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html, provide_context=True)
+    t23 = PythonOperator(task_id="send_sre_email", python_callable=send_sre_email, provide_context=True)
+    
+    # === POD DYNAMIC FLOW (fixed) =================================================
+    pod_namespaces_var = Variable.get(
+        "ltai.v1.sretradeideas.pod.namespaces",
+        default_var='["alpha-prod","tipreprod-prod"]'
+    )
+    try:
+        namespaces_list = json.loads(pod_namespaces_var)
+    except Exception:
+        namespaces_list = ["alpha-prod", "tipreprod-prod"]
+    
+    # 1. TODAY
+    today_results = (
+        pod_metrics_for_namespace.partial(period="last 24 hours")
+        .expand(ns=namespaces_list)
+    )
+    
+    # 2. YESTERDAY
+    yesterday_results = (
+        pod_metrics_for_namespace.partial(period="yesterday")
+        .expand(ns=namespaces_list)
+    )
+    
+    # 3. TODAY MARKDOWN
+    pod_today_markdown = compile_pod_sections_today(today_results)
+    
+    # 4. COMPARISON MARKDOWN
+    @task
+    def collect_pod_results(today_res, yesterday_res):
+        today_list = list(today_res) if not isinstance(today_res, list) else today_res
+        yesterday_list = list(yesterday_res) if not isinstance(yesterday_res, list) else yesterday_res
+        return today_list + yesterday_list
+    
+    all_pod_results = collect_pod_results(today_results, yesterday_results)
+    pod_comparison_markdown = compile_pod_comparison(all_pod_results)
+    
+    # === DEPENDENCIES =====================================
+    # Node + static tasks (all previous static tasks feed into comparisons)
+    [t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14] >> t15 >> t16 >> t17 >> t18 >> t19
+    
+    # Pod flow
+    t4 >> today_results
+    t4 >> yesterday_results
+    today_results >> pod_today_markdown
+    [yesterday_results, pod_today_markdown] >> all_pod_results
+    all_pod_results >> pod_comparison_markdown
+    
+    # Final chain
+    pod_comparison_markdown >> t20
+    t19 >> t20 >> t21 >> t22 >> t23
