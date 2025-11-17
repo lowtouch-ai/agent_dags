@@ -25,7 +25,7 @@ default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2025, 2, 18),
-    "retries": 0,
+    "retries": 3,
     "retry_delay": timedelta(seconds=15),
 }
 
@@ -40,6 +40,51 @@ UPTIME_API_KEY = Variable.get("UPTIME_API_KEY")
 MONITOR_ID = Variable.get("UPTIME_MONITOR_ID")
 RECIPIENT_EMAIL = Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL")
 REPORT_PERIOD = "last 30 days"
+
+# Added for Slack alert
+SLACK_WEBHOOK_URL = Variable.get("SLACK_WEBHOOK_URL", default_var=None)
+SERVER_NAME = Variable.get("SERVER", default_var="UNKNOWN")
+
+# Slack alert function
+def slack_alert(context):
+    webhook_url = SLACK_WEBHOOK_URL
+    if not webhook_url:
+        logging.error("Slack webhook URL not found in Airflow Variables")
+        return
+
+    dag_id = context.get("dag_run").dag_id
+    task_id = context.get("task_instance").task_id
+    run_id = context.get("dag_run").run_id
+
+    # Pull extra info from XCom
+    ti = context.get("task_instance")
+    error_message = ti.xcom_pull(task_ids=task_id, key="error_message")
+
+    if error_message:
+        extra_info = f"\n*Error:* {error_message}"
+    else:
+        extra_info = ""
+
+    message = {
+        "text": (
+            f":x:*Airflow Task Failed in Server* {SERVER_NAME}\n"
+            f"*DAG:* {dag_id}\n"
+            f"*Task:* {task_id}\n"
+            f"*Run ID:* {run_id}"
+            f"{extra_info}"
+        )
+    }
+
+    try:
+        requests.post(
+            webhook_url,
+            data=json.dumps(message),
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        logging.info("Slack alert sent")
+    except Exception as e:
+        logging.error(f"Failed to send Slack alert: {e}")
 
 def get_ai_response(prompt, conversation_history=None):
     """Get AI response with conversation history context"""
@@ -298,6 +343,7 @@ def step_1_fetch_data(ti, **context):
         logging.error("One or more DataFrames are empty: "
                       f"df_current empty: {df_current.empty}, "
                       f"df_prev_week empty: {df_prev.empty}. Triggering retry...")
+        ti.xcom_push(key="error_message", value=f"One or more DataFrames are empty: Current month empty: {df_current.empty}, Previous month empty: {df_prev.empty}")
         
         raise ValueError("One or more DataFrames (df_current or df_prev) are empty. Triggering retry...")
 
@@ -1026,8 +1072,8 @@ with DAG(
         task_id="step_1_fetch_data",
         python_callable=step_1_fetch_data,
         provide_context=True,
-        retries=3,
-        retry_delay=timedelta(minutes=15)
+        retry_delay=timedelta(minutes=15),
+        on_failure_callback=slack_alert  # Call slack_alert on final failure (after retries)
     )
     
     anomaly_detection_task = PythonOperator(
