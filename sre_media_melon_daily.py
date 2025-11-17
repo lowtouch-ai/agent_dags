@@ -40,8 +40,8 @@ SMTP_PASSWORD = Variable.get("ltai.v3.mediamelon.smtp.password")
 SMTP_SUFFIX = Variable.get("ltai.v3.mediamelon.smtp.suffix","<noreply@mediamelon.com>")
 
 # From/To - MediaMelon
-MEDIAMELON_FROM_ADDRESS = Variable.get("ltai.v3.mediamelon.mediamelon_from_address",default_var=SMTP_USER or "noreply@mediamelon.com")
-MEDIAMELON_TO_ADDRESS = Variable.get("ltai.v3.mediamelon.mediamelon_to_address", default_var=MEDIAMELON_FROM_ADDRESS)
+MEDIAMELON_FROM_ADDRESS = Variable.get("ltai.v3.mediamelon.mediamelon_from_address","SMTP_USER" or "noreply@mediamelon.com")
+MEDIAMELON_TO_ADDRESS = Variable.get("ltai.v3.mediamelon.mediamelon_to_address","MEDIAMELON_FROM_ADDRESS")
 
 # Ollama Host for MediaMelon agent
 OLLAMA_HOST = Variable.get("MEDIAMELON_OLLAMA_HOST", default_var="http://agentomatic:8000/")
