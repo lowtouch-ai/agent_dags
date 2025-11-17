@@ -194,18 +194,53 @@ Each record contains: `pvc_name`, `namespace`, `storageclass`, `capacity_gib`, `
 # === POD-LEVEL DYNAMIC TASKS (Today + Yesterday + Comparison) ===
 @task
 def pod_metrics_for_namespace(ns: str, period: str):
-    """Fetch CPU and Memory for one namespace and period."""
+    """Fetch CPU and Memory + Running Pods count + Problematic Pods (Failed/Pending/Unknown)"""
+    
+    # 1. Number of running pods
+    count_prompt = f"""
+    Execute this exact Prometheus query and return only the number:
+    count( kube_pod_status_phase{{namespace="{ns}", phase="Running"}} == 1 )
+    Give only the plain number, nothing else.
+    """
+    total_running_pods = get_ai_response(count_prompt).strip()
+
+    # 2. Problematic pods (Failed, Pending, Unknown) – list only bad ones
+    problem_prompt = f"""
+    Execute this exact query:
+    sum by (pod, namespace, phase) (kube_pod_status_phase{{namespace="{ns}", phase=~"Failed|Pending|Unknown"}} == 1)
+
+    If result is empty → respond exactly: No problematic pods
+    If result has values → return only the problematic pods in this format (one per line):
+    - <pod-name> (<phase>)
+    Example:
+    - auth-service-abc123 (Failed)
+    - payment-worker-xyz (Pending)
+    Do not include namespace, timestamps, or any extra text.
+    """
+    problematic_pods = get_ai_response(problem_prompt).strip()
+
+    # 3. CPU table (unchanged)
     cpu_prompt = f"""
     Generate the **pod-level CPU utilization** for namespace `{ns}` for {period}.
     Return a markdown table with columns: pod, avg_cpu_cores, max_cpu_cores.
     """
+    cpu = get_ai_response(cpu_prompt)
+
+    # 4. Memory table (unchanged)
     mem_prompt = f"""
     Generate the **pod-level memory utilization** for namespace `{ns}` for {period}.
     Return a markdown table with columns: pod, avg_memory_gb, max_memory_gb.
     """
-    cpu = get_ai_response(cpu_prompt)
     mem = get_ai_response(mem_prompt)
-    return {"namespace": ns, "period": period, "cpu": cpu.strip(), "memory": mem.strip()}
+
+    return {
+        "namespace": ns,
+        "period": period,
+        "total_running_pods": total_running_pods,
+        "problematic_pods": problematic_pods,
+        "cpu": cpu.strip(),
+        "memory": mem.strip()
+    }
 
 @task
 def compile_pod_sections_today(namespace_results: list, **context):
@@ -217,6 +252,7 @@ def compile_pod_sections_today(namespace_results: list, **context):
     if first_ns in ns_map:
         data = ns_map.pop(first_ns)
         sections.append(f"### Namespace: `{first_ns}`\n")
+        sections.append(f"**Running Pods**: {data['total_running_pods']} | **Problematic Pods**: {data['problematic_pods']}\n")
         sections.append("#### CPU\n" + data["cpu"] + "\n")
         sections.append("#### Memory\n" + data["memory"] + "\n")
         sections.append("---\n")
@@ -224,6 +260,7 @@ def compile_pod_sections_today(namespace_results: list, **context):
     for ns in sorted(ns_map.keys()):
         data = ns_map[ns]
         sections.append(f"### Namespace: `{ns}`\n")
+        sections.append(f"**Running Pods**: {data['total_running_pods']} | **Problematic Pods**: {data['problematic_pods']}\n")
         sections.append("#### CPU\n" + data["cpu"] + "\n")
         sections.append("#### Memory\n" + data["memory"] + "\n")
         sections.append("---\n")
@@ -234,7 +271,6 @@ def compile_pod_sections_today(namespace_results: list, **context):
     ti.xcom_push(key="pod_today_markdown", value=result)
     
     return result
-
 @task
 def compile_pod_comparison(namespace_results: list, **context):
     ti = context['ti']
