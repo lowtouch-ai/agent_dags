@@ -2274,80 +2274,56 @@ If error, set status as failure, error message in reason and include individual 
     response = None
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-        parsed = json.loads(response)
+        parsed = json.loads(response)       
         status = parsed.get("status", "unknown")
-        updated = parsed.get("updated_deals", [])
+        updated_deals = parsed.get("updated_deals", [])
         errors = parsed.get("errors", [])
         reason = parsed.get("reason", "")
-        
+
+        # Prepare final result dict (will be pushed all at once)
+        result = {
+            "updated_deals": updated_deals if status == "success" else [],
+            "deals_update_errors": errors,
+            "deal_update_status": {"status": "success", "reason": reason},
+            "deal_update_response": parsed
+        }
+
         if status == "success":
-            logging.info(f"✓ Successfully updated {len(updated)} deals on attempt {current_try_number}")
-            ti.xcom_push(key="updated_deals", value=updated)
-            ti.xcom_push(key="deals_update_errors", value=errors)
-            ti.xcom_push(key="deal_update_status", value={"status": "success"})
-            ti.xcom_push(key="deal_update_response", value=parsed)
-            return updated
+            logging.info(f"Successfully updated {len(updated_deals)} deals on attempt {current_try_number}")
+            # Push all at once
+            for key, value in result.items():
+                ti.xcom_push(key=key, value=value)
+            return updated_deals
+
         else:
-            # Failure - determine if this is final or can retry
-            if current_try_number >= max_tries:
-                # Final failure - no more retries
-                logging.error(f"✗ FINAL FAILURE after {max_tries} attempts: {reason}")
-                ti.xcom_push(key="updated_deals", value=[])
-                ti.xcom_push(key="deals_update_errors", value=errors)
-                ti.xcom_push(key="deal_update_status", value={"status": "final_failure", "reason": reason})
-                ti.xcom_push(key="deal_update_response", value=parsed)
-                raise Exception(f"update_deals failed after {max_tries} attempts: {reason}")
-            else:
-                # Not final - push status for next retry and raise exception
-                logging.warning(f"✗ Attempt {current_try_number}/{max_tries} failed: {reason}")
-                logging.info(f"→ Will retry with retry prompt on next attempt")
-                ti.xcom_push(key="updated_deals", value=[])
-                ti.xcom_push(key="deals_update_errors", value=errors)
-                ti.xcom_push(key="deal_update_status", value={"status": "failure", "reason": reason})
-                ti.xcom_push(key="deal_update_response", value=parsed)
-                raise Exception(f"update_deals failed (attempt {current_try_number}/{max_tries}): {reason}")
-            
+            # LLM reported failure
+            raise Exception(reason or "LLM returned status='failure'")
     except json.JSONDecodeError as e:
-        error_msg = f"JSON parsing error: {str(e)}"
-        logging.error(f"✗ {error_msg}")
-        logging.error(f"Raw response: {response}")
-        
-        if current_try_number >= max_tries:
-            # Final failure
-            ti.xcom_push(key="updated_deals", value=[])
-            ti.xcom_push(key="deals_update_errors", value=[str(e)])
-            ti.xcom_push(key="deal_update_status", value={"status": "final_failure", "reason": error_msg})
-            ti.xcom_push(key="deal_update_response", value={"raw_response": response})
-            raise Exception(f"update_deals failed after {max_tries} attempts: {error_msg}")
-        else:
-            # Retry
-            logging.info(f"→ Will retry with retry prompt on next attempt")
-            ti.xcom_push(key="updated_deals", value=[])
-            ti.xcom_push(key="deals_update_errors", value=[str(e)])
-            ti.xcom_push(key="deal_update_status", value={"status": "failure", "reason": error_msg})
-            ti.xcom_push(key="deal_update_response", value={"raw_response": response})
-            raise Exception(f"update_deals failed (attempt {current_try_number}/{max_tries}): {error_msg}")
-            
+        error_msg = f"Invalid JSON from AI: {e}\nRaw response: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)   
     except Exception as e:
-        error_msg = str(e)
-        logging.error(f"✗ Error: {error_msg}")
-        logging.error(f"Raw response: {response}")
+        error_msg = str(e) if str(e) else "Unknown error during deal update"
+        is_final_attempt = current_try_number >= max_tries
         
-        if current_try_number >= max_tries:
-            # Final failure
-            ti.xcom_push(key="updated_deals", value=[])
-            ti.xcom_push(key="deals_update_errors", value=[str(e)])
-            ti.xcom_push(key="deal_update_status", value={"status": "final_failure", "reason": error_msg})
-            ti.xcom_push(key="deal_update_response", value={"raw_response": response})
-            raise Exception(f"update_deals failed after {max_tries} attempts: {error_msg}")
+        status_type = "final_failure" if is_final_attempt else "failure"
+        result = {
+            "updated_deals": [],
+            "deals_update_errors": [error_msg],
+            "deal_update_status": {"status": status_type, "reason": error_msg},
+            "deal_update_response": {"raw_response": response} if 'response' in locals() else None
+        }
+
+        # Push everything once
+        for key, value in result.items():
+            ti.xcom_push(key=key, value=value)
+
+        if is_final_attempt:
+            logging.error(f"FINAL FAILURE after {max_tries} attempts: {error_msg}")
+            raise  # This will mark task as failed
         else:
-            # Retry
-            logging.info(f"→ Will retry with retry prompt on next attempt")
-            ti.xcom_push(key="updated_deals", value=[])
-            ti.xcom_push(key="deals_update_errors", value=[str(e)])
-            ti.xcom_push(key="deal_update_status", value={"status": "failure", "reason": error_msg})
-            ti.xcom_push(key="deal_update_response", value={"raw_response": response})
-            raise Exception(f"update_deals failed (attempt {current_try_number}/{max_tries}): {error_msg}")
+            logging.warning(f"Attempt {current_try_number}/{max_tries} failed → retrying...")
+            raise
     
 def update_meetings(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
