@@ -788,6 +788,11 @@ def create_contacts(ti, **context):
     to_create_contacts = analysis_results.get("entities_to_create", {}).get("contacts", [])
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     owner_info = ti.xcom_pull(key="owner_info", default={})
+    task_instance = context['task_instance']
+    current_try_number = task_instance.try_number
+    max_tries = task_instance.max_tries
+    
+    logging.info(f"=== CREATE CONTACTS - Attempt {current_try_number}/{max_tries} ===")
     
     # Check if this is a retry by pulling previous status
     previous_status = ti.xcom_pull(key="contact_creation_status")
@@ -809,16 +814,25 @@ def create_contacts(ti, **context):
         if not contact.get("contactOwnerId"):
             contact["contactOwnerId"] = contact_owner_id
     
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
-        # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt")
-        previous_reason = previous_status.get("reason", "Unknown error")
-        
+        is_retry = current_try_number > 1
+            
+        if is_retry:
+                # This is a retry - use retry prompt
+                logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try_number}/{max_tries})")
+                
+                if previous_status is None:
+                    previous_reason = "Unknown error (no previous status found)"
+                else:
+                    previous_reason = previous_status.get("reason", "Unknown error")
+                
+                if previous_response is None:
+                    previous_response_str = "No previous response available"
+                else:
+                    previous_response_str = json.dumps(previous_response, indent=2)
         prompt = f"""Previous attempt to create contacts failed.
 
 Previous Response:
-{json.dumps(previous_response, indent=2)}
+{json.dumps(previous_response_str)}
 
 Previous Failure Reason: {previous_reason}
 
@@ -884,7 +898,7 @@ Return ONLY this JSON structure (no other text):
             }}
         }}
     ],
-    "errors": [],
+    "errors": ["Error message 1", "Error message 2"],
     "reason": "error description if status is failure"
 }}"""
 
@@ -985,7 +999,7 @@ Return ONLY this JSON structure (no other text):
 def create_companies(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_companies = analysis_results.get("entities_to_create", {}).get("companies", [])
-    
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
     # Check if this is a retry by pulling previous status
     previous_status = ti.xcom_pull(key="company_creation_status")
     previous_response = ti.xcom_pull(key="company_creation_response")
@@ -1081,7 +1095,7 @@ Return ONLY this JSON structure (no other text):
     
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         created = parsed.get("created_companies", [])
@@ -1455,7 +1469,6 @@ def create_notes(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     to_create_notes = analysis_results.get("entities_to_create", {}).get("notes", [])
-    
     # Check if this is a retry by pulling previous status
     previous_status = ti.xcom_pull(key="note_creation_status")
     previous_response = ti.xcom_pull(key="note_creation_response")
@@ -1646,7 +1659,7 @@ def create_tasks(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     owner_info = ti.xcom_pull(key="owner_info", default={})
     to_create_tasks = analysis_results.get("entities_to_create", {}).get("tasks", [])
-    
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
     # Check if this is a retry by pulling previous status
     previous_status = ti.xcom_pull(key="task_creation_status")
     previous_response = ti.xcom_pull(key="task_creation_response")
@@ -1802,7 +1815,7 @@ CRITICAL: Preserve the task_owner_id from the input. Do not default to Kishore (
     
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         created = parsed.get("created_tasks", [])
@@ -1988,7 +2001,7 @@ Return ONLY this JSON structure (no other text):
 def update_companies(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("companies", [])
-    
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
     # Check if this is a retry by pulling previous status
     previous_status = ti.xcom_pull(key="company_update_status")
     previous_response = ti.xcom_pull(key="company_update_response")
@@ -2052,7 +2065,7 @@ Return ONLY this JSON structure (no other text):
 
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         updated = parsed.get("updated_companies", [])
@@ -2095,27 +2108,49 @@ Return ONLY this JSON structure (no other text):
 def update_deals(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("deals", [])
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    # Get current attempt number
+    task_instance = context['task_instance']
+    current_try_number = task_instance.try_number
+    max_tries = task_instance.max_tries
+    
+    logging.info(f"=== UPDATE DEALS - Attempt {current_try_number}/{max_tries} ===")
     
     # Check if this is a retry by pulling previous status
     previous_status = ti.xcom_pull(key="deal_update_status")
     previous_response = ti.xcom_pull(key="deal_update_response")
     
     if not to_update:
+        logging.info("No deals to update")
         ti.xcom_push(key="updated_deals", value=[])
+        ti.xcom_push(key="deals_update_errors", value=[])
         return []
     
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
+    # Determine if this is a retry (attempt > 1)
+    is_retry = current_try_number > 1
+    
+    if is_retry:
         # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt for deal updates")
-        previous_reason = previous_status.get("reason", "Unknown error")
+        logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try_number}/{max_tries})")
+        
+        if previous_status is None:
+            previous_reason = "Unknown error (no previous status found)"
+        else:
+            previous_reason = previous_status.get("reason", "Unknown error")
+        
+        if previous_response is None:
+            previous_response_str = "No previous response available"
+        else:
+            previous_response_str = json.dumps(previous_response, indent=2)
         
         prompt = f"""Previous attempt to update deals failed.
 
 Previous Response:
-{json.dumps(previous_response, indent=2)}
+{previous_response_str}
 
 Previous Failure Reason: {previous_reason}
+
+This is retry attempt {current_try_number} of {max_tries}.
 
 Please analyze the error and retry updating the deals:
 
@@ -2127,7 +2162,7 @@ IMPORTANT: Respond with ONLY a valid JSON object.
 Steps:
 1. Review the previous error and identify the root cause
 2. For each deal, invoke update_deal with the id and changes in the exact format:
-    update_deal(task_id, {{
+    update_deal(deal_id, {{
      "properties": {{
        "dealName": "",
        "dealLabelName": "",
@@ -2136,9 +2171,37 @@ Steps:
        "dealOwnerName": ""
      }}
    }})
+3. HubSpot Deal Stage Label Configuration
 
-3. Collect the updated deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
+When updating or creating a deal in HubSpot via API (or automation), always use the following **internal IDs** as the `dealLabelName` (or equivalent field) in the request payload.  
 
+However, when displaying the stage to users (in UI, reports, emails, dashboards, etc.), always show the corresponding **human-readable Display Name**.
+
+| Internal ID (use in API request body) | Display Name (show to users)       |
+|---------------------------------------|------------------------------------|
+| appointmentscheduled                  | Appointment Scheduled              |
+| qualifiedtobuy                        | Qualified To Buy                   |
+| presentationscheduled                 | Presentation Scheduled             |
+| decisionmakerboughtin                 | Decision Maker Bought In           |
+| contractsent                          | Contract Sent                      |
+| closedwon                             | Closed Won                         |
+| closedlost                            | Closed Lost                        |
+
+**Important rules:**
+- The value sent in the API request **must** be the exact Internal ID (lowercase, no spaces).
+- Never send the Display Name in the request body — it will cause errors or mismatches.
+- Always map and display the user-friendly Display Name in any front-end interface, notifications, or reporting tools.
+
+Example API payload snippet:
+```json
+{{
+  "dealLabelName": "appointmentscheduled"   // correct
+  // "dealLabelName": "Appointment Scheduled"  // incorrect – will fail
+}}
+4. Use all the properties exactly as provided in the input for updating the deal.
+5. Use the deal owner id for updating the deal owner instead of name.
+6. Collect the updated deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
+7. While returning the dealLabelName should be the deal stage name instead of ID. for e.g, if contractsent then return Contract Sent.
 Return JSON:
 {{
     "status": "success|failure",
@@ -2150,14 +2213,14 @@ Return JSON:
 If error, set status as failure, error message in reason and include individual errors in the errors array."""
     else:
         # This is the initial attempt - use initial prompt
-        logging.info("Initial attempt - using initial prompt for deal updates")
+        logging.info(f"INITIAL ATTEMPT - Using initial prompt (attempt {current_try_number}/{max_tries})")
         
         prompt = f"""Update deals: {json.dumps(to_update, indent=2)}
 IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
 1. For each deal, invoke update_deal with the id and changes in the exact format:
-    update_deal(task_id, {{
+    update_deal(deal_id, {{
      "properties": {{
        "dealName": "",
        "dealLabelName": "",
@@ -2167,8 +2230,37 @@ Steps:
      }}
    }})
 2. Deal owner Id should be used in above request body instead of name.
-3. Collect the updated deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
+3. HubSpot Deal Stage Label Configuration
 
+When updating or creating a deal in HubSpot via API (or automation), always use the following **internal IDs** as the `dealLabelName` (or equivalent field) in the request payload.  
+
+However, when displaying the stage to users (in UI, reports, emails, dashboards, etc.), always show the corresponding **human-readable Display Name**.
+
+| Internal ID (use in API request body) | Display Name (show to users)       |
+|---------------------------------------|------------------------------------|
+| appointmentscheduled                  | Appointment Scheduled              |
+| qualifiedtobuy                        | Qualified To Buy                   |
+| presentationscheduled                 | Presentation Scheduled             |
+| decisionmakerboughtin                 | Decision Maker Bought In           |
+| contractsent                          | Contract Sent                      |
+| closedwon                             | Closed Won                         |
+| closedlost                            | Closed Lost                        |
+
+**Important rules:**
+- The value sent in the API request **must** be the exact Internal ID (lowercase, no spaces).
+- Never send the Display Name in the request body — it will cause errors or mismatches.
+- Always map and display the user-friendly Display Name in any front-end interface, notifications, or reporting tools.
+
+Example API payload snippet:
+```json
+{{
+  "dealLabelName": "appointmentscheduled"   // correct
+  // "dealLabelName": "Appointment Scheduled"  // incorrect – will fail
+}}
+4. Use all the properties exactly as provided in the input for updating the deal.
+5. Use the deal owner id for updating the deal owner instead of name.
+6. Collect the updated deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
+7. While returning the dealLabelName should be the deal stage name instead of ID. for e.g, if contractsent then return Contract Sent.
 Return JSON:
 {{
     "status": "success|failure",
@@ -2181,7 +2273,7 @@ If error, set status as failure, error message in reason and include individual 
 
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         updated = parsed.get("updated_deals", [])
@@ -2189,41 +2281,78 @@ If error, set status as failure, error message in reason and include individual 
         reason = parsed.get("reason", "")
         
         if status == "success":
+            logging.info(f"✓ Successfully updated {len(updated)} deals on attempt {current_try_number}")
             ti.xcom_push(key="updated_deals", value=updated)
+            ti.xcom_push(key="deals_update_errors", value=errors)
             ti.xcom_push(key="deal_update_status", value={"status": "success"})
             ti.xcom_push(key="deal_update_response", value=parsed)
-            logging.info(f"Updated {len(updated)} deals")
             return updated
         else:
-            # Push failure status and response for next retry
-            ti.xcom_push(key="updated_deals", value=[])
-            ti.xcom_push(key="deals_errors", value=errors)
-            ti.xcom_push(key="deal_update_status", value={"status": "failure", "reason": reason})
-            ti.xcom_push(key="deal_update_response", value=parsed)
-            logging.error(f"Deal update failed: {reason}")
-            raise Exception(f"update_deals failed: {reason}")
+            # Failure - determine if this is final or can retry
+            if current_try_number >= max_tries:
+                # Final failure - no more retries
+                logging.error(f"✗ FINAL FAILURE after {max_tries} attempts: {reason}")
+                ti.xcom_push(key="updated_deals", value=[])
+                ti.xcom_push(key="deals_update_errors", value=errors)
+                ti.xcom_push(key="deal_update_status", value={"status": "final_failure", "reason": reason})
+                ti.xcom_push(key="deal_update_response", value=parsed)
+                raise Exception(f"update_deals failed after {max_tries} attempts: {reason}")
+            else:
+                # Not final - push status for next retry and raise exception
+                logging.warning(f"✗ Attempt {current_try_number}/{max_tries} failed: {reason}")
+                logging.info(f"→ Will retry with retry prompt on next attempt")
+                ti.xcom_push(key="updated_deals", value=[])
+                ti.xcom_push(key="deals_update_errors", value=errors)
+                ti.xcom_push(key="deal_update_status", value={"status": "failure", "reason": reason})
+                ti.xcom_push(key="deal_update_response", value=parsed)
+                raise Exception(f"update_deals failed (attempt {current_try_number}/{max_tries}): {reason}")
             
     except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response: {e}")
+        error_msg = f"JSON parsing error: {str(e)}"
+        logging.error(f"✗ {error_msg}")
         logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_deals", value=[])
-        ti.xcom_push(key="deals_errors", value=[str(e)])
-        ti.xcom_push(key="deal_update_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-        ti.xcom_push(key="deal_update_response", value={"raw_response": response})
-        raise Exception(f"update_deals failed: JSON parsing error - {str(e)}")
+        
+        if current_try_number >= max_tries:
+            # Final failure
+            ti.xcom_push(key="updated_deals", value=[])
+            ti.xcom_push(key="deals_update_errors", value=[str(e)])
+            ti.xcom_push(key="deal_update_status", value={"status": "final_failure", "reason": error_msg})
+            ti.xcom_push(key="deal_update_response", value={"raw_response": response})
+            raise Exception(f"update_deals failed after {max_tries} attempts: {error_msg}")
+        else:
+            # Retry
+            logging.info(f"→ Will retry with retry prompt on next attempt")
+            ti.xcom_push(key="updated_deals", value=[])
+            ti.xcom_push(key="deals_update_errors", value=[str(e)])
+            ti.xcom_push(key="deal_update_status", value={"status": "failure", "reason": error_msg})
+            ti.xcom_push(key="deal_update_response", value={"raw_response": response})
+            raise Exception(f"update_deals failed (attempt {current_try_number}/{max_tries}): {error_msg}")
+            
     except Exception as e:
-        logging.error(f"Error updating deals: {e}")
+        error_msg = str(e)
+        logging.error(f"✗ Error: {error_msg}")
         logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_deals", value=[])
-        ti.xcom_push(key="deals_errors", value=[str(e)])
-        ti.xcom_push(key="deal_update_status", value={"status": "failure", "reason": str(e)})
-        ti.xcom_push(key="deal_update_response", value={"raw_response": response})
-        raise Exception(f"update_deals failed: {str(e)}")
+        
+        if current_try_number >= max_tries:
+            # Final failure
+            ti.xcom_push(key="updated_deals", value=[])
+            ti.xcom_push(key="deals_update_errors", value=[str(e)])
+            ti.xcom_push(key="deal_update_status", value={"status": "final_failure", "reason": error_msg})
+            ti.xcom_push(key="deal_update_response", value={"raw_response": response})
+            raise Exception(f"update_deals failed after {max_tries} attempts: {error_msg}")
+        else:
+            # Retry
+            logging.info(f"→ Will retry with retry prompt on next attempt")
+            ti.xcom_push(key="updated_deals", value=[])
+            ti.xcom_push(key="deals_update_errors", value=[str(e)])
+            ti.xcom_push(key="deal_update_status", value={"status": "failure", "reason": error_msg})
+            ti.xcom_push(key="deal_update_response", value={"raw_response": response})
+            raise Exception(f"update_deals failed (attempt {current_try_number}/{max_tries}): {error_msg}")
     
 def update_meetings(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("meetings", [])
-    
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
     # Check if this is a retry by pulling previous status
     previous_status = ti.xcom_pull(key="meeting_update_status")
     previous_response = ti.xcom_pull(key="meeting_update_response")
@@ -2285,7 +2414,7 @@ Return ONLY this JSON structure (no other text):
 
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         updated = parsed.get("updated_meetings", [])
@@ -2324,7 +2453,7 @@ Return ONLY this JSON structure (no other text):
 def update_notes(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("notes", [])
-    
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
     # Check if this is a retry by pulling previous status
     previous_status = ti.xcom_pull(key="note_update_status")
     previous_response = ti.xcom_pull(key="note_update_response")
@@ -2386,7 +2515,7 @@ Return ONLY this JSON structure (no other text):
 
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         updated = parsed.get("updated_notes", [])
@@ -2427,7 +2556,7 @@ def update_tasks(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     owner_info = ti.xcom_pull(key="owner_info", default={})
     to_update = analysis_results.get("entities_to_update", {}).get("tasks", [])
-    
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
     # Check if this is a retry by pulling previous status
     previous_status = ti.xcom_pull(key="task_update_status")
     previous_response = ti.xcom_pull(key="task_update_response")
@@ -2588,7 +2717,7 @@ Return ONLY this JSON structure (no other text):
     
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         parsed = json.loads(response)
         status = parsed.get("status", "unknown")
         updated = parsed.get("updated_tasks", [])
@@ -3082,50 +3211,58 @@ def compose_response_html(ti, **context):
         email_content += "</tbody></table>"
     
     # Existing/Used Deals
+    # Existing/Used Deals
     if existing_deals or updated_deals:
-        email_content += """
-        <h3>Deals Used/Updated</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>Deal Name</th>
-                    <th>Deal Stage Label</th>
-                    <th>Deal Amount</th>
-                    <th>Close Date</th>
-                    <th>Deal Owner Name</th>
-                    <th>Status</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
-        for deal in existing_deals:
-            details = deal.get("details", deal)
-            email_content += f"""
-                <tr>
-                    <td>{deal.get("dealId", "")}</td>
-                    <td>{details.get("dealName", "")}</td>
-                    <td>{details.get("dealLabelName", "")}</td>
-                    <td>{details.get("dealAmount", "")}</td>
-                    <td>{details.get("closeDate", "")}</td>
-                    <td>{details.get("dealOwnerName", "")}</td>
-                    <td>Existing</td>
-                </tr>
+        # CHANGED: Filter out deals that were updated from existing_deals
+        updated_deal_ids = [deal.get("id") for deal in updated_deals if deal.get("id")]
+        final_existing_deals = [d for d in existing_deals if d.get("dealId") not in updated_deal_ids]
+        
+        # CHANGED: Only show table if there are deals to display
+        if final_existing_deals or updated_deals:
+            email_content += """
+            <h3>Deals Used/Updated</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Deal Name</th>
+                        <th>Deal Stage Label</th>
+                        <th>Deal Amount</th>
+                        <th>Close Date</th>
+                        <th>Deal Owner Name</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
             """
-        for deal in updated_deals:
-            details = deal.get("details", {})
-            email_content += f"""
-                <tr>
-                    <td>{deal.get("id", "")}</td>
-                    <td>{details.get("dealName", "")}</td>
-                    <td>{details.get("dealLabelName", "")}</td>
-                    <td>{details.get("dealAmount", "")}</td>
-                    <td>{details.get("closeDate", "")}</td>
-                    <td>{details.get("dealOwnerName", "")}</td>
-                    <td>Updated</td>
-                </tr>
-            """
-        email_content += "</tbody></table>"
+            # CHANGED: Use filtered existing deals
+            for deal in final_existing_deals:
+                details = deal.get("details", deal)
+                email_content += f"""
+                    <tr>
+                        <td>{deal.get("dealId", "")}</td>
+                        <td>{details.get("dealName", "")}</td>
+                        <td>{details.get("dealLabelName", "")}</td>
+                        <td>{details.get("dealAmount", "")}</td>
+                        <td>{details.get("closeDate", "")}</td>
+                        <td>{details.get("dealOwnerName", "")}</td>
+                        <td>Existing</td>
+                    </tr>
+                """
+            for deal in updated_deals:
+                details = deal.get("details", {})
+                email_content += f"""
+                    <tr>
+                        <td>{deal.get("id", "")}</td>
+                        <td>{details.get("dealName", "")}</td>
+                        <td>{details.get("dealLabelName", "")}</td>
+                        <td>{details.get("dealAmount", "")}</td>
+                        <td>{details.get("closeDate", "")}</td>
+                        <td>{details.get("dealOwnerName", "")}</td>
+                        <td>Updated</td>
+                    </tr>
+                """
+            email_content += "</tbody></table>"
     # Newly Created Contacts
     if created_contacts:
         email_content += """
@@ -3739,7 +3876,7 @@ with DAG(
     create_contacts_task = PythonOperator(
         task_id="create_contacts",
         python_callable=create_contacts,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3747,7 +3884,7 @@ with DAG(
     create_companies_task = PythonOperator(
         task_id="create_companies",
         python_callable=create_companies,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3755,7 +3892,7 @@ with DAG(
     create_deals_task = PythonOperator(
         task_id="create_deals",
         python_callable=create_deals,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3763,7 +3900,7 @@ with DAG(
     create_meetings_task = PythonOperator(
         task_id="create_meetings",
         python_callable=create_meetings,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3771,7 +3908,7 @@ with DAG(
     create_notes_task = PythonOperator(
         task_id="create_notes",
         python_callable=create_notes,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3779,7 +3916,7 @@ with DAG(
     create_tasks_task = PythonOperator(
         task_id="create_tasks",
         python_callable=create_tasks,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3787,7 +3924,7 @@ with DAG(
     update_contacts_task = PythonOperator(
         task_id="update_contacts",
         python_callable=update_contacts,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3795,7 +3932,7 @@ with DAG(
     update_companies_task = PythonOperator(
         task_id="update_companies",
         python_callable=update_companies,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3803,7 +3940,7 @@ with DAG(
     update_deals_task = PythonOperator(
         task_id="update_deals",
         python_callable=update_deals,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3811,7 +3948,7 @@ with DAG(
     update_meetings_task = PythonOperator(
         task_id="update_meetings",
         python_callable=update_meetings,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3819,7 +3956,7 @@ with DAG(
     update_notes_task = PythonOperator(
         task_id="update_notes",
         python_callable=update_notes,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3827,7 +3964,7 @@ with DAG(
     update_tasks_task = PythonOperator(
         task_id="update_tasks",
         python_callable=update_tasks,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
