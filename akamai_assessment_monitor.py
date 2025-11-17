@@ -32,15 +32,57 @@ LAST_PROCESSED_EMAIL_FILE = "/appz/cache/last_processed_email.json"
 ATTACHMENT_DIR = "/appz/data/attachments/"
 
 def authenticate_gmail():
-    """Authenticate Gmail API and verify the correct email account is used."""
-    creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
-    service = build("gmail", "v1", credentials=creds)
-    profile = service.users().getProfile(userId="me").execute()
-    logged_in_email = profile.get("emailAddress", "")
-    if logged_in_email.lower() != CLOUD_ASSESS_FROM_ADDRESS.lower():
-        raise ValueError(f"Wrong Gmail account! Expected {CLOUD_ASSESS_FROM_ADDRESS}, but got {logged_in_email}")
-    logging.info(f"Authenticated Gmail Account: {logged_in_email}")
-    return service
+    """
+    Authenticate Gmail API and verify the correct email account is used.
+    Accepts either raw JSON or base64-encoded JSON stored in the Airflow Variable.
+    Returns the Gmail service object or None on failure.
+    """
+    try:
+        raw_val = Variable.get("AKAMAI_CLOUD_ASSESS_GMAIL_CREDENTIALS", default_var=None)
+        if not raw_val:
+            logging.error("Airflow Variable 'AKAMAI_CLOUD_ASSESS_GMAIL_CREDENTIALS' is missing or empty.")
+            return None
+
+        creds_json = None
+
+        # If variable looks like base64, try decode first
+        try:
+            # detect likely base64 by attempting decode and json.loads
+            import base64 as _base64
+            decoded = _base64.b64decode(raw_val).decode("utf-8")
+            creds_json = json.loads(decoded)
+            logging.info("Loaded Gmail credentials from base64-encoded JSON variable.")
+        except Exception:
+            # fallback: try raw JSON
+            try:
+                creds_json = json.loads(raw_val)
+                logging.info("Loaded Gmail credentials from raw JSON variable.")
+            except Exception as e:
+                logging.error("AKAMAI_CLOUD_ASSESS_GMAIL_CREDENTIALS is not valid JSON nor base64-encoded JSON.")
+                logging.debug("Raw variable content (truncated): %s", (raw_val[:200] + '...') if raw_val else "")
+                return None
+
+        # Build credentials object
+        creds = Credentials.from_authorized_user_info(creds_json)
+        service = build("gmail", "v1", credentials=creds)
+
+        profile = service.users().getProfile(userId="me").execute()
+        logged_in_email = profile.get("emailAddress", "")
+        expected = Variable.get("AKAMAI_CLOUD_ASSESS_FROM_ADDRESS", default_var="").lower()
+        if expected and logged_in_email.lower() != expected:
+            logging.error(
+                "Wrong Gmail account! Expected %s, but got %s",
+                expected, logged_in_email
+            )
+            return None
+
+        logging.info("Authenticated Gmail Account: %s", logged_in_email)
+        return service
+
+    except Exception as e:
+        logging.exception("Failed to authenticate Gmail: %s", str(e))
+        return None
+
 
 def get_last_checked_timestamp():
     """Retrieve the last processed timestamp, ensuring it's in milliseconds."""

@@ -35,17 +35,55 @@ ATTACHMENT_DIR = "/appz/data/attachments/"
 OLLAMA_HOST = "http://agentomatic:8000/"
 
 def authenticate_gmail():
+    """
+    Authenticate Gmail API and verify the correct email account is used.
+    Accepts either raw JSON or base64-encoded JSON stored in the Airflow Variable.
+    Returns the Gmail service object or None on failure.
+    """
     try:
-        creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
+        raw_val = Variable.get("AKAMAI_CLOUD_ASSESS_GMAIL_CREDENTIALS", default_var=None)
+        if not raw_val:
+            logging.error("Airflow Variable 'AKAMAI_CLOUD_ASSESS_GMAIL_CREDENTIALS' is missing or empty.")
+            return None
+
+        creds_json = None
+
+        # If variable looks like base64, try decode first
+        try:
+            # detect likely base64 by attempting decode and json.loads
+            import base64 as _base64
+            decoded = _base64.b64decode(raw_val).decode("utf-8")
+            creds_json = json.loads(decoded)
+            logging.info("Loaded Gmail credentials from base64-encoded JSON variable.")
+        except Exception:
+            # fallback: try raw JSON
+            try:
+                creds_json = json.loads(raw_val)
+                logging.info("Loaded Gmail credentials from raw JSON variable.")
+            except Exception as e:
+                logging.error("AKAMAI_CLOUD_ASSESS_GMAIL_CREDENTIALS is not valid JSON nor base64-encoded JSON.")
+                logging.debug("Raw variable content (truncated): %s", (raw_val[:200] + '...') if raw_val else "")
+                return None
+
+        # Build credentials object
+        creds = Credentials.from_authorized_user_info(creds_json)
         service = build("gmail", "v1", credentials=creds)
+
         profile = service.users().getProfile(userId="me").execute()
         logged_in_email = profile.get("emailAddress", "")
-        if logged_in_email.lower() != CLOUD_ASSESS_FROM_ADDRESS.lower():
-            raise ValueError(f"Wrong Gmail account! Expected {CLOUD_ASSESS_FROM_ADDRESS}, but got {logged_in_email}")
-        logging.info(f"Authenticated Gmail account: {logged_in_email}")
+        expected = Variable.get("AKAMAI_CLOUD_ASSESS_FROM_ADDRESS", default_var="").lower()
+        if expected and logged_in_email.lower() != expected:
+            logging.error(
+                "Wrong Gmail account! Expected %s, but got %s",
+                expected, logged_in_email
+            )
+            return None
+
+        logging.info("Authenticated Gmail Account: %s", logged_in_email)
         return service
+
     except Exception as e:
-        logging.error(f"Failed to authenticate Gmail: {str(e)}")
+        logging.exception("Failed to authenticate Gmail: %s", str(e))
         return None
 
 def decode_email_payload(msg):
@@ -249,7 +287,13 @@ def send_email(service, recipient, subject, body, in_reply_to, references):
 
 def step_1_process_email(ti, **context):
     """Step 1: Process message from email, handle attachments or errors."""
-    email_data = context['dag_run'].conf.get("email_data", {})
+    
+    email_data = context['dag_run'].conf.get("email_data")
+
+    if not email_data:
+        logging.error("No email_data passed to DAG! This typically happens when the DAG is triggered manually.")
+        ti.xcom_push(key="step_1_response", value="No email_data received. Cannot process email.")
+        return "No email_data received"
     
     service = authenticate_gmail()
     if not service:
@@ -336,50 +380,95 @@ def step_1_process_email(ti, **context):
     return response
 
 def step_2_compose_email(ti, **context):
-    """Step 2: Compose professional HTML email based on assessment."""
+    """Step 2: Compose email based on attachment type:
+       - PDF  → Do Akamai comparison
+       - Excel → Do Cloud Assessment
+    """
     step_1_response = ti.xcom_pull(key="step_1_response")
     sender_name = ti.xcom_pull(key="sender_name") or "Valued Client"
-    content_appended = step_1_response if step_1_response else "No assessment generated due to error."
-    
-    prompt = f"""
-        Generate a professional, human-like business email in American English, written in the tone of a senior AI Engineer at lowtouch.ai, to notify the client, addressed by name '{sender_name}', about the cloud assessment results.
+    email_content = ti.xcom_pull(key="email_content") or ""
+    attachments = context['dag_run'].conf.get("email_data", {}).get("attachments", [])
 
-        Content: {content_appended}
+    # --------------------------
+    # Detect attachment type
+    # --------------------------
+    attachment_type = "none"
+    for att in attachments:
+        mime = att.get("mime_type", "")
+        if "pdf" in mime:
+            attachment_type = "pdf"
+            break
+        elif "excel" in mime or "spreadsheet" in mime:
+            attachment_type = "excel"
 
-        Follow this exact structure for the email body, using clean, valid HTML without any additional wrappers like <html> or <body>. Do not omit any sections or elements listed below. Use natural, professional wording but adhere strictly to the format. Extract all details from the provided Content; use 'N/A' if a value is not available. Infuse insights where appropriate to make the summary analytical and actionable, highlighting implications for the client's operations, potential risks, opportunities for optimization, and alignments with Akamai's cloud solutions or lowtouch.ai's agentic AI capabilities for automation.
+    logging.info(f"Detected attachment type for Step-2: {attachment_type}")
 
-        1. Greeting: <p>Dear {sender_name},</p>
+    # ====== PDF → AKAMAI COMPARISON REPORT ======
+    if attachment_type == "pdf":
+        prompt = f"""
+            You are an expert Cloud Architect at lowtouch.ai. 
+            The client has submitted a **PDF Cloud Architecture document**.
 
-        2. Opening paragraph: <p>We have received your filled details and completed the cloud assessment for Akamai. This assessment analyzes your current setup to identify strengths, areas for improvement, and strategic opportunities. Here is a insightful summary to guide next steps:</p>
+            Your job is to create a **detailed Akamai Cloud Comparison Report**.
 
-        3. Detailed Assessment mentioned in `Sample Cloud Assessment Report`: <p><strong>Assessment Report</strong></p> followed by the full assessment from Content.
-        4. Signature: <p>Best regards<br><br> </p>
-        Ensure the email is natural, professional, and concise. Avoid rigid or formulaic language to maintain a human-like tone. Do not use placeholders; replace with actual extracted values. Return only the HTML content as specified, without <!DOCTYPE>, <html>, or <body> tags.
+            ### REQUIRED OUTPUT (STRICT FORMAT):
+            1. <p><strong>Comparison Summary</strong></p>
+            2. <p>Highlight differences between the client PDF and Akamai cloud services.</p>
+            3. <p>Point out mismatches, gaps, risks, and optimization opportunities.</p>
+            4. <p>Summarize Akamai advantages relevant to the client's architecture.</p>
+            5. <p>Get the savings by comparing the cost with akamai and client's PDF.</p>
 
-        Return only the HTML body of the email.
+            ### Input from Client (PDF extracted content):
+            {email_content}
+
+            Produce a fully detailed professional comparison report written in clean HTML. 
+            DO NOT return <html> or <body> wrappers.
         """
-    
-    # Pass previous step's response as history
-    history = [{"role": "assistant", "content": content_appended}] if content_appended else []
+
+    # ====== EXCEL → CLOUD ASSESSMENT REPORT ======
+    else:
+        prompt = f"""
+            Generate a professional, human-like business email in American English, 
+            addressed to '{sender_name}', summarizing the **Cloud Assessment Report** 
+            based on the extracted Excel data.
+
+            ### Content Extracted from Excel:
+            {step_1_response}
+
+            ### Required output:
+            1. Greeting: <p>Dear {sender_name},</p>
+            2. Opening paragraph:
+               <p>We have received your filled details and completed the cloud assessment for Akamai...</p>
+            3. <p><strong>Assessment Report</strong></p>  
+               Insert the full analysis from Excel (step_1_response).
+            4. Signature:
+               <p>Best regards<br><br></p>
+
+            Requirements:
+            - Return **only HTML body**, no <html>, no <body>.
+            - Use a natural, senior-engineer tone.
+            - Do NOT add contact details.
+            - Fill missing values with “N/A”.
+        """
+
+    history = [{"role": "assistant", "content": step_1_response}] if step_1_response else []
     response = get_ai_response(prompt, conversation_history=history)
-    # Clean the HTML response
+
     cleaned_response = re.sub(r'```html\n|```', '', response).strip()
-    
-    if not cleaned_response.strip().startswith('<!DOCTYPE') and not cleaned_response.strip().startswith('<html'):
-        if not cleaned_response.strip().startswith('<'):
-            cleaned_response = f"<html><body>{cleaned_response}</body></html>"
-    
-    # Append to history
+    if not cleaned_response.strip().startswith('<'):
+        cleaned_response = f"<html><body>{cleaned_response}</body></html>"
+
+    # Save outputs
     full_history = ti.xcom_pull(key="conversation_history") or []
     full_history.append({"role": "user", "content": prompt})
     full_history.append({"role": "assistant", "content": response})
-    ti.xcom_push(key="email_content", value=content_appended)
+
     ti.xcom_push(key="step_2_prompt", value=prompt)
     ti.xcom_push(key="step_2_response", value=response)
     ti.xcom_push(key="conversation_history", value=full_history)
     ti.xcom_push(key="markdown_email_content", value=cleaned_response)
-    
-    logging.info(f"Step 2 completed: {response[:200]}...")
+
+    logging.info(f"Step-2 completed for attachment type '{attachment_type}'.")
     return response
 
 def step_3_convert_to_html(ti, **context):
