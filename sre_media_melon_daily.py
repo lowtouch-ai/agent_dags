@@ -33,11 +33,11 @@ default_args = {
 }
 
 # SMTP + Mail configuration from Airflow Variables (defensive defaults)
-SMTP_HOST = Variable.get("ltai.v3.mediamelon.smtp.host",default_var="mail.authsmtp.com")
+SMTP_HOST = Variable.get("ltai.v3.mediamelon.smtp.host","mail.authsmtp.com")
 SMTP_PORT = int(Variable.get("ltai.v3.mediamelon.smtp.port"))
 SMTP_USER = Variable.get("ltai.v3.mediamelon.smtp.user")
 SMTP_PASSWORD = Variable.get("ltai.v3.mediamelon.smtp.password")
-SMTP_SUFFIX = Variable.get("ltai.v3.mediamelon.smtp.suffix",default_var="<noreply@mediamelon.com>")
+SMTP_SUFFIX = Variable.get("ltai.v3.mediamelon.smtp.suffix","<noreply@mediamelon.com>")
 
 # From/To - MediaMelon
 MEDIAMELON_FROM_ADDRESS = Variable.get("ltai.v3.mediamelon.mediamelon_from_address",default_var=SMTP_USER or "noreply@mediamelon.com")
@@ -61,7 +61,7 @@ def authenticate_gmail():
     Returns None on any failure.
     """
     try:
-        creds_json = Variable.get(GMAIL_CREDENTIALS_VAR, default_var=None)
+        creds_json = Variable.get("ltai.v3.mediamelon.mediamelon_gmail_credentials", default_var=None)
         if not creds_json:
             logging.info("Gmail credentials not found in Airflow variables.")
             return None
