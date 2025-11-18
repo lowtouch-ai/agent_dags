@@ -105,6 +105,8 @@ def mysql_health_yesterday(ti, **context): return generate_sre_report(ti, "mysql
 
 # === MicroK8s Checks ===
 def kubernetes_version_check(ti, **context): return generate_sre_report(ti, "kubernetes_version_check", "Kubernetes version check")
+def kubernetes_eol_and_next_version(ti, **context): return generate_sre_report(ti, "kubernetes_eol_and_next_version", "Kubernetes Current Version EOL Details and Next Supported Kubernetes Version")
+
 def microk8s_expiry_check(ti, **context): return generate_sre_report(ti, "microk8s_expiry_check", "MicroK8s master node certificate expiry check")
 
 # === LKE PVC Storage Details ===
@@ -344,6 +346,7 @@ def overall_summary(ti, **context):
     pod_restart    = ti.xcom_pull(key="pod_restart_today") or "No restart data"
     mysql_health   = ti.xcom_pull(key="mysql_health_today") or "No MySQL data"
     kubernetes_ver = ti.xcom_pull(key="kubernetes_version_check")or "No kubernetes version data"
+    k8s_eol = ti.xcom_pull(key="kubernetes_eol_and_next_version")or "No kubernetes eol and next version data"
     microk8s_exp   = ti.xcom_pull(key="microk8s_expiry_check") or "No certificate data"
     lke_pvc        = ti.xcom_pull(key="lke_pvc_storage_details") or "No PVC data"
     
@@ -368,6 +371,7 @@ Generate a **complete overall summary** for today's SRE report, followed by a **
 - MySQL Health: {mysql_health}
 - LKE PVC: {lke_pvc}
 - MicroK8s Version: {kubernetes_ver}
+- Kubernetes EOL: {k8s_eol}
 - MicroK8s Expiry: {microk8s_exp}
 
 ### Part 2: Comparison Summary
@@ -396,6 +400,7 @@ def compile_sre_report(ti, **context):
     pod_restart    = ti.xcom_pull(key="pod_restart_today") or "No restart data"
     mysql_health   = ti.xcom_pull(key="mysql_health_today") or "No MySQL data"
     kubernetes_ver = ti.xcom_pull(key="kubernetes_version_check")or "No kubernetes version data"
+    k8s_eol = ti.xcom_pull(key="kubernetes_eol_and_next_version")or "No kubernetes eol and next version data"
     microk8s_exp   = ti.xcom_pull(key="microk8s_expiry_check") or "No certificate data"
     lke_pvc        = ti.xcom_pull(key="lke_pvc_storage_details") or "No PVC data"
     
@@ -444,6 +449,7 @@ def compile_sre_report(ti, **context):
 
 ## 6. Certificate Status
 {kubernetes_ver}
+{k8s_eol}
 {microk8s_exp}
 
 
@@ -756,6 +762,7 @@ with DAG(
     t5 = PythonOperator(task_id="pod_restart_today", python_callable=pod_restart_today, provide_context=True)
     t6 = PythonOperator(task_id="mysql_health_today", python_callable=mysql_health_today, provide_context=True)
     t7 = PythonOperator(task_id="kubernetes_version_check", python_callable=kubernetes_version_check, provide_context=True)
+    t7_1 = PythonOperator(task_id="kubernetes_eol_and_next_version", python_callable=kubernetes_eol_and_next_version, provide_context=True)
     t8 = PythonOperator(task_id="microk8s_expiry_check", python_callable=microk8s_expiry_check, provide_context=True)
     t9 = PythonOperator(task_id="lke_pvc_storage_details", python_callable=lke_pvc_storage_details, provide_context=True)
     
@@ -822,7 +829,7 @@ with DAG(
     
     # === DEPENDENCIES =====================================
     # Node + static tasks (all previous static tasks feed into comparisons)
-    [t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14] >> t15 >> t16 >> t17 >> t18 >> t19
+    [t1, t2, t3, t4, t5, t6, t7, t7_1, t8, t9, t10, t11, t12, t13, t14] >> t15 >> t16 >> t17 >> t18 >> t19
     
     # Pod flow
     t4 >> today_results
