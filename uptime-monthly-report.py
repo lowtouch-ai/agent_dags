@@ -25,7 +25,7 @@ default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2025, 2, 18),
-    "retries": 0,
+    "retries": 3,
     "retry_delay": timedelta(seconds=15),
 }
 
@@ -40,6 +40,51 @@ UPTIME_API_KEY = Variable.get("UPTIME_API_KEY")
 MONITOR_ID = Variable.get("UPTIME_MONITOR_ID")
 RECIPIENT_EMAIL = Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL")
 REPORT_PERIOD = "last 30 days"
+
+# Added for Slack alert
+SLACK_WEBHOOK_URL = Variable.get("SLACK_WEBHOOK_URL", default_var=None)
+SERVER_NAME = Variable.get("SERVER", default_var="UNKNOWN")
+
+# Slack alert function
+def slack_alert(context):
+    webhook_url = SLACK_WEBHOOK_URL
+    if not webhook_url:
+        logging.error("Slack webhook URL not found in Airflow Variables")
+        return
+
+    dag_id = context.get("dag_run").dag_id
+    task_id = context.get("task_instance").task_id
+    run_id = context.get("dag_run").run_id
+
+    # Pull extra info from XCom
+    ti = context.get("task_instance")
+    error_message = ti.xcom_pull(task_ids=task_id, key="error_message")
+
+    if error_message:
+        extra_info = f"\n*Error:* {error_message}"
+    else:
+        extra_info = ""
+
+    message = {
+        "text": (
+            f":x:*Airflow Task Failed in Server* {SERVER_NAME}\n"
+            f"*DAG:* {dag_id}\n"
+            f"*Task:* {task_id}\n"
+            f"*Run ID:* {run_id}"
+            f"{extra_info}"
+        )
+    }
+
+    try:
+        requests.post(
+            webhook_url,
+            data=json.dumps(message),
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        logging.info("Slack alert sent")
+    except Exception as e:
+        logging.error(f"Failed to send Slack alert: {e}")
 
 def get_ai_response(prompt, conversation_history=None):
     """Get AI response with conversation history context"""
@@ -217,13 +262,13 @@ def parse_monitor_data(monitor, rt_list):
     custom_down = monitor.get('custom_down_durations', '').split('-')
     
     # Use index [2] for 30-day data (indices: [0]=1d, [1]=7d, [2]=30d, [3]=365d)
-    uptime_30d = f"{float(custom_uptime[2]):.3f}%" if len(custom_uptime) > 2 else "N/A"
+    uptime_30d = f"{float(custom_uptime[2]):.2f}%" if len(custom_uptime) > 2 else "N/A"
     down_sec_30d = int(custom_down[2]) if len(custom_down) > 2 else 0
     # Convert to hours for readability
     downtime_30d = f"{down_sec_30d / 3600:.1f} hours" if down_sec_30d > 0 else "0 hours"
     
     logs = monitor.get('logs', [])
-    incidents = sum(1 for log in logs if log.get('type') == 1)
+    errors = sum(1 for log in logs if log.get('type') == 1)
     status_map = {0: 'Paused', 1: 'Down', 2: 'Up', 9: 'Pending'}
     status = status_map.get(monitor.get('status', 0), 'Unknown')
     ssl = monitor.get('ssl', {})
@@ -253,25 +298,27 @@ def parse_monitor_data(monitor, rt_list):
             "status": status,
             "uptime_last_30days": uptime_30d,
             "downtime_last_30days": downtime_30d,
-            "incidents_last_30days": str(incidents)
+            "errors_last_30days": str(errors)
         },
         "ssl_information": {"brand": brand, "expiry_date": expiry_date},
         "response_time": {"min": f"{min_rt:.2f}", "max": f"{max_rt:.2f}", "avg": f"{avg_rt:.2f}"},
         "notifications": {"to_be_notified": to_be_notified},
-        "logs_summary": {"summary": f"Total logs: {len(logs)}. Incidents: {incidents}."}
+        "logs_summary": {"summary": f"Total logs: {len(logs)}. Errors: {errors}."}
     }
     return structured
 
 def step_1_fetch_data(ti, **context):
     now = datetime.now(timezone.utc)
-    
+    today_start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    current_month_start_dt = today_start_dt.replace(day=1)
+
     # Current 30-day period
-    current_end_dt = now
-    current_start_dt = now - timedelta(days=30)
+    current_end_dt = current_month_start_dt - timedelta(seconds=1)
+    current_start_dt = current_end_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     
     # Previous 30-day period
-    prev_end_dt = current_start_dt - timedelta(microseconds=1)
-    prev_start_dt = prev_end_dt - timedelta(days=30)
+    prev_end_dt = current_start_dt - timedelta(seconds=1)
+    prev_start_dt = prev_end_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     logging.info(f"Fetching time periods: Current {current_start_dt} to {current_end_dt}, Previous {prev_start_dt} to {prev_end_dt}")
     
@@ -290,13 +337,25 @@ def step_1_fetch_data(ti, **context):
     df_prev_list = [{'datetime': datetime.fromtimestamp(r['datetime']).isoformat(), 'value': r['value']} for r in rt_prev]
     df_prev = pd.DataFrame(df_prev_list)
     
+    # Conditional check for empty DataFrames to trigger retry
+    if df_current.empty or df_prev.empty:
+        # Log an error message with which DataFrame is empty, mention which one is empty
+        logging.error("One or more DataFrames are empty: "
+                      f"df_current empty: {df_current.empty}, "
+                      f"df_prev_week empty: {df_prev.empty}. Triggering retry...")
+        ti.xcom_push(key="error_message", value=f"One or more DataFrames are empty: Current month empty: {df_current.empty}, Previous month empty: {df_prev.empty}")
+        
+        raise ValueError("One or more DataFrames (df_current or df_prev) are empty. Triggering retry...")
+
     # Push all data to XCom
     ti.xcom_push(key="structured_current", value=json.dumps(structured_current))
     ti.xcom_push(key="df_current", value=df_current.to_json(orient='records', date_format='iso'))
     ti.xcom_push(key="logs", value=json.dumps(logs))
     ti.xcom_push(key="structured_prev", value=json.dumps(structured_prev))
     ti.xcom_push(key="df_prev", value=df_prev.to_json(orient='records', date_format='iso'))
-    
+    ti.xcom_push(key="report_month_start_dt", value=current_start_dt.strftime('%Y-%m-%d'))
+    ti.xcom_push(key="report_month_end_dt", value=current_end_dt.strftime('%Y-%m-%d'))
+
     logging.info("Monthly data fetch completed.")
     return structured_current
 
@@ -338,7 +397,8 @@ Logic for analysis (follow steps in order):
 
 Return ONLY a single JSON object with the key "anomaly_detection" and its value as a concise summary string (1-3 sentences). Do not include any additional text, explanations, or markdown.
 Example 1 (Normal): {{"anomaly_detection": "Detected 2 spikes >100ms and one down log cluster (2 events, code 408 timeout); however, the average response time improved, dropping 9.12% (from 82.2ms to 74.7ms) compared to the previous 30-day period."}}
-Example 2 (Edge Case): {{"anomaly_detection": "No current data available for anomaly detection."}}
+Example 2 (Spikes and Patterns): {{"anomaly_detection": "Detected multiple spikes (>100ms) in the past month, with the highest at 2025-11-10 11:00:00 (844ms) and others at 2025-11-10 07:00:00 (244ms) and 2025-11-10 09:00:00 (198ms). Average response time increased significantly by 112% (157.34ms) compared to the previous month (74.17ms). Significant anomaly detected regarding response time."}}
+Example 3 (Edge Case): {{"anomaly_detection": "No current data available for anomaly detection."}}
 """
     
     response = get_ai_response(prompt)
@@ -375,20 +435,20 @@ def step_2b_rca(ti, **context):
     })
     
     prompt = f"""
-Analyze the following uptime and response time data for the monitor over the current 30-day period and previous 30-day period for root cause analysis (RCA) of incidents. Always provide a concise summary in bulleted format: Use bullets for each incident (format: '- [Time]: [Reason] (duration [X]s) - [Root cause inference]; [Recommendation].'), or a single bullet '- No incidents requiring RCA.' if none. Do not mention missing data unless it directly impacts analysis.
+Analyze the following uptime and response time data for the monitor over the current 30-day period and previous 30-day period for root cause analysis (RCA) of errors. Always provide a concise summary in bulleted format: Use bullets for each error (format: '- [Time]: [Reason] (duration [X]s) - [Root cause inference]; [Recommendation].'), or a single bullet '- No errors requiring RCA.' if none. Do not mention missing data unless it directly impacts analysis.
 
 Current 30-day period data: {current_data_str}
 Previous 30-day period data: {prev_data_str}
 
 Logic for analysis (follow steps in order):
-1. Extract down logs: Filter current 30-day period's logs where type=1; sort by datetime descending. If none, output single bullet '- No incidents requiring RCA.' and stop.
+1. Extract down logs: Filter current 30-day period's logs where type=1; sort by datetime descending. If none, output single bullet '- No errors requiring RCA.' and stop.
 2. For each: Analyze reason (code/detail: e.g., 500=server error → overload; 404=not found → config issue; 408=timeout → network; 0=unknown → investigate API).
 3. Infer root cause: Correlate with preceding response_times (e.g., if avg >200ms in 30min before down → overload; check if similar in previous 30-day period for recurrence (count matching reasons >1)).
 4. Recommendations: Tailor per cause (e.g., overload: 'Scale resources'; timeout: 'Check network latency'; config: 'Verify endpoints'). Limit to 1-2 actionable steps.
-5. Edge cases: If logs empty, treat as no incidents (single bullet); if previous missing, skip recurrence without noting.
+5. Edge cases: If logs empty, treat as no errors (single bullet); if previous missing, skip recurrence without noting.
 6. Overall: If multiple, add final bullet summarizing common causes.
 
-Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bulleted points). Do not include any additional text, explanations, or markdown. Example: {{"rca": "- 2025-10-17 10:00:00: Code 500 server error (duration 120s) - Root cause: Overload inferred from preceding high response times (avg 250ms); recurred from previous 30-day period (2 similar). Recommendation: Add autoscaling and monitor CPU usage.\\n- Common cause: Server overload - Implement load balancing."}} or {{"rca": "- No incidents requiring RCA."}}
+Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bulleted points). Do not include any additional text, explanations, or markdown. Example: {{"rca": "- 2025-10-17 10:00:00: Code 500 server error (duration 120s) - Root cause: Overload inferred from preceding high response times (avg 250ms); recurred from previous 30-day period (2 similar). Recommendation: Add autoscaling and monitor CPU usage.\\n- Common cause: Server overload - Implement load balancing."}} or {{"rca": "- No errors requiring RCA."}}
 """
     
     response = get_ai_response(prompt)
@@ -432,14 +492,17 @@ Previous 30-day period data: {prev_data_str}
 
 Logic for analysis (follow steps in order):
 1. Edge cases (Check first): If the 'current 30-day period data' (specifically 'structured' data or 'response_times') is empty or missing, stop analysis and return 'No current data available for comparative analysis.'.
-2. Extract metrics: (Only if current data exists) Uptime = structured['uptime_status']['uptime_last_30days']; Avg response = structured['response_time']['avg'] or mean(response_times['value']); Incidents = structured['uptime_status']['incidents_last_30days'].
-3. Calculate changes: For each metric, calculate the change. Uptime % = ((current - prev) / prev * 100) if prev >0; Avg response delta = current - prev (ms); Incidents delta = current - prev.
-4. Highlight direction: Uptime >0 = 'improvement'; <0 = 'degradation'; =0 = 'no change'. For response/incidents: <0 = 'improvement'; >0 = 'degradation'; =0 = 'no change'.
+2. Extract metrics: (Only if current data exists) Uptime = structured['uptime_status']['uptime_last_30days']; Avg response = structured['response_time']['avg'] or mean(response_times['value']); Errors = structured['uptime_status']['errors_last_30days'].
+3. Calculate changes: For each metric, calculate the change. Uptime % = ((current - prev) / prev * 100) if prev >0; Avg response delta = current - prev (ms); Errors delta = current - prev.
+4. Highlight direction: Uptime >0 = 'improvement'; <0 = 'degradation'; =0 = 'no change'. For response/errors: <0 = 'improvement'; >0 = 'degradation'; =0 = 'no change'.
 5. Handle Missing Baselines: If 'previous 30-day period data' is missing for a specific metric, output: '- [Metric] month-over-month: N/A - no baseline.' Round % to 2 decimals, deltas to 1 decimal.
-6. Order bullets: Always return all 3 bullets in this order: Uptime, Avg response, Incidents.
+6. Order bullets: Always return all 3 bullets in this order: 
+- Uptime month-over-month
+- Avg response month-over-month
+- Errors month-over-month
 
 Return ONLY a single JSON object with the key "comparative_analysis" and its value as a concise summary string (bullet points, one per metric, or the single edge case string). Do not include any additional text, explanations, or markdown.
-Example 1 (Normal): {{"comparative_analysis": "- Uptime month-over-month: +0.0% (no change from 100.0% to 100.0%).\\n- Avg response month-over-month: -7.5ms (improvement from 82.2ms to 74.7ms).\\n- Incidents month-over-month: +0 (no change from 0 to 0)."}}
+Example 1 (Normal): {{"comparative_analysis": "- Uptime month-over-month: +0.0% (no change from 100.0% to 100.0%).\\n- Avg response month-over-month: -7.5ms (improvement from 82.2ms to 74.7ms).\\n- Errors month-over-month: +0 (no change from 0 to 0)."}}
 Example 2 (Edge Case): {{"comparative_analysis": "No current data available for comparative analysis."}}
 """
     
@@ -464,6 +527,30 @@ def step_2f_combine_analysis(ti, **context):
         "rca": rca,
         "comparative_analysis": comparative_analysis
     }
+
+    flag_prompt = f"""
+Analyze the following AI-generated analysis contents to determine boolean flags for alerting:
+
+Contents: {analysis_json}
+
+Logic for flags (follow strictly):
+- has_anomalies (for anomaly_detection): true if the content mentions spikes (>100ms), unusual patterns, >10% average response time increase, clusters, or unusual logs; false if 'No significant anomalies detected' or equivalent, or if no issues noted (e.g., minor/isolated changes <10%).
+- has_errors (for rca): true if the content describes any errors (e.g., down events, timeouts, errors) with root causes or recommendations; false if 'No errors requiring RCA' or equivalent.
+- has_degradation (for comparative_analysis): true if the content mentions any 'degradation' in metrics (e.g., lower uptime, higher response time, more errors) vs baselines; false if all 'improvement', 'no change', or 'N/A'.
+
+Return ONLY a single JSON object with keys "has_anomalies" (boolean), "has_errors" (boolean), and "has_degradation" (boolean). No additional text.
+Example: {{"has_anomalies": true, "has_errors": false, "has_degradation": true}}
+    """
+
+    flag_response = get_ai_response(flag_prompt)
+    cleaned_flag_response = re.sub(r'```json\n?|```\n?', '', flag_response, flags=re.DOTALL).strip()
+    try:
+        flags = json.loads(cleaned_flag_response)
+        ti.xcom_push(key="analysis_flags", value=json.dumps(flags))
+    except json.JSONDecodeError:
+        default_flags = {"has_anomalies": False, "has_errors": False, "has_degradation": False}
+        ti.xcom_push(key="analysis_flags", value=json.dumps(default_flags))
+        logging.error("Error parsing AI flag response; using defaults.")
     
     ti.xcom_push(key="analysis", value=json.dumps(analysis_json))
     logging.info("Analysis combination completed.")
@@ -474,6 +561,8 @@ def step_3_generate_plot(ti, **context):
         structured_str = ti.xcom_pull(key="structured_current")
         structured = json.loads(structured_str)
         monitor_name = structured.get("monitor_information", {}).get("monitor_name", "Default Monitor")
+        report_month_start_dt = ti.xcom_pull(key="report_month_start_dt")
+        report_month_end_dt = ti.xcom_pull(key="report_month_end_dt")
         
         df_current_json = ti.xcom_pull(key="df_current")
         df_current = pd.read_json(io.StringIO(df_current_json), orient='records')
@@ -490,24 +579,24 @@ def step_3_generate_plot(ti, **context):
         prev_avg = df_prev['value'].mean() if 'value' in df_prev.columns and not df_prev.empty else 0
         
         fig, ax = plt.subplots(figsize=(15, 6), dpi=120)
-        ax.set_facecolor('#1a1a1a')
-        fig.set_facecolor('#1a1a1a')
+        ax.set_facecolor('white')
+        fig.set_facecolor('white')
         
         if not df_current.empty and 'datetime' in df_current.columns and 'value' in df_current.columns:
-            ax.plot(df_current['datetime'], df_current['value'], color='#28a745', linewidth=1.5, label='This Month\'s Response Time')
+            ax.plot(df_current['datetime'], df_current['value'], color='#1e275d', linewidth=1.5, label='This Month\'s Response Time')
         
-        ax.axhline(y=prev_avg, color='#6c757d', linestyle='--', label=f'Previous Month Avg ({prev_avg:.2f}ms)')
+        ax.axhline(y=prev_avg, color='#ff52ff', linestyle='--', label=f'Previous Month Avg ({prev_avg:.2f}ms)')
         
         if 'value' in df_current.columns:
             high_current = df_current[df_current['value'] > 100] # Highlight threshold
             if not high_current.empty:
-                ax.scatter(high_current['datetime'], high_current['value'], color='#dc3545', s=80, label='High Response (>100ms)', zorder=5)
+                ax.scatter(high_current['datetime'], high_current['value'], color='#fb47de', s=80, label='High Response (>100ms)', zorder=5)
         
-        ax.grid(True, linestyle='--', alpha=0.2, color='gray')
-        ax.tick_params(axis='x', colors='white', which='major', labelsize=10)
-        ax.tick_params(axis='y', colors='white')
-        ax.xaxis.label.set_color('white')
-        ax.yaxis.label.set_color('white')
+        ax.grid(True, linestyle='--', alpha=0.2, color='black')
+        ax.tick_params(axis='x', colors='black', which='major', labelsize=10)
+        ax.tick_params(axis='y', colors='black')
+        ax.xaxis.label.set_color('black')
+        ax.yaxis.label.set_color('black')
         
         # Day labels for x-axis (e.g., every 3 days)
         ax.xaxis.set_major_locator(DayLocator(interval=3))
@@ -523,14 +612,14 @@ def step_3_generate_plot(ti, **context):
              ax.set_ylim(bottom=0, top=100)
 
         ax.set_title(
-            f"Response Time: Month-over-Month Comparison for {monitor_name}",
-            fontsize=18, fontweight='bold', color='white'
+            f"Response Time: Month-over-Month Comparison for {monitor_name} for {report_month_start_dt} to {report_month_end_dt}",
+            fontsize=18, fontweight='bold', color='black'
         )
         ax.set_xlabel("Datetime", fontsize=14)
         ax.set_ylabel("Response Time (ms)", fontsize=14)
         
         legend = ax.legend()
-        plt.setp(legend.get_texts(), color='white')
+        plt.setp(legend.get_texts(), color='black')
         
         fig.tight_layout()
         
@@ -566,9 +655,14 @@ def step_4_compose_email(ti, **context):
     try:
         structured_str = ti.xcom_pull(key="structured_current")
         structured = json.loads(structured_str)
+        report_month_start_dt = ti.xcom_pull(key="report_month_start_dt", default="N/A")
+        report_month_end_dt = ti.xcom_pull(key="report_month_end_dt", default="N/A")
         
         analysis_str = ti.xcom_pull(key="analysis")
         analysis = json.loads(analysis_str)
+
+        analysis_flags_str = ti.xcom_pull(key="analysis_flags")
+        analysis_flags = json.loads(analysis_flags_str) if analysis_flags_str else {"has_anomalies": False, "has_errors": False, "has_degradation": False}
         
         logs_json = ti.xcom_pull(key="logs")
         logs = json.loads(logs_json)
@@ -581,6 +675,8 @@ def step_4_compose_email(ti, **context):
         structured = {}
         analysis = {}
         logs = []
+        report_month_start_dt = "N/A"
+        report_month_end_dt = "N/A"
         chart_html = '<p style="color: #dc3545; font-weight: bold;">Failed to load report data.</p>'
 
     # 3. Define Embedded CSS Styles
@@ -604,7 +700,7 @@ def step_4_compose_email(ti, **context):
         }
         .header {
             padding: 24px 30px;
-            background-color: #004a99; /* Professional blue */
+            background-color: #1e275d;
             color: #ffffff;
         }
         .header h1 {
@@ -676,6 +772,10 @@ def step_4_compose_email(ti, **context):
             border: 1px solid #e0eafc;
             border-radius: 5px;
         }
+        .ai-section.alert-section {
+            border-left: 4px solid #dc3545;
+            background-color: #f8d7da33;
+        }
         .ai-section h3 {
             margin-top: 0;
             margin-bottom: 10px;
@@ -686,10 +786,10 @@ def step_4_compose_email(ti, **context):
             font-size: 14px;
             line-height: 1.6;
             margin: 0;
-            white-space: pre-wrap; /* Renders newline characters */
+            white-space: pre-wrap;
         }
         .ai-section ul {
-            padding-left: 20px; /* Indent bullets */
+            padding-left: 20px;
         }
         .chart-container {
             text-align: center;
@@ -701,8 +801,8 @@ def step_4_compose_email(ti, **context):
             padding: 30px;
             text-align: left;
             font-size: 14px;
-            color: #888;
-            background-color: #fcfcfc;
+            color: #fcfcfc;
+            background-color: #1e275d;
             border-top: 1px solid #eee;
         }
     </style>
@@ -717,7 +817,6 @@ def step_4_compose_email(ti, **context):
     
     monitor_name = monitor_info.get('monitor_name', 'N/A')
     monitor_id = monitor_info.get('monitor_id', 'N/A')
-    monitor_url = monitor_info.get('monitor_url', 'N/A')
 
     html = f"""
     <!DOCTYPE html>
@@ -731,11 +830,11 @@ def step_4_compose_email(ti, **context):
     <body>
         <div class="container">
             <div class="header">
-                <h1>{report_type} Uptime Report</h1>
+                <h1>{report_type} Uptime Report - {report_month_start_dt} to {report_month_end_dt}</h1>
             </div>
             <div class="content">
                 <p>Dear Team,</p>
-                <p>Please find below the {report_type.lower()} uptime report for the monitor: <strong>{monitor_name}</strong>.</p>
+                <p>Please find below the {report_type.lower()} uptime report for the date <strong>{report_month_start_dt}</strong> to <strong>{report_month_end_dt}</strong> for the monitor: <strong>{monitor_name}</strong>.</p>
                 
                 <div class="section">
                     <h2>Monitor Information</h2>
@@ -747,10 +846,6 @@ def step_4_compose_email(ti, **context):
                         <tr>
                             <td>Monitor ID</td>
                             <td>{monitor_id}</td>
-                        </tr>
-                        <tr>
-                            <td>URL</td>
-                            <td>{monitor_url}</td>
                         </tr>
                     </table>
                 </div>
@@ -771,8 +866,8 @@ def step_4_compose_email(ti, **context):
                             <td>{uptime.get('downtime_last_30days', 'N/A')}</td>
                         </tr>
                         <tr>
-                            <td>Incidents (Last 30d)</td>
-                            <td>{uptime.get('incidents_last_30days', 'N/A')}</td>
+                            <td>Errors (Last 30d)</td>
+                            <td>{uptime.get('errors_last_30days', 'N/A')}</td>
                         </tr>
                     </table>
                 </div>
@@ -872,16 +967,18 @@ def step_4_compose_email(ti, **context):
     """
     
     sections = [
-        ("Anomaly Detection", analysis.get("anomaly_detection", "N/A")),
-        ("Root Cause Analysis", analysis.get("rca", "N/A")),
-        ("Comparative Analysis", analysis.get("comparative_analysis", "N/A")),
+    ("Anomaly Detection (Response Time)", analysis.get("anomaly_detection", "N/A"), "has_anomalies"),
+    ("Root Cause Analysis", analysis.get("rca", "N/A"), "has_errors"),
+    ("Comparative Analysis", analysis.get("comparative_analysis", "N/A"), "has_degradation")
     ]
     
     has_ai_content = False
-    for title, content in sections:
+    for title, content, flag_key in sections:
         content_str = str(content)
-        if content and content_str != "N/A" and "error" not in content_str.lower():
+        if content and content_str != "N/A" and content_str != "Error parsing AI response":
             has_ai_content = True
+
+            class_add = "alert-section" if analysis_flags.get(flag_key, False) else ""
             
             # Format as bullets if content contains newlines or hyphens
             if '\n' in content_str or content_str.strip().startswith('-'):
@@ -892,7 +989,7 @@ def step_4_compose_email(ti, **context):
                 content_html = f"<p>{content_str}</p>"
                 
             html += f"""
-                    <div class="ai-section">
+                    <div class="ai-section" {class_add}>
                         <h3>{title}</h3>
                         {content_html}
                     </div>
@@ -909,6 +1006,7 @@ def step_4_compose_email(ti, **context):
             <div class="footer">
                 Best regards,<br>
                 The Monitoring Team
+                <center><span style="font-size: 14px; opacity: 0.9;">Powered by lowtouch<span style="color: #fb47de;">.ai</span></span></center>
             </div>
         </div>
     </body>
@@ -973,7 +1071,9 @@ with DAG(
     fetch_data_task = PythonOperator(
         task_id="step_1_fetch_data",
         python_callable=step_1_fetch_data,
-        provide_context=True
+        provide_context=True,
+        retry_delay=timedelta(minutes=15),
+        on_failure_callback=slack_alert  # Call slack_alert on final failure (after retries)
     )
     
     anomaly_detection_task = PythonOperator(
