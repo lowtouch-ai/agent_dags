@@ -247,14 +247,17 @@ def pod_metrics_for_namespace(ns: str, period: str):
 @task
 def compile_pod_sections_today(namespace_results: list, **context):
     ti = context['ti']
+    logging.info("compile_pod_sections_today received %d items", len(namespace_results))
+    for i, r in enumerate(namespace_results[:5]):
+        logging.info("Sample item %d: %s", i, r)
     sections = []
 
     # Load namespaces in correct order
-    namespaces = [
-        ns.strip()
-        for ns in Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var="").split(",")
-        if ns.strip()
-    ]
+    raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var="[]")
+    try:
+        namespaces = json.loads(raw)
+    except Exception:
+        namespaces = [ns.strip() for ns in raw.split(",") if ns.strip()]
 
     today_map = {
         r["namespace"]: r
@@ -286,6 +289,9 @@ def compile_pod_sections_today(namespace_results: list, **context):
 @task
 def compile_pod_comparison(namespace_results: list, **context):
     ti = context['ti']
+    logging.info("compile_pod_sections_today received %d items", len(namespace_results))
+    for i, r in enumerate(namespace_results[:5]):
+        logging.info("Sample item %d: %s", i, r)
     sections = []
 
     # Maps
@@ -293,11 +299,11 @@ def compile_pod_comparison(namespace_results: list, **context):
     yesterday_map = {r["namespace"]: r for r in namespace_results if r and r["period"] == "yesterday"}
 
     # Load namespace order from Airflow variable
-    namespaces = [
-        ns.strip()
-        for ns in Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var="").split(",")
-        if ns.strip()
-    ]
+    raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var="[]")
+    try:
+        namespaces = json.loads(raw)
+    except Exception:
+        namespaces = [ns.strip() for ns in raw.split(",") if ns.strip()]
 
     # Only namespaces that exist in both days
     ordered_namespaces = [ns for ns in namespaces if ns in today_map and ns in yesterday_map]
