@@ -400,7 +400,8 @@ def step_2_compose_email(ti, **context):
             break
         elif "excel" in mime or "spreadsheet" in mime:
             attachment_type = "excel"
-
+        elif "image" in mime:
+            attachment_type = "image"
     logging.info(f"Detected attachment type for Step-2: {attachment_type}")
 
     # ====== PDF → AKAMAI COMPARISON REPORT ======
@@ -423,6 +424,31 @@ def step_2_compose_email(ti, **context):
 
             Produce a fully detailed professional comparison report written in clean HTML. 
             DO NOT return <html> or <body> wrappers.
+            """
+
+    # ==========================================
+    # IMAGE — COST COMPARISON
+    # ==========================================
+
+    elif attachment_type == "image":
+        prompt = f"""
+        The client has submitted **images** containing invoice details, cost dashboards, 
+            billing screenshots, or cloud data.
+
+            Tasks:
+            1. Perform OCR on the provided images.
+            2. Extract all identifiable:
+               - Costs
+               - Resource usage
+               - Cloud provider info
+               - SKUs or VM types
+            3. Compare against Akamai cloud service pricing.
+            4. Provide a detailed Akamai cost comparison summary.
+            5. Highlight savings, risks, and mapping to Akamai products.
+
+            The images are provided as base64 inside the input.
+
+            Return ONLY clean HTML (no wrappers).
         """
 
     # ====== EXCEL → CLOUD ASSESSMENT REPORT ======
