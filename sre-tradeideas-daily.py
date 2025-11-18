@@ -74,29 +74,6 @@ def get_ai_response(prompt, conversation_history=None):
         logging.error(f"Error in get_ai_response: {str(e)}")
         raise
 
-def extract_number(text: str, default: int = 0) -> int:
-    """
-    Extract the first integer found in any string.
-    If nothing found → return default (safe fallback).
-    """
-    if not text:
-        return default
-        
-    match = re.search(r'\b\d+\b', str(text))
-    return int(match.group()) if match else default
-
-def reorder_with_priority(ns_list):
-    # Read which namespace should be first
-    first_ns = Variable.get("ltai.v1.sretradeideas.pod.firstnamespace", default_var=None)
-
-    # If variable is missing OR not in list → do nothing
-    if not first_ns or first_ns not in ns_list:
-        return ns_list
-
-    # Move first_ns to top
-    cleaned = [ns for ns in ns_list if ns != first_ns]
-    return [first_ns] + cleaned
-
 # === Generic helper to generate SRE reports ===
 def generate_sre_report(ti, key, description, period=None):
     prompt = f"You are the SRE TradeIdeas agent. Generate a **complete {description} report for {period or 'last 24 hours'}**"
@@ -225,8 +202,7 @@ def pod_metrics_for_namespace(ns: str, period: str):
     count( kube_pod_status_phase{{namespace="{ns}", phase="Running"}} == 1 )
     Give only the plain number, nothing else.
     """
-    raw_response = get_ai_response(count_prompt)
-    total_running_pods = extract_number(raw_response, default=0)
+    total_running_pods = int(re.search(r'\d+', raw_response).group()) if re.search(r'\d+', raw_response) else 0
 
     # 2. Problematic pods (Failed, Pending, Unknown) – list only bad ones
     problem_prompt = f"""
@@ -271,21 +247,20 @@ def compile_pod_sections_today(namespace_results: list, **context):
     ti = context['ti']
     sections = []
 
-    # Load namespace list from airflow variable
-    raw_order = Variable.get("NAMESPACE_ORDER", default_var="").split(",")
-    raw_order = [ns.strip() for ns in raw_order if ns.strip()]
+    # Load namespaces in correct order
+    namespaces = [
+        ns.strip()
+        for ns in Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var="").split(",")
+        if ns.strip()
+    ]
 
-    # Apply first-namespace priority logic
-    final_order = reorder_with_priority(raw_order)
-
-    # Today's map
     today_map = {
         r["namespace"]: r
         for r in namespace_results
         if r and r["period"] == "last 24 hours"
     }
 
-    for ns in final_order:
+    for ns in namespaces:
         if ns not in today_map:
             continue
 
@@ -303,30 +278,34 @@ def compile_pod_sections_today(namespace_results: list, **context):
     result = "\n".join(sections)
     ti.xcom_push(key="pod_today_markdown", value=result)
     return result
-    
+
+
 
 @task
 def compile_pod_comparison(namespace_results: list, **context):
     ti = context['ti']
     sections = []
 
-    # Build maps
+    # Maps
     today_map = {r["namespace"]: r for r in namespace_results if r and r["period"] == "last 24 hours"}
     yesterday_map = {r["namespace"]: r for r in namespace_results if r and r["period"] == "yesterday"}
 
-    # Namespaces that exist in both days
-    common_ns = sorted(set(today_map.keys()) & set(yesterday_map.keys()))
+    # Load namespace order from Airflow variable
+    namespaces = [
+        ns.strip()
+        for ns in Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var="").split(",")
+        if ns.strip()
+    ]
 
-    # Apply first-namespace ordering (from Airflow variable)
-    ordered_namespaces = reorder_with_priority(common_ns)
+    # Only namespaces that exist in both days
+    ordered_namespaces = [ns for ns in namespaces if ns in today_map and ns in yesterday_map]
 
-    # Comparison function (unchanged)
     def compare_ns(ns):
-        today = today_map.get(ns, {})
-        yesterday = yesterday_map.get(ns, {})
+        today = today_map.get(ns)
+        yesterday = yesterday_map.get(ns)
         if not today or not yesterday:
             return None
-
+            
         prompt = f"""
 You are the SRE TradeIdeas agent.
 **Today's Data (P1):** {today["cpu"]} {today["memory"]}
@@ -344,14 +323,13 @@ List pods with |max_cpu_diff| > 0.8 cores or |max_mem_diff| > 1.0 GB, else “No
 """
         return get_ai_response(prompt)
 
-    # Loop in the final correct order
+    # Loop only in desired order
     for ns in ordered_namespaces:
         comp = compare_ns(ns)
         if comp:
             sections.append(comp)
 
     result = "\n\n---\n\n".join(sections)
-
     ti.xcom_push(key="pod_comparison_markdown", value=result)
     return result
 
@@ -789,11 +767,11 @@ with DAG(
         if not isinstance(namespaces_list, list):
             raise ValueError("Parsed value is not a list")
                   
-        log.info(
+        logging.info(
             "Successfully loaded pod namespaces from Airflow Variable 'ltai.v1.sretradeideas.pod.namespaces': %s", namespaces_list)
     
     except Exception as e:
-        log.warning(
+        logging.warning(
             "Failed to parse Airflow Variable 'ltai.v1.sretradeideas.pod.namespaces' (value was: %s). "
             "Reason: %s. Falling back to hard-coded default namespaces.", pod_namespaces_var, str(e))
         namespaces_list = ["alpha-prod", "tipreprod-prod"]
