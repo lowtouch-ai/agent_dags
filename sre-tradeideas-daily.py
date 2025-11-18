@@ -336,14 +336,23 @@ List pods with |max_cpu_diff| > 0.8 cores or |max_mem_diff| > 1.0 GB, else “No
 
 # === Overall Summary ===
 def overall_summary(ti, **context):
-    def xp(key, default="No data"): return ti.xcom_pull(key=key) or default
-    node_cpu = xp("node_cpu_today"); node_memory = xp("node_memory_today"); node_disk = xp("node_disk_today")
-    node_readiness = xp("node_readiness_check"); pod_today = xp("pod_today_markdown", "No pod data")
-    pod_restart = xp("pod_restart_today"); mysql_health = xp("mysql_health_today")
-    kubernetes_ver = xp("kubernetes_version_check"); microk8s_exp = xp("microk8s_expiry_check"); lke_pvc = xp("lke_pvc_storage_details")
-    node_cpu_cmp = xp("node_cpu_today_vs_yesterday"); node_mem_cmp = xp("node_memory_today_vs_yesterday")
-    node_disk_cmp = xp("node_disk_today_vs_yesterday"); pod_cmp = xp("pod_comparison_markdown", "No comparison")
-    mysql_cmp = xp("mysql_health_today_vs_yesterday"); pvc_cmp = xp("lke_pvc_today_vs_yesterday")
+    node_cpu       = ti.xcom_pull(key="node_cpu_today") or "No CPU data"
+    node_memory    = ti.xcom_pull(key="node_memory_today") or "No memory data"
+    node_disk      = ti.xcom_pull(key="node_disk_today") or "No disk data"
+    node_readiness = ti.xcom_pull(key="node_readiness_check") or "No readiness data"
+    pod_today      = ti.xcom_pull(key="pod_today_markdown")or "No pod data"
+    pod_restart    = ti.xcom_pull(key="pod_restart_today") or "No restart data"
+    mysql_health   = ti.xcom_pull(key="mysql_health_today") or "No MySQL data"
+    kubernetes_ver = ti.xcom_pull(key="kubernetes_version_check")or "No kubernetes version data"
+    microk8s_exp   = ti.xcom_pull(key="microk8s_expiry_check") or "No certificate data"
+    lke_pvc        = ti.xcom_pull(key="lke_pvc_storage_details") or "No PVC data"
+    
+    node_cpu_cmp   = ti.xcom_pull(key="node_cpu_today_vs_yesterday") or "No comparison data"
+    node_mem_cmp   = ti.xcom_pull(key="node_memory_today_vs_yesterday") or "No comparison data"
+    node_disk_cmp  = ti.xcom_pull(key="node_disk_today_vs_yesterday") or "No comparison data"
+    pod_cmp        = ti.xcom_pull(key="pod_comparison_markdown")or "No comparison"
+    mysql_cmp      = ti.xcom_pull(key="mysql_health_today_vs_yesterday") or "No comparison data"
+    pvc_cmp             = ti.xcom_pull(key="lke_pvc_today_vs_yesterday")or "No data"
 
     prompt = f"""
 You are the SRE TradeIdeas agent.
@@ -379,15 +388,25 @@ Highlight critical alerts and anomalies.
 
 # === Compile SRE Report ===
 def compile_sre_report(ti, **context):
-    def xp(key, default="No data"): return ti.xcom_pull(key=key) or default
-    node_cpu = xp("node_cpu_today"); node_memory = xp("node_memory_today"); node_disk = xp("node_disk_today")
-    node_readiness = xp("node_readiness_check"); pod_today = xp("pod_today_markdown", "No pod data")
-    pod_restart = xp("pod_restart_today"); mysql_health = xp("mysql_health_today")
-    kubernetes_ver = xp("kubernetes_version_check"); microk8s_exp = xp("microk8s_expiry_check"); lke_pvc = xp("lke_pvc_storage_details")
-    node_cpu_cmp = xp("node_cpu_today_vs_yesterday"); node_mem_cmp = xp("node_memory_today_vs_yesterday")
-    node_disk_cmp = xp("node_disk_today_vs_yesterday"); pod_cmp = xp("pod_comparison_markdown", "No comparison")
-    mysql_cmp = xp("mysql_health_today_vs_yesterday"); pvc_cmp = xp("lke_pvc_today_vs_yesterday")
-    overall_summary = xp("overall_summary", "No summary")
+    node_cpu       = ti.xcom_pull(key="node_cpu_today") or "No CPU data"
+    node_memory    = ti.xcom_pull(key="node_memory_today") or "No memory data"
+    node_disk      = ti.xcom_pull(key="node_disk_today") or "No disk data"
+    node_readiness = ti.xcom_pull(key="node_readiness_check") or "No readiness data"
+    pod_today      = ti.xcom_pull(key="pod_today_markdown")or "No pod data"
+    pod_restart    = ti.xcom_pull(key="pod_restart_today") or "No restart data"
+    mysql_health   = ti.xcom_pull(key="mysql_health_today") or "No MySQL data"
+    kubernetes_ver = ti.xcom_pull(key="kubernetes_version_check")or "No kubernetes version data"
+    microk8s_exp   = ti.xcom_pull(key="microk8s_expiry_check") or "No certificate data"
+    lke_pvc        = ti.xcom_pull(key="lke_pvc_storage_details") or "No PVC data"
+    
+    node_cpu_cmp   = ti.xcom_pull(key="node_cpu_today_vs_yesterday") or "No comparison data"
+    node_mem_cmp   = ti.xcom_pull(key="node_memory_today_vs_yesterday") or "No comparison data"
+    node_disk_cmp  = ti.xcom_pull(key="node_disk_today_vs_yesterday") or "No comparison data"
+    pod_cmp        = ti.xcom_pull(key="pod_comparison_markdown")or "No comparison"
+    mysql_cmp      = ti.xcom_pull(key="mysql_health_today_vs_yesterday") or "No comparison data"
+    pvc_cmp             = ti.xcom_pull(key="lke_pvc_today_vs_yesterday")or "No data"
+    
+    overall_summary     = ti.xcom_pull(key="overall_summary")or "No summary"
 
     report = f"""
 # SRE Daily Report – TradeIdeas Platform
