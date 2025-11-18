@@ -27,7 +27,6 @@ default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2025, 8, 22),
-    "retries": 1,
     "retry_delay": timedelta(seconds=15),
 }
 
@@ -426,16 +425,16 @@ CRITICAL REMINDERS:
                     padding: 20px;
                 }}
                 .greeting {{
-                    margin-bottom: 20px;
+                    margin-bottom: 15px;
                 }}
                 .message {{
-                    margin: 20px 0;
+                    margin: 15px 0;
                 }}
                 .closing {{
-                    margin-top: 30px;
+                    margin-top: 15px;
                 }}
                 .signature {{
-                    margin-top: 20px;
+                    margin-top: 15px;
                     font-weight: bold;
                 }}
                 .company {{
@@ -464,7 +463,7 @@ CRITICAL REMINDERS:
             <div class="signature">
                 <p>Best regards,<br>
                 The HubSpot Assistant Team<br>
-                <span class="company">Lowtouch.ai</span></p>
+                <a href="http://lowtouch.ai" class="company">Lowtouch.ai</a></p>
             </div>
         </body>
         </html>
