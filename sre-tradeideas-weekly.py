@@ -120,7 +120,7 @@ def node_cpu_this_vs_last_week(ti, **context):
 Each record contains: `instance_ip`, `node_name`, `avg_cpu`, `max_cpu`.
 **Compute**: `avg_cpu_diff`, `max_cpu_diff` (round 4 decimals)
 **Output exactly this:**
-### CPU Utilization Comparison - Node Level (This Week: [period] , Previous Week: [period2])
+### CPU Utilization Comparison - Node Level (This Week: [period1] , Previous Week: [period2])
 | Node Name | Instance IP | Avg CPU (%) - This Week | Avg CPU (%) - Previous Week | Avg CPU Diff (%) | Max CPU (%) - This Week | Max CPU (%) - Previous Week | Max CPU Diff (%) |
 ### Summary
 List nodes with |max_diff| > 20%, else “No significant CPU changes.”
@@ -132,7 +132,7 @@ def node_memory_this_vs_last_week(ti, **context):
 Each record contains: `instance_ip`, `node_name`, `total_memory_gb`, `avg_available_gb`, `max_usage_percent`.
 **Compute**: `avg_avail_diff`, `max_usage_diff` (round 2 decimals)
 **Output exactly this:**
-### Memory Utilization Comparison - Node Level (This Week vs Previous Week)
+### Memory Utilization Comparison - Node Level (This Week: [period1] , Previous Week: [period2])
 | Instance IP | Node Name | Total Mem (GB) | Avg Avail This Week | Avg Avail Previous Week | Avg Diff (GB) | Max Usage This Week (%) | Max Usage Previous Week (%) | Max Diff (%) |
 ### Summary
 List instances with |max_diff| > 20%, else “No significant memory issues.”
@@ -144,7 +144,7 @@ def node_disk_this_vs_last_week(ti, **context):
 Each record contains: `instance_ip`, `node_name`, `mountpoint`, `used_percent`.
 **Compute**: `used_diff` (round 2 decimals)
 **Output exactly this:**
-### Disk Utilization Comparison - Node Level (This Week vs Previous Week)
+### Disk Utilization Comparison - Node Level (This Week: [period1] , Previous Week: [period2])
 | Instance IP | Node Name | Mountpoint | Used (%) - This Week | Used (%) - Previous Week | Diff (%) |
 ### Summary
 Show entries with |used_diff| > 20%, else “No significant disk issues.”
@@ -156,7 +156,7 @@ def mysql_health_this_vs_last_week(ti, **context):
 Each record contains: `status`, `downtime_count`, `total_downtime_seconds`, `avg_probe_duration_seconds`.
 **Compute**: `count_diff`, `duration_diff` (round 1 decimal)
 **Output exactly this:**
-### MySQL Health Comparison (This Week vs Previous Week)
+### MySQL Health Comparison (This Week: [period1] , Previous Week: [period2])
 | Endpoint | Status This Week | Status Previous Week | Count This Week | Count Previous Week | Diff | Duration This Week | Duration Previous Week | Duration Diff (s) |
 ### Summary
 Describe downtime trends and current status.
@@ -167,7 +167,7 @@ def lke_pvc_this_vs_last_week(ti, **context):
     instructions = """
 Each record contains: `pvc_name`, `namespace`, `storageclass`, `capacity_gib`, `used_current_gib`, `used_prev_gib`, etc.
 **Output exactly this:**
-### LKE PVC Storage Comparison (This Week vs Previous Week)
+### LKE PVC Storage Comparison (This Week: [period1] , Previous Week: [period2])
 | Persistent Volume Claim | Namespace   | Storage Class      | Capacity (GiB) | Used This Week (GiB) | Used Previous Week (GiB) | Used Diff (GiB) | Available This Week | Available Previous Week | Available Diff |
 ### Summary
 [Concise summary of storage growth or anomalies]
