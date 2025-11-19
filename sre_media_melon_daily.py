@@ -16,8 +16,10 @@ from airflow.models import Variable
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
+from email.mime.application import MIMEApplication
 import smtplib
 import markdown
+import os
 
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -86,6 +88,7 @@ def json_list_to_markdown_table(json_list, column_defs):
     if not isinstance(json_list, list) or not json_list:
         return None
     headers = [h for (_, h, _) in column_defs]
+    # create header and separator with a single space around pipes for consistent markdown
     header_row = "| " + " | ".join(headers) + " |"
     sep_row = "| " + " | ".join(["---"] * len(headers)) + " |"
     rows = [header_row, sep_row]
@@ -96,13 +99,16 @@ def json_list_to_markdown_table(json_list, column_defs):
         for key, _, fmt in column_defs:
             val = item.get(key, "")
             try:
-                if fmt and callable(fmt):
+                if fmt and callable(fmt) and val not in (None, ""):
                     val = fmt(val)
             except Exception:
                 val = item.get(key, "")
-            row_cells.append(str(val))
+            # ensure no newlines in cells
+            cell = str(val).replace("\n", " ").strip()
+            row_cells.append(cell)
         rows.append("| " + " | ".join(row_cells) + " |")
-    return "\n".join(rows)
+    # Ensure there is a blank line before and after the table for most markdown parsers
+    return "\n" + "\n".join(rows) + "\n"
 
 
 def try_convert_peak_cpu_to_markdown(text):
@@ -110,7 +116,7 @@ def try_convert_peak_cpu_to_markdown(text):
     if isinstance(parsed, list):
         column_defs = [
             ("pod_name", "Pod Name", None),
-            ("peak_cpu_cores", "Peak CPU (cores)", lambda v: f"{v}" if v is not None else ""),
+            ("peak_cpu_cores", "Peak CPU (cores)", lambda v: f"{float(v):.3f}" if v is not None and v != "" else ""),
             ("timestamp", "Timestamp", None),
         ]
         md = json_list_to_markdown_table(parsed, column_defs)
@@ -124,13 +130,42 @@ def try_convert_peak_memory_to_markdown(text):
     if isinstance(parsed, list):
         column_defs = [
             ("pod_name", "Pod Name", None),
-            ("peak_memory_gb", "Peak Memory (GB)", lambda v: f"{v}" if v is not None else ""),
+            ("peak_memory_gb", "Peak Memory (GB)", lambda v: f"{float(v):.3f}" if v is not None and v != "" else ""),
             ("timestamp", "Timestamp", None),
         ]
         md = json_list_to_markdown_table(parsed, column_defs)
         if md:
             return md
     return text
+
+
+def convert_cpu_usage_to_md(text):
+    parsed = safe_parse_json(text)
+    if isinstance(parsed, list):
+        column_defs = [
+            ("pod", "Pod", None),
+            ("cpu_usage", "CPU Used (cores)", lambda v: f"{float(v):.3f}" if v not in (None, "") else ""),
+            ("cpu_limit", "CPU Limit (cores)", lambda v: f"{float(v):.3f}" if v not in (None, "") else ""),
+        ]
+        md = json_list_to_markdown_table(parsed, column_defs)
+        if md:
+            return md
+    return text
+
+
+def convert_memory_usage_to_md(text):
+    parsed = safe_parse_json(text)
+    if isinstance(parsed, list):
+        column_defs = [
+            ("pod", "Pod", None),
+            ("memory_gb", "Memory Used (GB)", lambda v: f"{float(v):.3f}" if v not in (None, "") else ""),
+            ("memory_limit_gb", "Memory Limit (GB)", lambda v: f"{float(v):.3f}" if v not in (None, "") else ""),
+        ]
+        md = json_list_to_markdown_table(parsed, column_defs)
+        if md:
+            return md
+    return text
+
 
 def get_ai_response(prompt, conversation_history=None):
     """
@@ -140,7 +175,7 @@ def get_ai_response(prompt, conversation_history=None):
     try:
         logging.debug("Query received: %s", (prompt[:200] + "...") if len(prompt) > 200 else prompt)
         if not prompt or not isinstance(prompt, str):
-            return "Invalid input provided. Please enter a valid query."
+            return "Invalid input provided. Please enter a valid query." 
 
         client = Client(host=OLLAMA_HOST, headers={"x-ltai-client": "media_melon-agent"})
         logging.debug("Connecting to Ollama at %s with model 'appz/sre/media_melon:0.4'", OLLAMA_HOST)
@@ -179,6 +214,7 @@ def get_ai_response(prompt, conversation_history=None):
     except Exception:
         logging.error("Error in get_ai_response: %s", traceback.format_exc())
         return f"An error occurred while processing your request: {traceback.format_exc()}"
+
 
 def authenticate_gmail():
     """
@@ -256,22 +292,27 @@ Get the peak memory usage for every pod in namespace '{ns}' over the last 24 hou
         cpu_peak_response = get_ai_response(cpu_peak_prompt)
         mem_peak_response = get_ai_response(mem_peak_prompt)
 
-        # Try to convert peak outputs to markdown if they are JSON arrays
-        cpu_response_md = try_convert_peak_cpu_to_markdown(cpu_peak_response) if cpu_peak_response else ""
-        memory_response_md = try_convert_peak_cpu_to_markdown(cpu_peak_response) if cpu_peak_response else ""
+        # Convert responses to markdown tables when possible
+        cpu_metrics_md = convert_cpu_usage_to_md(cpu_response) if cpu_response else ""
+        memory_metrics_md = convert_memory_usage_to_md(memory_response) if memory_response else ""
         cpu_peak_md = try_convert_peak_cpu_to_markdown(cpu_peak_response) if cpu_peak_response else ""
         mem_peak_md = try_convert_peak_memory_to_markdown(mem_peak_response) if mem_peak_response else ""
 
         result = {
             "namespace": ns,
-            "cpu_metrics": cpu_response_md or cpu_response or "",
-            "cpu_peak_metrics": cpu_peak_md or cpu_peak_response or "",
-            "memory_metrics": memory_response_md or memory_response or "",
-            "memory_peak_metrics": mem_peak_md or mem_peak_response or "",
+            # Keep both raw and converted outputs (converted preferred by report)
+            "cpu_metrics": cpu_metrics_md or (cpu_response or ""),
+            "cpu_raw": cpu_response or "",
+            "cpu_peak_metrics": cpu_peak_md or (cpu_peak_response or ""),
+            "cpu_peak_raw": cpu_peak_response or "",
+            "memory_metrics": memory_metrics_md or (memory_response or ""),
+            "memory_raw": memory_response or "",
+            "memory_peak_metrics": mem_peak_md or (mem_peak_response or ""),
+            "memory_peak_raw": mem_peak_response or "",
             "status": "success",
         }
         logger.info("Successfully processed namespace %s", ns)
-        logger.info(f"namespace : {ns} result : {result}")
+        logger.info("namespace : %s result keys: %s", ns, list(result.keys()))
         return result
     except Exception:
         logger.exception("Error processing namespace %s", ns)
@@ -336,18 +377,18 @@ def compile_namespace_report(namespace_data: dict):
         # CPU Metrics
         cpu_metrics_text = data.get("cpu_metrics")
         if cpu_metrics_text:
-            markdown_sections.append(f"\n#### CPU Usage\n")
+            markdown_sections.append(f"\n#### CPU Usage (24h)\n")
             markdown_sections.append(cpu_metrics_text)
             markdown_sections.append("\n")
 
         # Memory Metrics
         memory_metrics_text = data.get("memory_metrics")
         if memory_metrics_text:
-            markdown_sections.append(f"\n#### Memory Usage\n")
+            markdown_sections.append(f"\n#### Memory Usage (24h)\n")
             markdown_sections.append(memory_metrics_text)
             markdown_sections.append("\n")
 
-        # CPU Peak (already converted to md if JSON)
+        # CPU Peak
         cpu_peak_text = data.get("cpu_peak_metrics")
         if cpu_peak_text:
             markdown_sections.append(f"\n#### Peak CPU (per Pod, 24h)\n")
@@ -689,23 +730,27 @@ def preprocess_markdown(markdown_text):
     markdown_text = markdown_text.lstrip("\ufeff\u200b\u200c\u200d")
     markdown_text = re.sub(r"^(#{1,6})\s*", r"\1 ", markdown_text, flags=re.MULTILINE)
 
+    # Ensure blank lines before and after tables so markdown libs render them as proper tables
     lines = markdown_text.split("\n")
     processed = []
     in_table = False
 
     for line in lines:
-        stripped = line.strip()
-        if "|" in stripped and stripped.count("|") >= 2:
+        stripped = line.rstrip()
+        if "|" in stripped and stripped.count("|") >= 2 and not stripped.startswith("```"):
             if not in_table and processed and processed[-1].strip():
                 processed.append("")
             in_table = True
-            processed.append(line)
+            processed.append(stripped)
         else:
             if in_table and stripped:
                 processed.append("")
                 in_table = False
-            processed.append(line)
-    return "\n".join(processed)
+            processed.append(stripped)
+    out = "\n".join(processed)
+    # collapse excessive blank lines
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out
 
 
 def convert_to_html_callable(ti=None, **context):
@@ -881,17 +926,47 @@ a:hover {{
         fallback = "<html><body><h1>Mediamelon SRE Daily Report</h1><pre>Conversion to HTML failed. Check scheduler logs for details.</pre></body></html>"
         return fallback
 
+
 def send_email_report_callable(ti=None, **context):
-    """Send the HTML report via SMTP"""
+    """Send the HTML report via SMTP, but with overall summary in body and full PDF attached"""
     try:
-        # Pull HTML from XCom
-        html_report = ti.xcom_pull(task_ids="convert_to_html")
-        if not html_report or "<html" not in html_report.lower():
-            logger.error("No valid HTML report found")
-            raise ValueError("HTML report missing or invalid")
+        # Pull overall summary from XCom
+        overall_md = ti.xcom_pull(key="overall_summary") or "No overall summary generated."
+        # Convert summary markdown to HTML for email body
+        try:
+            overall_html = markdown.markdown(preprocess_markdown(overall_md), extensions=["nl2br", "sane_lists"])
+        except Exception:
+            overall_html = "<pre>{}</pre>".format(html.escape(overall_md))
 
-        html_body = re.sub(r'```html\s*|```', '', html_report).strip()
+        # Pull PDF path from XCom pushed by generate_pdf task
+        pdf_path = ti.xcom_pull(key="sre_pdf_path") or "/tmp/mediamelon_sre_report.pdf"
 
+        # Build email
+        sender = MEDIAMELON_FROM_ADDRESS or SMTP_USER or "noreply@mediamelon.com"
+        recipients = [r.strip() for r in MEDIAMELON_TO_ADDRESS.split(",") if r.strip()]
+        subject = f"Mediamelon SRE Daily Report - Summary - {datetime.utcnow().strftime('%Y-%m-%d')}"
+
+        msg = MIMEMultipart("mixed")
+        msg["Subject"] = subject
+        msg["From"] = f"Mediamelon SRE Reports {SMTP_SUFFIX}"
+        msg["To"] = ", ".join(recipients)
+
+        # Attach the HTML summary as the email body (alternative for mail clients)
+        alternative = MIMEMultipart("alternative")
+        alternative.attach(MIMEText(overall_html, "html"))
+        msg.attach(alternative)
+
+        # Attach the PDF file
+        if pdf_path and os.path.exists(pdf_path):
+            with open(pdf_path, "rb") as f:
+                part = MIMEApplication(f.read(), _subtype="pdf")
+                part.add_header("Content-Disposition", "attachment", filename=os.path.basename(pdf_path))
+                msg.attach(part)
+            logger.info("Attached PDF: %s", pdf_path)
+        else:
+            logger.warning("PDF not found at path: %s. Email will be sent without PDF attachment.", pdf_path)
+
+        # Send email via SMTP
         logger.info("Connecting to SMTP server %s:%d", SMTP_HOST, SMTP_PORT)
         server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
         try:
@@ -902,24 +977,177 @@ def send_email_report_callable(ti=None, **context):
         if SMTP_USER and SMTP_PASSWORD:
             server.login(SMTP_USER, SMTP_PASSWORD)
 
-        sender = MEDIAMELON_FROM_ADDRESS or SMTP_USER or "noreply@mediamelon.com"
-        recipients = [r.strip() for r in MEDIAMELON_TO_ADDRESS.split(",") if r.strip()]
-        subject = f"Mediamelon SRE Daily Report - {datetime.utcnow().strftime('%Y-%m-%d')}"
-
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = f"Mediamelon SRE Reports {SMTP_SUFFIX}"
-        msg["To"] = ", ".join(recipients)
-        msg.attach(MIMEText(html_body, "html"))
-
         server.sendmail(sender, recipients, msg.as_string())
-        logger.info("Email sent successfully to: %s", recipients)
+        logger.info("Email (summary + PDF) sent successfully to: %s", recipients)
         server.quit()
         return True
 
     except Exception:
-        logger.exception("Failed to send email report")
+        logger.exception("Failed to send email report (summary + PDF)")
         raise
+
+
+# -------------------------------
+# PDF generation (ReportLab) - styled with headings, paragraphs and real tables
+# -------------------------------
+def generate_pdf_report_callable(ti=None, **context):
+    """
+    Convert the sre_full_report (markdown) into a styled PDF using ReportLab.
+    Produces /tmp/mediamelon_sre_report.pdf and pushes its path to XCom key 'sre_pdf_path'.
+    """
+    try:
+        md = ti.xcom_pull(key="sre_full_report") or "# No report generated."
+        md = preprocess_markdown(md)
+
+        try:
+            # Import reportlab inside function to avoid module import errors at file parse time
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.enums import TA_LEFT, TA_CENTER
+            from reportlab.lib import colors
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Preformatted
+            logger.info("ReportLab imported successfully for PDF generation.")
+        except ImportError:
+            logger.exception("reportlab is not installed in the environment. Install reportlab to enable PDF generation.")
+            raise
+
+        # Output path
+        out_path = "/tmp/mediamelon_sre_report.pdf"
+
+        # Basic styles
+        styles = getSampleStyleSheet()
+        h1 = ParagraphStyle("Heading1", parent=styles["Heading1"], fontSize=20, leading=24, alignment=TA_CENTER, spaceAfter=12, textColor=colors.HexColor("#1a5fb4"))
+        h2 = ParagraphStyle("Heading2", parent=styles["Heading2"], fontSize=14, leading=18, alignment=TA_LEFT, spaceAfter=8, textColor=colors.HexColor("#1a5fb4"))
+        h3 = ParagraphStyle("Heading3", parent=styles["Heading3"], fontSize=12, leading=16, alignment=TA_LEFT, spaceAfter=6)
+        body = ParagraphStyle("Body", parent=styles["BodyText"], fontSize=10, leading=14, alignment=TA_LEFT)
+        pre_style = ParagraphStyle("Pre", parent=styles["Code"], fontName="Courier", fontSize=8, leading=12)
+
+        # Convert markdown to flowables (rudimentary parser for headings, paragraphs, tables, fenced code)
+        lines = md.splitlines()
+        flowables = []
+
+        # Title
+        flowables.append(Paragraph("Mediamelon SRE Daily Report", h1))
+        flowables.append(Paragraph(f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}", body))
+        flowables.append(Spacer(1, 12))
+
+        i = 0
+        in_code_block = False
+        code_block_lines = []
+        while i < len(lines):
+            line = lines[i].rstrip()
+
+            # Fenced code block handling
+            if line.strip().startswith("```"):
+                if not in_code_block:
+                    in_code_block = True
+                    code_block_lines = []
+                else:
+                    # end code block
+                    in_code_block = False
+                    code_text = "\n".join(code_block_lines)
+                    flowables.append(Preformatted(code_text, pre_style))
+                    flowables.append(Spacer(1, 8))
+                i += 1
+                continue
+
+            if in_code_block:
+                code_block_lines.append(line)
+                i += 1
+                continue
+
+            # Heading detection
+            if line.startswith("# "):
+                flowables.append(Paragraph(line.lstrip("# ").strip(), h2))
+                i += 1
+                continue
+            if line.startswith("## "):
+                flowables.append(Paragraph(line.lstrip("# ").strip(), h2))
+                i += 1
+                continue
+            if line.startswith("### "):
+                flowables.append(Paragraph(line.lstrip("# ").strip(), h3))
+                i += 1
+                continue
+
+            # Table detection: current line has '|' and next line has --- (markdown table)
+            if "|" in line and i + 1 < len(lines) and re.match(r"^\s*\|?\s*[-:]+\s*\|", lines[i+1]):
+                # collect table lines starting at i while they contain '|'
+                table_lines = []
+                # header
+                header_line = line
+                separator_line = lines[i+1]
+                i += 2
+                while i <= len(lines) - 1 and "|" in lines[i]:
+                    table_lines.append(lines[i])
+                    i += 1
+                # parse header and rows
+                def split_row(r):
+                    parts = [c.strip() for c in re.split(r"\|", r)]
+                    # remove leading/trailing empty cells due to leading/trailing pipes
+                    if parts and parts[0] == "":
+                        parts = parts[1:]
+                    if parts and parts[-1] == "":
+                        parts = parts[:-1]
+                    return parts
+
+                header_cells = split_row(header_line)
+                data_rows = [split_row(l) for l in table_lines]
+                # Build table data with header as first row
+                table_data = [header_cells] + data_rows
+
+                # Create ReportLab Table
+                t = Table(table_data, repeatRows=1)
+                tbl_style = TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a5fb4")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                    ("BOX", (0, 0), (-1, -1), 0.25, colors.grey),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
+                    ("TOPPADDING", (0, 0), (-1, 0), 6),
+                ])
+                t.setStyle(tbl_style)
+                flowables.append(t)
+                flowables.append(Spacer(1, 8))
+                continue
+
+            # Horizontal rule
+            if line.strip().startswith("---"):
+                flowables.append(Spacer(1, 6))
+                i += 1
+                continue
+
+            # Blank line -> spacer
+            if not line.strip():
+                flowables.append(Spacer(1, 6))
+                i += 1
+                continue
+
+            # Normal paragraph
+            flowables.append(Paragraph(line, body))
+            i += 1
+
+        # Build PDF
+        doc = SimpleDocTemplate(out_path, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+        doc.build(flowables)
+        logger.info("PDF generated at: %s", out_path)
+
+        # Push path to XCom for email task
+        try:
+            ti.xcom_push(key="sre_pdf_path", value=out_path)
+        except Exception:
+            logger.debug("ti.xcom_push not available (maybe not provided).")
+
+        return out_path
+
+    except Exception:
+        logger.exception("Failed to generate PDF from markdown")
+        raise
+
+
 # -------------------------------
 # DAG definition and wiring
 # -------------------------------
@@ -1045,6 +1273,14 @@ with DAG(
 
     # Convert to HTML -> send email
     t_convert_to_html = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html_callable, provide_context=True)
+
+    # PDF generation task (new)
+    t_generate_pdf = PythonOperator(task_id="generate_pdf", python_callable=generate_pdf_report_callable, provide_context=True)
+
+    # Overall summary task (new) - produces overall_summary XCom used for email body
+    t_overall_summary = PythonOperator(task_id="overall_summary", python_callable=overall_summary_callable, provide_context=True)
+
+    # Updated send email (attaches PDF, uses overall_summary in body)
     t_send_email = PythonOperator(task_id="send_email_report", python_callable=send_email_report_callable, provide_context=True)
 
     # -----------------------
@@ -1073,5 +1309,5 @@ with DAG(
     ns_markdown >> t_combine_reports
     t_compile_node_report >> t_combine_reports
 
-    # Combine -> extract summary -> compile final -> html -> email
-    t_combine_reports >> t_extract_summary >> t_compile_sre_report >> t_convert_to_html >> t_send_email
+    # Combine -> extract summary -> compile final -> overall summary -> generate PDF -> convert to HTML -> send email
+    t_combine_reports >> t_extract_summary >> t_compile_sre_report >> t_overall_summary >> t_generate_pdf >> t_convert_to_html >> t_send_email
