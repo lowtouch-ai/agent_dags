@@ -1,5 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.decorators import task
 from datetime import datetime, timedelta
 import logging
 from ollama import Client
@@ -25,15 +26,15 @@ default_args = {
 }
 
 # SMTP Configuration from Airflow Variables
-SMTP_USER = Variable.get("SMTP_USER")
-SMTP_PASSWORD = Variable.get("SMTP_PASSWORD")
-SMTP_HOST = Variable.get("SMTP_HOST", default_var="mail.authsmtp.com")
-SMTP_PORT = int(Variable.get("SMTP_PORT", default_var="2525"))
-SMTP_SUFFIX = Variable.get("SMTP_FROM_SUFFIX", default_var="via lowtouch.ai <webmaster@ecloudcontrol.com>")
-SENDER_EMAIL = Variable.get("TRADEIDEAS_FROM_ADDRESS", default_var=SMTP_USER)
-RECEIVER_EMAIL = Variable.get("TRADEIDEAS_TO_ADDRESS", default_var=SENDER_EMAIL)
+SMTP_USER = Variable.get("ltai.v1.sretradeideas.SMTP_USER")
+SMTP_PASSWORD = Variable.get("ltai.v1.sretradeideas.SMTP_PASSWORD")
+SMTP_HOST = Variable.get("ltai.v1.sretradeideas.SMTP_HOST", default_var="mail.authsmtp.com")
+SMTP_PORT = int(Variable.get("ltai.v1.sretradeideas.SMTP_PORT", default_var="2525"))
+SMTP_SUFFIX = Variable.get("ltai.v1.sretradeideas.SMTP_FROM_SUFFIX", default_var="via lowtouch.ai <webmaster@ecloudcontrol.com>")
+SENDER_EMAIL = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_FROM_ADDRESS", default_var=SMTP_USER)
+RECEIVER_EMAIL = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_TO_ADDRESS", default_var=SENDER_EMAIL)
 
-OLLAMA_HOST = Variable.get("TRADEIDEAS_OLLAMA_HOST", "http://agentomatic:8000/")
+OLLAMA_HOST = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_OLLAMA_HOST", "http://agentomatic:8000/")
 
 YESTERDAY = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%d')
 TODAY = datetime.utcnow().strftime('%Y-%m-%d')
@@ -76,413 +77,349 @@ def get_ai_response(prompt, conversation_history=None):
 
 # === Generic helper to generate SRE reports ===
 def generate_sre_report(ti, key, description, period=None):
-    """
-    Generic function to generate SRE TradeIdeas reports.
-
-    Args:
-        ti: Airflow TaskInstance for pushing XCom.
-        key: The key under which the response is stored (used for XCom).
-        description: A short description of what report to generate.
-        period: 'today', 'yesterday', or None (default: None).
-    """
-    if period:
-        prompt = f"""
-        You are the SRE TradeIdeas agent.
-        Generate a **complete {description} report for {period}**
-        """
-    else:
-        prompt = f"""
-        You are the SRE TradeIdeas agent.
-        Generate a **complete {description} report**
-        """
-
+    prompt = f"You are the SRE TradeIdeas agent. Generate a **complete {description} report for {period or 'last 24 hours'}**"
     response = get_ai_response(prompt)
     ti.xcom_push(key=key, value=response)
     return response
-
 
 # === Node CPU ===
-def node_cpu_today(ti, **context):
-    return generate_sre_report(ti, "node_cpu_today", "node-level CPU utilization", "today")
-
-def node_cpu_yesterday(ti, **context):
-    return generate_sre_report(ti, "node_cpu_yesterday", "node-level CPU utilization", "yesterday")
-
+def node_cpu_today(ti, **context): return generate_sre_report(ti, "node_cpu_today", "node-level CPU utilization", "last 24 hours")
+def node_cpu_yesterday(ti, **context): return generate_sre_report(ti, "node_cpu_yesterday", "node-level CPU utilization", "yesterday")
 
 # === Node Memory ===
-def node_memory_today(ti, **context):
-    return generate_sre_report(ti, "node_memory_today", "node-level memory utilization", "today")
-
-def node_memory_yesterday(ti, **context):
-    return generate_sre_report(ti, "node_memory_yesterday", "node-level memory utilization", "yesterday")
-
+def node_memory_today(ti, **context): return generate_sre_report(ti, "node_memory_today", "node-level memory utilization", "last 24 hours")
+def node_memory_yesterday(ti, **context): return generate_sre_report(ti, "node_memory_yesterday", "node-level memory utilization", "yesterday")
 
 # === Node Disk ===
-def node_disk_today(ti, **context):
-    return generate_sre_report(ti, "node_disk_today", "node-level disk utilization", "today")
-
-def node_disk_yesterday(ti, **context):
-    return generate_sre_report(ti, "node_disk_yesterday", "node-level disk utilization", "yesterday")
-
+def node_disk_today(ti, **context): return generate_sre_report(ti, "node_disk_today", "node-level disk utilization", "last 24 hours")
+def node_disk_yesterday(ti, **context): return generate_sre_report(ti, "node_disk_yesterday", "node-level disk utilization", "yesterday")
 
 # === Node Readiness ===
-def node_readiness_check(ti, **context):
-    return generate_sre_report(ti, "node_readiness_check", "node readiness check")
+def node_readiness_check(ti, **context): return generate_sre_report(ti, "node_readiness_check", "node readiness check")
 
-
-# === Pod CPU ===
-def pod_cpu_today(ti, **context):
-    return generate_sre_report(ti, "pod_cpu_today", "pod-level CPU utilization", "today")
-
-def pod_cpu_yesterday(ti, **context):
-    return generate_sre_report(ti, "pod_cpu_yesterday", "pod-level CPU utilization", "yesterday")
-
-
-# === Pod Memory ===
-def pod_memory_today(ti, **context):
-    return generate_sre_report(ti, "pod_memory_today", "pod-level memory utilization", "today")
-
-def pod_memory_yesterday(ti, **context):
-    return generate_sre_report(ti, "pod_memory_yesterday", "pod-level memory utilization", "yesterday")
-
-
-# === Pod Restart ===
-def pod_restart_today(ti, **context):
-    return generate_sre_report(ti, "pod_restart_today", "pod restart count", "today")
-
+# === Pod Restart (today only) ===
+def pod_restart_today(ti, **context): return generate_sre_report(ti, "pod_restart_today", "pod restart count", "last 24 hours")
 
 # === MySQL Health ===
-def mysql_health_today(ti, **context):
-    return generate_sre_report(ti, "mysql_health_today", "MySQL health status", "today")
-
-def mysql_health_yesterday(ti, **context):
-    return generate_sre_report(ti, "mysql_health_yesterday", "MySQL health status", "yesterday")
-
+def mysql_health_today(ti, **context): return generate_sre_report(ti, "mysql_health_today", "MySQL health status", "last 24 hours")
+def mysql_health_yesterday(ti, **context): return generate_sre_report(ti, "mysql_health_yesterday", "MySQL health status", "yesterday")
 
 # === MicroK8s Checks ===
-def microk8s_version_check(ti, **context):
-    return generate_sre_report(ti, "microk8s_version_check", "MicroK8s version check")
+def kubernetes_version_check(ti, **context): return generate_sre_report(ti, "kubernetes_version_check", "Kubernetes version check")
+def kubernetes_eol_and_next_version(ti, **context): return generate_sre_report(ti, "kubernetes_eol_and_next_version", "Kubernetes Current Version EOL Details and Next Supported Kubernetes Version")
 
-def microk8s_expiry_check(ti, **context):
-    return generate_sre_report(ti, "microk8s_expiry_check", "MicroK8s master node certificate expiry check")
-
+def microk8s_expiry_check(ti, **context): return generate_sre_report(ti, "microk8s_expiry_check", "MicroK8s master node certificate expiry check")
 
 # === LKE PVC Storage Details ===
-def lke_pvc_storage_details(ti, **context):
-    return generate_sre_report(ti, "lke_pvc_storage_details", "LKE PVC storage details with disk sizes")
+def lke_pvc_storage_details(ti, **context): return generate_sre_report(ti, "lke_pvc_storage_details", "LKE PVC storage details with disk sizes")
+def lke_pvc_storage_details_yesterday(ti, **context): return generate_sre_report(ti, "lke_pvc_storage_details_yesterday", "LKE PVC storage details with disk sizes", "yesterday")
 
 
-def generate_sre_comparison(
-    ti,
-    key,
-    report_name,
-    data_today_key,
-    data_yesterday_key,
-    instructions
-):
-    """
-    Generic function to compare 'today' vs 'yesterday' SRE reports.
-
-    Args:
-        ti: Airflow TaskInstance.
-        key: XCom key to push the result under.
-        report_name: Name/title of the report (e.g., "Node CPU Utilization").
-        data_today_key: XCom key for today's data.
-        data_yesterday_key: XCom key for yesterday's data.
-        instructions: String containing the AI comparison instructions (specific to each metric).
-    """
+# === Comparison Functions ===
+def generate_sre_comparison(ti, key, report_name, data_today_key, data_yesterday_key, instructions):
     data_today = ti.xcom_pull(key=data_today_key)
     data_yesterday = ti.xcom_pull(key=data_yesterday_key)
-
     prompt = f"""
 You are the SRE TradeIdeas agent.
-
-**Today's {report_name} Data:**
-{data_today}
-
-**Yesterday's {report_name} Data:**
-{data_yesterday}
-
+**Today's {report_name} Data:** {data_today}
+**Yesterday's {report_name} Data:** {data_yesterday}
 ---
-
 {instructions}
 """
-
     response = get_ai_response(prompt)
     ti.xcom_push(key=key, value=response)
     return response
 
-
+# Node Comparisons
 def node_cpu_today_vs_yesterday(ti, **context):
     instructions = """
 Each record contains: `instance_ip`, `node_name`, `avg_cpu`, `max_cpu`.
-
-**Compute**:
-- `avg_cpu_diff = today.avg_cpu - yesterday.avg_cpu`
-- `max_cpu_diff = today.max_cpu - yesterday.max_cpu` (round 4 decimals)
-
+**Compute**: `avg_cpu_diff`, `max_cpu_diff` (round 4 decimals)
 **Output exactly this:**
-
-### CPU Utilization Comparison - Node Level (Period1: 2025-11-07, Period2: 2025-11-06)
-| Instance IP | Node Name | Avg CPU (%) - P1 | Avg CPU (%) - P2 | Avg Diff (%) | Max CPU (%) - P1 | Max CPU (%) - P2 | Max Diff (%) |
-|-------------|-----------|------------------|------------------|---------------|------------------|------------------|---------------|
-| [ip]        | [node]    | [p1_avg]         | [p2_avg]         | [avg_diff]    | [p1_max]         | [p2_max]         | [max_diff]    |
-
+### CPU Utilization Comparison - Node Level (Period1: [period1_date], Period2: [period2_date])
+| Node Name | Instance IP | Avg CPU (%) - Period1 | Avg CPU (%) - Period2 | Avg CPU Diff (%) | Max CPU (%) - Period1 | Max CPU (%) - Period2 | Max CPU Diff (%) |
 ### Summary
 List nodes with |max_diff| > 20%, else “No significant CPU changes.”
 """
-    return generate_sre_comparison(
-        ti,
-        key="node_cpu_today_vs_yesterday",
-        report_name="Node-Level CPU Utilization",
-        data_today_key="node_cpu_today",
-        data_yesterday_key="node_cpu_yesterday",
-        instructions=instructions
-    )
-
+    return generate_sre_comparison(ti, "node_cpu_today_vs_yesterday", "Node-Level CPU Utilization", "node_cpu_today", "node_cpu_yesterday", instructions)
 
 def node_memory_today_vs_yesterday(ti, **context):
     instructions = """
 Each record contains: `instance_ip`, `node_name`, `total_memory_gb`, `avg_available_gb`, `max_usage_percent`.
-
-**Compute**:
-- `avg_avail_diff = today.avg_available_gb - yesterday.avg_available_gb`
-- `max_usage_diff = today.max_usage_percent - yesterday.max_usage_percent` (round 2 decimals)
-
+**Compute**: `avg_avail_diff`, `max_usage_diff` (round 2 decimals)
 **Output exactly this:**
-
-### Memory Utilization Comparison - Node Level (Period1: 2025-11-07, Period2: 2025-11-06)
+### Memory Utilization Comparison - Node Level (Period1: [period1_date], Period2: [period2_date])
 | Instance IP | Node Name | Total Mem (GB) - P1 | Total Mem (GB) - P2 | Avg Avail (GB) - P1 | Avg Avail (GB) - P2 | Avg Diff (GB) | Max Usage (%) - P1 | Max Usage (%) - P2 | Max Diff (%) |
-|-------------|-----------|---------------------|---------------------|--------------------|--------------------|----------------|--------------------|--------------------|---------------|
-
 ### Summary
 List instances with |max_diff| > 20%, else “No significant memory issues.”
 """
-    return generate_sre_comparison(
-        ti,
-        key="node_memory_today_vs_yesterday",
-        report_name="Node-Level Memory Utilization",
-        data_today_key="node_memory_today",
-        data_yesterday_key="node_memory_yesterday",
-        instructions=instructions
-    )
-
+    return generate_sre_comparison(ti, "node_memory_today_vs_yesterday", "Node-Level Memory Utilization", "node_memory_today", "node_memory_yesterday", instructions)
 
 def node_disk_today_vs_yesterday(ti, **context):
     instructions = """
 Each record contains: `instance_ip`, `node_name`, `mountpoint`, `used_percent`.
-
-**Compute**:
-- `used_diff = today.used_percent - yesterday.used_percent` (round 2 decimals)
-
+**Compute**: `used_diff` (round 2 decimals)
 **Output exactly this:**
-
-### Disk Utilization Comparison - Node Level (Period1: 2025-11-07, Period2: 2025-11-06)
+### Disk Utilization Comparison - Node Level (Period1: [period1_date], Period2: [period2_date])
 | Instance IP | Node Name | Mountpoint | Used (%) - P1 | Used (%) - P2 | Diff (%) |
-|-------------|-----------|------------|---------------|---------------|-----------|
-
 ### Summary
 Show entries with |used_diff| > 20%, else “No significant disk issues.”
 """
-    return generate_sre_comparison(
-        ti,
-        key="node_disk_today_vs_yesterday",
-        report_name="Node-Level Disk Utilization",
-        data_today_key="node_disk_today",
-        data_yesterday_key="node_disk_yesterday",
-        instructions=instructions
-    )
-
-
-def pod_cpu_today_vs_yesterday(ti, **context):
-    instructions = """
-Each record contains: `namespace`, `pod`, `avg_cpu_cores`, `max_cpu_cores`.
-
-Compute:
-- `avg_cpu_diff` and `max_cpu_diff` (round 4 decimals).
-
-Output: one table per namespace.
-
-**Output exactly this:**
-
-### [namespace] Pod CPU Comparison (P1: 2025-11-07, P2: 2025-11-06)
-| Pod Name | Avg CPU (cores) - P1 | Avg CPU (cores) - P2 | Avg Diff | Max CPU (cores) - P1 | Max CPU (cores) - P2 | Max Diff |
-|-----------|---------------------|---------------------|----------|----------------------|----------------------|----------|
-
-### Summary
-List pods with |max_diff| > 0.8 cores, else “No CPU spikes.”
-"""
-    return generate_sre_comparison(
-        ti,
-        key="pod_cpu_today_vs_yesterday",
-        report_name="Pod-Level CPU Utilization",
-        data_today_key="pod_cpu_today",
-        data_yesterday_key="pod_cpu_yesterday",
-        instructions=instructions
-    )
-
-
-def pod_memory_today_vs_yesterday(ti, **context):
-    instructions = """
-Each record contains: `namespace`, `pod`, `avg_memory_gb`, `max_memory_gb`.
-
-Compute:
-- `avg_memory_diff` and `max_memory_diff` (round 4 decimals).
-
-Output: one table per namespace.
-
-**Output exactly this:**
-
-### [namespace] Pod Memory Comparison (P1: 2025-11-07, P2: 2025-11-06)
-| Pod Name | Avg Memory (GB) - P1 | Avg Memory (GB) - P2 | Avg Diff (GB) | Max Memory (GB) - P1 | Max Memory (GB) - P2 | Max Diff (GB) |
-|-----------|---------------------|---------------------|----------------|----------------------|----------------------|----------------|
-
-### Summary
-List pods with |max_diff| > 1.0 GB, else “No memory pressure.”
-"""
-    return generate_sre_comparison(
-        ti,
-        key="pod_memory_today_vs_yesterday",
-        report_name="Pod-Level Memory Utilization",
-        data_today_key="pod_memory_today",
-        data_yesterday_key="pod_memory_yesterday",
-        instructions=instructions
-    )
-
+    return generate_sre_comparison(ti, "node_disk_today_vs_yesterday", "Node-Level Disk Utilization", "node_disk_today", "node_disk_yesterday", instructions)
 
 def mysql_health_today_vs_yesterday(ti, **context):
     instructions = """
 Each record contains: `status`, `downtime_count`, `total_downtime_seconds`, `avg_probe_duration_seconds`.
-
-Compute:
-- `count_diff` and `duration_diff` (round 1 decimal).
-
+**Compute**: `count_diff`, `duration_diff` (round 1 decimal)
 **Output exactly this:**
-
-### MySQL Health Comparison (Period1: 2025-11-07, Period2: 2025-11-06)
+### MySQL Health Comparison (Period1: [period1_date], Period2: [period2_date])
 | Endpoint | Status P1 | Status P2 | Count P1 | Count P2 | Diff | Duration P1 | Duration P2 | Duration Diff (s) | Probe P1 | Probe P2 |
-|-----------|------------|------------|----------|----------|------|--------------|--------------|-------------------|----------|----------|
-
 ### Summary
 Describe downtime and final status comparison.
 """
-    return generate_sre_comparison(
-        ti,
-        key="mysql_health_today_vs_yesterday",
-        report_name="MySQL Health Status",
-        data_today_key="mysql_health_today",
-        data_yesterday_key="mysql_health_yesterday",
-        instructions=instructions
-    )
+    return generate_sre_comparison(ti, "mysql_health_today_vs_yesterday", "MySQL Health Status", "mysql_health_today", "mysql_health_yesterday", instructions)
+
+def lke_pvc_today_vs_yesterday(ti, **context):
+    instructions = """
+Each record contains: `pvc_name`, `namespace`, `storageclass`, `capacity_gib`, `used_current_gib`, `used_prev_gib`, `available_current_gib`, `available_prev_gib`.
+**Compute** (round to 2 decimals): `used_diff_gib` = used_current_gib - used_prev_gib, `available_diff_gib` = available_current_gib - available_prev_gib, `used_percent_current` = round((used_current_gib / capacity_gib) * 100, 2).
+**Output exactly this:**
+### LKE PVC Storage Comparison (Period1: [period1_date], Period2: [period2_date])
+| Persistent Volume Claim | Namespace   | Storage Class      | Capacity (GiB) | Used Current (GiB) | Used Previous (GiB) | Used Diff (GiB) | Available Current (GiB) | Available Previous (GiB) | Available Diff (GiB) |
+|-------------------------|-------------|--------------------|----------------|--------------------|---------------------|-----------------|-------------------------|--------------------------|----------------------|
+| [pvc_name]              | [namespace] | [storageclass]     | [capacity_gib] | [used_current_gib] | [used_prev_gib]     | [used_diff_gib] | [available_current_gib] | [available_prev_gib]     | [available_diff_gib] |
+
+### Summary
+[Generate a concise paragraph summarizing the comparison of storage details]
+"""
+    return generate_sre_comparison(ti, "lke_pvc_today_vs_yesterday", "LKE PVC Storage Comparison", "lke_pvc_storage_details", "lke_pvc_storage_details_yesterday", instructions)
+
+# === POD-LEVEL DYNAMIC TASKS (Today + Yesterday + Comparison) ===
+@task
+def pod_metrics_for_namespace(ns: str, period: str):
+    """Fetch CPU and Memory + Running Pods count + Problematic Pods (Failed/Pending/Unknown)"""
+    
+    # 1. Number of running pods
+    count_prompt = f"""
+    Execute this exact Prometheus query and return only the number:
+    count( kube_pod_status_phase{{namespace="{ns}", phase="Running"}} == 1 )
+    Give only the plain number, nothing else.
+    """
+    total_running_pods = int(re.search(r'\d+', raw_response).group()) if re.search(r'\d+', raw_response) else 0
+
+    # 2. Problematic pods (Failed, Pending, Unknown) – list only bad ones
+    problem_prompt = f"""
+    Execute this exact query:
+    sum by (pod, namespace, phase) (kube_pod_status_phase{{namespace="{ns}", phase=~"Failed|Pending|Unknown"}} == 1)
+
+    If result is empty → respond exactly: No problematic pods
+    If result has values → return only the problematic pods in this format (one per line):
+    - <pod-name> (<phase>)
+    Example:
+    - auth-service-abc123 (Failed)
+    - payment-worker-xyz (Pending)
+    Do not include namespace, timestamps, or any extra text.
+    """
+    problematic_pods = get_ai_response(problem_prompt).strip()
+
+    # 3. CPU table (unchanged)
+    cpu_prompt = f"""
+    Generate the **pod-level CPU utilization** for namespace `{ns}` for {period}.
+    Return a markdown table with columns: pod, avg_cpu_cores, max_cpu_cores.
+    """
+    cpu = get_ai_response(cpu_prompt)
+
+    # 4. Memory table (unchanged)
+    mem_prompt = f"""
+    Generate the **pod-level memory utilization** for namespace `{ns}` for {period}.
+    Return a markdown table with columns: pod, avg_memory_gb, max_memory_gb.
+    """
+    mem = get_ai_response(mem_prompt)
+
+    return {
+        "namespace": ns,
+        "period": period,
+        "total_running_pods": total_running_pods,
+        "problematic_pods": problematic_pods,
+        "cpu": cpu.strip(),
+        "memory": mem.strip()
+    }
+
+@task
+def compile_pod_sections_today(namespace_results: list, **context):
+    ti = context['ti']
+    logging.info("compile_pod_sections_today received %d items", len(namespace_results))
+    for i, r in enumerate(namespace_results[:5]):
+        logging.info("Sample item %d: %s", i, r)
+    sections = []
+
+    # Load namespaces in correct order
+    raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var="[]")
+    try:
+        namespaces = json.loads(raw)
+    except Exception:
+        namespaces = [ns.strip() for ns in raw.split(",") if ns.strip()]
+
+    today_map = {
+        r["namespace"]: r
+        for r in namespace_results
+        if r and r["period"] == "last 24 hours"
+    }
+
+    for ns in namespaces:
+        if ns not in today_map:
+            continue
+
+        data = today_map[ns]
+
+        sections.append(f"### Namespace: `{ns}`\n")
+        sections.append(
+            f"**Running Pods**: {data['total_running_pods']} | "
+            f"**Problematic Pods**: {data['problematic_pods']}\n"
+        )
+        sections.append("#### CPU\n" + data["cpu"] + "\n")
+        sections.append("#### Memory\n" + data["memory"] + "\n")
+        sections.append("---\n")
+
+    result = "\n".join(sections)
+    ti.xcom_push(key="pod_today_markdown", value=result)
+    return result
 
 
-# === tX: Overall Summary (Today + Comparison) ===
+
+@task
+def compile_pod_comparison(namespace_results: list, **context):
+    ti = context['ti']
+    logging.info("compile_pod_sections_today received %d items", len(namespace_results))
+    for i, r in enumerate(namespace_results[:5]):
+        logging.info("Sample item %d: %s", i, r)
+    sections = []
+
+    # Maps
+    today_map = {r["namespace"]: r for r in namespace_results if r and r["period"] == "last 24 hours"}
+    yesterday_map = {r["namespace"]: r for r in namespace_results if r and r["period"] == "yesterday"}
+
+    # Load namespace order from Airflow variable
+    raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var="[]")
+    try:
+        namespaces = json.loads(raw)
+    except Exception:
+        namespaces = [ns.strip() for ns in raw.split(",") if ns.strip()]
+
+    # Only namespaces that exist in both days
+    ordered_namespaces = [ns for ns in namespaces if ns in today_map and ns in yesterday_map]
+
+    def compare_ns(ns):
+        today = today_map.get(ns)
+        yesterday = yesterday_map.get(ns)
+        if not today or not yesterday:
+            return None
+            
+        prompt = f"""
+You are the SRE TradeIdeas agent.
+**Today's Data (P1):** {today["cpu"]} {today["memory"]}
+**Yesterday's Data (P2):** {yesterday["cpu"]} {yesterday["memory"]}
+**Output exactly this:**
+### {ns} Pod CPU & Memory Comparison (Period1: [period1_date], Period2: [period2_date])
+#### CPU
+| Pod Name | Avg CPU (cores) - P1 | Avg CPU (cores) - P2 | Avg Diff | Max CPU (cores) - P1 | Max CPU (cores) - P2 | Max Diff |
+|----------|----------------------|----------------------|----------|----------------------|----------------------|----------|
+#### Memory
+| Pod Name | Avg Memory (GB) - P1 | Avg Memory (GB) - P2 | Avg Diff (GB) | Max Memory (GB) - P1 | Max Memory (GB) - P2 | Max Diff (GB) |
+|----------|----------------------|----------------------|---------------|----------------------|----------------------|----------------|
+### Summary
+List pods with |max_cpu_diff| > 0.8 cores or |max_mem_diff| > 1.0 GB, else “No significant changes.”
+"""
+        return get_ai_response(prompt)
+
+    # Loop only in desired order
+    for ns in ordered_namespaces:
+        comp = compare_ns(ns)
+        if comp:
+            sections.append(comp)
+
+    result = "\n\n---\n\n".join(sections)
+    ti.xcom_push(key="pod_comparison_markdown", value=result)
+    return result
+
+
+# === Overall Summary ===
 def overall_summary(ti, **context):
-    """
-    Generate an overall summary combining today's metrics and comparisons
-    across all monitored components.
-    """
-
-    # --- Today's Data ---
     node_cpu       = ti.xcom_pull(key="node_cpu_today") or "No CPU data"
     node_memory    = ti.xcom_pull(key="node_memory_today") or "No memory data"
     node_disk      = ti.xcom_pull(key="node_disk_today") or "No disk data"
     node_readiness = ti.xcom_pull(key="node_readiness_check") or "No readiness data"
-    pod_cpu        = ti.xcom_pull(key="pod_cpu_today") or "No pod CPU data"
-    pod_memory     = ti.xcom_pull(key="pod_memory_today") or "No pod memory data"
+    pod_today      = ti.xcom_pull(key="pod_today_markdown")or "No pod data"
     pod_restart    = ti.xcom_pull(key="pod_restart_today") or "No restart data"
     mysql_health   = ti.xcom_pull(key="mysql_health_today") or "No MySQL data"
-    microk8s_ver   = ti.xcom_pull(key="microk8s_version_check") or "No MicroK8s version data"
+    kubernetes_ver = ti.xcom_pull(key="kubernetes_version_check")or "No kubernetes version data"
+    k8s_eol = ti.xcom_pull(key="kubernetes_eol_and_next_version")or "No kubernetes eol and next version data"
     microk8s_exp   = ti.xcom_pull(key="microk8s_expiry_check") or "No certificate data"
     lke_pvc        = ti.xcom_pull(key="lke_pvc_storage_details") or "No PVC data"
-
-    # --- Comparison Data ---
+    
     node_cpu_cmp   = ti.xcom_pull(key="node_cpu_today_vs_yesterday") or "No comparison data"
     node_mem_cmp   = ti.xcom_pull(key="node_memory_today_vs_yesterday") or "No comparison data"
     node_disk_cmp  = ti.xcom_pull(key="node_disk_today_vs_yesterday") or "No comparison data"
-    pod_cpu_cmp    = ti.xcom_pull(key="pod_cpu_today_vs_yesterday") or "No comparison data"
-    pod_mem_cmp    = ti.xcom_pull(key="pod_memory_today_vs_yesterday") or "No comparison data"
+    pod_cmp        = ti.xcom_pull(key="pod_comparison_markdown")or "No comparison"
     mysql_cmp      = ti.xcom_pull(key="mysql_health_today_vs_yesterday") or "No comparison data"
+    pvc_cmp             = ti.xcom_pull(key="lke_pvc_today_vs_yesterday")or "No data"
 
-    # --- Build Prompt for AI Summary ---
     prompt = f"""
-    You are the SRE TradeIdeas agent.
+You are the SRE TradeIdeas agent.
+Generate a **complete overall summary** for today's SRE report, followed by a **comparative summary**.
 
-    Your task: Generate a **complete overall summary** for today's SRE report,
-    followed by a **comparative summary** analyzing performance trends versus yesterday.
+### Part 1: Today's Summary
+- Node CPU: {node_cpu}
+- Node Memory: {node_memory}
+- Node Disk: {node_disk}
+- Node Readiness: {node_readiness}
+- Pod Metrics (by Namespace): {pod_today}
+- Pod Restarts: {pod_restart}
+- MySQL Health: {mysql_health}
+- LKE PVC: {lke_pvc}
+- MicroK8s Version: {kubernetes_ver}
+- Kubernetes EOL: {k8s_eol}
+- MicroK8s Expiry: {microk8s_exp}
 
-    ### Part 1: Today's Summary
-    Use the data below to provide a high-level assessment of current cluster health.
+### Part 2: Comparison Summary
+- Node CPU: {node_cpu_cmp}
+- Node Memory: {node_mem_cmp}
+- Node Disk: {node_disk_cmp}
+- Pod CPU & Memory: {pod_cmp}
+- LKE PVC: {pvc_cmp}
+- MySQL Health: {mysql_cmp}
 
-    #### Today's Section Data:
-    - Node CPU Report: {node_cpu}
-    - Node Memory Report: {node_memory}
-    - Node Disk Report: {node_disk}
-    - Node Readiness: {node_readiness}
-    - Pod CPU Report: {pod_cpu}
-    - Pod Memory Report: {pod_memory}
-    - Pod Restart Summary: {pod_restart}
-    - MySQL Health: {mysql_health}
-    - MicroK8s Version: {microk8s_ver}
-    - MicroK8s Certificate Expiry: {microk8s_exp}
-    - LKE PVC Storage Details: {lke_pvc}
-
-    ### Part 2: Comparison Summary (Today vs Yesterday)
-    Use the comparison metrics to highlight improvements, degradations, or stability across systems.
-
-    #### Comparison Data:
-    - Node CPU Comparison: {node_cpu_cmp}
-    - Node Memory Comparison: {node_mem_cmp}
-    - Node Disk Comparison: {node_disk_cmp}
-    - Pod CPU Comparison: {pod_cpu_cmp}
-    - Pod Memory Comparison: {pod_mem_cmp}
-    - MySQL Health Comparison: {mysql_cmp}
-
-    ### Instructions:
-    1. Write two clearly separated sections:
-       - **Overall Summary (Today)**
-       - **Comparison Summary (Today vs Yesterday)**
-    2. Use professional tone, concise sentences, and structured paragraphs.
-    3. Highlight critical alerts, anomalies, and areas of improvement.
-    4. Summarize key positives and potential issues.
-    5. Avoid repeating detailed metrics — focus on interpretation and trends.
-    """
-
-    # --- Generate AI Response ---
+Write two sections: **Overall Summary (Today)** and **Comparison Summary (Today vs Yesterday)**.
+Highlight critical alerts and anomalies.
+"""
     response = get_ai_response(prompt)
-
-    # --- Push to XCom ---
     ti.xcom_push(key="overall_summary", value=response)
-
     return response
 
-# === t10: Compile SRE Report ===
+
+# === Compile SRE Report ===
 def compile_sre_report(ti, **context):
-    # Pull all XComs for today
     node_cpu       = ti.xcom_pull(key="node_cpu_today") or "No CPU data"
     node_memory    = ti.xcom_pull(key="node_memory_today") or "No memory data"
     node_disk      = ti.xcom_pull(key="node_disk_today") or "No disk data"
     node_readiness = ti.xcom_pull(key="node_readiness_check") or "No readiness data"
-    pod_cpu        = ti.xcom_pull(key="pod_cpu_today") or "No pod CPU data"
-    pod_memory     = ti.xcom_pull(key="pod_memory_today") or "No pod memory data"
+    pod_today      = ti.xcom_pull(key="pod_today_markdown")or "No pod data"
     pod_restart    = ti.xcom_pull(key="pod_restart_today") or "No restart data"
     mysql_health   = ti.xcom_pull(key="mysql_health_today") or "No MySQL data"
-    microk8s_ver   = ti.xcom_pull(key="microk8s_version_check") or "No MicroK8s version data"
-    microk8s_exp   = ti.xcom_pull(key="microk8s_expiry_check") or "No cert data"
+    kubernetes_ver = ti.xcom_pull(key="kubernetes_version_check")or "No kubernetes version data"
+    k8s_eol = ti.xcom_pull(key="kubernetes_eol_and_next_version")or "No kubernetes eol and next version data"
+    microk8s_exp   = ti.xcom_pull(key="microk8s_expiry_check") or "No certificate data"
     lke_pvc        = ti.xcom_pull(key="lke_pvc_storage_details") or "No PVC data"
+    
+    node_cpu_cmp   = ti.xcom_pull(key="node_cpu_today_vs_yesterday") or "No comparison data"
+    node_mem_cmp   = ti.xcom_pull(key="node_memory_today_vs_yesterday") or "No comparison data"
+    node_disk_cmp  = ti.xcom_pull(key="node_disk_today_vs_yesterday") or "No comparison data"
+    pod_cmp        = ti.xcom_pull(key="pod_comparison_markdown")or "No comparison"
+    mysql_cmp      = ti.xcom_pull(key="mysql_health_today_vs_yesterday") or "No comparison data"
+    pvc_cmp             = ti.xcom_pull(key="lke_pvc_today_vs_yesterday")or "No data"
+    
+    overall_summary     = ti.xcom_pull(key="overall_summary")or "No summary"
 
-    # --- Generate Overall Summary ---
-    overall_summary = ti.xcom_pull(key="overall_summary") or "No overall summary available."
-
-    # XComs for yesterday comparisons
-    node_cpu_cmp     = ti.xcom_pull(key="node_cpu_today_vs_yesterday") or "No comparison"
-    node_mem_cmp     = ti.xcom_pull(key="node_memory_today_vs_yesterday") or "No comparison"
-    node_disk_cmp    = ti.xcom_pull(key="node_disk_today_vs_yesterday") or "No comparison"
-    pod_cpu_cmp      = ti.xcom_pull(key="pod_cpu_today_vs_yesterday") or "No comparison"
-    pod_mem_cmp      = ti.xcom_pull(key="pod_memory_today_vs_yesterday") or "No comparison"
-    mysql_cmp        = ti.xcom_pull(key="mysql_health_today_vs_yesterday") or "No comparison"
-
-    # Compile final markdown
     report = f"""
 # SRE Daily Report – TradeIdeas Platform
 **Generated**: **11:00 AM IST**
@@ -491,93 +428,73 @@ def compile_sre_report(ti, **context):
 
 ## 1. Node-Level Metrics (Last 24h)
 {node_cpu}
-
----
-
 {node_memory}
-
----
-
 {node_disk}
-
----
-
 {node_readiness}
 
 ---
 
 ## 2. Pod-Level Metrics (Last 24h)
-{pod_cpu}
+{pod_today}
 
 ---
 
-{pod_memory}
-
----
-
+## 3. Pod Restart Count (Last 24h)
 {pod_restart}
 
 ---
 
-## 3. Database Health
+## 4. Storage (LKE PVCs)
+{lke_pvc}
+
+---
+    
+## 5. Database Health
 {mysql_health}
 
 ---
 
-## 4. Certificate Status
-
-{microk8s_ver}
-
----
-
+## 6. Certificate Status
+{kubernetes_ver}
+{k8s_eol}
 {microk8s_exp}
 
----
 
-## 5. Storage (LKE PVCs)
-{lke_pvc}
 
 ---
 
-## 6. Node-Level Metrics (Today vs Yesterday)
+## 7. Node-Level Metrics (Today vs Yesterday)
 {node_cpu_cmp}
-
----
-
 {node_mem_cmp}
-
----
-
 {node_disk_cmp}
 
 ---
 
-## 7. Pod-Level Metrics (Today vs Yesterday)
-{pod_cpu_cmp}
+## 8. Pod-Level Metrics (Today vs Yesterday)
+{pod_cmp}
 
 ---
 
-{pod_mem_cmp}
+## 9. LKE PVC Storage Details (Today vs Yesterday)
+{pvc_cmp}
 
 ---
 
-## 8. Database Health (Today vs Yesterday)
+## 10. Database Health (Today vs Yesterday)
 {mysql_cmp}
 
 ---
 
-## 9. Overall Summary
+## 11. Overall Summary
 {overall_summary}
 
 ---
 
 **End of Report**  
 *Generated by SRE TradeIdeas Agent @ 11:00 AM IST*
-"""
+""".strip()
 
-    # Clean up extra newlines
-    report = re.sub(r'\n{3,}', '\n\n', report.strip())
-
+    report = re.sub(r'\n{3,}', '\n\n', report)
     ti.xcom_push(key="sre_full_report", value=report)
     logging.info("SRE report compiled successfully.")
     return report
@@ -844,175 +761,90 @@ with DAG(
     max_active_runs=1,
 ) as dag:
 
-   # TODAY TASKS
-    t1 = PythonOperator(
-        task_id="node_cpu_today",
-        python_callable=node_cpu_today,
-        provide_context=True,
+   # Static Tasks - renumbered sequentially
+    t1 = PythonOperator(task_id="node_cpu_today", python_callable=node_cpu_today, provide_context=True)
+    t2 = PythonOperator(task_id="node_memory_today", python_callable=node_memory_today, provide_context=True)
+    t3 = PythonOperator(task_id="node_disk_today", python_callable=node_disk_today, provide_context=True)
+    t4 = PythonOperator(task_id="node_readiness_check", python_callable=node_readiness_check, provide_context=True)
+    t5 = PythonOperator(task_id="pod_restart_today", python_callable=pod_restart_today, provide_context=True)
+    t6 = PythonOperator(task_id="mysql_health_today", python_callable=mysql_health_today, provide_context=True)
+    t7 = PythonOperator(task_id="kubernetes_version_check", python_callable=kubernetes_version_check, provide_context=True)
+    t7_1 = PythonOperator(task_id="kubernetes_eol_and_next_version", python_callable=kubernetes_eol_and_next_version, provide_context=True)
+    t8 = PythonOperator(task_id="microk8s_expiry_check", python_callable=microk8s_expiry_check, provide_context=True)
+    t9 = PythonOperator(task_id="lke_pvc_storage_details", python_callable=lke_pvc_storage_details, provide_context=True)
+    
+    t10 = PythonOperator(task_id="node_cpu_yesterday", python_callable=node_cpu_yesterday, provide_context=True)
+    t11 = PythonOperator(task_id="node_memory_yesterday", python_callable=node_memory_yesterday, provide_context=True)
+    t12 = PythonOperator(task_id="node_disk_yesterday", python_callable=node_disk_yesterday, provide_context=True)
+    t13 = PythonOperator(task_id="lke_pvc_storage_details_yesterday", python_callable=lke_pvc_storage_details_yesterday, provide_context=True)
+    t14 = PythonOperator(task_id="mysql_health_yesterday", python_callable=mysql_health_yesterday, provide_context=True)
+    
+    t15 = PythonOperator(task_id="node_cpu_today_vs_yesterday", python_callable=node_cpu_today_vs_yesterday, provide_context=True)
+    t16 = PythonOperator(task_id="node_memory_today_vs_yesterday", python_callable=node_memory_today_vs_yesterday, provide_context=True)
+    t17 = PythonOperator(task_id="node_disk_today_vs_yesterday", python_callable=node_disk_today_vs_yesterday, provide_context=True)
+    t18 = PythonOperator(task_id="lke_pvc_today_vs_yesterday", python_callable=lke_pvc_today_vs_yesterday, provide_context=True)
+    t19 = PythonOperator(task_id="mysql_health_today_vs_yesterday", python_callable=mysql_health_today_vs_yesterday, provide_context=True)
+    
+    t20 = PythonOperator(task_id="overall_summary", python_callable=overall_summary, provide_context=True)
+    t21 = PythonOperator(task_id="compile_sre_report", python_callable=compile_sre_report, provide_context=True)
+    t22 = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html, provide_context=True)
+    t23 = PythonOperator(task_id="send_sre_email", python_callable=send_sre_email, provide_context=True)
+    
+    # === POD DYNAMIC FLOW (fixed) =================================================
+    pod_namespaces_var = Variable.get(
+        "ltai.v1.sretradeideas.pod.namespaces",
+        default_var='["alpha-prod","tipreprod-prod"]'
     )
-
-    t2 = PythonOperator(
-        task_id="node_memory_today",
-        python_callable=node_memory_today,
-        provide_context=True,
+    try:
+        namespaces_list = json.loads(pod_namespaces_var)
+        if not isinstance(namespaces_list, list):
+            raise ValueError("Parsed value is not a list")
+                  
+        logging.info(
+            "Successfully loaded pod namespaces from Airflow Variable 'ltai.v1.sretradeideas.pod.namespaces': %s", namespaces_list)
+    
+    except Exception as e:
+        logging.warning(
+            "Failed to parse Airflow Variable 'ltai.v1.sretradeideas.pod.namespaces' (value was: %s). "
+            "Reason: %s. Falling back to hard-coded default namespaces.", pod_namespaces_var, str(e))
+        namespaces_list = ["alpha-prod", "tipreprod-prod"]
+    
+    # 1. TODAY
+    today_results = (
+        pod_metrics_for_namespace.partial(period="last 24 hours")
+        .expand(ns=namespaces_list)
     )
-
-    t3 = PythonOperator(
-        task_id="node_disk_today",
-        python_callable=node_disk_today,
-        provide_context=True,
+    
+    # 2. YESTERDAY
+    yesterday_results = (
+        pod_metrics_for_namespace.partial(period="yesterday")
+        .expand(ns=namespaces_list)
     )
-
-    t4= PythonOperator(
-        task_id="node_readiness_check",
-        python_callable=node_readiness_check,
-        provide_context=True,
-    )
-
-    t5 = PythonOperator(
-        task_id="pod_cpu_today",
-        python_callable=pod_cpu_today,
-        provide_context=True,
-    )
-
-    t6 = PythonOperator(
-        task_id="pod_memory_today",
-        python_callable=pod_memory_today,
-        provide_context=True,
-    )
-
-    t7 = PythonOperator(
-        task_id="pod_restart_today",
-        python_callable=pod_restart_today,
-        provide_context=True,
-    )
-
-    t8 = PythonOperator(
-        task_id="mysql_health_today",
-        python_callable=mysql_health_today,
-        provide_context=True,
-    )
-
-    t9 = PythonOperator(
-        task_id="microk8s_version_check",
-        python_callable=microk8s_version_check,
-        provide_context=True,
-    )
-
-    t10 = PythonOperator(
-        task_id="microk8s_expiry_check",
-        python_callable=microk8s_expiry_check,
-        provide_context=True,
-    )
-
-    t11 = PythonOperator(
-        task_id="lke_pvc_storage_details",
-        python_callable=lke_pvc_storage_details,
-        provide_context=True,
-    )
-
-
-    # YESTERDAY TASKS
-    t12 = PythonOperator(
-        task_id="node_cpu_yesterday",
-        python_callable=node_cpu_yesterday,
-        provide_context=True,
-    )
-
-    t13 = PythonOperator(
-        task_id="node_memory_yesterday",
-        python_callable=node_memory_yesterday,
-        provide_context=True,
-    )
-
-    t14 = PythonOperator(
-        task_id="node_disk_yesterday",
-        python_callable=node_disk_yesterday,
-        provide_context=True,
-    )
-
-    t15 = PythonOperator(
-        task_id="pod_cpu_yesterday",
-        python_callable=pod_cpu_yesterday,
-        provide_context=True,
-    )
-
-    t16 = PythonOperator(
-        task_id="pod_memory_yesterday",
-        python_callable=pod_memory_yesterday,
-        provide_context=True,
-    )
-
-    t17 = PythonOperator(
-        task_id="mysql_health_yesterday",
-        python_callable=mysql_health_yesterday,
-        provide_context=True,
-    )
-
-
-    # COMPARISON TASKS
-    t18 = PythonOperator(
-        task_id="node_cpu_today_vs_yesterday",
-        python_callable=node_cpu_today_vs_yesterday,
-        provide_context=True,
-    )
-
-    t19 = PythonOperator(
-        task_id="node_memory_today_vs_yesterday",
-        python_callable=node_memory_today_vs_yesterday,
-        provide_context=True,
-    )
-
-    t20 = PythonOperator(
-        task_id="node_disk_today_vs_yesterday",
-        python_callable=node_disk_today_vs_yesterday,
-        provide_context=True,
-    )
-
-    t21 = PythonOperator(
-        task_id="pod_cpu_today_vs_yesterday",
-        python_callable=pod_cpu_today_vs_yesterday,
-        provide_context=True,
-    )
-
-    t22 = PythonOperator(
-        task_id="pod_memory_today_vs_yesterday",
-        python_callable=pod_memory_today_vs_yesterday,
-        provide_context=True,
-    )
-
-    t23 = PythonOperator(
-        task_id="mysql_health_today_vs_yesterday",
-        python_callable=mysql_health_today_vs_yesterday,
-        provide_context=True,
-    )
-
-
-    t24 = PythonOperator(
-        task_id="overall_summary",
-        python_callable=overall_summary,
-        provide_context=True,
-    )
-
-    # FINAL REPORTING
-    t25 = PythonOperator(
-        task_id="compile_sre_report",
-        python_callable=compile_sre_report,
-        provide_context=True,
-    )
-
-    t26 = PythonOperator(
-        task_id="convert_to_html",
-        python_callable=convert_to_html,
-        provide_context=True,
-    )
-
-    t27 = PythonOperator(
-        task_id="send_sre_email",
-        python_callable=send_sre_email,
-        provide_context=True,
-    )
-
-
-    # FINAL DAG CHAIN
-    t1 >> t2 >> t3 >> t4 >> t5 >> t6 >> t7 >> t8 >> t9 >> t10 >> t11 >> t12 >> t13 >> t14 >> t15 >> t16 >> t17 >> t18 >> t19 >> t20 >> t21 >> t22 >> t23 >> t24 >> t25 >> t26 >> t27
+    
+    # 3. TODAY MARKDOWN
+    pod_today_markdown = compile_pod_sections_today(today_results)
+    
+    # 4. COMPARISON MARKDOWN
+    @task
+    def collect_pod_results(today_res, yesterday_res):
+        today_list = list(today_res) if not isinstance(today_res, list) else today_res
+        yesterday_list = list(yesterday_res) if not isinstance(yesterday_res, list) else yesterday_res
+        return today_list + yesterday_list
+    
+    all_pod_results = collect_pod_results(today_results, yesterday_results)
+    pod_comparison_markdown = compile_pod_comparison(all_pod_results)
+    
+    # === DEPENDENCIES =====================================
+    # Node + static tasks (all previous static tasks feed into comparisons)
+    [t1, t2, t3, t4, t5, t6, t7, t7_1, t8, t9, t10, t11, t12, t13, t14] >> t15 >> t16 >> t17 >> t18 >> t19
+    
+    # Pod flow
+    t4 >> today_results
+    t4 >> yesterday_results
+    today_results >> pod_today_markdown
+    [yesterday_results, pod_today_markdown] >> all_pod_results
+    all_pod_results >> pod_comparison_markdown
+    
+    # Final chain
+    pod_comparison_markdown >> t20
+    t19 >> t20 >> t21 >> t22 >> t23
