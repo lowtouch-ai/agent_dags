@@ -23,7 +23,6 @@ default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2025, 8, 22),
-    "retries": 1,
     "retry_delay": timedelta(seconds=15),
 }
 
@@ -800,60 +799,62 @@ Return plain text only. No HTML."""
                 final_response = ai_response
                 log_prefix = "AI"
             else:
-                final_response = f"""<html>
-<head>
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            max-width: 600px;
-            margin: 0 auto;
-            padding: 20px;
-        }}
-        .greeting {{
-            margin-bottom: 20px;
-        }}
-        .message {{
-            margin: 20px 0;
-        }}
-        .closing {{
-            margin-top: 30px;
-        }}
-        .signature {{
-            margin-top: 20px;
-            font-weight: bold;
-        }}
-        .company {{
-            color: #666;
-            font-size: 0.9em;
-        }}
-    </style>
-</head>
-<body>
-    <div class="greeting">
-        <p>Hello {sender_name},</p>
-    </div>
-    
-    <div class="message">
-        <p>We're currently experiencing a temporary technical issue that may affect your experience with the {AGENT_NAME}.</p>
-        
-        <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
-        
-        <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
-    </div>
-    
-    <div class="closing">
-        <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
-    </div>
-    
-    <div class="signature">
-        <p>Best regards,<br>
-        The HubSpot Assistant Team<br>
-        <span class="company">Lowtouch.ai</span></p>
-    </div>
-</body>
-</html>"""
+                final_response = f"""
+        <html>
+        <head>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    max-width: 600px;
+                    margin: 0 auto;
+                    padding: 20px;
+                }}
+                .greeting {{
+                    margin-bottom: 15px;
+                }}
+                .message {{
+                    margin: 15px 0;
+                }}
+                .closing {{
+                    margin-top: 15px;
+                }}
+                .signature {{
+                    margin-top: 15px;
+                    font-weight: bold;
+                }}
+                .company {{
+                    color: #666;
+                    font-size: 0.9em;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="greeting">
+                <p>Hello {sender_name},</p>
+            </div>
+            
+            <div class="message">
+                <p>We're currently experiencing a temporary technical issue that may affect your experience with the HubSpot Assistant.</p>
+                
+                <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
+                
+                <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
+            </div>
+            
+            <div class="closing">
+                <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
+            </div>
+            
+            <div class="signature">
+                <p>Best regards,<br>
+                The HubSpot Assistant Team<br>
+                <a href="http://lowtouch.ai" class="company">Lowtouch.ai</a></p>
+            </div>
+        </body>
+        </html>
+        """
                 log_prefix = "Fallback"
 
             # === STEP 3: Build and Send Email ===

@@ -26,7 +26,6 @@ default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2025, 8, 22),
-    "retries": 1,
     "retry_delay": timedelta(seconds=15),
 }
 
@@ -235,19 +234,25 @@ Analyze the content and determine:
         - Contact information like email or phone number also triggers this.
         - exclude the user name or hubspot owner names.
         - Exclude the contact name used for assigning a task or deal owner.
-        - Set to FALSE if no person is mentioned by name.
+        - User mentions the contact name of a exiting contact.
+        - User mentions company name or deal name of a existing contact.
 
     - COMPANIES (search_companies):
-        - Set to TRUE if a company/organization name is mentioned
+        - Set to TRUE if a company/organization name is mentioned.
+        - Contact person name is also a trigger for company search.
         - This includes formal company names, business names, or organizational references
-        - Set to FALSE if no company is mentioned by name. 
+        - User Mentions the contact name or deal name of a exiting company. 
 
     - DEALS (search_deals):
         - Set to TRUE ONLY if ANY of these conditions are met:
-            a) User explicitly mentions creating a deal, opportunity, or sale
-            b) User states the client/contact is interested in moving forward with a purchase, contract, or agreement
-            c) User mentions pricing discussions, proposals sent, quotes provided, or contract negotiations
-            d) User indicates a clear buying intent from the client (e.g., "they want to proceed", "ready to sign", "committed to purchase")
+            a) User explicitly mention the name of a existing deal name.
+            b) User explicitly mention the name of contact or name of company.
+            c) User is talking about creating entities for existing deals, contacts or company.
+            d) User is creating followup tasks, notes, or meetings for existing deals.
+            e) User explicitly mentions creating a deal, opportunity, or sale
+            f) User states the client/contact is interested in moving forward with a purchase, contract, or agreement
+            g) User mentions pricing discussions, proposals sent, quotes provided, or contract negotiations
+            h) User indicates a clear buying intent from the client (e.g., "they want to proceed", "ready to sign", "committed to purchase")
         - Set to FALSE for:
             - Initial conversations or introductions
             - Exploratory discussions without commitment
@@ -338,16 +343,16 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
                     padding: 20px;
                 }}
                 .greeting {{
-                    margin-bottom: 20px;
+                    margin-bottom: 15px;
                 }}
                 .message {{
-                    margin: 20px 0;
+                    margin: 15px 0;
                 }}
                 .closing {{
-                    margin-top: 30px;
+                    margin-top: 15px;
                 }}
                 .signature {{
-                    margin-top: 20px;
+                    margin-top: 15px;
                     font-weight: bold;
                 }}
                 .company {{
@@ -376,7 +381,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
             <div class="signature">
                 <p>Best regards,<br>
                 The HubSpot Assistant Team<br>
-                <span class="company">Lowtouch.ai</span></p>
+                <a href="http://lowtouch.ai" class="company">Lowtouch.ai</a></p>
             </div>
         </body>
         </html>
@@ -641,7 +646,14 @@ Return this exact JSON structure:
             "task_owner_id": "",
             "task_owner_name": "",
             "task_owner_message": ""
-        }}
+        }},
+        {{
+            "task_index": 2,
+            "task_owner_id": "",
+            "task_owner_name": "",
+            "task_owner_message": ""
+        }},
+        ...
     ],
     "all_owners_table": [
         {{
@@ -675,25 +687,38 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         ti.xcom_push(key="owner_info", value=default_owner)
 
 def search_deals(ti, **context):
-    """Search for deals based on conversation context"""
+    """Search for deals based on conversation context with retry support"""
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
     if not entity_flags.get("search_deals", True):
         logging.info(f"Skipping deals search: {entity_flags.get('deals_reason', 'Not mentioned')}")
-        ti.xcom_push(key="deal_info", value={
+        default_result = {
             "deal_results": {"total": 0, "results": []},
             "new_deals": []
-        })
+        }
+        ti.xcom_push(key="deal_info", value=default_result)
         return
-    
+
+    # Get retry context
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries  # Usually set via retries= in DAG
+
+    logging.info(f"=== SEARCH DEALS - Attempt {current_try}/{max_tries} ===")
+
+    # Fetch previous failure info for retry prompt
+    previous_status = ti.xcom_pull(key="deal_search_status")
+    previous_response = ti.xcom_pull(key="deal_search_response")
+
+    is_retry = current_try > 1
+
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
-    owner_info = ti.xcom_pull(key="owner_info")
-    
+    owner_info = ti.xcom_pull(key="owner_info", default={})
     deal_owner_id = owner_info.get('deal_owner_id', '71346067')
     deal_owner_name = owner_info.get('deal_owner_name', 'Kishore')
     
 
-    prompt = f"""You are a HubSpot Deal Intelligence Assistant. Your role is to analyze the email conversation and:
+    base_prompt = f"""You are a HubSpot Deal Intelligence Assistant. Your role is to analyze the email conversation and:
 
 1. **Search** for existing deals by extracting and matching deal names.
 2. **Suggest** new deal drafts **only when the email clearly expresses intent to move forward** (e.g., pricing, timeline, commitment).
@@ -707,24 +732,42 @@ LATEST USER MESSAGE:
 Validated Deal Owner ID: {deal_owner_id}
 Validated Deal Owner Name: {deal_owner_name}
 
-IMPORTANT: Respond with ONLY a valid JSON object. No explanations, no markdown, no other text.
-
+IMPORTANT: 
+- Respond with ONLY a valid JSON object. No explanations, no markdown, no other text.
+- Always validate `step 2` before proceeding to `step 3`.
 Steps:
 1. Search for existing deals using the deal name extracted from the email content.
-2. If deals are found, include them in 'deal_results' with: dealId, dealName, dealLabelName (e.g., 'Appointment Scheduled' for stage 'appointmentscheduled'), dealAmount, closeDate, dealOwnerName.
-3. If no deals are found, check if the email clearly indicates a new deal. If yes, propose new deals in 'new_deals'. If not, leave 'new_deals' as an empty list.
-4. Strictly follow these rules, for new deal names, :
+2. Parsing and searching for deals:
+   - If the user explicitly provides a **deal name**, use that exact deal name (or a close match) as the search query with the `search_deals` tool.
+   - If no deal name is directly provided, extract relevant identifiers and search as follows:
+        1. If a **contact name** (person) is mentioned → call `search_deals` using that contact's ID.
+        2. If a **company name** is mentioned → call `search_deals` using that company ID.
+        3. If both contact and company are mentioned:
+            - Perform two separate `search_deals` calls (one with the contact, one with the company).
+            - Identify deals that appear in **both** result sets (intersection).
+            - If multiple common deals exist, include in deal_results.
+   - Always prefer an exact or direct deal name when available over inferred searches via contact or company.
+3. If deals are found, include them in 'deal_results' with: dealId, dealName, dealLabelName (e.g., 'Appointment Scheduled' for stage 'appointmentscheduled'), dealAmount, closeDate, dealOwnerName.
+4. If no deals are found, then new_deals may only be proposed if below 5 points are validated:
+            a) User explicitly mentions creating a deal, opportunity, or sale
+            b) User states the client/contact is interested in moving forward with a purchase, contract, or agreement
+            c) User mentions pricing discussions, proposals sent, quotes provided, or contract negotiations
+            d) User indicates a clear buying intent from the client (e.g., "they want to proceed", "ready to sign", "committed to purchase")
+            e) User is not creating any followup enitites for existing deals.
+    otherwise, new_deals must be an empty list.
+
+5. Strictly follow these rules, for new deal names, :
    - Extract the Client Name (company or individual being sold to) from the email.
    - Check if it's a direct deal (no partner) or partner deal (partner or intermediary mentioned).
    - Direct deal: <Client Name>-<Deal Name>
    - Partner deal: <Partner Name>-<Client Name>-<Deal Name>
    - Use the Deal Name from the email if specified; otherwise, create a concise one based on the description (e.g., product or service discussed).
-5. For new deals, use the validated deal owner name in dealOwnerName.
-6. Propose an additional new deal if the email explicitly requests opening a second deal, even if one exists.
-7. Use dealLabelName for deal stages (e.g., 'Appointment Scheduled').
-8. Always use default closeDate 90 days from today, if not specified in YYYY-MM-DD format.
-9. Always use the default deal amount as 5000 if not specified.
-10. Fill all fields in the JSON. Use empty string "" for any missing values.
+6. For new deals, use the validated deal owner name in dealOwnerName.
+7. Propose an additional new deal if the email explicitly requests opening a second deal, even if one exists.
+8. Use dealLabelName for deal stages (e.g., 'Appointment Scheduled').
+9. Always use default closeDate 90 days from today, if not specified in YYYY-MM-DD format.
+10. Always use the default deal amount as 5000 if not specified.
+11. Fill all fields in the JSON. Use empty string "" for any missing values.
 
 Return exactly this JSON structure:
 {{
@@ -754,40 +797,128 @@ Return exactly this JSON structure:
 
 RESPOND WITH ONLY THE JSON OBJECT."""
 
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    logging.info(f"Raw AI response for deals: {response[:1000]}...")
 
+    if is_retry:
+        logging.info(f"RETRY ATTEMPT {current_try}/{max_tries} - Using retry prompt")
+
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
+        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
+
+        prompt = f"""PREVIOUS ATTEMPT TO SEARCH DEALS FAILED.
+
+Previous AI Response:
+{prev_resp_str}
+
+Failure Reason: {prev_reason}
+
+This is retry attempt {current_try} of {max_tries}.
+
+Please carefully re-analyze the latest message and correctly return the deal search results.
+
+Latest Message:
+{latest_message}
+
+{base_prompt}
+
+CRITICAL: You MUST return a valid JSON object matching the exact schema above.
+Fix any parsing errors, missing fields, or incorrect logic from the previous attempt."""
+    else:
+        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
+        prompt = base_prompt
+
+    response = None
     try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response for deals: {response[:1000]}...")
+
+        # Parse JSON
         parsed_json = json.loads(response.strip())
-        ti.xcom_push(key="deal_info", value=parsed_json)
-        logging.info(f"Deals search completed: {parsed_json['deal_results']['total']} existing, {len(parsed_json['new_deals'])} new")
-    except Exception as e:
-        logging.error(f"Error processing deals AI response: {e}")
-        default = {
-            "deal_results": {"total": 0, "results": []},
-            "new_deals": []
+
+        # Validate basic structure
+        if not isinstance(parsed_json, dict) or "deal_results" not in parsed_json:
+            raise ValueError("Response missing 'deal_results' key")
+
+        # Success — push results
+        result = {
+            "deal_info": parsed_json,
+            "deal_search_status": {"status": "success"},
+            "deal_search_response": parsed_json
         }
-        ti.xcom_push(key="deal_info", value=default)
+
+        for key, value in result.items():
+            ti.xcom_push(key=key, value=value)
+
+        logging.info(f"Deals search SUCCEEDED on attempt {current_try}: "
+                     f"{parsed_json['deal_results']['total']} existing, "
+                     f"{len(parsed_json.get('new_deals', []))} new suggested")
+        return parsed_json
+
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON from AI: {e}\nRaw: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+    except Exception as e:
+        error_msg = str(e) or "Unknown error in deal search"
+        is_final_attempt = current_try >= max_tries
+
+        status_type = "final_failure" if is_final_attempt else "failure"
+        result = {
+            "deal_info": {
+                "deal_results": {"total": 0, "results": []},
+                "new_deals": []
+            },
+            "deal_search_status": {"status": status_type, "reason": error_msg},
+            "deal_search_response": {"raw_response": response} if response else None
+        }
+
+        for key, value in result.items():
+            ti.xcom_push(key=key, value=value)
+
+        if is_final_attempt:
+            logging.error(f"FINAL FAILURE in search_deals after {max_tries} attempts: {error_msg}")
+            raise  # Mark task as failed
+        else:
+            logging.warning(f"search_deals failed (attempt {current_try}/{max_tries}) → will retry")
+            raise
 
 def search_contacts(ti, **context):
-    """Search for contacts based on conversation context"""
+    """Search for contacts based on conversation context with retry support"""
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
     if not entity_flags.get("search_contacts", True):
         logging.info(f"Skipping contacts search: {entity_flags.get('contacts_reason', 'Not mentioned')}")
-        ti.xcom_push(key="contact_info", value={
+        default_result = {
+            "reasoning_summary": {
+                "extracted_names": [],
+                "excluded_names": [],
+                "total_extracted": 0,
+                "search_notes": "Skipped due to entity flags"
+            },
             "contact_results": {"total": 0, "results": []},
             "new_contacts": []
-        })
+        }
+        ti.xcom_push(key="contact_info", value=default_result)
         return
-    
+
+    # === Retry Context ===
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== SEARCH CONTACTS - Attempt {current_try}/{max_tries} ===")
+
+    previous_status = ti.xcom_pull(key="contact_search_status")
+    previous_response = ti.xcom_pull(key="contact_search_response")
+    is_retry = current_try > 1
+
+    # === Data ===
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
-    owner_info = ti.xcom_pull(key="owner_info")
-    
+    owner_info = ti.xcom_pull(key="owner_info", default={})
+
     contact_owner_id = owner_info.get('contact_owner_id', '71346067')
     contact_owner_name = owner_info.get('contact_owner_name', 'Kishore')
 
-    prompt = f"""You are a HubSpot Contact Search Assistant. Your role is to **search** for existing contacts based on the email conversation.  
+    base_prompt = f"""You are a HubSpot Contact Search Assistant. Your role is to **search** for existing contacts based on the email conversation.  
 **You CANNOT create contacts in HubSpot.**  
 You may only **suggest** new contact details **when no match is found and the email clearly identifies a new external person**.
 
@@ -947,38 +1078,137 @@ Fill ALL fields, use "" for missing values.
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    logging.info(f"Raw AI response for contacts: {response[:1000]}...")
+    if is_retry:
+        logging.info(f"RETRY ATTEMPT {current_try}/{max_tries} - Using retry prompt")
 
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
+        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
+
+        prompt = f"""PREVIOUS CONTACT SEARCH ATTEMPT FAILED
+
+Previous AI Response:
+{prev_resp_str}
+
+Failure Reason: {prev_reason}
+
+This is retry attempt {current_try} of {max_tries}.
+
+Please carefully re-analyze the message and return a **perfectly valid JSON** matching the exact schema above.
+
+Latest Message:
+{latest_message}
+
+{base_prompt}
+
+FIX ANY OF THE FOLLOWING FROM LAST ATTEMPT:
+- Invalid/malformed JSON
+- Missing commas, quotes, or brackets
+- Wrong field names
+- Missing reasoning_summary or contact_results
+- Incorrect name splitting or exclusion logic
+- Duplicate contacts
+- Wrong template_used value
+
+YOU MUST RETURN ONLY A CLEAN, VALID JSON OBJECT."""
+    else:
+        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
+        prompt = base_prompt
+
+    response = None
     try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response for contacts: {response[:1000]}...")
+
         parsed_json = json.loads(response.strip())
-        ti.xcom_push(key="contact_info", value=parsed_json)
-        logging.info(f"Contacts search completed: {parsed_json['contact_results']['total']} existing, {len(parsed_json['new_contacts'])} new")
+
+        # Basic structure validation
+        required_keys = ["contact_results", "new_contacts"]
+        if not all(k in parsed_json for k in required_keys):
+            raise ValueError(f"Missing required keys. Found: {list(parsed_json.keys())}")
+
+        # === SUCCESS ===
+        result = {
+            "contact_info": parsed_json,
+            "contact_search_status": {"status": "success"},
+            "contact_search_response": parsed_json
+        }
+
+        for key, value in result.items():
+            ti.xcom_push(key=key, value=value)
+
+        total_existing = parsed_json['contact_results']['total']
+        new_count = len(parsed_json.get('new_contacts', []))
+        logging.info(f"Contacts search SUCCEEDED on attempt {current_try}: {total_existing} existing, {new_count} new suggested")
+
+        return parsed_json
+
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON from AI: {e}\nRaw response: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
     except Exception as e:
-        logging.error(f"Error processing contacts AI response: {e}")
-        default = {
+        error_msg = str(e) or "Unknown error during contact search"
+        is_final_attempt = current_try >= max_tries
+
+        status_type = "final_failure" if is_final_attempt else "failure"
+        fallback_result = {
+            "reasoning_summary": {
+                "extracted_names": [],
+                "excluded_names": [],
+                "total_extracted": 0,
+                "search_notes": f"Failed after {current_try} attempts: {error_msg}"
+            },
             "contact_results": {"total": 0, "results": []},
             "new_contacts": []
         }
-        ti.xcom_push(key="contact_info", value=default)
+
+        push_data = {
+            "contact_info": fallback_result,
+            "contact_search_status": {"status": status_type, "reason": error_msg},
+            "contact_search_response": {"raw_response": response} if response else None
+        }
+
+        for key, value in push_data.items():
+            ti.xcom_push(key=key, value=value)
+
+        if is_final_attempt:
+            logging.error(f"FINAL FAILURE in search_contacts after {max_tries} attempts: {error_msg}")
+            raise  # Task fails in Airflow
+        else:
+            logging.warning(f"search_contacts failed (attempt {current_try}/{max_tries}) → retrying...")
+            raise
 
 def search_companies(ti, **context):
-    """Search for companies based on conversation context"""
+    """Search for companies based on conversation context with retry support"""
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
     if not entity_flags.get("search_companies", True):
         logging.info(f"Skipping companies search: {entity_flags.get('companies_reason', 'Not mentioned')}")
-        ti.xcom_push(key="company_info", value={
+        default_result = {
             "company_results": {"total": 0, "results": []},
             "new_companies": [],
             "partner_status": None
-        })
+        }
+        ti.xcom_push(key="company_info", value=default_result)
         return
-    
+
+    # === Retry Context ===
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== SEARCH COMPANIES - Attempt {current_try}/{max_tries} ===")
+
+    previous_status = ti.xcom_pull(key="company_search_status")
+    previous_response = ti.xcom_pull(key="company_search_response")
+    is_retry = current_try > 1
+
+    # === Data ===
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
 
 
-    prompt = f"""You are a HubSpot Company Search Assistant. Your role is to **search** for existing companies based on the email conversation.  
+    base_prompt = f"""You are a HubSpot Company Search Assistant. Your role is to **search** for existing companies based on the email conversation.  
 **You CANNOT create companies in HubSpot.**  
 You may only **suggest** new company details **when no match is found and the email clearly identifies a new external organization**.
 
@@ -1028,6 +1258,13 @@ LATEST USER MESSAGE:
        "sorts": [{{{{ "propertyName": "hs_lastmodifieddate", "direction": "DESCENDING" }}}}],
        "limit": 5
    }}}}
+   
+   - If company name is not given, use contact or deal to search for associated company using :
+        1. If a **contact name** is mentioned → call `search_companies` using the Id of the contact:
+        2. If a **deal name** is mentioned → call `search_companies` using the Id of the deal.
+        3. If both contact and deal are mentioned:
+            - Perform two separate `search_companies` calls (one with the contact, one with the deal).
+            - Identify companies that appear in **both** result sets (intersection).
 
 3. **Process search results**:
    - Deduplicate by `hs_object_id`.
@@ -1101,21 +1338,98 @@ LATEST USER MESSAGE:
 - **RESPOND WITH ONLY THE JSON OBJECT — NO OTHER TEXT.**
 """
 
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    logging.info(f"Raw AI response for companies: {response[:1000]}...")
+    if is_retry:
+        logging.info(f"RETRY ATTEMPT {current_try}/{max_tries} - Using enhanced retry prompt")
 
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
+        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
+
+        prompt = f"""PREVIOUS COMPANY SEARCH ATTEMPT FAILED
+
+Previous AI Response:
+{prev_resp_str}
+
+Failure Reason: {prev_reason}
+
+This is retry attempt {current_try} of {max_tries}.
+
+Please re-analyze the message carefully and return a CORRECT, VALID JSON matching the exact schema.
+
+Latest Message:
+{latest_message}
+
+{base_prompt}
+
+FIX ANY:
+- Invalid JSON (missing commas, quotes, brackets)
+- Wrong field names
+- Missing required keys
+- Incorrect partner_status logic
+- Duplicate suggestions
+
+YOU MUST RETURN ONLY A CLEAN, VALID JSON OBJECT."""
+    else:
+        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
+        prompt = base_prompt
+
+    response = None
     try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response for companies: {response[:1000]}...")
+
         parsed_json = json.loads(response.strip())
-        ti.xcom_push(key="company_info", value=parsed_json)
-        logging.info(f"Companies search completed: {parsed_json['company_results']['total']} existing, {len(parsed_json['new_companies'])} new")
+
+        # Basic validation
+        if not isinstance(parsed_json, dict) or "company_results" not in parsed_json:
+            raise ValueError("Missing 'company_results' in response")
+
+        # === SUCCESS ===
+        result = {
+            "company_info": parsed_json,
+            "company_search_status": {"status": "success"},
+            "company_search_response": parsed_json
+        }
+
+        for key, value in result.items():
+            ti.xcom_push(key=key, value=value)
+
+        total_existing = parsed_json['company_results']['total']
+        new_count = len(parsed_json.get('new_companies', []))
+        logging.info(f"Companies search SUCCEEDED on attempt {current_try}: {total_existing} existing, {new_count} new suggested")
+
+        return parsed_json
+
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON from AI: {e}\nRaw response: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
     except Exception as e:
-        logging.error(f"Error processing companies AI response: {e}")
-        default = {
+        error_msg = str(e) or "Unknown error during company search"
+        is_final_attempt = current_try >= max_tries
+
+        status_type = "final_failure" if is_final_attempt else "failure"
+        fallback_result = {
             "company_results": {"total": 0, "results": []},
             "new_companies": [],
             "partner_status": None
         }
-        ti.xcom_push(key="company_info", value=default)
+
+        push_data = {
+            "company_info": fallback_result,
+            "company_search_status": {"status": status_type, "reason": error_msg},
+            "company_search_response": {"raw_response": response} if response else None
+        }
+
+        for key, value in push_data.items():
+            ti.xcom_push(key=key, value=value)
+
+        if is_final_attempt:
+            logging.error(f"FINAL FAILURE in search_companies after {max_tries} attempts: {error_msg}")
+            raise  # Mark task failed in Airflow
+        else:
+            logging.warning(f"search_companies failed (attempt {current_try}/{max_tries}) → retrying...")
+            raise
 
 def parse_notes_tasks_meeting(ti, **context):
     """Parse notes, tasks, and meetings from conversation"""
@@ -2013,72 +2327,9 @@ def compose_confirmation_email(ti, **context):
                     </p>
                     """
             email_content += "</div>"
-        
-        # Available Owners Table
-        if all_owners:
-            email_content += """
-            <h4 style='color: #2c5aa0;'>Available Owners:</h4>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Owner ID</th>
-                        <th>Owner Name</th>
-                        <th>Owner Email</th>
-                        <th>Assignment</th>
-                    </tr>
-                </thead>
-                <tbody>
-            """
-            
-            for owner in all_owners:
-                owner_id = owner.get("id", "")
-                owner_name = owner.get("name", "")
-                owner_email = owner.get("email", "")
-                
-                assignments = []
-                if owner_id == contact_owner_id and (contact_results.get("total", 0) > 0 or len(new_contacts) > 0):
-                    assignments.append("Contact Owner")
-                if owner_id == chosen_deal_owner_id and (deal_results.get("total", 0) > 0 or len(new_deals) > 0):
-                    assignments.append("Deal Owner")
-                
-                if any(task.get("task_owner_id") == owner_id for task in corrected_tasks) and len(meaningful_tasks) > 0:
-                    task_indices = [str(task.get("task_index")) for task in corrected_tasks if task.get("task_owner_id") == owner_id]
-                    assignments.append(f"Task Owner (Tasks {', '.join(task_indices)})")
-                
-                assignment_text = ", ".join(assignments) if assignments else ""
-
-                if "Contact Owner" in assignments and "Task Owner" in assignments:
-                    row_style = ' style="background-color: #c3e6cb; border-left: 4px solid #155724;"'
-                if "Deal Owner" in assignments and "Task Owner" in assignments:
-                    row_style = ' style="background-color: #d1ecf1; border-left: 4px solid #0c5460;"'
-                elif "Deal Owner" in assignments:
-                    row_style = ' style="background-color: #d4edda; border-left: 4px solid #28a745;"'
-                elif "Task Owner" in assignments:
-                    row_style = ' style="background-color: #fff3cd; border-left: 4px solid #ffc107;"'
-                else:
-                    row_style = ' style="background-color: #f8f9fa;"'
-                
-                email_content += f"""
-                    <tr{row_style}>
-                        <td>{owner_id}</td>
-                        <td><strong>{owner_name}</strong></td>
-                        <td>{owner_email}</td>
-                        <td><strong>{assignment_text}</strong></td>
-                    </tr>
-                """
-            
-            email_content += "</tbody></table>"
-        
-        email_content += "<hr>"
 
     email_content += """
         <div class="closing">
-            <p><strong>Instructions:</strong></p>
-            <ul>
-                <li>Reply with "PROCEED WITH EXISTING" to use existing entities and create new objects</li>
-                <li>Reply with "CREATE NEW" along with corrections to modify proposed objects</li>
-                <li>Specify any changes needed in your reply</li>
-            </ul>
             <p>Please confirm whether this summary looks correct before I proceed.</p>
             <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br>Lowtouch.ai</p>
         </div>
@@ -2564,19 +2815,22 @@ with DAG(
     search_deals_task = PythonOperator(
         task_id="search_deals",
         python_callable=search_deals,
-        provide_context=True
+        provide_context=True,
+        retries=2,
     )
 
     search_contacts_task = PythonOperator(
         task_id="search_contacts",
         python_callable=search_contacts,
-        provide_context=True
+        provide_context=True,
+        retries=2
     )
 
     search_companies_task = PythonOperator(
         task_id="search_companies",
         python_callable=search_companies,
-        provide_context=True
+        provide_context=True,
+        retries=2
     )
 
     parse_notes_tasks_task = PythonOperator(
