@@ -678,36 +678,46 @@ def overall_summary_callable(ti=None, **context):
         namespace_md = ti.xcom_pull(task_ids="compile_namespace_report") or "No namespace report generated."
 
         prompt = (
-            "You are the SRE Mediamelon agent.\n\n"
-            "Your task: Generate a complete overall summary for today's SRE report, "
-            "followed by a comparative summary analyzing performance trends versus yesterday.\n\n"
-            "### Part 1: Today's Summary\n"
-            "Use the data below to provide a high-level assessment of current cluster health.\n\n"
-            "- Node CPU Report: " + (node_cpu or "") + "\n"
-            "- Node Memory Report: " + (node_memory or "") + "\n"
-            "- Node Disk Report: " + (node_disk or "") + "\n"
-            "- Pod CPU Report: " + (pod_cpu or "") + "\n"
-            "- Pod Memory Report: " + (pod_memory or "") + "\n\n"
-            "### Namespace Peak Metrics (Pod-level peaks - Tables included below)\n\n"
-            + namespace_md + "\n\n"
-            "### Part 2: Comparison Summary (Today vs Yesterday)\n"
-            "- Node CPU Comparison: " + (node_cpu_cmp or "") + "\n"
-            "- Node Memory Comparison: " + (node_mem_cmp or "") + "\n"
-            "- Node Disk Comparison: " + (node_disk_cmp or "") + "\n"
-            "- Pod CPU Comparison: " + (pod_cpu_cmp or "") + "\n"
-            "- Pod Memory Comparison: " + (pod_mem_cmp or "") + "\n\n"
-            "### Instructions:\n"
-            "1. Write two clearly separated sections:\n"
-            "   - Overall Summary (Today)\n"
-            "   - Comparison Summary (Today vs Yesterday)\n"
-            "2. Use professional tone, concise sentences, and structured paragraphs.\n"
-            "3. Highlight critical alerts, anomalies, and areas of improvement.\n"
-            "4. Summarize key positives and potential issues.\n"
-            "5. Include top 3 namespaces/pods by peak CPU and top 3 by peak Memory (use the tables above).\n"
-            "6. Keep each section to roughly 6-12 sentences.\n"
-            "7. Avoid repeating raw metrics from tables; focus on interpretation and action items.\n"
-        )
+    "Write a brief HTML-formatted email summary for the Mediamelon SRE daily report.\n\n"
+    "Begin with:\n"
+    "\"Hi Mediamelon Team,<br><br>Here is the overall summary for today's SRE report.\"<br><br>"
 
+    "### INSTRUCTIONS\n"
+    "1. The summary MUST be short (8-12 sentences total).\n"
+    "2. DO NOT repeat long tables, raw metrics, pod names, or namespace lists.\n"
+    "3. Summarize only the key trends and critical issues.\n"
+    "4. Use the following HTML highlighting:\n"
+    "   - <span style='color:red;font-weight:bold'>CRITICAL</span> for high-risk issues\n"
+    "   - <span style='color:#d17d00;font-weight:bold'>IMPORTANT</span> for notable issues\n\n"
+
+    "### EMAIL STRUCTURE\n"
+    "<h2>Node-Level Summary</h2>\n"
+    "- Summarize CPU, Memory, and Disk trends.\n"
+    "- Highlight risks using the HTML tags above.\n\n"
+
+    "<h2>Pod-Level Summary</h2>\n"
+    "- Summarize cross-namespace pod behavior.\n"
+    "- Identify high-risk pods using:\n"
+    "  <span style='color:red;font-weight:bold'>HIGH-RISK POD</span>\n"
+    "- Identify warning pods using:\n"
+    "  <span style='#d17d00;font-weight:bold'>WARNING</span>\n"
+    "- Keep this section short and general.\n\n"
+
+    "### DATA CONTEXT (DO NOT REPEAT RAW DATA IN OUTPUT — ONLY USE FOR ANALYSIS)\n"
+    f"Node CPU (short excerpt): { (node_cpu or '')[:600] }\n\n"
+    f"Node Memory (short excerpt): { (node_memory or '')[:600] }\n\n"
+    f"Node Disk (short excerpt): { (node_disk or '')[:600] }\n\n"
+    f"Pod CPU (short excerpt): { (pod_cpu or '')[:600] }\n\n"
+    f"Pod Memory (short excerpt): { (pod_memory or '')[:600] }\n\n"
+    f"Namespace Peak Metrics (short excerpt): { (namespace_md or '')[:600] }\n\n"
+
+    "### FINAL REQUIREMENTS\n"
+    "- Output MUST be valid HTML.\n"
+    "- No markdown.\n"
+    "- No code blocks.\n"
+    "- Do not include long data or tables.\n"
+
+)
         response = get_ai_response(prompt)
         try:
             ti.xcom_push(key="overall_summary", value=response)
@@ -953,7 +963,7 @@ def send_email_report_callable(ti=None, **context):
 
         # Attach the HTML summary as the email body (alternative for mail clients)
         alternative = MIMEMultipart("alternative")
-        alternative.attach(MIMEText(overall_html, "html"))
+        alternative.attach(MIMEText(overall_html, "html", "utf-8"))
         msg.attach(alternative)
 
         # Attach the PDF file
