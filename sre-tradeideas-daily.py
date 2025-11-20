@@ -104,7 +104,7 @@ def pod_restart_today(ti, **context): return generate_sre_report(ti, "pod_restar
 def mysql_health_today(ti, **context): return generate_sre_report(ti, "mysql_health_today", "MySQL health status", "last 24 hours")
 def mysql_health_yesterday(ti, **context): return generate_sre_report(ti, "mysql_health_yesterday", "MySQL health status", "yesterday")
 
-# === MicroK8s Checks ===
+# === Certificate Checks ===
 def kubernetes_version_check(ti, **context): return generate_sre_report(ti, "kubernetes_version_check", "Kubernetes version check")
 def kubernetes_eol_and_next_version(ti, **context): return generate_sre_report(ti, "kubernetes_eol_and_next_version", "Kubernetes Current Version EOL Details and Next Supported Kubernetes Version")
 
@@ -205,7 +205,7 @@ def pod_metrics_for_namespace(ns: str, period: str):
     count( kube_pod_status_phase{{namespace="{ns}", phase="Running"}} == 1 )
     Give only the plain number, nothing else.
     """
-    total_running_pods = int(re.search(r'\d+', raw_response).group()) if re.search(r'\d+', raw_response) else 0
+    total_running_pods = int(re.search(r'\d+', get_ai_response(count_prompt) or '').group() or 0)
 
     # 2. Problematic pods (Failed, Pending, Unknown) – list only bad ones
     problem_prompt = f"""
@@ -377,7 +377,7 @@ Generate a **complete overall summary** for today's SRE report, followed by a **
 - Pod Restarts: {pod_restart}
 - MySQL Health: {mysql_health}
 - LKE PVC: {lke_pvc}
-- MicroK8s Version: {kubernetes_ver}
+- Kubernetes Version: {kubernetes_ver}
 - Kubernetes EOL: {k8s_eol}
 - MicroK8s Expiry: {microk8s_exp}
 
@@ -753,7 +753,7 @@ def send_sre_email(ti, **context):
 
 # === DAG ===
 with DAG(
-    dag_id="sre-tradeideas",
+    dag_id="sre-tradeideas_daily",
     default_args=default_args,
     schedule_interval="30 5 * * *",  # 05:30 UTC = 11:00 AM IST
     catchup=False,
