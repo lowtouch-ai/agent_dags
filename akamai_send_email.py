@@ -260,131 +260,121 @@ def step_1_process_email(ti, **context):
     if not service:
         logging.error("Gmail authentication failed, aborting.")
         return "Gmail authentication failed"
-    
-    complete_email_thread = get_email_thread(service, email_data, CLOUD_ASSESS_FROM_ADDRESS)
-    image_attachments = []
-    
-    from_header = email_data["headers"].get("From", "Unknown <unknown@example.com>")
-    sender_name = "Unknown"
-    sender_email = "unknown@example.com"
-    name_email_match = re.match(r'^(.*?)\s*<(.*?@.*?)>', from_header)
-    if name_email_match:
-        sender_name = name_email_match.group(1).strip() or "Unknown"
-        sender_email = name_email_match.group(2).strip()
-    elif re.match(r'^.*?@.*?$', from_header):
-        sender_email = from_header.strip()
-        sender_name = sender_email.split('@')[0]
 
-    # Collect image attachments if any
-    if email_data.get("attachments"):
-        logging.info(f"Number of attachments: {len(email_data['attachments'])}")
-        for attachment in email_data["attachments"]:
-            if "base64_content" in attachment and attachment["base64_content"]:
-                image_attachments.append(attachment["base64_content"])
-                logging.info(f"Found base64 image attachment: {attachment['filename']}")
-    
-    # Extract attachment content (Markdown from Excel/PDF)
-    attachment_content = ""
+    # detect attachment type
+    att_type = "none"
+    for att in email_data.get("attachments", []):
+        mime = att.get("mime_type", "")
+        if "pdf" in mime:
+            att_type = "pdf"
+            break
+        elif "excel" in mime or "spreadsheet" in mime:
+            att_type = "excel"
+        elif "image" in mime:
+            att_type = "image"
+
+    ti.xcom_push(key="attachment_type", value=att_type)
+    logging.info(f"Attachment type: {att_type}")
+
+    # get thread + content
+    thread = get_email_thread(service, email_data, CLOUD_ASSESS_FROM_ADDRESS)
+    history = thread[:-1] if thread else []
+    current = thread[-1]["content"] if thread else email_data.get("content", "")
+
+    soup = BeautifulSoup(current, "html.parser")
+    current = remove_quoted_text(soup.get_text(separator=" ", strip=True))
+
+    att_content = ""
     has_valid_attachment = False
-    if email_data.get("attachments"):
-        for attachment in email_data["attachments"]:
-            if "extracted_content" in attachment and "content" in attachment["extracted_content"]:
-                attachment_content += f"\nAttachment Content (Markdown):\n{attachment['extracted_content']['content']}\n"
-                if attachment['extracted_content']['content'] and "Unsupported" not in attachment['extracted_content']['content'] and "Error" not in attachment['extracted_content']['content']:
-                    has_valid_attachment = True
+    for att in email_data.get("attachments", []):
+        extracted = att.get("extracted_content", {})
+        content = extracted.get("content")
+
+        if content and isinstance(content, str) and content.strip():
+        # Only valid excel/pdf extraction will be appended
+            att_content += f"\n{content}\n"
+            has_valid_attachment = True
     
     # Handle no attachment edge case
     if not has_valid_attachment:
-        attachment_content = "No valid Excel or PDF attachment found. Please attach the filled Excel or PDF for cloud assessment."
+        att_content = "No valid Excel or PDF attachment found."  
 
-    # Split thread into history and current content
-    if complete_email_thread:
-        conversation_history = complete_email_thread[:-1]  # All previous messages
-        current_content = complete_email_thread[-1]["content"] if len(complete_email_thread) > 0 else email_data.get("content", "").strip()  # Current message
-    else:
-        conversation_history = []  # No previous conversation
-        current_content = email_data.get("content", "").strip()
-    
-    # Log conversation history
-    logging.info(f"Complete conversation history contains {len(conversation_history)} messages")
-    logging.info(f"Current content: {current_content}...")
-    for i, msg in enumerate(conversation_history[:3]):  # Log first 3 for brevity
-        logging.info(f"History message {i+1}: Role={msg['role']}, Content={msg['content'][:100]}...")
-    
-    # Clean current content
-    if current_content:
-        soup = BeautifulSoup(current_content, "html.parser")
-        current_content = soup.get_text(separator=" ", strip=True)
-        current_content = remove_quoted_text(current_content)
-    
-    # Append attachment content to current content
-    current_content += f"\n{attachment_content}"
+    current += f"\n{att_content}"
 
-    logging.info(f"Final current content: {current_content}")
+    prompt = f"Assess the cloud details:\n{current}"
 
-    prompt = f"""Assess the cloud details from the following Markdown table and provide a detailed assessment report:
-                {current_content}
-                Note: If no valid attachment is provided, inform the user to attach one. Do not Include any contact information at the bottom of the report as this is an email report"""
-
-    logging.info(f"Final prompt to AI: {prompt}...")
-    
-    response = get_ai_response(prompt, images=image_attachments if image_attachments else None, conversation_history=conversation_history)
-
-    ti.xcom_push(key="step_1_prompt", value=prompt)
-    ti.xcom_push(key="step_1_response", value=response)
-    ti.xcom_push(key="conversation_history", value=conversation_history + [{"role": "user", "content": prompt}, {"role": "assistant", "content": response}])
-    ti.xcom_push(key="email_content", value=current_content)
-    ti.xcom_push(key="complete_email_thread", value=complete_email_thread)
-    ti.xcom_push(key="sender_name", value=sender_name)
+    response = get_ai_response(prompt, conversation_history=history)
     
     logging.info(f"Step 1 completed: {response[:200]}...")
     return response
 
-def step_2_compose_email(ti, **context):
-    """Step 2: Compose professional HTML email based on assessment."""
-    step_1_response = ti.xcom_pull(key="step_1_response")
-    sender_name = ti.xcom_pull(key="sender_name") or "Valued Client"
-    content_appended = step_1_response if step_1_response else "No assessment generated due to error."
-    
+# ----------------------------------------------------------
+# BRANCH SELECTOR
+# ----------------------------------------------------------
+def route_based_on_attachment(ti, **kwargs):
+    att = ti.xcom_pull(key="attachment_type")
+    if att == "pdf":
+        return "step_pdf_process"
+    if att == "excel":
+        return "step_excel_process"
+    if att == "image":
+        return "step_image_process"
+    return "step_excel_process"
+
+# ----------------------------------------------------------
+# PDF Processor
+# ----------------------------------------------------------
+def step_pdf_process(ti, **context):
+    content = ti.xcom_pull(key="email_content")
+    hist = ti.xcom_pull(key="conversation_history") or []
+
     prompt = f"""
-        Generate a professional, human-like business email in American English, written in the tone of a senior AI Engineer at lowtouch.ai, to notify the client, addressed by name '{sender_name}', about the cloud assessment results.
+        Client submitted a PDF. Produce a detailed **Akamai Cloud Comparison Report**.
+        Input:{content}
+        Return clean HTML (without <html> wrapper).
+    """
+    response = get_ai_response(prompt, conversation_history=hist)
+    ti.xcom_push(key="markdown_email_content", value=response)
+    return response
 
-        Content: {content_appended}
+# ----------------------------------------------------------
+# Excel Processor
+# ----------------------------------------------------------
+def step_excel_process(ti, **context):
+    sender = ti.xcom_pull(key="sender_name") or "Client"
+    step1 = ti.xcom_pull(key="step_1_response")
+    hist = ti.xcom_pull(key="conversation_history")
 
-        Follow this exact structure for the email body, using clean, valid HTML without any additional wrappers like <html> or <body>. Do not omit any sections or elements listed below. Use natural, professional wording but adhere strictly to the format. Extract all details from the provided Content; use 'N/A' if a value is not available. Infuse insights where appropriate to make the summary analytical and actionable, highlighting implications for the client's operations, potential risks, opportunities for optimization, and alignments with Akamai's cloud solutions or lowtouch.ai's agentic AI capabilities for automation.
+    prompt = f"""
+        Generate a professional Cloud Assessment email addressed to {sender}.
+        Assessment content:
+        {step1}
 
-        1. Greeting: <p>Dear {sender_name},</p>
+        Return ONLY HTML body, no <html> tag.
+    """
 
-        2. Opening paragraph: <p>We have received your filled details and completed the cloud assessment for Akamai. This assessment analyzes your current setup to identify strengths, areas for improvement, and strategic opportunities. Here is a insightful summary to guide next steps:</p>
+    response = get_ai_response(prompt, conversation_history=hist)
+    ti.xcom_push(key="markdown_email_content", value=response)
+    return response
 
-        3. Detailed Assessment mentioned in `Sample Cloud Assessment Report`: <p><strong>Assessment Report</strong></p> followed by the full assessment from Content.
-        4. Signature: <p>Best regards<br><br> </p>
-        Ensure the email is natural, professional, and concise. Avoid rigid or formulaic language to maintain a human-like tone. Do not use placeholders; replace with actual extracted values. Return only the HTML content as specified, without <!DOCTYPE>, <html>, or <body> tags.
+# ----------------------------------------------------------
+# Image Processor
+# ----------------------------------------------------------
+def step_image_process(ti, **context):
+    hist = ti.xcom_pull(key="conversation_history")
+    email_data = context['dag_run'].conf.get("email_data")
 
-        Return only the HTML body of the email.
-        """
-    
-    # Pass previous step's response as history
-    history = [{"role": "assistant", "content": content_appended}] if content_appended else []
-    response = get_ai_response(prompt, conversation_history=history)
-    # Clean the HTML response
-    cleaned_response = re.sub(r'```html\n|```', '', response).strip()
-    
-    if not cleaned_response.strip().startswith('<!DOCTYPE') and not cleaned_response.strip().startswith('<html'):
-        if not cleaned_response.strip().startswith('<'):
-            cleaned_response = f"<html><body>{cleaned_response}</body></html>"
-    
-    # Append to history
-    full_history = ti.xcom_pull(key="conversation_history") or []
-    full_history.append({"role": "user", "content": prompt})
-    full_history.append({"role": "assistant", "content": response})
-    ti.xcom_push(key="email_content", value=content_appended)
-    ti.xcom_push(key="step_2_prompt", value=prompt)
-    ti.xcom_push(key="step_2_response", value=response)
-    ti.xcom_push(key="conversation_history", value=full_history)
-    ti.xcom_push(key="markdown_email_content", value=cleaned_response)
-    
-    logging.info(f"Step 2 completed: {response[:200]}...")
+    images = []
+    for att in email_data.get("attachments", []):
+        if "image" in att.get("mime_type", ""):
+            images.append(att["base64_content"])
+
+    prompt = """
+        Extract cost and cloud info from images, compare with Akamai, return HTML only.
+    """
+
+    response = get_ai_response(prompt, images=images, conversation_history=hist)
+    ti.xcom_push(key="markdown_email_content", value=response)
     return response
 
 def step_3_convert_to_html(ti, **context):
@@ -499,14 +489,38 @@ with DAG(
         python_callable=step_1_process_email,
         provide_context=True
     )
-    
-    task_2 = PythonOperator(
-        task_id="step_2_compose_email",
-        python_callable=step_2_compose_email,
+
+    branch = BranchPythonOperator(
+        task_id="branch_on_attachment",
+        python_callable=route_based_on_attachment,
         provide_context=True
     )
-    
-    task_3 = PythonOperator(
+
+    pdf_task = PythonOperator(
+        task_id="step_pdf_process",
+        python_callable=step_pdf_process,
+        provide_context=True
+    )
+
+    excel_task = PythonOperator(
+        task_id="step_excel_process",
+        python_callable=step_excel_process,
+        provide_context=True
+    )
+
+    image_task = PythonOperator(
+        task_id="step_image_process",
+        python_callable=step_image_process,
+        provide_context=True
+    )
+
+    join = PythonOperator(
+        task_id="join_after_branch",
+        python_callable=lambda: logging.info("Branch complete"),
+        trigger_rule=TriggerRule.ONE_SUCCESS
+    )
+
+    html_task = PythonOperator(
         task_id="step_3_convert_to_html",
         python_callable=step_3_convert_to_html,
         provide_context=True
@@ -517,5 +531,6 @@ with DAG(
         python_callable=step_4_send_email,
         provide_context=True
     )
-    
-    task_1 >> task_2 >> task_3 >> task_4
+
+    # DAG FLOW
+    task_1 >> branch >> [pdf_task, excel_task, image_task] >> join >> html_task >> task_4
