@@ -2684,7 +2684,7 @@ def compose_engagement_summary_email(ti, **context):
         email_content += f"""
         <h3>Recommended Call Strategy</h3>
         <div class="section">
-            <p>{call_strategy}</p>l
+            <p>{call_strategy}</p>
         </div>
         """
 
