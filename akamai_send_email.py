@@ -35,55 +35,17 @@ ATTACHMENT_DIR = "/appz/data/attachments/"
 OLLAMA_HOST = "http://agentomatic:8000/"
 
 def authenticate_gmail():
-    """
-    Authenticate Gmail API and verify the correct email account is used.
-    Accepts either raw JSON or base64-encoded JSON stored in the Airflow Variable.
-    Returns the Gmail service object or None on failure.
-    """
     try:
-        raw_val = Variable.get("AKAMAI_CLOUD_ASSESS_GMAIL_CREDENTIALS", default_var=None)
-        if not raw_val:
-            logging.error("Airflow Variable 'AKAMAI_CLOUD_ASSESS_GMAIL_CREDENTIALS' is missing or empty.")
-            return None
-
-        creds_json = None
-
-        # If variable looks like base64, try decode first
-        try:
-            # detect likely base64 by attempting decode and json.loads
-            import base64 as _base64
-            decoded = _base64.b64decode(raw_val).decode("utf-8")
-            creds_json = json.loads(decoded)
-            logging.info("Loaded Gmail credentials from base64-encoded JSON variable.")
-        except Exception:
-            # fallback: try raw JSON
-            try:
-                creds_json = json.loads(raw_val)
-                logging.info("Loaded Gmail credentials from raw JSON variable.")
-            except Exception as e:
-                logging.error("AKAMAI_CLOUD_ASSESS_GMAIL_CREDENTIALS is not valid JSON nor base64-encoded JSON.")
-                logging.debug("Raw variable content (truncated): %s", (raw_val[:200] + '...') if raw_val else "")
-                return None
-
-        # Build credentials object
-        creds = Credentials.from_authorized_user_info(creds_json)
+        creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
         service = build("gmail", "v1", credentials=creds)
-
         profile = service.users().getProfile(userId="me").execute()
         logged_in_email = profile.get("emailAddress", "")
-        expected = Variable.get("AKAMAI_CLOUD_ASSESS_FROM_ADDRESS", default_var="").lower()
-        if expected and logged_in_email.lower() != expected:
-            logging.error(
-                "Wrong Gmail account! Expected %s, but got %s",
-                expected, logged_in_email
-            )
-            return None
-
-        logging.info("Authenticated Gmail Account: %s", logged_in_email)
+        if logged_in_email.lower() != CLOUD_ASSESS_FROM_ADDRESS.lower():
+            raise ValueError(f"Wrong Gmail account! Expected {CLOUD_ASSESS_FROM_ADDRESS}, but got {logged_in_email}")
+        logging.info(f"Authenticated Gmail account: {logged_in_email}")
         return service
-
     except Exception as e:
-        logging.exception("Failed to authenticate Gmail: %s", str(e))
+        logging.error(f"Failed to authenticate Gmail: {str(e)}")
         return None
 
 def decode_email_payload(msg):
@@ -387,6 +349,7 @@ def step_2_compose_email(ti, **context):
     step_1_response = ti.xcom_pull(key="step_1_response")
     sender_name = ti.xcom_pull(key="sender_name") or "Valued Client"
     email_content = ti.xcom_pull(key="email_content") or ""
+    content_appended = step_1_response if step_1_response else "No assessment generated due to error."
     attachments = context['dag_run'].conf.get("email_data", {}).get("attachments", [])
 
     # --------------------------
@@ -436,15 +399,14 @@ def step_2_compose_email(ti, **context):
             billing screenshots, or cloud data.
 
             Tasks:
-            1. Perform OCR on the provided images.
-            2. Extract all identifiable:
+            1. Extract all identifiable:
                - Costs
                - Resource usage
                - Cloud provider info
                - SKUs or VM types
-            3. Compare against Akamai cloud service pricing.
-            4. Provide a detailed Akamai cost comparison summary.
-            5. Highlight savings, risks, and mapping to Akamai products.
+            2. Compare against Akamai cloud service pricing.
+            3. Provide a detailed Akamai cost comparison summary.
+            4. Highlight savings, risks, and mapping to Akamai products.
 
             The images are provided as base64 inside the input.
 
@@ -461,40 +423,38 @@ def step_2_compose_email(ti, **context):
             ### Content Extracted from Excel:
             {step_1_response}
 
-            ### Required output:
-            1. Greeting: <p>Dear {sender_name},</p>
-            2. Opening paragraph:
-               <p>We have received your filled details and completed the cloud assessment for Akamai...</p>
-            3. <p><strong>Assessment Report</strong></p>  
-               Insert the full analysis from Excel (step_1_response).
-            4. Signature:
-               <p>Best regards<br><br></p>
+        1. Greeting: <p>Dear {sender_name},</p>
 
-            Requirements:
-            - Return **only HTML body**, no <html>, no <body>.
-            - Use a natural, senior-engineer tone.
-            - Do NOT add contact details.
-            - Fill missing values with “N/A”.
+        2. Opening paragraph: <p>We have received your filled details and completed the cloud assessment for Akamai. This assessment analyzes your current setup to identify strengths, areas for improvement, and strategic opportunities. Here is a insightful summary to guide next steps:</p>
+
+        3. Detailed Assessment mentioned in `Sample Cloud Assessment Report`: <p><strong>Assessment Report</strong></p> followed by the full assessment from Content.
+        4. Signature: <p>Best regards<br><br> </p>
+        Ensure the email is natural, professional, and concise. Avoid rigid or formulaic language to maintain a human-like tone. Do not use placeholders; replace with actual extracted values. Return only the HTML content as specified, without <!DOCTYPE>, <html>, or <body> tags.
+
+        Return only the HTML body of the email.
         """
-
-    history = [{"role": "assistant", "content": step_1_response}] if step_1_response else []
+    
+    # Pass previous step's response as history
+    history = [{"role": "assistant", "content": content_appended}] if content_appended else []
     response = get_ai_response(prompt, conversation_history=history)
-
+    # Clean the HTML response
     cleaned_response = re.sub(r'```html\n|```', '', response).strip()
-    if not cleaned_response.strip().startswith('<'):
-        cleaned_response = f"<html><body>{cleaned_response}</body></html>"
-
-    # Save outputs
+    
+    if not cleaned_response.strip().startswith('<!DOCTYPE') and not cleaned_response.strip().startswith('<html'):
+        if not cleaned_response.strip().startswith('<'):
+            cleaned_response = f"<html><body>{cleaned_response}</body></html>"
+    
+    # Append to history
     full_history = ti.xcom_pull(key="conversation_history") or []
     full_history.append({"role": "user", "content": prompt})
     full_history.append({"role": "assistant", "content": response})
-
+    ti.xcom_push(key="email_content", value=content_appended)
     ti.xcom_push(key="step_2_prompt", value=prompt)
     ti.xcom_push(key="step_2_response", value=response)
     ti.xcom_push(key="conversation_history", value=full_history)
     ti.xcom_push(key="markdown_email_content", value=cleaned_response)
 
-    logging.info(f"Step-2 completed for attachment type '{attachment_type}'.")
+    logging.info(f"Step 2 completed for attachment type '{attachment_type}'.")
     return response
 
 def step_3_convert_to_html(ti, **context):
