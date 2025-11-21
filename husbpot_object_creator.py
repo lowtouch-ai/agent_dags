@@ -2853,10 +2853,6 @@ RETURN ONLY CLEAN, VALID JSON."""
             logging.warning(f"update_tasks failed → retrying ({current_try}/{max_tries})")
             raise
 
-import json
-import logging
-from bs4 import BeautifulSoup
-
 def create_associations(ti, **context):
     """Create associations between HubSpot entities with full retry support"""
     # === Retry Context ===
