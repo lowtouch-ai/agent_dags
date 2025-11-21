@@ -242,6 +242,8 @@ Analyze the content and determine:
         - Contact person name is also a trigger for company search.
         - This includes formal company names, business names, or organizational references
         - User Mentions the contact name or deal name of a exiting company. 
+        - Do not consider the company `lowtouch.ai`.
+        - Strictly ignore the previous company of the contacts and consider the current company from contacts email id.
 
     - DEALS (search_deals):
         - Set to TRUE ONLY if ANY of these conditions are met:
@@ -585,10 +587,20 @@ def determine_owner(ti, **context):
     """Determine deal owner and task owners from conversation"""
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
+    email_data = ti.xcom_pull(key="email_data", default={})
+    headers      = email_data.get("headers", {})
+    sender_raw   = headers.get("From", "")                # e.g. "John Doe <john@acme.com>"
+    # Parse a clean name and e-mail (fallback to raw string if parsing fails)
+    import email.utils
+    sender_tuple = email.utils.parseaddr(sender_raw)      # (realname, email)
+    sender_name  = sender_tuple[0].strip() or sender_raw
+    sender_email = sender_tuple[1].strip() or sender_raw
     
 
     prompt = f"""You are a HubSpot API assistant. Analyze this conversation to identify deal owner and task owners.
-
+**SENDER**  
+Name : {sender_name}  
+Email: {sender_email}
 LATEST USER MESSAGE:
 {latest_message}
 
@@ -610,8 +622,11 @@ Steps:
     - If deal owner IS specified and IS found in available owners list:
         - Use the matched owner (with correct casing from the available owners list)
         - Message: "Deal owner specified as [matched_owner_name]"
+Important rule for deal owner - Never take the task owner as deal owner, if the owner is not specified.
 5. Parse and validate each task owner against the available owners list:
     - Identify all tasks and their respective owners from the email content.
+    - Identify if the task owner is the email sender himself by checking phrases like : I'll send, i will get back etc.
+    - Identify multiple tasks from one email by checking for bullet points, numbered lists, or separate paragraphs indicating distinct action items. Also check for conjunctions like "and" or "also" that may link multiple tasks in a single sentence.
     - For each task owner:
         - If task owner is NOT specified for a task:
             - Default to: "Kishore"
@@ -621,7 +636,8 @@ Steps:
             - Message: "The specified task owner '[parsed_owner]' for task [task_index] is not valid, so assigning to default owner Kishore."
         - If task owner IS specified and IS found in available owners list:
             - Use the matched owner (with correct casing from the available owners list)
-            - Message: "Task owner for task [task_index] specified as [matched_owner_name]"
+            - Message: "Task owner for task [task_index] specified as [matched_owner_name]".
+Important rule for task owner - Sender should be the task owner of the tasks where the phrase is I will do or I'll sned etc. For all others if the owner is not specified it should be kishore.
 6. Parse and validate each contact owner against the available owners list:
     - If the deal details are not given and contact owner is also not specified:
         - Default to: "Kishore"
@@ -630,7 +646,12 @@ Steps:
         - Default to: "Kishore"
         - Message: "The specified contact owner '[parsed_owner]' is not valid, so assigning to default owner Kishore."
     - If the deal details are given then contact owner is same as deal owner.
-7. Return a list of task owners with their validation details.
+
+7. Important Rule for deciding owners for task deal and contact.
+- Never use the task owner as deal owner or contact owner. 
+- Parse the specified deal owner from latest_message. If not specified use default one rather than using task owners.
+- COntact owner is always the deal owner.
+8. Return a list of task owners with their validation details.
 
 Return this exact JSON structure:
 {{
@@ -1228,6 +1249,8 @@ LATEST USER MESSAGE:
      - Generic terms: "the client", "vendor", "partner" (unless part of a proper name).
      - Email domains alone (e.g., `@gmail.com`) unless tied to a clear company.
    - Extract **one company per distinct entity**.
+   - Never consider a company name which the contact has already left or the previous company of the contact.
+   - Never consider `lowtouch.ai` as a client company.
 
 2. **For each extracted company name**:
    - **Simulate a HubSpot `search_companies` API call** using 90 percent match on `name`.
@@ -1503,6 +1526,10 @@ For meetings (only if meeting parsing is enabled):
 For tasks (only if task parsing is enabled):
 - Identify all tasks and their respective owners from the email content.
 - Always check for headings mext steps or followup steps. All the next steps, followup steps specified in email content are considered as tasks.
+- If headings are not given check for following up phrases or action items in the email content. 
+- Identify multiple tasks from one email by checking for bullet points, numbered lists, or separate paragraphs indicating distinct action items. Also check for conjunctions like "and" or "also" that may link multiple tasks in a single sentence.
+- check the due date of the task from email content even if the tasks are given as conjunctions.
+- If the user is mentioning task for himself for example: I'll send the documents, I'll review the proposal, I will get back to you, I will share the details, I will check and revert, I will look into it etc., assign the task to the email sender.
 - For each task:
   - Match the task to the corresponding owner in the provided Task Owners list by task_index (1-based indexing).
   - If a specific task owner is mentioned in the email and matches an entry in the Task Owners list, use that owner's name and ID.
@@ -2241,7 +2268,8 @@ def compose_confirmation_email(ti, **context):
 
     if has_deals_or_tasks_or_contacts:
         has_content_sections = True
-        email_content += "<h3>Owner Assignment Details</h3>"
+        
+        
         
         # Contact Owner
         if contact_results.get("total", 0) > 0 or len(new_contacts) > 0:
@@ -2251,6 +2279,7 @@ def compose_confirmation_email(ti, **context):
             contact_msg_lower = contact_owner_msg.lower()
             
             if "no contact owner specified" in contact_msg_lower:
+                email_content += "<h3>Owner Assignment Details</h3>"
                 email_content += f"""
                 <h4 style='color: #2c5aa0;'>Contact Owner Assignment:</h4>
                 <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
@@ -2259,6 +2288,7 @@ def compose_confirmation_email(ti, **context):
                 </p>
                 """
             elif "not valid" in contact_msg_lower:
+                email_content += "<h3>Owner Assignment Details</h3>"
                 email_content += f"""
                 <h4 style='color: #2c5aa0;'>Contact Owner Assignment:</h4>
                 <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
@@ -2275,6 +2305,7 @@ def compose_confirmation_email(ti, **context):
             deal_msg_lower = deal_owner_msg.lower()
             
             if "no deal owner specified" in deal_msg_lower:
+                email_content += "<h3>Owner Assignment Details</h3>"
                 email_content += f"""
                 <h4 style='color: #2c5aa0;'>Deal Owner Assignment:</h4>
                 <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
@@ -2283,6 +2314,7 @@ def compose_confirmation_email(ti, **context):
                 </p>
                 """
             elif "not valid" in deal_msg_lower:
+                email_content += "<h3>Owner Assignment Details</h3>"
                 email_content += f"""
                 <h4 style='color: #2c5aa0;'>Deal Owner Assignment:</h4>
                 <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
@@ -2309,6 +2341,7 @@ def compose_confirmation_email(ti, **context):
                 task_msg_lower = task_owner_msg.lower()
                 
                 if "no task owner specified" in task_msg_lower:
+                    email_content += "<h3>Owner Assignment Details</h3>"
                     email_content += f"""
                     <h4 style='color: #2c5aa0;'>Task Owner Assignment:</h4>
                     <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
@@ -2318,6 +2351,7 @@ def compose_confirmation_email(ti, **context):
                     </p>
                     """
                 elif "not valid" in task_msg_lower:
+                    email_content += "<h3>Owner Assignment Details</h3>"
                     email_content += f"""
                     <h4 style='color: #2c5aa0;'>Task Owner Assignment:</h4>
                     <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
@@ -2331,7 +2365,7 @@ def compose_confirmation_email(ti, **context):
     email_content += """
         <div class="closing">
             <p>Please confirm whether this summary looks correct before I proceed.</p>
-            <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br>Lowtouch.ai</p>
+            <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">Lowtouch.ai</a></p>
         </div>
     </body>
     </html>
@@ -2439,7 +2473,7 @@ def compose_engagement_summary_email(ti, **context):
         <strong>Error:</strong> {engagement_summary.get('error')}
     </div>
     <p>I apologize, but I encountered an issue retrieving the engagement summary. Please check if the contact/deal information is correct and try again.</p>
-    <p>Best regards,<br>HubSpot Agent</p>
+    <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">Lowtouch.ai</a></p>
 </body>
 </html>"""
         ti.xcom_push(key="engagement_summary_email", value=error_email)
@@ -2660,7 +2694,7 @@ def compose_engagement_summary_email(ti, **context):
         <p>This summary provides a comprehensive overview to help you prepare for your upcoming engagement.</p>
         <p>If you need any clarifications or additional information, please don't hesitate to ask.</p>
         <br>
-        <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br>Lowtouch.ai</p>
+        <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">Lowtouch.ai</a></p>
     </div>
 </body>
 </html>"""
