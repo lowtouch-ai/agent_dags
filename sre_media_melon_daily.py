@@ -598,7 +598,7 @@ def pod_memory_compare_callable(ti=None, **context):
 # Final compile SRE report -> pushes sre_full_report
 def compile_sre_report_callable(ti=None, **context):
     try:
-        logger.info("Compiling final SRE markdown report for Mediamelon")
+        logger.info("Compiling final SRE daily report for Mediamelon")
         node_cpu = ti.xcom_pull(key="node_cpu_today") or "No CPU data"
         node_memory = ti.xcom_pull(key="node_memory_today") or "No memory data"
         node_disk = ti.xcom_pull(key="node_disk_today") or "No disk data"
@@ -644,7 +644,7 @@ def compile_sre_report_callable(ti=None, **context):
             "---\n\n"
             f"{pod_mem_cmp}\n\n"
             "---\n\n"
-            "## 10. Overall Summary\n\n"
+            "## 9. Overall Summary\n\n"
             "(See consolidated summary)\n\n"
             "---\n"
         )
@@ -747,7 +747,7 @@ def preprocess_markdown(markdown_text):
 
     for line in lines:
         stripped = line.rstrip()
-        if "|" in stripped and stripped.count("|") >= 2 and not stripped.startswith("```"):
+        if "|" in stripped and stripped.count("|") >= 2 and not stripped.startswith(" "):
             if not in_table and processed and processed[-1].strip():
                 processed.append("")
             in_table = True
@@ -1048,7 +1048,7 @@ def generate_pdf_report_callable(ti=None, **context):
             line = lines[i].rstrip()
 
             # Fenced code block handling
-            if line.strip().startswith("```"):
+            if line.strip().startswith(" "):
                 if not in_code_block:
                     in_code_block = True
                     code_block_lines = []
