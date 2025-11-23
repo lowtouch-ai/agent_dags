@@ -1,6 +1,7 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.decorators import task
+from airflow.decorators import task, task_group
+from typing import List
 from datetime import datetime, timedelta
 import logging
 from ollama import Client
@@ -36,6 +37,7 @@ RECEIVER_EMAIL = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_TO_ADDRESS", def
 
 OLLAMA_HOST = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_OLLAMA_HOST", "http://agentomatic:8000/")
 
+POD_BATCH_SIZE = 6
 YESTERDAY = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%d')
 TODAY = datetime.utcnow().strftime('%Y-%m-%d')
 
@@ -246,42 +248,103 @@ def pod_metrics_for_namespace(ns: str, period: str):
     }
 
 @task
-def compile_pod_sections_today(namespace_results: list, **context):
-    ti = context['ti']
-    logging.info("compile_pod_sections_today received %d items", len(namespace_results))
-    for i, r in enumerate(namespace_results[:5]):
-        logging.info("Sample item %d: %s", i, r)
-    sections = []
+def get_real_pod_counts(namespaces: list) -> dict:
+    """Run the exact same query you already have — but only once per namespace"""
+    result = {}
+    for ns in namespaces:
+        prompt = f"""
+        Execute this exact Prometheus query and return ONLY the number (nothing else):
+        count(kube_pod_status_phase{{namespace="{ns}", phase="Running"}} == 1)
+        """
+        response = get_ai_response(prompt).strip()
+        import re
+        num = re.search(r'\d+', response)
+        result[ns] = int(num.group()) if num else 0
+    return result
 
-    # Load namespaces in correct order
-    raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var="[]")
+@task
+def compile_pod_sections_today(namespace_results: list, real_counts: dict, **context):
+    ti = context['ti']
+    logging.info("compile_pod_sections_today: merging %d batches", len(namespace_results))
+
+    # Load ordered namespaces
+    raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
     try:
         namespaces = json.loads(raw)
-    except Exception:
+    except:
         namespaces = [ns.strip() for ns in raw.split(",") if ns.strip()]
 
-    today_map = {
-        r["namespace"]: r
-        for r in namespace_results
-        if r and r["period"] == "last 24 hours"
-    }
+    # Merge all batches
+    merged = {}
+    real_problematic = {}  # We'll fall back to batched value if needed
 
+    for batch in namespace_results:
+        if not batch or not isinstance(batch, dict):
+            continue
+        key = (batch["namespace"], batch["period"])
+        if key not in merged:
+            merged[key] = {"cpu": [], "memory": []}
+
+        # Save problematic pods info (from any batch — usually consistent)
+        if batch["namespace"] not in real_problematic:
+            real_problematic[batch["namespace"]] = batch.get("problematic_pods", "No problematic pods")
+
+        # Extract clean table rows only
+        def is_valid_row(line):
+            line = line.strip()
+            if not line.startswith("|") or line.count("|") < 4:
+                return False
+            parts = [p.strip() for p in line.split("|")[1:-1]]
+            if len(parts) < 3 or parts[0] in ["pod", "Pod", "Pod Name", "", "Namespace"]:
+                return False
+            return any(c.isdigit() or c == "." for c in "".join(parts[1:]))
+
+        for line in batch["cpu"].splitlines():
+            if is_valid_row(line):
+                merged[key]["cpu"].append(line.strip())
+
+        for line in batch["memory"].splitlines():
+            if is_valid_row(line):
+                merged[key]["memory"].append(line.strip())
+
+    # Build final markdown
+    sections = []
     for ns in namespaces:
-        if ns not in today_map:
+        key_today = (ns, "last 24 hours")
+        if key_today not in merged:
             continue
 
-        data = today_map[ns]
+        data = merged[key_today]
+        actual_count = real_counts.get(ns, "unknown")  # ← This will be 9 and 24
+        problematic = real_problematic.get(ns, "No problematic pods")
 
-        sections.append(f"### Namespace: `{ns}`\n")
-        sections.append(
-            f"**Running Pods**: {data['total_running_pods']} | "
-            f"**Problematic Pods**: {data['problematic_pods']}\n"
-        )
-        sections.append("#### CPU\n" + data["cpu"] + "\n")
-        sections.append("#### Memory\n" + data["memory"] + "\n")
-        sections.append("---\n")
+        sections.append(f"### Namespace: `{ns}`")
+        sections.append(f"**Running Pods**: {actual_count} | **Problematic Pods**: {problematic}\n")
 
-    result = "\n".join(sections)
+        # CPU Table
+        if data["cpu"]:
+            sections.append("#### CPU Utilization (Last 24h)")
+            sections.append("| Pod | Avg (cores) | Max (cores) | Current (cores) |")
+            sections.append("|-----|-------------|-------------|-----------------|")
+            def safe_float(s):
+                try: return float(s)
+                except: return 0.0
+            sorted_cpu = sorted(data["cpu"], key=lambda x: safe_float(x.split("|")[2].strip()), reverse=True)
+            sections.extend(sorted_cpu)
+            sections.append("")
+
+        # Memory Table
+        if data["memory"]:
+            sections.append("#### Memory Utilization (Last 24h)")
+            sections.append("| Pod | Avg (GB) | Max (GB) | Current (GB) |")
+            sections.append("|-----|----------|----------|-------------|")
+            sorted_mem = sorted(data["memory"], key=lambda x: safe_float(x.split("|")[2].strip()), reverse=True)
+            sections.extend(sorted_mem)
+            sections.append("")
+
+        sections.append("---")
+
+    result = "\n".join(sections).strip()
     ti.xcom_push(key="pod_today_markdown", value=result)
     return result
 
@@ -290,53 +353,64 @@ def compile_pod_sections_today(namespace_results: list, **context):
 @task
 def compile_pod_comparison(namespace_results: list, **context):
     ti = context['ti']
-    logging.info("compile_pod_sections_today received %d items", len(namespace_results))
-    for i, r in enumerate(namespace_results[:5]):
-        logging.info("Sample item %d: %s", i, r)
+
+    # Group by (namespace, period)
+    merged = {}
+    for batch in namespace_results:
+        if not batch: continue
+        key = (batch["namespace"], batch["period"])
+        if key not in merged:
+            merged[key] = {**batch, "cpu_lines": [], "mem_lines": []}
+        # Extract only table rows
+        for line in batch["cpu"].split('\n'):
+            if line.strip().startswith('|') and '|' in line and not line.startswith('| pod |') and not line.startswith('|---'):
+                merged[key]["cpu_lines"].append(line.strip())
+        for line in batch["memory"].split('\n'):
+            if line.strip().startswith('|') and '|' in line and not line.startswith('| pod |') and not line.startswith('|---'):
+                merged[key]["mem_lines"].append(line.strip())
+
+    # Build comparison per namespace
     sections = []
-
-    # Maps
-    today_map = {r["namespace"]: r for r in namespace_results if r and r["period"] == "last 24 hours"}
-    yesterday_map = {r["namespace"]: r for r in namespace_results if r and r["period"] == "yesterday"}
-
-    # Load namespace order from Airflow variable
     raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var="[]")
     try:
         namespaces = json.loads(raw)
-    except Exception:
+    except:
         namespaces = [ns.strip() for ns in raw.split(",") if ns.strip()]
 
-    # Only namespaces that exist in both days
-    ordered_namespaces = [ns for ns in namespaces if ns in today_map and ns in yesterday_map]
-
-    def compare_ns(ns):
-        today = today_map.get(ns)
-        yesterday = yesterday_map.get(ns)
+    for ns in namespaces:
+        today = merged.get((ns, "last 24 hours"))
+        yesterday = merged.get((ns, "yesterday"))
         if not today or not yesterday:
-            return None
-            
+            continue
+
         prompt = f"""
 You are the SRE TradeIdeas agent.
-**Today's Data (P1):** {today["cpu"]} {today["memory"]}
-**Yesterday's Data (P2):** {yesterday["cpu"]} {yesterday["memory"]}
-**Output exactly this:**
-### {ns} Pod CPU & Memory Comparison (Period1: [period1_date], Period2: [period2_date])
-#### CPU
-| Pod Name | Avg CPU (cores) - P1 | Avg CPU (cores) - P2 | Avg Diff | Max CPU (cores) - P1 | Max CPU (cores) - P2 | Max Diff |
-|----------|----------------------|----------------------|----------|----------------------|----------------------|----------|
-#### Memory
-| Pod Name | Avg Memory (GB) - P1 | Avg Memory (GB) - P2 | Avg Diff (GB) | Max Memory (GB) - P1 | Max Memory (GB) - P2 | Max Diff (GB) |
-|----------|----------------------|----------------------|---------------|----------------------|----------------------|----------------|
-### Summary
-List pods with |max_cpu_diff| > 0.8 cores or |max_mem_diff| > 1.0 GB, else “No significant changes.”
-"""
-        return get_ai_response(prompt)
+Generate a clean comparison between today and yesterday for namespace `{ns}`.
 
-    # Loop only in desired order
-    for ns in ordered_namespaces:
-        comp = compare_ns(ns)
-        if comp:
-            sections.append(comp)
+Today's CPU rows:
+{"\n".join(today["cpu_lines"])}
+
+Today's Memory rows:
+{"\n".join(today["mem_lines"])}
+
+Yesterday's CPU rows:
+{"\n".join(yesterday["cpu_lines"])}
+
+Yesterday's Memory rows:
+{"\n".join(yesterday["mem_lines"])}
+
+Return exactly this format:
+### {ns} — Pod CPU & Memory Comparison
+#### CPU Changes
+| Pod | Today Avg | Yest Avg | Diff | Today Max | Yest Max | Max Diff |
+...
+#### Memory Changes
+| Pod | Today Avg (GB) | Yest Avg | Diff | ...
+### Summary
+Highlight pods with >0.5 core or >1GB change.
+"""
+        comparison = get_ai_response(prompt)
+        sections.append(comparison)
 
     result = "\n\n---\n\n".join(sections)
     ti.xcom_push(key="pod_comparison_markdown", value=result)
@@ -790,61 +864,166 @@ with DAG(
     t22 = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html, provide_context=True)
     t23 = PythonOperator(task_id="send_sre_email", python_callable=send_sre_email, provide_context=True)
     
-    # === POD DYNAMIC FLOW (fixed) =================================================
-    pod_namespaces_var = Variable.get(
-        "ltai.v1.sretradeideas.pod.namespaces",
-        default_var='["alpha-prod","tipreprod-prod"]'
-    )
+    # === POD DYNAMIC FLOW - BATCHED (6 pods max per AI call) ===
     try:
-        namespaces_list = json.loads(pod_namespaces_var)
-        if not isinstance(namespaces_list, list):
-            raise ValueError("Parsed value is not a list")
-                  
-        logging.info(
-            "Successfully loaded pod namespaces from Airflow Variable 'ltai.v1.sretradeideas.pod.namespaces': %s", namespaces_list)
-    
+        namespaces_list = json.loads(
+            Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
+        )
     except Exception as e:
         logging.warning(
             "Failed to parse Airflow Variable 'ltai.v1.sretradeideas.pod.namespaces' (value was: %s). "
             "Reason: %s. Falling back to hard-coded default namespaces.", pod_namespaces_var, str(e))
         namespaces_list = ["alpha-prod", "tipreprod-prod"]
-    
-    # 1. TODAY
-    today_results = (
-        pod_metrics_for_namespace.partial(period="last 24 hours")
-        .expand(ns=namespaces_list)
-    )
-    
-    # 2. YESTERDAY
-    yesterday_results = (
-        pod_metrics_for_namespace.partial(period="yesterday")
-        .expand(ns=namespaces_list)
-    )
-    
-    # 3. TODAY MARKDOWN
-    pod_today_markdown = compile_pod_sections_today(today_results)
-    
-    # 4. COMPARISON MARKDOWN
+
     @task
-    def collect_pod_results(today_res, yesterday_res):
-        today_list = list(today_res) if not isinstance(today_res, list) else today_res
-        yesterday_list = list(yesterday_res) if not isinstance(yesterday_res, list) else yesterday_res
-        return today_list + yesterday_list
-    
-    all_pod_results = collect_pod_results(today_results, yesterday_results)
-    pod_comparison_markdown = compile_pod_comparison(all_pod_results)
-    
-    # === DEPENDENCIES =====================================
-    # Node + static tasks (all previous static tasks feed into comparisons)
+    def get_pods_in_namespace(ns: str) -> List[str]:
+        prompt = f"""
+        Execute this query and return only pod names (one per line):
+        sum by(pod) (kube_pod_info{{namespace='{ns}'}})
+        """
+        resp = get_ai_response(prompt)
+        return [line.strip() for line in resp.splitlines() if line.strip()]
+
+    @task
+    def process_pod_batch(pods_batch: List[str], ns: str, period: str):
+        if not pods_batch:
+            return []
+
+        pod_regex = "|".join(pods_batch)
+        is_yesterday = "yesterday" in period.lower()
+
+        if is_yesterday:
+            # === ABSOLUTE TIME RANGE: Full yesterday (UTC 00:00 to 23:59:59) ===
+            start = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%dT00:00:00Z')
+            end   = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%dT23:59:59Z')
+
+            cpu_prompt = f"""
+    Namespace: {ns} — Yesterday (absolute range: {start} to {end})
+
+    Run this exact query and process results:
+    sum by (pod) (rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace='{ns}', pod=~"{pod_regex}"}}[5m]))[{start}:{end}]
+
+    For each pod:
+    - avg_cpu_cores  = MeanTool(values)   → round to 4 decimals
+    - max_cpu_cores  = MaxTool(values)    → round to 4 decimals
+   
+
+    Return ONLY this markdown table, sorted by avg_cpu_cores DESC:
+    | pod                  | avg_cpu_cores | max_cpu_cores |
+    |----------------------|---------------|---------------|
+    Use `N/A` if no data for a pod.
+    """
+
+            mem_prompt = f"""
+    Same namespace and absolute time range ({start} to {end}) — now memory in GB.
+
+    Query:
+    sum by (pod) (container_memory_working_set_bytes{{image!="", namespace='{ns}', pod=~"{pod_regex}"}})[{start}:{end}]
+
+    For each pod:
+    - avg_memory_gb = MeanTool(values) / 1024 / 1024 / 1024 → round to 2 decimals
+    - max_memory_gb = MaxTool(values) / 1024 / 1024 / 1024 → round to 2 decimals
+
+
+    Return ONLY this markdown table, sorted by avg_memory_gb DESC:
+    | pod                  | avg_memory_gb | max_memory_gb |
+    |----------------------|---------------|---------------|
+    Use `N/A` if no data.
+    """
+
+        else:
+            # === RELATIVE TIME: Last 24 hours (rolling window) ===
+            cpu_prompt = f"""
+    Namespace: {ns} — Last 24 hours (relative)
+
+    Use these exact queries:
+
+    Average CPU:
+    avg_over_time(avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace='{ns}', pod=~"{pod_regex}"}}[5m]))[24h:5m])
+
+    Max CPU:
+    max_over_time(avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace='{ns}', pod=~"{pod_regex}"}}[5m]))[24h:5m])
+
+    Current CPU:
+    avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace='{ns}', pod=~"{pod_regex}"}}[5m]))
+
+    Return ONLY this table, sorted by avg_cpu_cores DESC:
+    | pod                  | avg_cpu_cores | max_cpu_cores | current_cpu_cores |
+    |----------------------|---------------|---------------|-------------------|
+    Round to 4 decimals. Use N/A if missing.
+    """
+
+            mem_prompt = f"""
+    Same namespace, last 24 hours — memory in GB.
+
+    Average:
+    avg_over_time(sum by(pod)(container_memory_working_set_bytes{{image!="", namespace='{ns}', pod=~"{pod_regex}"}})[24h:5m]) / 1024 / 1024 / 1024
+
+    Max:
+    max_over_time(sum by(pod)(container_memory_working_set_bytes{{image!="", namespace='{ns}', pod=~"{pod_regex}"}})[24h:5m]) / 1024 / 1024 / 1024
+
+    Current:
+    sum by(pod)(container_memory_working_set_bytes{{image!="", namespace='{ns}', pod=~"{pod_regex}"}}) / 1024 / 1024 / 1024
+
+    Return ONLY this table, sorted by avg_memory_gb DESC:
+    | pod                  | avg_memory_gb | max_memory_gb | current_memory_gb |
+    |----------------------|---------------|---------------|-------------------|
+    Round to 2 decimals. Use N/A if missing.
+    """
+
+        return [{
+            "namespace": ns,
+            "period": period,
+            "total_running_pods": len(pods_batch),
+            "problematic_pods": "No problematic pods (batched)",
+            "cpu": get_ai_response(cpu_prompt).strip(),
+            "memory": get_ai_response(mem_prompt).strip()
+        }]
+        
+    @task
+    def merge_batch_results(batches: List) -> List:
+        return [item for batch in batches for item in batch]
+
+    @task_group(group_id="pod_metrics_batched")
+    def pod_metrics_batched():
+        namespace_results = []
+
+        for ns in namespaces_list:
+            pods = get_pods_in_namespace.override(task_id=f"list_pods_{ns}")(ns=ns)
+
+            @task(task_id=f"split_{ns}")
+            def split_pods(pod_list: List[str]) -> List[List[str]]:
+                return [pod_list[i:i + POD_BATCH_SIZE] for i in range(0, len(pod_list), POD_BATCH_SIZE)]
+
+            batches = split_pods(pods)
+
+            # Today
+            today_batches = process_pod_batch.partial(ns=ns, period="last 24 hours").expand(pods_batch=batches)
+            today_merged = merge_batch_results.override(task_id=f"merged_today_{ns}")(today_batches)
+
+            # Yesterday
+            yesterday_batches = process_pod_batch.partial(ns=ns, period="yesterday").expand(pods_batch=batches)
+            yesterday_merged = merge_batch_results.override(task_id=f"merged_yesterday_{ns}")(yesterday_batches)
+
+            # Collect task outputs
+            namespace_results.extend([today_merged, yesterday_merged])
+
+        # One final task that receives ALL namespace results
+        all_data = merge_batch_results(namespace_results)
+        return all_data
+
+    # Run the batched flow
+    all_pod_data = pod_metrics_batched()
+
+    # Your existing compile tasks work perfectly with this data
+    real_pod_counts = get_real_pod_counts(namespaces_list)
+    pod_today_markdown = compile_pod_sections_today(all_pod_data, real_pod_counts)
+    pod_comparison_markdown = compile_pod_comparison(all_pod_data)
+
+    # === DEPENDENCIES ===
     [t1, t2, t3, t4, t5, t6, t7, t7_1, t8, t9, t10, t11, t12, t13, t14] >> t15 >> t16 >> t17 >> t18 >> t19
-    
-    # Pod flow
-    t4 >> today_results
-    t4 >> yesterday_results
-    today_results >> pod_today_markdown
-    [yesterday_results, pod_today_markdown] >> all_pod_results
-    all_pod_results >> pod_comparison_markdown
-    
-    # Final chain
-    pod_comparison_markdown >> t20
+
+    t4 >> all_pod_data
+    all_pod_data >> pod_today_markdown >> t20
+    all_pod_data >> pod_comparison_markdown >> t20
     t19 >> t20 >> t21 >> t22 >> t23
