@@ -189,25 +189,6 @@ def get_ai_response(prompt, conversation_history=None):
         logging.error("Error in get_ai_response: %s", traceback.format_exc())
         return f"An error occurred while processing your request: {traceback.format_exc()}"
 
-def authenticate_gmail():
-    try:
-        creds_json = Variable.get(GMAIL_CREDENTIALS_VAR, default_var=None)
-        if not creds_json:
-            logger.info("Gmail credentials not found in Airflow variables.")
-            return None
-        creds_info = json.loads(creds_json)
-        if Credentials is None or build is None:
-            logger.warning("google oauth libraries not installed in environment.")
-            return None
-        creds = Credentials.from_authorized_user_info(creds_info)
-        service = build("gmail", "v1", credentials=creds)
-        profile = service.users().getProfile(userId="me").execute()
-        logged_in_email = profile.get("emailAddress", "")
-        return service
-    except Exception:
-        logger.error("Failed to authenticate Gmail: %s", traceback.format_exc())
-        return None
-
 # -------------------------------
 # TaskFlow tasks (namespace processing - updated for 7 days)
 # -------------------------------
