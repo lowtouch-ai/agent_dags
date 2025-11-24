@@ -38,8 +38,19 @@ RECEIVER_EMAIL = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_TO_ADDRESS", def
 OLLAMA_HOST = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_OLLAMA_HOST", "http://agentomatic:8000/")
 
 POD_BATCH_SIZE = 6
-YESTERDAY = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%d')
-TODAY = datetime.utcnow().strftime('%Y-%m-%d')
+# === Precise Date & Time Helpers (computed once per DAG run) ===
+def _get_yesterday_range():
+    yesterday_date = (datetime.utcnow() - timedelta(days=1)).date()
+    start = f"{yesterday_date}T00:00:00Z"
+    end = f"{yesterday_date}T23:59:59Z"
+    return start, end
+
+# For use in prompts (human-readable + precise)
+YESTERDAY_START, YESTERDAY_END = _get_yesterday_range()
+YESTERDAY_FULL_RANGE = f"yesterday ({YESTERDAY_START} to {YESTERDAY_END})"
+
+# For display only
+YESTERDAY_DATE_STR = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%d')
 
 def get_ai_response(prompt, conversation_history=None):
     try:
@@ -79,7 +90,15 @@ def get_ai_response(prompt, conversation_history=None):
 
 # === Generic helper to generate SRE reports ===
 def generate_sre_report(ti, key, description, period=None):
-    prompt = f"You are the SRE TradeIdeas agent. Generate a **complete {description} report for {period or 'last 24 hours'}**"
+    if period == "yesterday":
+        period = YESTERDAY_FULL_RANGE  # ← precise range
+    elif period is None:
+        period = "last 24 hours"
+
+    prompt = f"""You are the SRE TradeIdeas agent.
+Generate a **complete {description} report** for the period: **{period}**.
+Be precise about the time range in your response.
+"""
     response = get_ai_response(prompt)
     ti.xcom_push(key=key, value=response)
     return response
@@ -276,7 +295,6 @@ def compile_pod_sections_today(namespace_results: list, real_counts: dict, **con
 
     # Merge all batches
     merged = {}
-    real_problematic = {}  # We'll fall back to batched value if needed
 
     for batch in namespace_results:
         if not batch or not isinstance(batch, dict):
@@ -284,11 +302,6 @@ def compile_pod_sections_today(namespace_results: list, real_counts: dict, **con
         key = (batch["namespace"], batch["period"])
         if key not in merged:
             merged[key] = {"cpu": [], "memory": []}
-
-        # Save problematic pods info (from any batch — usually consistent)
-        if batch["namespace"] not in real_problematic:
-            real_problematic[batch["namespace"]] = batch.get("problematic_pods", "No problematic pods")
-
         # Extract clean table rows only
         def is_valid_row(line):
             line = line.strip()
@@ -315,8 +328,9 @@ def compile_pod_sections_today(namespace_results: list, real_counts: dict, **con
             continue
 
         data = merged[key_today]
-        actual_count = real_counts.get(ns, "unknown")  # ← This will be 9 and 24
-        problematic = real_problematic.get(ns, "No problematic pods")
+        actual_count = real_counts.get(ns, "unknown") 
+        problematic_pods_data = context['ti'].xcom_pull(task_ids='fetch_real_problematic_pods')
+        problematic = problematic_pods_data.get(ns, "No problematic pods") if problematic_pods_data else "No problematic pods"
 
         sections.append(f"### Namespace: `{ns}`")
         sections.append(f"**Running Pods**: {actual_count} | **Problematic Pods**: {problematic}\n")
@@ -875,6 +889,35 @@ with DAG(
             "Reason: %s. Falling back to hard-coded default namespaces.", pod_namespaces_var, str(e))
         namespaces_list = ["alpha-prod", "tipreprod-prod"]
 
+    @task(task_id="fetch_real_problematic_pods")
+    def fetch_real_problematic_pods(namespaces: List[str]) -> dict:
+        """One clean AI call per namespace — returns real Failed/Pending/Unknown pods"""
+        result = {}
+        for ns in namespaces:
+            prompt = f"""
+            Namespace: `{ns}`
+            Execute this exact Prometheus query:
+            sum by (pod, phase) (kube_pod_status_phase{{namespace="{ns}", phase=~"Failed|Pending|Unknown"}} == 1)
+
+            Return ONLY one of these two exact responses:
+            • If no problematic pods → respond exactly: No problematic pods
+            • If any → respond with one line per pod in this format (no extra text):
+            - my-pod-abc123 (Failed)
+            - another-pod-xyz (Pending)
+
+            Do not include headers, counts, timestamps, or markdown.
+            """
+            response = get_ai_response(prompt).strip()
+            if not response or "no problematic" in response.lower():
+                result[ns] = "No problematic pods"
+            else:
+                result[ns] = response
+            logging.info(f"Problematic pods in {ns}: {result[ns]}")
+        return result
+
+    # Instantiate the task
+    real_problematic_pods_task = fetch_real_problematic_pods(namespaces_list)
+
     @task
     def get_pods_in_namespace(ns: str) -> List[str]:
         prompt = f"""
@@ -894,14 +937,14 @@ with DAG(
 
         if is_yesterday:
             # === ABSOLUTE TIME RANGE: Full yesterday (UTC 00:00 to 23:59:59) ===
-            start = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%dT00:00:00Z')
-            end   = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%dT23:59:59Z')
+            start = YESTERDAY_START
+            end   = YESTERDAY_END
 
             cpu_prompt = f"""
     Namespace: {ns} — Yesterday (absolute range: {start} to {end})
 
     Run this exact query and process results:
-    sum by (pod) (rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace='{ns}', pod=~"{pod_regex}"}}[5m]))[{start}:{end}]
+    sum by (pod) (rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace=~"{ns}", pod=~"{pod_regex}"}}[5m]))[{start}:{end}]
 
     For each pod:
     - avg_cpu_cores  = MeanTool(values)   → round to 4 decimals
@@ -918,7 +961,7 @@ with DAG(
     Same namespace and absolute time range ({start} to {end}) — now memory in GB.
 
     Query:
-    sum by (pod) (container_memory_working_set_bytes{{image!="", namespace='{ns}', pod=~"{pod_regex}"}})[{start}:{end}]
+    sum by (pod) (container_memory_working_set_bytes{{image!="", namespace=~"{ns}", pod=~"{pod_regex}"}})[{start}:{end}]
 
     For each pod:
     - avg_memory_gb = MeanTool(values) / 1024 / 1024 / 1024 → round to 2 decimals
@@ -939,13 +982,13 @@ with DAG(
     Use these exact queries:
 
     Average CPU:
-    avg_over_time(avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace='{ns}', pod=~"{pod_regex}"}}[5m]))[24h:5m])
+    avg_over_time(avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace=~"{ns}", pod=~"{pod_regex}"}}[5m]))[24h:5m])
 
     Max CPU:
-    max_over_time(avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace='{ns}', pod=~"{pod_regex}"}}[5m]))[24h:5m])
+    max_over_time(avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace=~"{ns}", pod=~"{pod_regex}"}}[5m]))[24h:5m])
 
     Current CPU:
-    avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace='{ns}', pod=~"{pod_regex}"}}[5m]))
+    avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace=~"{ns}", pod=~"{pod_regex}"}}[5m]))
 
     Return ONLY this table, sorted by avg_cpu_cores DESC:
     | pod                  | avg_cpu_cores | max_cpu_cores | current_cpu_cores |
@@ -957,13 +1000,13 @@ with DAG(
     Same namespace, last 24 hours — memory in GB.
 
     Average:
-    avg_over_time(sum by(pod)(container_memory_working_set_bytes{{image!="", namespace='{ns}', pod=~"{pod_regex}"}})[24h:5m]) / 1024 / 1024 / 1024
+    avg_over_time(sum by(pod)(container_memory_working_set_bytes{{image!="", namespace=~"{ns}", pod=~"{pod_regex}"}})[24h:5m]) / 1024 / 1024 / 1024
 
     Max:
-    max_over_time(sum by(pod)(container_memory_working_set_bytes{{image!="", namespace='{ns}', pod=~"{pod_regex}"}})[24h:5m]) / 1024 / 1024 / 1024
+    max_over_time(sum by(pod)(container_memory_working_set_bytes{{image!="", namespace=~"{ns}", pod=~"{pod_regex}"}})[24h:5m]) / 1024 / 1024 / 1024
 
     Current:
-    sum by(pod)(container_memory_working_set_bytes{{image!="", namespace='{ns}', pod=~"{pod_regex}"}}) / 1024 / 1024 / 1024
+    sum by(pod)(container_memory_working_set_bytes{{image!="", namespace=~"{ns}", pod=~"{pod_regex}"}}) / 1024 / 1024 / 1024
 
     Return ONLY this table, sorted by avg_memory_gb DESC:
     | pod                  | avg_memory_gb | max_memory_gb | current_memory_gb |
@@ -975,7 +1018,6 @@ with DAG(
             "namespace": ns,
             "period": period,
             "total_running_pods": len(pods_batch),
-            "problematic_pods": "No problematic pods (batched)",
             "cpu": get_ai_response(cpu_prompt).strip(),
             "memory": get_ai_response(mem_prompt).strip()
         }]
@@ -1017,7 +1059,12 @@ with DAG(
 
     # Your existing compile tasks work perfectly with this data
     real_pod_counts = get_real_pod_counts(namespaces_list)
-    pod_today_markdown = compile_pod_sections_today(all_pod_data, real_pod_counts)
+
+    # Make sure it runs before compilation
+    all_pod_data >> real_problematic_pods_task
+
+    # Pass the result into the compile task
+    pod_today_markdown = compile_pod_sections_today(namespace_results=all_pod_data,real_counts=real_pod_counts,problematic_pods_dict=real_problematic_pods_task)
     pod_comparison_markdown = compile_pod_comparison(all_pod_data)
 
     # === DEPENDENCIES ===
