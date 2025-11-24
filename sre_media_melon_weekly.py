@@ -832,62 +832,59 @@ a:hover {{
         fallback = "<html><body><h1>Mediamelon SRE Weekly Report</h1><pre>Conversion to HTML failed. Check scheduler logs for details.</pre></body></html>"
         return fallback
 
-def send_email_report_callable(ti=None, **context):
+def send_sre_email(ti, **context):
+    """Send SRE HTML report via SMTP instead of Gmail API"""
+    html_report = ti.xcom_pull(key="sre_html_report")
+
+    if not html_report or "<html" not in html_report.lower():
+        logging.error("No valid HTML report found in XCom.")
+        raise ValueError("HTML report missing or invalid.")
+
+    # Clean up any code block wrappers
+    html_body = re.sub(r'```html\s*|```', '', html_report).strip()
+    sender = MEDIAMELON_FROM_ADDRESS or SMTP_USER or "noreply@mediamelon.com"
+    recipients = [r.strip() for r in MEDIAMELON_TO_ADDRESS.split(",") if r.strip()]
+    subject = f"Mediamelon SRE Daily Report - Summary - {datetime.utcnow().strftime('%Y-%m-%d')}"
+
+
     try:
-        # Pull overall summary from XCom
-        overall_md = ti.xcom_pull(key="overall_summary") or "No overall summary generated."
-        # Convert summary markdown to HTML for email body
-        try:
-            overall_html = markdown.markdown(preprocess_markdown(overall_md), extensions=["nl2br", "sane_lists"])
-        except Exception:
-            overall_html = "<pre>{}</pre>".format(html.escape(overall_md))
+        # Initialize SMTP connection
+        logging.info(f"Connecting to SMTP server {SMTP_HOST}:{SMTP_PORT} as {SMTP_USER}")
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
 
-        # Pull PDF path from XCom pushed by generate_pdf task
-        pdf_path = ti.xcom_pull(key="sre_pdf_path") or "/tmp/mediamelon_sre_report.pdf"
-
-        # Build email
-        sender = MEDIAMELON_FROM_ADDRESS or SMTP_USER or "noreply@mediamelon.com"
-        recipients = [r.strip() for r in MEDIAMELON_TO_ADDRESS.split(",") if r.strip()]
-        subject = f"Mediamelon SRE weekly Report - Summary - {datetime.utcnow().strftime('%Y-%m-%d')}"
-
+        # Prepare email
         msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
         msg["From"] = f"Mediamelon SRE Reports {SMTP_SUFFIX}"
         msg["To"] = ", ".join(recipients)
 
-        # Attach the HTML summary as the email body (alternative for mail clients)
-        alternative = MIMEMultipart("alternative")
-        alternative.attach(MIMEText(overall_html, "html", "utf-8"))
-        msg.attach(alternative)
+        # Attach the HTML body
+        msg.attach(MIMEText(html_body, "html"))
 
-        # Attach the PDF file
-        if pdf_path and os.path.exists(pdf_path):
-            with open(pdf_path, "rb") as f:
-                part = MIMEApplication(f.read(), _subtype="pdf")
-                part.add_header("Content-Disposition", "attachment", filename=os.path.basename(pdf_path))
-                msg.attach(part)
-            logger.info("Attached PDF: %s", pdf_path)
-        else:
-            logger.warning("PDF not found at path: %s. Email will be sent without PDF attachment.", pdf_path)
+        # Optional: Inline image support (if your DAG attaches graphs later)
+        chart_b64 = ti.xcom_pull(key="chart_b64")
+        if chart_b64:
+            try:
+                img_data = base64.b64decode(chart_b64)
+                img_part = MIMEImage(img_data, 'png')
+                img_part.add_header('Content-ID', '<chart_image>')
+                img_part.add_header('Content-Disposition', 'inline', filename='chart.png')
+                msg.attach(img_part)
+                logging.info("Attached chart image to email.")
+            except Exception as e:
+                logging.warning(f"Failed to attach inline image: {str(e)}")
 
-        # Send email via SMTP
-        logger.info("Connecting to SMTP server %s:%d", SMTP_HOST, SMTP_PORT)
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
-        try:
-            server.starttls()
-        except Exception:
-            logger.debug("starttls not supported or failed")
-
-        if SMTP_USER and SMTP_PASSWORD:
-            server.login(SMTP_USER, SMTP_PASSWORD)
-
+        # Send the email
         server.sendmail(sender, recipients, msg.as_string())
-        logger.info("Email (summary + PDF) sent successfully to: %s", recipients)
         server.quit()
-        return True
 
-    except Exception:
-        logger.exception("Failed to send email report (summary + PDF)")
+        logging.info(f"Email sent successfully to {recipients}")
+        return f"Email sent successfully to {recipients}"
+
+    except Exception as e:
+        logging.error(f"Failed to send email via SMTP: {str(e)}")
         raise
 
 
