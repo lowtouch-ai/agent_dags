@@ -1161,7 +1161,7 @@ with DAG(
     t_overall_summary = PythonOperator(task_id="overall_summary", python_callable=overall_summary_callable, provide_context=True)
 
     # Updated send email (attaches PDF, uses overall_summary in body)
-    t_send_email = PythonOperator(task_id="send_email_report", python_callable=send_email_report_callable, provide_context=True)
+    t_send_email = PythonOperator(task_id="send_email_report", python_callable=send_sre_email, provide_context=True)
 
     # -----------------------
     # DAG wiring (clean and inside DAG context)
