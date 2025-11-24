@@ -823,7 +823,7 @@ def send_sre_email(ti, **context):
 
     # Clean up any code block wrappers
     html_body = re.sub(r'```html\s*|```', '', html_report).strip()
-    sender = MEDIAMELON_FROM_ADDRESS or SMTP_USER or "noreply@mediamelon.com"
+    sender = MEDIAMELON_FROM_ADDRESS
     recipients = [r.strip() for r in MEDIAMELON_TO_ADDRESS.split(",") if r.strip()]
     subject = f"Mediamelon SRE Daily Report - Summary - {datetime.utcnow().strftime('%Y-%m-%d')}"
 
