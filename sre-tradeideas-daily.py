@@ -335,14 +335,15 @@ def compile_pod_sections_today(namespace_results: list, real_counts: dict, **con
         sections.append(f"### Namespace: `{ns}`")
         sections.append(f"**Running Pods**: {actual_count} | **Problematic Pods**: {problematic}\n")
 
+        def safe_float(s):
+                try: return float(s)
+                except: return 0.0
+                
         # CPU Table
         if data["cpu"]:
             sections.append("#### CPU Utilization (Last 24h)")
             sections.append("| Pod | Avg (cores) | Max (cores) | Current (cores) |")
             sections.append("|-----|-------------|-------------|-----------------|")
-            def safe_float(s):
-                try: return float(s)
-                except: return 0.0
             sorted_cpu = sorted(data["cpu"], key=lambda x: safe_float(x.split("|")[2].strip()), reverse=True)
             sections.extend(sorted_cpu)
             sections.append("")
