@@ -43,7 +43,7 @@ SMTP_HOST = Variable.get("ltai.v3.mediamelon.smtp.host", "mail.authsmtp.com")
 SMTP_PORT = int(Variable.get("ltai.v3.mediamelon.smtp.port", "587"))
 SMTP_USER = Variable.get("ltai.v3.mediamelon.smtp.user", "")
 SMTP_PASSWORD = Variable.get("ltai.v3.mediamelon.smtp.password", "")
-SMTP_SUFFIX = Variable.get("ltai.v3.mediamelon.smtp.suffix", "<noreply@mediamelon.com>")
+SMTP_SUFFIX = Variable.get("ltai.v3.mediamelon.smtp.suffix", default_var="via lowtouch.ai <webmaster@ecloudcontrol.com>")
 
 MEDIAMELON_FROM_ADDRESS = Variable.get("ltai.v3.mediamelon.mediamelon_from_address", SMTP_USER or "noreply@mediamelon.com")
 MEDIAMELON_TO_ADDRESS = Variable.get("ltai.v3.mediamelon.mediamelon_to_address", MEDIAMELON_FROM_ADDRESS)
@@ -807,65 +807,73 @@ a:hover {{
 </html>"""
 
         logger.info("HTML generated, length: %d", len(full_html))
+        ti.xcom_push(key="sre_html_report", value=full_html)
         return full_html
     except Exception:
         logger.exception("convert_to_html failed")
         fallback = "<html><body><h1>Mediamelon SRE Weekly Report</h1><pre>Conversion to HTML failed. Check scheduler logs for details.</pre></body></html>"
+        ti.xcom_push(key="sre_html_report", value=fallback)
         return fallback
 
-def send_sre_email(ti, **context):
-    """Send SRE HTML report via SMTP instead of Gmail API"""
-    html_report = ti.xcom_pull(key="sre_html_report")
-
-    if not html_report or "<html" not in html_report.lower():
-        logging.error("No valid HTML report found in XCom.")
-        raise ValueError("HTML report missing or invalid.")
-
-    # Clean up any code block wrappers
-    html_body = re.sub(r'```html\s*|```', '', html_report).strip()
-    sender = MEDIAMELON_FROM_ADDRESS or SMTP_USER or "noreply@mediamelon.com"
-    recipients = [r.strip() for r in MEDIAMELON_TO_ADDRESS.split(",") if r.strip()]
-    subject = f"Mediamelon SRE Daily Report - Summary - {datetime.utcnow().strftime('%Y-%m-%d')}"
-
-
+def send_email_report_callable(ti=None, **context):
+    """Send the HTML report via SMTP, but with overall summary in body and full PDF attached"""
     try:
-        # Initialize SMTP connection
-        logging.info(f"Connecting to SMTP server {SMTP_HOST}:{SMTP_PORT} as {SMTP_USER}")
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASSWORD)
+        # Pull overall summary from XCom
+        overall_md = ti.xcom_pull(key="overall_summary") or "No overall summary generated."
+        # Convert summary markdown to HTML for email body
+        try:
+            clean = re.sub(r'(^```html|^```|```$)', '', overall_md.strip(), flags=re.IGNORECASE).strip()
+            overall_html = clean if clean.lstrip().startswith("<") else markdown.markdown(clean, extensions=["nl2br", "sane_lists"])
 
-        # Prepare email
+        except Exception:
+            overall_html = "<pre>{}</pre>".format(html.escape(overall_md))
+
+        # Pull PDF path from XCom pushed by generate_pdf task
+        pdf_path = ti.xcom_pull(key="sre_pdf_path") or "/tmp/mediamelon_sre_report.pdf"
+
+        # Build email
+        sender = MEDIAMELON_FROM_ADDRESS
+        recipients = [r.strip() for r in MEDIAMELON_TO_ADDRESS.split(",") if r.strip()]
+        subject = f"Mediamelon SRE Weekly Report - Summary - {datetime.utcnow().strftime('%Y-%m-%d')}"
+
         msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
         msg["From"] = f"Mediamelon SRE Reports {SMTP_SUFFIX}"
         msg["To"] = ", ".join(recipients)
 
-        # Attach the HTML body
-        msg.attach(MIMEText(html_body, "html"))
+        # Attach the HTML summary as the email body (alternative for mail clients)
+        alternative = MIMEMultipart("alternative")
+        alternative.attach(MIMEText(overall_html, "html", "utf-8"))
+        msg.attach(alternative)
 
-        # Optional: Inline image support (if your DAG attaches graphs later)
-        chart_b64 = ti.xcom_pull(key="chart_b64")
-        if chart_b64:
-            try:
-                img_data = base64.b64decode(chart_b64)
-                img_part = MIMEImage(img_data, 'png')
-                img_part.add_header('Content-ID', '<chart_image>')
-                img_part.add_header('Content-Disposition', 'inline', filename='chart.png')
-                msg.attach(img_part)
-                logging.info("Attached chart image to email.")
-            except Exception as e:
-                logging.warning(f"Failed to attach inline image: {str(e)}")
+        # Attach the PDF file
+        if pdf_path and os.path.exists(pdf_path):
+            with open(pdf_path, "rb") as f:
+                part = MIMEApplication(f.read(), _subtype="pdf")
+                part.add_header("Content-Disposition", "attachment", filename=os.path.basename(pdf_path))
+                msg.attach(part)
+            logger.info("Attached PDF: %s", pdf_path)
+        else:
+            logger.warning("PDF not found at path: %s. Email will be sent without PDF attachment.", pdf_path)
 
-        # Send the email
+        # Send email via SMTP
+        logger.info("Connecting to SMTP server %s:%d", SMTP_HOST, SMTP_PORT)
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+        try:
+            server.starttls()
+        except Exception:
+            logger.debug("starttls not supported or failed")
+
+        if SMTP_USER and SMTP_PASSWORD:
+            server.login(SMTP_USER, SMTP_PASSWORD)
+
         server.sendmail(sender, recipients, msg.as_string())
+        logger.info("Email (summary + PDF) sent successfully to: %s", recipients)
         server.quit()
+        return True
 
-        logging.info(f"Email sent successfully to {recipients}")
-        return f"Email sent successfully to {recipients}"
-
-    except Exception as e:
-        logging.error(f"Failed to send email via SMTP: {str(e)}")
+    except Exception:
+        logger.exception("Failed to send email report (summary + PDF)")
         raise
 
 
@@ -1161,7 +1169,7 @@ with DAG(
     t_overall_summary = PythonOperator(task_id="overall_summary", python_callable=overall_summary_callable, provide_context=True)
 
     # Updated send email (attaches PDF, uses overall_summary in body)
-    t_send_email = PythonOperator(task_id="send_email_report", python_callable=send_sre_email, provide_context=True)
+    t_send_email = PythonOperator(task_id="send_email_report", python_callable=send_email_report_callable, provide_context=True)
 
     # -----------------------
     # DAG wiring (clean and inside DAG context)
