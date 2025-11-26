@@ -23,7 +23,6 @@ default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2025, 8, 22),
-    "retries": 1,
     "retry_delay": timedelta(seconds=15),
 }
 
@@ -494,7 +493,7 @@ Important Instructions:
     - You should only answer based on your knowledge and the provided email details.
     - Hubspot functions include: searching and creating contacts, companies, deals, meetings, tasks, logging notes, and summarizing engagements, casual comments based on context etc.
 SEARCH_DAG CAPABILITIES:
-- Searches for existing contacts, companies, deals in HubSpot
+- Searches for existing contacts, companies, deals in HubSpot only if followup entities like notes meetings, tasks or another contact or company or deal needs to be created based on user request.
 - Extracts entity information from conversations
 - Determines what needs to be created vs what exists
 - Generates engagement summaries for meetings
@@ -514,10 +513,10 @@ NO_ACTION CAPABILITIES:
 - Recognizes greetings, closings, and simple acknowledgments
 - Outputs friendly responses without further action
 - Handles questions about bot capabilities or general chat
-- Does not perform any HubSpot operations
+- Does not perform any HubSpot operations. Only answer the hubspot queries.
 - Ignore casual comments about hubspot context.
 - Handles blank emails without content or context. 
-- Handles any queries out of hubspot.
+- Handles any direct queries including hubspot. For example IS there a deal called X in hubspot? or what is the status of deal Y in hubspot? These do not require any action, just a friendly response.
 ROUTING DECISION TREE:
 
 1. **NO ACTION NEEDED** (Return: no_action)
@@ -526,12 +525,13 @@ ROUTING DECISION TREE:
    - Simple acknowledgments: "ok", "got it", "understood", "sounds good"
    - Questions about bot capabilities or general chat
    - If the email lacks content or context.
-   - If the email is about topics outside HubSpot functionalities. 
+   - Information retrieveing questions from hubspot database.
+   - Information out of hubspot. 
    → Response: {{"task_type": "no_action", "message": "friendly_response"}}
 
 2. **SEARCH & ANALYZE** (Route to: search_dag)
    When user needs to:
-   - Search for existing contacts, companies, or deals
+   - Search for existing contacts, companies, or deals only if followup entities like notes meetings, tasks or another contact or company or deal needs to be created based on user request.
    - Create NEW entities (deals, contacts, companies, meetings, tasks)
    - Log meeting minutes or notes from discussions
    - Request summaries of clients/deals before meetings
@@ -773,21 +773,83 @@ def handle_general_queries(**kwargs):
             # === STEP 1: Try AI-generated response ===
             ai_response = None
             try:
-                prompt = f"""You are a friendly HubSpot email assistant.
+                prompt = f"""You are a friendly HubSpot email assistant. You can answer generic questions about hubspot also causal greetings and Thanking mails.
 User message: "{email.get("content", "").strip()}"
 
 Reply in 1-2 short, polite, professional sentences.
 - If greeting: acknowledge warmly.
 - If out of context: say you're HubSpot-focused.
 - If no content: ask for clarification.
-- sign with:
-    Best regards, The HubSpot Assistant Team 
-    Lowtouch.ai
-Return plain text only. No HTML."""
+- If user asks for HubSpot info: provide concise, accurate answers.
+- Hubspot query rules:
+    - If user asks about any contact or contact details call the tool `search_contacts` and answer the question based on the output. The output should be in HTML - table Format .
+    - If user asks about any company or company details call the tool `search_companies` and answer the question based on the output. The output should be in HTML - table Format .
+    - If user asks about any deal or deal details call the tool `search_deals` and answer the question based on the output. The output should be in HTML - table Format .
+    - If user asking a entity detail along with a timeperiod use LTE, GTE or both based on user request. The output should be in HTML - table Format .
+- Always maintain a friendly and professional tone.
+Your final response must be in below format:
+```
+        <html>
+        <head>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    max-width: 600px;
+                    margin: 0 auto;
+                    padding: 20px;
+                }}
+                .greeting {{
+                    margin-bottom: 15px;
+                }}
+                .message {{
+                    margin: 15px 0;
+                }}
+                .closing {{
+                    margin-top: 15px;
+                }}
+                .signature {{
+                    margin-top: 15px;
+                    font-weight: bold;
+                }}
+                .company {{
+                    color: #666;
+                    font-size: 0.9em;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="greeting">
+                <p>Hello {sender_name},</p>
+            </div>
+            
+            <div class="message">
+                <p>"Here your resposne should be replaced."</p>
+            </div>
+            
+            <div class="closing">
+                <p>If you need additional information, please don't hesitate to ask.</p>
+            </div>
+            
+            <div class="signature">
+                <p>Best regards,<br>
+                The HubSpot Assistant Team<br>
+                <a href="http://lowtouch.ai" class="company">Lowtouch.ai</a></p>
+            </div>
+        </body>
+        </html>```
+"""
 
                 ai_response = get_ai_response(prompt=prompt, expect_json=False)
-                ai_response = re.sub(r'<[^>]+>', '', ai_response).strip()
-
+                logging.info(f"AI generated response before cleaning: {ai_response}")   
+                match = re.search(r'```html.*?\n(.*?)```', ai_response, re.DOTALL)
+                if match:
+                    ai_response = match.group(1).strip()
+                else:
+                    # No HTML code block found, use response directly
+                    ai_response = ai_response.strip()
+                logging.info(f"AI generated response :{ai_response}")
                 if not ai_response or len(ai_response) < 5 or "error" in ai_response.lower():
                     raise ValueError("Invalid AI response")
 
@@ -800,60 +862,62 @@ Return plain text only. No HTML."""
                 final_response = ai_response
                 log_prefix = "AI"
             else:
-                final_response = f"""<html>
-<head>
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            max-width: 600px;
-            margin: 0 auto;
-            padding: 20px;
-        }}
-        .greeting {{
-            margin-bottom: 20px;
-        }}
-        .message {{
-            margin: 20px 0;
-        }}
-        .closing {{
-            margin-top: 30px;
-        }}
-        .signature {{
-            margin-top: 20px;
-            font-weight: bold;
-        }}
-        .company {{
-            color: #666;
-            font-size: 0.9em;
-        }}
-    </style>
-</head>
-<body>
-    <div class="greeting">
-        <p>Hello {sender_name},</p>
-    </div>
-    
-    <div class="message">
-        <p>We're currently experiencing a temporary technical issue that may affect your experience with the {AGENT_NAME}.</p>
-        
-        <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
-        
-        <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
-    </div>
-    
-    <div class="closing">
-        <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
-    </div>
-    
-    <div class="signature">
-        <p>Best regards,<br>
-        The HubSpot Assistant Team<br>
-        <span class="company">Lowtouch.ai</span></p>
-    </div>
-</body>
-</html>"""
+                final_response = f"""
+        <html>
+        <head>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    max-width: 600px;
+                    margin: 0 auto;
+                    padding: 20px;
+                }}
+                .greeting {{
+                    margin-bottom: 15px;
+                }}
+                .message {{
+                    margin: 15px 0;
+                }}
+                .closing {{
+                    margin-top: 15px;
+                }}
+                .signature {{
+                    margin-top: 15px;
+                    font-weight: bold;
+                }}
+                .company {{
+                    color: #666;
+                    font-size: 0.9em;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="greeting">
+                <p>Hello {sender_name},</p>
+            </div>
+            
+            <div class="message">
+                <p>We're currently experiencing a temporary technical issue that may affect your experience with the HubSpot Assistant.</p>
+                
+                <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
+                
+                <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
+            </div>
+            
+            <div class="closing">
+                <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
+            </div>
+            
+            <div class="signature">
+                <p>Best regards,<br>
+                The HubSpot Assistant Team<br>
+                <a href="http://lowtouch.ai" class="company">Lowtouch.ai</a></p>
+            </div>
+        </body>
+        </html>
+        """
                 log_prefix = "Fallback"
 
             # === STEP 3: Build and Send Email ===

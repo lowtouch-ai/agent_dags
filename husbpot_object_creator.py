@@ -1,6 +1,6 @@
 import logging
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
@@ -27,7 +27,6 @@ default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2025, 8, 22),
-    "retries": 1,
     "retry_delay": timedelta(seconds=15),
 }
 
@@ -426,16 +425,16 @@ CRITICAL REMINDERS:
                     padding: 20px;
                 }}
                 .greeting {{
-                    margin-bottom: 20px;
+                    margin-bottom: 15px;
                 }}
                 .message {{
-                    margin: 20px 0;
+                    margin: 15px 0;
                 }}
                 .closing {{
-                    margin-top: 30px;
+                    margin-top: 15px;
                 }}
                 .signature {{
-                    margin-top: 20px;
+                    margin-top: 15px;
                     font-weight: bold;
                 }}
                 .company {{
@@ -464,7 +463,7 @@ CRITICAL REMINDERS:
             <div class="signature">
                 <p>Best regards,<br>
                 The HubSpot Assistant Team<br>
-                <span class="company">Lowtouch.ai</span></p>
+                <a href="http://lowtouch.ai" class="company">Lowtouch.ai</a></p>
             </div>
         </body>
         </html>
@@ -782,82 +781,47 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
     
     return warnings
 
-# CREATE FUNCTIONS (abbreviated - follow same pattern)
+
 def create_contacts(ti, **context):
+    """Create new contacts in HubSpot with full retry logic and clean error handling"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_contacts = analysis_results.get("entities_to_create", {}).get("contacts", [])
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     owner_info = ti.xcom_pull(key="owner_info", default={})
-    
-    # Check if this is a retry by pulling previous status
+
+    # === Retry Context ===
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== CREATE CONTACTS - Attempt {current_try}/{max_tries} ===")
+
     previous_status = ti.xcom_pull(key="contact_creation_status")
     previous_response = ti.xcom_pull(key="contact_creation_response")
-    
+    is_retry = current_try > 1
+
     if not to_create_contacts:
         logging.info("No contacts to create")
-        ti.xcom_push(key="created_contacts", value=[])
-        ti.xcom_push(key="contacts_errors", value=[])
-        ti.xcom_push(key="contact_creation_final_status", value="success")
+        result = {
+            "created_contacts": [],
+            "contacts_errors": [],
+            "contact_creation_status": {"status": "success"},
+            "contact_creation_response": {"status": "success", "created_contacts": [], "errors": []},
+            "contact_creation_final_status": "success"
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
         return []
-    
-    # Add owner info to each contact
+
+    # Inject owner info
     contact_owner_id = owner_info.get("contact_owner_id", "71346067")
     contact_owner_name = owner_info.get("contact_owner_name", "Kishore")
     for contact in to_create_contacts:
-        if not contact.get("contactOwnerName"):
-            contact["contactOwnerName"] = contact_owner_name
-        if not contact.get("contactOwnerId"):
-            contact["contactOwnerId"] = contact_owner_id
-    
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
-        # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt")
-        previous_reason = previous_status.get("reason", "Unknown error")
-        
-        prompt = f"""Previous attempt to create contacts failed.
+        contact.setdefault("contactOwnerName", contact_owner_name)
+        contact.setdefault("contactOwnerId", contact_owner_id)
 
-Previous Response:
-{json.dumps(previous_response, indent=2)}
-
-Previous Failure Reason: {previous_reason}
-
-Please analyze the error and retry creating the contacts:
-
-Contact Details to Create:
-{json.dumps(to_create_contacts, indent=2)}
-Contact Owner: {contact_owner_name} (ID: {contact_owner_id})
-
-Steps:
-1. Review the previous error and identify the root cause
-2. For each contact, invoke create_contact tool with the provided properties
-3. Return the created contact ID and all properties
-
-Return ONLY this JSON structure (no other text):
-{{
-    "status": "success|failure",
-    "created_contacts": [
-        {{
-            "id": "contact_id_from_api",
-            "details": {{
-                "firstname": "value",
-                "lastname": "value",
-                "email": "value",
-                "phone": "value",
-                "address": "value",
-                "jobtitle": "value",
-                "contactOwnerName": "value"
-            }}
-        }}
-    ],
-    "errors": [],
-    "reason": "error description if status is failure"
-}}"""
-    else:
-        # This is the initial attempt - use initial prompt
-        logging.info("Initial attempt - using initial prompt")
-        
-        prompt = f"""Create contacts in HubSpot.
+    # === Base Prompt (shared) ===
+    base_prompt = f"""Create contacts in HubSpot.
 
 Contact Details to Create:
 {json.dumps(to_create_contacts, indent=2)}
@@ -884,169 +848,134 @@ Return ONLY this JSON structure (no other text):
             }}
         }}
     ],
-    "errors": [],
+    "errors": ["Error message 1", "Error message 2"],
     "reason": "error description if status is failure"
 }}"""
+
+    # === Retry Prompt (enhanced with previous failure) ===
+    if is_retry:
+        logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try}/{max_tries})")
+
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
+        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
+
+        prompt = f"""PREVIOUS CONTACT CREATION FAILED
+
+Previous AI Response:
+{prev_resp_str}
+
+Failure Reason: {prev_reason}
+
+This is retry attempt {current_try} of {max_tries}.
+
+Please fix the issue and correctly create the contacts.
+
+Contacts to Create:
+{json.dumps(to_create_contacts, indent=2)}
+
+{base_prompt}
+
+COMMON FIXES NEEDED:
+- Invalid JSON (missing commas, quotes, brackets)
+- Wrong field names or structure
+- Missing contactOwnerId
+- Not using create_contact tool
+- Returning extra text
+
+YOU MUST RETURN ONLY CLEAN, VALID JSON."""
+    else:
+        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
+        prompt = base_prompt
 
     response = None
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-        parsed = json.loads(response)
-        status = parsed.get("status", "unknown")
-        created = parsed.get("created_contacts", [])
+        logging.info(f"Raw AI response: {response[:1000]}...")
+
+        parsed = json.loads(response.strip())
+        status = parsed.get("status")
+
+        if status != "success":
+            raise Exception(parsed.get("reason", "LLM returned status != success"))
+
+        created_contacts = parsed.get("created_contacts", [])
         errors = parsed.get("errors", [])
-        reason = parsed.get("reason", "")
-        
-        if status == "success":
-            ti.xcom_push(key="created_contacts", value=created)
-            ti.xcom_push(key="contacts_errors", value=errors)
-            ti.xcom_push(key="contact_creation_status", value={"status": "success"})
-            ti.xcom_push(key="contact_creation_response", value=parsed)
-            ti.xcom_push(key="contact_creation_final_status", value="success")
-            logging.info(f"Created {len(created)} contacts")
-            return created
-        else:
-            # Check if this is the final retry
-            task_instance = context['task_instance']
-            current_try_number = task_instance.try_number
-            max_tries = task_instance.max_tries
-            
-            if current_try_number >= max_tries:
-                # Final failure - push status and raise to fail task
-                logging.error(f"Contact creation failed after {max_tries} attempts: {reason}")
-                ti.xcom_push(key="created_contacts", value=[])
-                ti.xcom_push(key="contacts_errors", value=errors)
-                ti.xcom_push(key="contact_creation_status", value={"status": "final_failure", "reason": reason})
-                ti.xcom_push(key="contact_creation_response", value=parsed)
-                ti.xcom_push(key="contact_creation_final_status", value="failed")
-                ti.xcom_push(key="contact_creation_failure_reason", value=reason)
-                raise Exception(f"create_contacts failed after {max_tries} attempts: {reason}")
-            else:
-                # Not final retry - raise exception to trigger retry
-                ti.xcom_push(key="created_contacts", value=[])
-                ti.xcom_push(key="contacts_errors", value=errors)
-                ti.xcom_push(key="contact_creation_status", value={"status": "failure", "reason": reason})
-                ti.xcom_push(key="contact_creation_response", value=parsed)
-                logging.error(f"Contact creation failed (attempt {current_try_number}/{max_tries}): {reason}")
-                raise Exception(f"create_contacts failed: {reason}")
-            
+
+        # === SUCCESS ===
+        result = {
+            "created_contacts": created_contacts,
+            "contacts_errors": errors,
+            "contact_creation_status": {"status": "success"},
+            "contact_creation_response": parsed,
+            "contact_creation_final_status": "success"
+        }
+
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
+
+        logging.info(f"SUCCESS: Created {len(created_contacts)} contacts on attempt {current_try}")
+        return created_contacts
+
     except json.JSONDecodeError as e:
-        # Check if this is the final retry
-        task_instance = context['task_instance']
-        current_try_number = task_instance.try_number
-        max_tries = task_instance.max_tries
-        
-        logging.error(f"Error parsing JSON response: {e}")
-        logging.error(f"Raw response: {response}")
-        
-        if current_try_number >= max_tries:
-            # Final failure
-            ti.xcom_push(key="created_contacts", value=[])
-            ti.xcom_push(key="contacts_errors", value=[str(e)])
-            ti.xcom_push(key="contact_creation_status", value={"status": "final_failure", "reason": f"JSON parsing error: {str(e)}"})
-            ti.xcom_push(key="contact_creation_response", value={"raw_response": response})
-            ti.xcom_push(key="contact_creation_final_status", value="failed")
-            ti.xcom_push(key="contact_creation_failure_reason", value=f"JSON parsing error: {str(e)}")
-            raise Exception(f"create_contacts failed after {max_tries} attempts: JSON parsing error - {str(e)}")
-        else:
-            # Retry
-            ti.xcom_push(key="created_contacts", value=[])
-            ti.xcom_push(key="contacts_errors", value=[str(e)])
-            ti.xcom_push(key="contact_creation_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-            ti.xcom_push(key="contact_creation_response", value={"raw_response": response})
-            raise Exception(f"create_contacts failed: JSON parsing error - {str(e)}")
-            
+        error_msg = f"Invalid JSON from AI: {e}\nRaw: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
     except Exception as e:
-        # Check if this is the final retry
-        task_instance = context['task_instance']
-        current_try_number = task_instance.try_number
-        max_tries = task_instance.max_tries
-        
-        logging.error(f"Error creating contacts: {e}")
-        logging.error(f"Raw response: {response}")
-        
-        if current_try_number >= max_tries:
-            # Final failure
-            ti.xcom_push(key="created_contacts", value=[])
-            ti.xcom_push(key="contacts_errors", value=[str(e)])
-            ti.xcom_push(key="contact_creation_status", value={"status": "final_failure", "reason": str(e)})
-            ti.xcom_push(key="contact_creation_response", value={"raw_response": response})
-            ti.xcom_push(key="contact_creation_final_status", value="failed")
-            ti.xcom_push(key="contact_creation_failure_reason", value=str(e))
-            raise Exception(f"create_contacts failed after {max_tries} attempts: {str(e)}")
+        error_msg = str(e) or "Unknown error during contact creation"
+        is_final = current_try >= max_tries
+
+        status_type = "final_failure" if is_final else "failure"
+        fallback = {
+            "created_contacts": [],
+            "contacts_errors": [error_msg],
+            "contact_creation_status": {"status": status_type, "reason": error_msg},
+            "contact_creation_response": {"raw_response": response} if response else None,
+            "contact_creation_final_status": "failed" if is_final else "retrying"
+        }
+
+        for k, v in fallback.items():
+            ti.xcom_push(key=k, value=v)
+
+        if is_final:
+            logging.error(f"FINAL FAILURE: Contact creation failed after {max_tries} attempts: {error_msg}")
+            raise  # Mark task failed
         else:
-            # Retry
-            ti.xcom_push(key="created_contacts", value=[])
-            ti.xcom_push(key="contacts_errors", value=[str(e)])
-            ti.xcom_push(key="contact_creation_status", value={"status": "failure", "reason": str(e)})
-            ti.xcom_push(key="contact_creation_response", value={"raw_response": response})
-            raise Exception(f"create_contacts failed: {str(e)}")
+            logging.warning(f"Contact creation failed → retrying ({current_try}/{max_tries})")
+            raise  # Trigger retry
 
 def create_companies(ti, **context):
+    """Create new companies in HubSpot with full retry support and clean error handling"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_companies = analysis_results.get("entities_to_create", {}).get("companies", [])
-    
-    # Check if this is a retry by pulling previous status
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+
+    # === Retry Context ===
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== CREATE COMPANIES - Attempt {current_try}/{max_tries} ===")
+
     previous_status = ti.xcom_pull(key="company_creation_status")
     previous_response = ti.xcom_pull(key="company_creation_response")
-    
+    is_retry = current_try > 1
+
     if not to_create_companies:
         logging.info("No companies to create")
-        ti.xcom_push(key="created_companies", value=[])
-        ti.xcom_push(key="companies_errors", value=[])
+        result = {
+            "created_companies": [],
+            "companies_errors": [],
+            "company_creation_status": {"status": "success"},
+            "company_creation_response": {"status": "success", "created_companies": [], "errors": []},
+            "company_creation_final_status": "success"
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
         return []
-    
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
-        # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt")
-        previous_reason = previous_status.get("reason", "Unknown error")
-        
-        prompt = f"""Previous attempt to create companies failed.
 
-Previous Response:
-{json.dumps(previous_response, indent=2)}
-
-Previous Failure Reason: {previous_reason}
-
-Please analyze the error and retry creating the companies:
-
-Company Details to Create:
-{json.dumps(to_create_companies, indent=2)}
-
-Steps:
-1. Review the previous error and identify the root cause
-2. For each company, invoke create_company tool with the provided properties
-3. Return the created company ID and all properties
-
-Return ONLY this JSON structure (no other text):
-{{
-    "status": "success|failure",
-    "created_companies": [
-        {{
-            "id": "company_id_from_api",
-            "details": {{
-                "name": "value",
-                "domain": "value",
-                "address": "value",
-                "city": "value",
-                "state": "value",
-                "zip": "value",
-                "country": "value",
-                "phone": "value",
-                "description": "value",
-                "type": "value"
-            }}
-        }}
-    ],
-    "errors": [],
-    "reason": "error description if status is failure"
-}}"""
-    else:
-        # This is the initial attempt - use initial prompt
-        logging.info("Initial attempt - using initial prompt")
-        
-        prompt = f"""Create companies in HubSpot.
+    # === Base Prompt (shared) ===
+    base_prompt = f"""Create companies in HubSpot.
 
 Company Details to Create:
 {json.dumps(to_create_companies, indent=2)}
@@ -1078,144 +1007,140 @@ Return ONLY this JSON structure (no other text):
     "errors": [],
     "reason": "error description if status is failure"
 }}"""
-    
+
+    # === Retry Prompt (with previous failure context) ===
+    if is_retry:
+        logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try}/{max_tries})")
+
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
+        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
+
+        prompt = f"""PREVIOUS COMPANY CREATION FAILED
+
+Previous AI Response:
+{prev_resp_str}
+
+Failure Reason: {prev_reason}
+
+This is retry attempt {current_try} of {max_tries}.
+
+Please fix the issue and correctly create the companies.
+
+Companies to Create:
+{json.dumps(to_create_companies, indent=2)}
+
+{base_prompt}
+
+COMMON ISSUES TO FIX:
+- Invalid or malformed JSON
+- Missing commas, quotes, or brackets
+- Wrong field names (e.g. "companyId" vs "id")
+- Not using create_company tool
+- Returning explanations instead of pure JSON
+- Missing required fields like domain or type
+
+YOU MUST RETURN ONLY CLEAN, VALID JSON."""
+    else:
+        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
+        prompt = base_prompt
+
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
-        parsed = json.loads(response)
-        status = parsed.get("status", "unknown")
-        created = parsed.get("created_companies", [])
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response: {response[:1000]}...")
+
+        parsed = json.loads(response.strip())
+        status = parsed.get("status")
+
+        if status != "success":
+            raise Exception(parsed.get("reason", "LLM returned status != success"))
+
+        created_companies = parsed.get("created_companies", [])
         errors = parsed.get("errors", [])
-        reason = parsed.get("reason", "")
-        
-        if status == "success":
-            ti.xcom_push(key="created_companies", value=created)
-            ti.xcom_push(key="companies_errors", value=errors)
-            ti.xcom_push(key="company_creation_status", value={"status": "success"})
-            ti.xcom_push(key="company_creation_response", value=parsed)
-            logging.info(f"Created {len(created)} companies")
-            return created
-        else:
-            # Push failure status and response for next retry
-            ti.xcom_push(key="created_companies", value=[])
-            ti.xcom_push(key="companies_errors", value=errors)
-            ti.xcom_push(key="company_creation_status", value={"status": "failure", "reason": reason})
-            ti.xcom_push(key="company_creation_response", value=parsed)
-            logging.error(f"Company creation failed: {reason}")
-            raise Exception(f"create_companies failed: {reason}")
-            
+
+        # === SUCCESS ===
+        result = {
+            "created_companies": created_companies,
+            "companies_errors": errors,
+            "company_creation_status": {"status": "success"},
+            "company_creation_response": parsed,
+            "company_creation_final_status": "success"
+        }
+
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
+
+        logging.info(f"SUCCESS: Created {len(created_companies)} companies on attempt {current_try}")
+        return created_companies
+
     except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="created_companies", value=[])
-        ti.xcom_push(key="companies_errors", value=[str(e)])
-        ti.xcom_push(key="company_creation_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-        ti.xcom_push(key="company_creation_response", value={"raw_response": response})
-        raise Exception(f"create_companies failed: JSON parsing error - {str(e)}")
+        error_msg = f"Invalid JSON from AI: {e}\nRaw: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
     except Exception as e:
-        logging.error(f"Error creating companies: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="created_companies", value=[])
-        ti.xcom_push(key="companies_errors", value=[str(e)])
-        ti.xcom_push(key="company_creation_status", value={"status": "failure", "reason": str(e)})
-        ti.xcom_push(key="company_creation_response", value={"raw_response": response})
-        raise Exception(f"create_companies failed: {str(e)}")
+        error_msg = str(e) or "Unknown error during company creation"
+        is_final = current_try >= max_tries
+
+        status_type = "final_failure" if is_final else "failure"
+        fallback = {
+            "created_companies": [],
+            "companies_errors": [error_msg],
+            "company_creation_status": {"status": status_type, "reason": error_msg},
+            "company_creation_response": {"raw_response": response} if response else None,
+            "company_creation_final_status": "failed" if is_final else "retrying"
+        }
+
+        for k, v in fallback.items():
+            ti.xcom_push(key=k, value=v)
+
+        if is_final:
+            logging.error(f"FINAL FAILURE: Company creation failed after {max_tries} attempts: {error_msg}")
+            raise  # Mark task failed in Airflow
+        else:
+            logging.warning(f"Company creation failed → retrying ({current_try}/{max_tries})")
+            raise
 
 def create_deals(ti, **context):
+    """Create new deals in HubSpot with full retry logic and clean error handling"""
     analysis_results = ti.xcom_pull(key="analysis_results")
+    to_create_deals = analysis_results.get("entities_to_create", {}).get("deals", [])
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     owner_info = ti.xcom_pull(key="owner_info", default={})
-    to_create_deals = analysis_results.get("entities_to_create", {}).get("deals", [])
-    
-    # Check if this is a retry by pulling previous status
+
+    # === Retry Context ===
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== CREATE DEALS - Attempt {current_try}/{max_tries} ===")
+
     previous_status = ti.xcom_pull(key="deal_creation_status")
     previous_response = ti.xcom_pull(key="deal_creation_response")
-    
+    is_retry = current_try > 1
+
     if not to_create_deals:
         logging.info("No deals to create")
-        ti.xcom_push(key="created_deals", value=[])
-        ti.xcom_push(key="deals_errors", value=[])
+        result = {
+            "created_deals": [],
+            "deals_errors": [],
+            "deal_creation_status": {"status": "success"},
+            "deal_creation_response": {"status": "success", "created_deals": [], "errors": []},
+            "deal_creation_final_status": "success"
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
         return []
-    
+
+    # Inject owner info
     deal_owner_id = owner_info.get("deal_owner_id", "71346067")
     deal_owner_name = owner_info.get("deal_owner_name", "Kishore")
-    
-    # Add owner info to each deal
     for deal in to_create_deals:
-        if not deal.get("dealOwnerName"):
-            deal["dealOwnerName"] = deal_owner_name
-        if not deal.get("dealOwnerId"):
-            deal["dealOwnerId"] = deal_owner_id
-    
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
-        # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt")
-        previous_reason = previous_status.get("reason", "Unknown error")
-        
-        prompt = f"""Previous attempt to create deals failed.
+        deal.setdefault("dealOwnerName", deal_owner_name)
+        deal.setdefault("dealOwnerId", deal_owner_id)
 
-Previous Response:
-{json.dumps(previous_response, indent=2)}
-
-Previous Failure Reason: {previous_reason}
-
-Please analyze the error and retry creating the deals:
-
-Deal Details to Create:
-{json.dumps(to_create_deals, indent=2)}
-
-Deal Owner: {deal_owner_name} (ID: {deal_owner_id})
-
-IMPORTANT: Respond with ONLY a valid JSON object. Always invoke create_deal.
-
-Critical Deal Naming Rules:
-1. Extract Client Name from latest user response or available details
-2. Determine if it's a direct deal or partner deal from context
-3. For direct deals: format as "<Client Name>-<Deal Name>"
-4. For partner deals: format as "<Partner Name>-<Client Name>-<Deal Name>"
-5. If Deal Name not specified, create descriptive name based on product/service mentioned
-6. Never use generic names - must reflect actual client/partner and deal purpose
-7. Preserve any specific deal amount, close date, or stage information provided
-8. Never use commas for deal amount.
-9. Use only the following for deal stage:
-    - appointmentscheduled
-    - qualifiedtobuy
-    - presentationscheduled
-    - decisionmakerboughtin
-    - contractsent
-    - closedwon
-    - closedlost
-10. Never use the hubspot owner name for calling the api, it should always be the id.
-
-Steps:
-1. Review the previous error and identify the root cause
-2. Analyze user response to extract client/partner names and deal details
-3. Apply naming convention strictly for each deal
-4. For each deal, invoke create_deal with the properties
-5. Collect created deal id, properly formatted deal name, label name, amount, close date, owner
-
-Return JSON:
-{{
-    "status": "success|failure",
-    "created_deals": [{{
-        "id": "123", 
-        "details": {{ 
-            "dealName": "ClientName-DealPurpose", // or "PartnerName-ClientName-DealPurpose",
-            "dealLabelName": "...",
-            "dealAmount": "...",
-            "closeDate": "...",
-            "dealOwnerName": "..."
-        }}
-    }}],
-    "errors": [],
-    "reason": "error description if status is failure"
-}}"""
-    else:
-        # This is the initial attempt - use initial prompt
-        logging.info("Initial attempt - using initial prompt")
-        
-        prompt = f"""Create deals in HubSpot.
+    # === Base Prompt (shared) ===
+    base_prompt = f"""Create deals in HubSpot.
 
 Deal Details to Create:
 {json.dumps(to_create_deals, indent=2)}
@@ -1265,116 +1190,133 @@ Return JSON:
     "errors": [],
     "reason": "error description if status is failure"
 }}"""
-    
+
+    # === Retry Prompt (with previous failure) ===
+    if is_retry:
+        logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try}/{max_tries})")
+
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
+        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
+
+        prompt = f"""PREVIOUS DEAL CREATION FAILED
+
+Previous AI Response:
+{prev_resp_str}
+
+Failure Reason: {prev_reason}
+
+This is retry attempt {current_try} of {max_tries}.
+
+Please fix the issue and correctly create the deals.
+
+Deals to Create:
+{json.dumps(to_create_deals, indent=2)}
+
+{base_prompt}
+
+COMMON ISSUES TO FIX:
+- Invalid or malformed JSON
+- Using owner name instead of ID
+- Wrong deal stage (using display name instead of internal ID)
+- Bad deal name format (generic, missing client, commas, etc.)
+- Not calling create_deal tool
+- Extra text outside JSON
+
+YOU MUST RETURN ONLY CLEAN, VALID JSON."""
+    else:
+        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
+        prompt = base_prompt
+
     response = None
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-        parsed = json.loads(response)
-        status = parsed.get("status", "unknown")
-        created = parsed.get("created_deals", [])
+        logging.info(f"Raw AI response: {response[:1000]}...")
+
+        parsed = json.loads(response.strip())
+        status = parsed.get("status")
+
+        if status != "success":
+            raise Exception(parsed.get("reason", "LLM returned status != success"))
+
+        created_deals = parsed.get("created_deals", [])
         errors = parsed.get("errors", [])
-        reason = parsed.get("reason", "")
-        
-        if status == "success":
-            ti.xcom_push(key="created_deals", value=created)
-            ti.xcom_push(key="deals_errors", value=errors)
-            ti.xcom_push(key="deal_creation_status", value={"status": "success"})
-            ti.xcom_push(key="deal_creation_response", value=parsed)
-            logging.info(f"Created {len(created)} deals")
-            return created
-        else:
-            # Push failure status and response for next retry
-            ti.xcom_push(key="created_deals", value=[])
-            ti.xcom_push(key="deals_errors", value=errors)
-            ti.xcom_push(key="deal_creation_status", value={"status": "failure", "reason": reason})
-            ti.xcom_push(key="deal_creation_response", value=parsed)
-            logging.error(f"Deal creation failed: {reason}")
-            raise Exception(f"create_deals failed: {reason}")
-            
+
+        # === SUCCESS ===
+        result = {
+            "created_deals": created_deals,
+            "deals_errors": errors,
+            "deal_creation_status": {"status": "success"},
+            "deal_creation_response": parsed,
+            "deal_creation_final_status": "success"
+        }
+
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
+
+        logging.info(f"SUCCESS: Created {len(created_deals)} deals on attempt {current_try}")
+        return created_deals
+
     except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="created_deals", value=[])
-        ti.xcom_push(key="deals_errors", value=[str(e)])
-        ti.xcom_push(key="deal_creation_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-        ti.xcom_push(key="deal_creation_response", value={"raw_response": response})
-        raise Exception(f"create_deals failed: JSON parsing error - {str(e)}")
+        error_msg = f"Invalid JSON from AI: {e}\nRaw: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
     except Exception as e:
-        logging.error(f"Error creating deals: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="created_deals", value=[])
-        ti.xcom_push(key="deals_errors", value=[str(e)])
-        ti.xcom_push(key="deal_creation_status", value={"status": "failure", "reason": str(e)})
-        ti.xcom_push(key="deal_creation_response", value={"raw_response": response})
-        raise Exception(f"create_deals failed: {str(e)}")
+        error_msg = str(e) or "Unknown error during deal creation"
+        is_final = current_try >= max_tries
+
+        status_type = "final_failure" if is_final else "failure"
+        fallback = {
+            "created_deals": [],
+            "deals_errors": [error_msg],
+            "deal_creation_status": {"status": status_type, "reason": error_msg},
+            "deal_creation_response": {"raw_response": response} if response else None,
+            "deal_creation_final_status": "failed" if is_final else "retrying"
+        }
+
+        for k, v in fallback.items():
+            ti.xcom_push(key=k, value=v)
+
+        if is_final:
+            logging.error(f"FINAL FAILURE: Deal creation failed after {max_tries} attempts: {error_msg}")
+            raise  # Task fails in Airflow
+        else:
+            logging.warning(f"Deal creation failed → retrying ({current_try}/{max_tries})")
+            raise
+
 
 def create_meetings(ti, **context):
+    """Create meetings in HubSpot with full retry logic and clean error handling"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_meetings = analysis_results.get("entities_to_create", {}).get("meetings", [])
-    
-    # Check if this is a retry by pulling previous status
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+
+    # === Retry Context ===
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== CREATE MEETINGS - Attempt {current_try}/{max_tries} ===")
+
     previous_status = ti.xcom_pull(key="meeting_creation_status")
     previous_response = ti.xcom_pull(key="meeting_creation_response")
-    
+    is_retry = current_try > 1
+
     if not to_create_meetings:
         logging.info("No meetings to create")
-        ti.xcom_push(key="created_meetings", value=[])
-        ti.xcom_push(key="meetings_errors", value=[])
+        result = {
+            "created_meetings": [],
+            "meetings_errors": [],
+            "meeting_creation_status": {"status": "success"},
+            "meeting_creation_response": {"status": "success", "created_meetings": [], "errors": []},
+            "meeting_creation_final_status": "success"
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
         return []
-    
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
-        # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt")
-        previous_reason = previous_status.get("reason", "Unknown error")
-        
-        prompt = f"""Previous attempt to create meetings failed.
 
-Previous Response:
-{json.dumps(previous_response, indent=2)}
-
-Previous Failure Reason: {previous_reason}
-
-Please analyze the error and retry creating the meetings:
-
-Meeting Details to Create:
-{json.dumps(to_create_meetings, indent=2)}
-
-Steps:
-1. Review the previous error and identify the root cause
-2. For each meeting, invoke create_meeting tool with:
-   - hs_meeting_title
-   - hs_meeting_start_time
-   - hs_meeting_end_time
-   - hs_meeting_location
-   - hs_meeting_outcome
-   - hs_meeting_body (from outcome)
-3. Return the created meeting ID and all properties
-
-Return ONLY this JSON structure (no other text):
-{{
-    "status": "success|failure",
-    "created_meetings": [
-        {{
-            "id": "meeting_id_from_api",
-            "details": {{
-                "meeting_title": "value",
-                "start_time": "value",
-                "end_time": "value",
-                "location": "value",
-                "outcome": "value",
-                "attendees": ["name1", "name2"]
-            }}
-        }}
-    ],
-    "errors": [],
-    "reason": "error description if status is failure"
-}}"""
-    else:
-        # This is the initial attempt - use initial prompt
-        logging.info("Initial attempt - using initial prompt")
-        
-        prompt = f"""Create meetings in HubSpot.
+    # === Base Prompt (shared) ===
+    base_prompt = f"""Create meetings in HubSpot.
 
 Meeting Details to Create:
 {json.dumps(to_create_meetings, indent=2)}
@@ -1408,145 +1350,139 @@ Return ONLY this JSON structure (no other text):
     "errors": [],
     "reason": "error description if status is failure"
 }}"""
-    
+
+    # === Retry Prompt (with previous failure context) ===
+    if is_retry:
+        logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try}/{max_tries})")
+
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
+        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
+
+        prompt = f"""PREVIOUS MEETING CREATION FAILED
+
+Previous AI Response:
+{prev_resp_str}
+
+Failure Reason: {prev_reason}
+
+This is retry attempt {current_try} of {max_tries}.
+
+Please fix the issue and correctly create the meetings.
+
+Meetings to Create:
+{json.dumps(to_create_meetings, indent=2)}
+
+{base_prompt}
+
+COMMON ISSUES TO FIX:
+- Invalid or malformed JSON
+- Missing commas, quotes, or brackets
+- Wrong field names (e.g., "title" instead of "meeting_title")
+- Not using create_meeting tool
+- Returning extra text or explanations
+- Invalid datetime format
+
+YOU MUST RETURN ONLY CLEAN, VALID JSON."""
+    else:
+        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
+        prompt = base_prompt
+
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
-        parsed = json.loads(response)
-        status = parsed.get("status", "unknown")
-        created = parsed.get("created_meetings", [])
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response: {response[:1000]}...")
+
+        parsed = json.loads(response.strip())
+        status = parsed.get("status")
+
+        if status != "success":
+            raise Exception(parsed.get("reason", "LLM returned status != success"))
+
+        created_meetings = parsed.get("created_meetings", [])
         errors = parsed.get("errors", [])
-        reason = parsed.get("reason", "")
-        
-        if status == "success":
-            ti.xcom_push(key="created_meetings", value=created)
-            ti.xcom_push(key="meetings_errors", value=errors)
-            ti.xcom_push(key="meeting_creation_status", value={"status": "success"})
-            ti.xcom_push(key="meeting_creation_response", value=parsed)
-            logging.info(f"Created {len(created)} meetings")
-            return created
-        else:
-            # Push failure status and response for next retry
-            ti.xcom_push(key="created_meetings", value=[])
-            ti.xcom_push(key="meetings_errors", value=errors)
-            ti.xcom_push(key="meeting_creation_status", value={"status": "failure", "reason": reason})
-            ti.xcom_push(key="meeting_creation_response", value=parsed)
-            logging.error(f"Meeting creation failed: {reason}")
-            raise Exception(f"create_meetings failed: {reason}")
-            
+
+        # === SUCCESS ===
+        result = {
+            "created_meetings": created_meetings,
+            "meetings_errors": errors,
+            "meeting_creation_status": {"status": "success"},
+            "meeting_creation_response": parsed,
+            "meeting_creation_final_status": "success"
+        }
+
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
+
+        logging.info(f"SUCCESS: Created {len(created_meetings)} meetings on attempt {current_try}")
+        return created_meetings
+
     except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="created_meetings", value=[])
-        ti.xcom_push(key="meetings_errors", value=[str(e)])
-        ti.xcom_push(key="meeting_creation_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-        ti.xcom_push(key="meeting_creation_response", value={"raw_response": response})
-        raise Exception(f"create_meetings failed: JSON parsing error - {str(e)}")
+        error_msg = f"Invalid JSON from AI: {e}\nRaw: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
     except Exception as e:
-        logging.error(f"Error creating meetings: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="created_meetings", value=[])
-        ti.xcom_push(key="meetings_errors", value=[str(e)])
-        ti.xcom_push(key="meeting_creation_status", value={"status": "failure", "reason": str(e)})
-        ti.xcom_push(key="meeting_creation_response", value={"raw_response": response})
-        raise Exception(f"create_meetings failed: {str(e)}")
+        error_msg = str(e) or "Unknown error during meeting creation"
+        is_final = current_try >= max_tries
+
+        status_type = "final_failure" if is_final else "failure"
+        fallback = {
+            "created_meetings": [],
+            "meetings_errors": [error_msg],
+            "meeting_creation_status": {"status": status_type, "reason": error_msg},
+            "meeting_creation_response": {"raw_response": response} if response else None,
+            "meeting_creation_final_status": "failed" if is_final else "retrying"
+        }
+
+        for k, v in fallback.items():
+            ti.xcom_push(key=k, value=v)
+
+        if is_final:
+            logging.error(f"FINAL FAILURE: Meeting creation failed after {max_tries} attempts: {error_msg}")
+            raise  # Mark task as failed in Airflow
+        else:
+            logging.warning(f"Meeting creation failed → retrying ({current_try}/{max_tries})")
+            raise
 
 def create_notes(ti, **context):
+    """Create notes in HubSpot with full retry logic and consistent error handling"""
     analysis_results = ti.xcom_pull(key="analysis_results")
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
     to_create_notes = analysis_results.get("entities_to_create", {}).get("notes", [])
-    
-    # Check if this is a retry by pulling previous status
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+
+    # === Retry Context ===
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== CREATE NOTES - Attempt {current_try}/{max_tries} ===")
+
     previous_status = ti.xcom_pull(key="note_creation_status")
     previous_response = ti.xcom_pull(key="note_creation_response")
-    
+    is_retry = current_try > 1
+
     if not to_create_notes:
         logging.info("No notes to create")
-        ti.xcom_push(key="created_notes", value=[])
-        ti.xcom_push(key="notes_errors", value=[])
+        result = {
+            "created_notes": [],
+            "notes_errors": [],
+            "note_creation_status": {"status": "success"},
+            "note_creation_response": {"status": "success", "created_notes": [], "errors": []}
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
         return []
-    
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
-        # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt")
-        previous_reason = previous_status.get("reason", "Unknown error")
-        
-        prompt = f"""Previous attempt to create notes failed.
 
-Previous Response:
-{json.dumps(previous_response, indent=2)}
+    # Current UTC timestamp (for reference in prompt)
+    current_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-Previous Failure Reason: {previous_reason}
-
-Please analyze the error and retry creating the notes.
-
----
-
-NOTES TO CREATE:
-{json.dumps(to_create_notes, indent=2)}
-
----
-
-**STRICT EXECUTION RULES:**
-
-1. **Review the previous error and identify the root cause**
-
-2. **For each note in `to_create_notes`:**
-   - Format `note_content` as:  
-     "[name] mentioned [note_content]" 
-     (Use `name` from the note object if present; otherwise use `"User"`)
-
-3. **Invoke HubSpot `create_notes` API** with:
-   - `hs_timestamp`: Current UTC time in `YYYY-MM-DDTHH:MM:SSZ` format
-   - `hs_note_body`: The formatted `note_content`
-   - Required associations (if provided in input)
-
-4. **On success per note:**
-   - Capture: `id`, formatted `note_content`, `hs_lastmodifieddate`
-
-5. **On failure per note:**
-   - Capture error message in `errors` array
-
-6. **Always return full JSON** — even if all fail.
-
----
-
-**RETURN EXACTLY THIS JSON STRUCTURE:**
-{{
-    "status": "success|failure",
-    "created_notes": [
-        {{
-            "id": "123",
-            "details": {{
-                "note_content": "[User] mentioned Follow up on Q4 budget approval",
-                "timestamp": "2025-04-05T10:30:00Z"
-            }}
-        }}
-    ],
-    "errors": [],
-    "reason": "error description if status is failure"
-}}
-
-**RULES:**
-- `status`: "success" if all notes created successfully, "failure" otherwise
-- `created_notes`: Array of successfully created notes
-- `errors`: Array of strings for failed creations
-- `reason`: Detailed error description if status is failure
-- **Always invoke API** — no skipping
-- Use **UTC** for all timestamps
-- **RESPOND WITH ONLY THE JSON OBJECT — NO OTHER TEXT.**
-"""
-    else:
-        # This is the initial attempt - use initial prompt
-        logging.info("Initial attempt - using initial prompt")
-        
-        prompt = f"""You are a HubSpot Note Creation Assistant. Your role is to **create notes in HubSpot** using the provided note details.  
+    # === Base Prompt (shared) ===
+    base_prompt = f"""You are a HubSpot Note Creation Assistant. Your role is to **create notes in HubSpot** using the provided note details.  
 **You MUST invoke the `create_notes` API for every note in the input.**  
 No parsing of user intent — assume all input notes are confirmed and ready to create.
 
 ---
-
+Current UTC Time: {current_utc}
 NOTES TO CREATE:
 {json.dumps(to_create_notes, indent=2)}
 
@@ -1562,6 +1498,7 @@ NOTES TO CREATE:
 2. **Invoke HubSpot `create_notes` API** with:
    - `hs_timestamp`: Current UTC time in `YYYY-MM-DDTHH:MM:SSZ` format
    - `hs_note_body`: The formatted `note_content`
+   - while using the `hs_note_body` for tool, convert the content to html format.
    - Required associations (if provided in input)
 
 3. **On success per note:**
@@ -1599,154 +1536,145 @@ NOTES TO CREATE:
 - Use **UTC** for all timestamps
 - **RESPOND WITH ONLY THE JSON OBJECT — NO OTHER TEXT.**
 """
-    
+
+    # === Final Prompt (Initial vs Retry) ===
+    if is_retry:
+        logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try}/{max_tries})")
+
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
+        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
+
+        prompt = f"""PREVIOUS NOTE CREATION FAILED
+
+Previous AI Response:
+{prev_resp_str}
+
+Failure Reason: {prev_reason}
+
+This is retry attempt {current_try} of {max_tries}.
+
+Please fix the issue and correctly create ALL notes.
+
+NOTES TO CREATE (again):
+{json.dumps(to_create_notes, indent=2)}
+
+{base_prompt}
+
+COMMON ISSUES TO FIX:
+- Invalid or malformed JSON
+- Missing commas, brackets, or quotes
+- Not calling create_notes tool
+- Wrong field names (e.g. hs_note_body vs note_content)
+- Returning extra text
+- Using local time instead of UTC
+
+YOU MUST RETURN ONLY CLEAN, VALID JSON."""
+    else:
+        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
+        prompt = base_prompt
+
     response = None
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-        parsed = json.loads(response)
-        status = parsed.get("status", "unknown")
-        created = parsed.get("created_notes", [])
+        logging.info(f"Raw AI response: {response[:1000]}...")
+
+        parsed = json.loads(response.strip())
+        status = parsed.get("status")
+
+        if status != "success":
+            raise Exception(parsed.get("reason", "LLM returned status != success"))
+
+        created_notes = parsed.get("created_notes", [])
         errors = parsed.get("errors", [])
-        reason = parsed.get("reason", "")
-        
-        if status == "success":
-            ti.xcom_push(key="created_notes", value=created)
-            ti.xcom_push(key="notes_errors", value=errors)
-            ti.xcom_push(key="note_creation_status", value={"status": "success"})
-            ti.xcom_push(key="note_creation_response", value=parsed)
-            logging.info(f"Created {len(created)} notes")
-            return created
-        else:
-            # Push failure status and response for next retry
-            ti.xcom_push(key="created_notes", value=[])
-            ti.xcom_push(key="notes_errors", value=errors)
-            ti.xcom_push(key="note_creation_status", value={"status": "failure", "reason": reason})
-            ti.xcom_push(key="note_creation_response", value=parsed)
-            logging.error(f"Note creation failed: {reason}")
-            raise Exception(f"create_notes failed: {reason}")
-            
+
+        # === SUCCESS ===
+        result = {
+            "created_notes": created_notes,
+            "notes_errors": errors,
+            "note_creation_status": {"status": "success"},
+            "note_creation_response": parsed
+        }
+
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
+
+        logging.info(f"SUCCESS: Created {len(created_notes)} notes on attempt {current_try}")
+        return created_notes
+
     except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="created_notes", value=[])
-        ti.xcom_push(key="notes_errors", value=[str(e)])
-        ti.xcom_push(key="note_creation_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-        ti.xcom_push(key="note_creation_response", value={"raw_response": response})
-        raise Exception(f"create_notes failed: JSON parsing error - {str(e)}")
+        error_msg = f"Invalid JSON from AI: {e}\nRaw: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
     except Exception as e:
-        logging.error(f"Error creating notes: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="created_notes", value=[])
-        ti.xcom_push(key="notes_errors", value=[str(e)])
-        ti.xcom_push(key="note_creation_status", value={"status": "failure", "reason": str(e)})
-        ti.xcom_push(key="note_creation_response", value={"raw_response": response})
-        raise Exception(f"create_notes failed: {str(e)}")
+        error_msg = str(e) or "Unknown error during note creation"
+        is_final = current_try >= max_tries
+
+        status_type = "final_failure" if is_final else "failure"
+        fallback = {
+            "created_notes": [],
+            "notes_errors": [error_msg],
+            "note_creation_status": {"status": status_type, "reason": error_msg},
+            "note_creation_response": {"raw_response": response} if response else None
+        }
+
+        for k, v in fallback.items():
+            ti.xcom_push(key=k, value=v)
+
+        if is_final:
+            logging.error(f"FINAL FAILURE: Note creation failed after {max_tries} attempts: {error_msg}")
+            raise  # Task fails in Airflow
+        else:
+            logging.warning(f"Note creation failed → retrying ({current_try}/{max_tries})")
+            raise
+
 
 def create_tasks(ti, **context):
+    """Create HubSpot tasks with correct owner assignment and full retry resilience"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     owner_info = ti.xcom_pull(key="owner_info", default={})
     to_create_tasks = analysis_results.get("entities_to_create", {}).get("tasks", [])
-    
-    # Check if this is a retry by pulling previous status
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+
+    # === Retry Context ===
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== CREATE TASKS - Attempt {current_try}/{max_tries} ===")
+
     previous_status = ti.xcom_pull(key="task_creation_status")
     previous_response = ti.xcom_pull(key="task_creation_response")
-    
+    is_retry = current_try > 1
+
     if not to_create_tasks:
         logging.info("No tasks to create")
-        ti.xcom_push(key="created_tasks", value=[])
-        ti.xcom_push(key="tasks_errors", value=[])
+        result = {
+            "created_tasks": [],
+            "tasks_errors": [],
+            "task_creation_status": {"status": "success"},
+            "task_creation_response": {"status": "success", "created_tasks": [], "errors": []},
+            "task_creation_final_status": "success"
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
         return []
-    
+
+    # === Assign correct task owners (critical logic preserved) ===
     task_owners = owner_info.get("task_owners", [])
-    
-    # Map task owners to tasks - CRITICAL: Ensure each task has correct owner
     for idx, task in enumerate(to_create_tasks, 1):
-        matching_owner = next((owner for owner in task_owners if owner.get("task_index") == idx), None)
+        matching_owner = next((o for o in task_owners if o.get("task_index") == idx), None)
         if matching_owner:
             task["task_owner_id"] = matching_owner.get("task_owner_id", "71346067")
             task["task_owner_name"] = matching_owner.get("task_owner_name", "Kishore")
         else:
-            # If no matching owner found, keep existing values or use defaults
-            if "task_owner_id" not in task:
-                task["task_owner_id"] = "71346067"
-            if "task_owner_name" not in task:
-                task["task_owner_name"] = "Kishore"
-    
-    # Log the tasks with their assigned owners for debugging
-    logging.info(f"Tasks with mapped owners: {json.dumps(to_create_tasks, indent=2)}")
-    
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
-        # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt")
-        previous_reason = previous_status.get("reason", "Unknown error")
-        
-        prompt = f"""Previous attempt to create tasks failed.
+            task.setdefault("task_owner_id", "71346067")
+            task.setdefault("task_owner_name", "Kishore")
 
-Previous Response:
-{json.dumps(previous_response, indent=2)}
+    logging.info(f"Tasks prepared with owners: {json.dumps(to_create_tasks, indent=2)}")
 
-Previous Failure Reason: {previous_reason}
-
-Please analyze the error and retry creating the tasks:
-
-Task Details to Create (with assigned owners):
-{json.dumps(to_create_tasks, indent=2)}
-
-CRITICAL INSTRUCTIONS:
-1. Review the previous error and identify the root cause
-2. You MUST use the EXACT task_owner_id specified for each task
-3. DO NOT change or override the task_owner_id values
-4. Each task already has the correct owner assigned - preserve it
-
-Steps:
-1. For each task, invoke create_task tool with:
-   - hs_task_subject: The task_details field
-   - hs_task_body: The task_details field
-   - hubspot_owner_id: Use the EXACT task_owner_id from the task (DO NOT change this)
-   - hs_task_status: "NOT_STARTED"
-   - hs_task_priority: The priority field (HIGH/MEDIUM/LOW)
-   - hs_timestamp: Convert due_date to milliseconds since epoch
-2. Return the created task ID and properties including the ACTUAL owner name used
-
-EXAMPLE for task with task_owner_id "159242825":
-create_task({{
-    "properties": {{
-        "hs_task_subject": "Draft a proposal...",
-        "hs_task_body": "Draft a proposal...",
-        "hubspot_owner_id": "159242825",  // MUST use this exact ID
-        "hs_task_status": "NOT_STARTED",
-        "hs_task_priority": "MEDIUM",
-        "hs_timestamp": "1729641600000"
-    }}
-}})
-
-Return ONLY this JSON structure (no other text):
-{{
-    "status": "success|failure",
-    "created_tasks": [
-        {{
-            "id": "task_id_from_api",
-            "details": {{
-                "task_details": "value",
-                "task_owner_name": "actual_owner_name_from_api",
-                "task_owner_id": "actual_owner_id_used",
-                "due_date": "value",
-                "priority": "value",
-                "task_index": task_index_number
-            }}
-        }}
-    ],
-    "errors": [],
-    "reason": "error description if status is failure"
-}}
-
-CRITICAL: Preserve the task_owner_id from the input. Do not default to Kishore (71346067) unless explicitly specified."""
-    else:
-        # This is the initial attempt - use initial prompt
-        logging.info("Initial attempt - using initial prompt")
-        
-        prompt = f"""Create tasks in HubSpot.
+    # === Base Prompt (shared) ===
+    base_prompt = f"""Create tasks in HubSpot.
 
 Task Details to Create (with assigned owners):
 {json.dumps(to_create_tasks, indent=2)}
@@ -1799,122 +1727,148 @@ Return ONLY this JSON structure (no other text):
 }}
 
 CRITICAL: Preserve the task_owner_id from the input. Do not default to Kishore (71346067) unless explicitly specified."""
-    
+
+    # === Build Final Prompt (Retry vs Initial) ===
+    if is_retry:
+        logging.info(f"RETRY ATTEMPT {current_try}/{max_tries} - Using enhanced retry prompt")
+
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
+        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
+
+        prompt = f"""PREVIOUS TASK CREATION FAILED
+
+Previous AI Response:
+{prev_resp_str}
+
+Failure Reason: {prev_reason}
+
+This is retry attempt {current_try} of {max_tries}.
+
+You likely changed the task_owner_id or returned invalid JSON.
+
+FIX IT NOW.
+
+Tasks to Create (with CORRECT owners):
+{json.dumps(to_create_tasks, indent=2)}
+
+{base_prompt}
+
+COMMON ISSUES TO FIX:
+- Wrong hubspot_owner_id used
+- Defaulted to Kishore when not allowed
+- Invalid JSON (missing commas, brackets, quotes)
+- Extra text outside JSON
+- Wrong field names
+
+YOU MUST:
+- Preserve EVERY task_owner_id exactly as given
+- Return ONLY clean, valid JSON
+- Use create_task tool correctly
+"""
+    else:
+        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
+        prompt = base_prompt
+
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
-        parsed = json.loads(response)
-        status = parsed.get("status", "unknown")
-        created = parsed.get("created_tasks", [])
-        errors = parsed.get("errors", [])
-        reason = parsed.get("reason", "")
-        
-        if status == "success":
-            # Verify owners were assigned correctly
-            for task in created:
-                task_index = task.get("details", {}).get("task_index")
-                original_task = next((t for t in to_create_tasks if t.get("task_index") == task_index), None)
-                if original_task:
-                    expected_owner_id = original_task.get("task_owner_id")
-                    actual_owner_id = task.get("details", {}).get("task_owner_id")
-                    if expected_owner_id != actual_owner_id:
-                        logging.warning(f"Task {task_index}: Expected owner {expected_owner_id}, got {actual_owner_id}")
-            
-            ti.xcom_push(key="created_tasks", value=created)
-            ti.xcom_push(key="tasks_errors", value=errors)
-            ti.xcom_push(key="task_creation_status", value={"status": "success"})
-            ti.xcom_push(key="task_creation_response", value=parsed)
-            logging.info(f"Created {len(created)} tasks with owners: {[(t.get('details', {}).get('task_owner_name'), t.get('details', {}).get('task_index')) for t in created]}")
-            return created
-        else:
-            # Push failure status and response for next retry
-            ti.xcom_push(key="created_tasks", value=[])
-            ti.xcom_push(key="tasks_errors", value=errors)
-            ti.xcom_push(key="task_creation_status", value={"status": "failure", "reason": reason})
-            ti.xcom_push(key="task_creation_response", value=parsed)
-            logging.error(f"Task creation failed: {reason}")
-            raise Exception(f"create_tasks failed: {reason}")
-            
-    except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="created_tasks", value=[])
-        ti.xcom_push(key="tasks_errors", value=[str(e)])
-        ti.xcom_push(key="task_creation_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-        ti.xcom_push(key="task_creation_response", value={"raw_response": response})
-        raise Exception(f"create_tasks failed: JSON parsing error - {str(e)}")
-    except Exception as e:
-        logging.error(f"Error creating tasks: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="created_tasks", value=[])
-        ti.xcom_push(key="tasks_errors", value=[str(e)])
-        ti.xcom_push(key="task_creation_status", value={"status": "failure", "reason": str(e)})
-        ti.xcom_push(key="task_creation_response", value={"raw_response": response})
-        raise Exception(f"create_tasks failed: {str(e)}")
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response: {response[:1000]}...")
 
+        parsed = json.loads(response.strip())
+        status = parsed.get("status")
+
+        if status != "success":
+            raise Exception(parsed.get("reason", "LLM returned status != success"))
+
+        created_tasks = parsed.get("created_tasks", [])
+        errors = parsed.get("errors", [])
+
+        # Optional: Validate owner IDs were preserved
+        for created in created_tasks:
+            details = created.get("details", {})
+            task_index = details.get("task_index")
+            original = next((t for t in to_create_tasks if t.get("task_index") == task_index), None)
+            if original and details.get("task_owner_id") != original.get("task_owner_id"):
+                logging.warning(f"Owner ID mismatch on task {task_index}: expected {original.get('task_owner_id')}, got {details.get('task_owner_id')}")
+
+        # === SUCCESS ===
+        result = {
+            "created_tasks": created_tasks,
+            "tasks_errors": errors,
+            "task_creation_status": {"status": "success"},
+            "task_creation_response": parsed,
+            "task_creation_final_status": "success"
+        }
+
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
+
+        logging.info(f"SUCCESS: Created {len(created_tasks)} tasks on attempt {current_try}")
+        return created_tasks
+
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON from AI: {e}\nRaw: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
+    except Exception as e:
+        error_msg = str(e) or "Unknown error during task creation"
+        is_final = current_try >= max_tries
+
+        status_type = "final_failure" if is_final else "failure"
+        fallback = {
+            "created_tasks": [],
+            "tasks_errors": [error_msg],
+            "task_creation_status": {"status": status_type, "reason": error_msg},
+            "task_creation_response": {"raw_response": response} if response else None,
+            "task_creation_final_status": "failed" if is_final else "retrying"
+        }
+
+        for k, v in fallback.items():
+            ti.xcom_push(key=k, value=v)
+
+        if is_final:
+            logging.error(f"FINAL FAILURE: Task creation failed after {max_tries} attempts: {error_msg}")
+            raise
+        else:
+            logging.warning(f"Task creation failed → retrying ({current_try}/{max_tries})")
+            raise
 # UPDATE FUNCTIONS (abbreviated - follow same pattern)
+import json
+import logging
+
 def update_contacts(ti, **context):
+    """Update existing contacts in HubSpot with full retry support"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("contacts", [])
     chat_history = ti.xcom_pull(key="chat_history", default=[])
-    
-    # Check if this is a retry by pulling previous status
+
+    # === Retry Context ===
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== UPDATE CONTACTS - Attempt {current_try}/{max_tries} ===")
+
     previous_status = ti.xcom_pull(key="contact_update_status")
     previous_response = ti.xcom_pull(key="contact_update_response")
-    
+    is_retry = current_try > 1
+
     if not to_update:
         logging.info("No contacts to update")
-        ti.xcom_push(key="updated_contacts", value=[])
-        ti.xcom_push(key="contacts_update_errors", value=[])
+        result = {
+            "updated_contacts": [],
+            "contacts_update_errors": [],
+            "contact_update_status": {"status": "success"},
+            "contact_update_response": {"status": "success", "updated_contacts": [], "errors": []},
+            "contact_update_final_status": "success"
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
         return []
-    
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
-        # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt")
-        previous_reason = previous_status.get("reason", "Unknown error")
-        
-        prompt = f"""Previous attempt to update contacts failed.
 
-Previous Response:
-{json.dumps(previous_response, indent=2)}
-
-Previous Failure Reason: {previous_reason}
-
-Please analyze the error and retry updating the contacts:
-
-Contacts to Update:
-{json.dumps(to_update, indent=2)}
-
-Steps:
-1. Review the previous error and identify the root cause
-2. For each contact, invoke update_contact with the id and changes
-3. Collect the updated IDs and details
-
-Return ONLY this JSON structure (no other text):
-{{
-    "status": "success|failure",
-    "updated_contacts": [
-        {{
-            "id": "123",
-            "details": {{
-                "firstname": "...",
-                "lastname": "...",
-                "email": "...",
-                "phone": "...",
-                "address": "...",
-                "jobtitle": "..."
-            }}
-        }}
-    ],
-    "errors": [],
-    "reason": "error description if status is failure"
-}}"""
-    else:
-        # This is the initial attempt - use initial prompt
-        logging.info("Initial attempt - using initial prompt")
-        
-        prompt = f"""Update contacts in HubSpot.
+    # === Base Prompt ===
+    base_prompt = f"""Update contacts in HubSpot.
 
 Contacts to Update:
 {json.dumps(to_update, indent=2)}
@@ -1943,179 +1897,302 @@ Return ONLY this JSON structure (no other text):
     "reason": "error description if status is failure"
 }}"""
 
+    # === Retry Prompt (with full context) ===
+    if is_retry:
+        logging.info(f"RETRY DETECTED - Using enhanced retry prompt (attempt {current_try}/{max_tries})")
+
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
+        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
+
+        prompt = f"""PREVIOUS CONTACT UPDATE FAILED
+
+Previous AI Response:
+{prev_resp_str}
+
+Failure Reason: {prev_reason}
+
+This is retry attempt {current_try} of {max_tries}.
+
+Please fix the issue and correctly update the contacts.
+
+Contacts to Update:
+{json.dumps(to_update, indent=2)}
+
+{base_prompt}
+
+COMMON ISSUES TO FIX:
+- Invalid or malformed JSON
+- Wrong field names or structure
+- Using wrong contact ID
+- Modifying fields not in the update list
+- Returning explanations instead of pure JSON
+- Missing commas, quotes, or brackets
+
+YOU MUST RETURN ONLY CLEAN, VALID JSON."""
+    else:
+        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
+        prompt = base_prompt
+
     response = None
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-        parsed = json.loads(response)
-        status = parsed.get("status", "unknown")
-        updated = parsed.get("updated_contacts", [])
+        logging.info(f"Raw AI response: {response[:1000]}...")
+
+        parsed = json.loads(response.strip())
+        status = parsed.get("status")
+
+        if status != "success":
+            raise Exception(parsed.get("reason", "LLM returned status != success"))
+
+        updated_contacts = parsed.get("updated_contacts", [])
         errors = parsed.get("errors", [])
-        reason = parsed.get("reason", "")
-        
-        if status == "success":
-            ti.xcom_push(key="updated_contacts", value=updated)
-            ti.xcom_push(key="contacts_update_errors", value=errors)
-            ti.xcom_push(key="contact_update_status", value={"status": "success"})
-            ti.xcom_push(key="contact_update_response", value=parsed)
-            logging.info(f"Updated {len(updated)} contacts")
-            return updated
-        else:
-            # Push failure status and response for next retry
-            ti.xcom_push(key="updated_contacts", value=[])
-            ti.xcom_push(key="contacts_update_errors", value=errors)
-            ti.xcom_push(key="contact_update_status", value={"status": "failure", "reason": reason})
-            ti.xcom_push(key="contact_update_response", value=parsed)
-            logging.error(f"Contact update failed: {reason}")
-            raise Exception(f"update_contacts failed: {reason}")
-            
+
+        # === SUCCESS ===
+        result = {
+            "updated_contacts": updated_contacts,
+            "contacts_update_errors": errors,
+            "contact_update_status": {"status": "success"},
+            "contact_update_response": parsed,
+            "contact_update_final_status": "success"
+        }
+
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
+
+        logging.info(f"SUCCESS: Updated {len(updated_contacts)} contacts on attempt {current_try}")
+        return updated_contacts
+
     except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_contacts", value=[])
-        ti.xcom_push(key="contacts_update_errors", value=[str(e)])
-        ti.xcom_push(key="contact_update_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-        ti.xcom_push(key="contact_update_response", value={"raw_response": response})
-        raise Exception(f"update_contacts failed: JSON parsing error - {str(e)}")
+        error_msg = f"Invalid JSON from AI: {e}\nRaw: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
     except Exception as e:
-        logging.error(f"Error updating contacts: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_contacts", value=[])
-        ti.xcom_push(key="contacts_update_errors", value=[str(e)])
-        ti.xcom_push(key="contact_update_status", value={"status": "failure", "reason": str(e)})
-        ti.xcom_push(key="contact_update_response", value={"raw_response": response})
-        raise Exception(f"update_contacts failed: {str(e)}")
+        error_msg = str(e) or "Unknown error during contact update"
+        is_final = current_try >= max_tries
+
+        status_type = "final_failure" if is_final else "failure"
+        fallback = {
+            "updated_contacts": [],
+            "contacts_update_errors": [error_msg],
+            "contact_update_status": {"status": status_type, "reason": error_msg},
+            "contact_update_response": {"raw_response": response} if response else None,
+            "contact_update_final_status": "failed" if is_final else "retrying"
+        }
+
+        for k, v in fallback.items():
+            ti.xcom_push(key=k, value=v)
+
+        if is_final:
+            logging.error(f"FINAL FAILURE: Contact update failed after {max_tries} attempts: {error_msg}")
+            raise  # Task fails in Airflow
+        else:
+            logging.warning(f"Contact update failed → retrying ({current_try}/{max_tries})")
+            raise
 
 def update_companies(ti, **context):
+    """Update existing companies in HubSpot with full retry support"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("companies", [])
-    
-    # Check if this is a retry by pulling previous status
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+
+    # === Retry Context ===
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== UPDATE COMPANIES - Attempt {current_try}/{max_tries} ===")
+
     previous_status = ti.xcom_pull(key="company_update_status")
     previous_response = ti.xcom_pull(key="company_update_response")
-    
+    is_retry = current_try > 1
+
     if not to_update:
         logging.info("No companies to update")
-        ti.xcom_push(key="updated_companies", value=[])
-        ti.xcom_push(key="companies_update_errors", value=[])
+        result = {
+            "updated_companies": [],
+            "companies_update_errors": [],
+            "company_update_status": {"status": "success"},
+            "company_update_response": {"status": "success", "updated_companies": [], "errors": []}
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
         return []
-    
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
-        # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt")
-        previous_reason = previous_status.get("reason", "Unknown error")
-        
-        prompt = f"""Previous attempt to update companies failed.
 
-Previous Response:
-{json.dumps(previous_response, indent=2)}
-
-Previous Failure Reason: {previous_reason}
-
-Please analyze the error and retry updating the companies:
+    # === Base Prompt (shared) ===
+    base_prompt = f"""Update the following companies in HubSpot.
 
 Companies to Update:
 {json.dumps(to_update, indent=2)}
 
-Steps:
-1. Review the previous error and identify the root cause
-2. For each company, invoke update_company with the id and changes
-3. Collect the updated company id, company name, domain, state, city, country, phone, type and display in tabular format. If any details not found, show as blank in table.
+For each company:
+- Invoke update_company(company_id, {{ "properties": {{ ... }} }})
+- Only include fields that need to be changed
+- Use exact property names as expected by HubSpot API
 
-Return ONLY this JSON structure (no other text):
+Return ONLY this exact JSON structure:
 {{
-    "status": "success|failure",
-    "updated_companies": [{{"id": "123", "details": {{ "name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}}} ...],
+    "status": "success",
+    "updated_companies": [
+        {{
+            "id": "company_id",
+            "details": {{
+                "name": "...",
+                "domain": "...",
+                "address": "...",
+                "city": "...",
+                "state": "...",
+                "zip": "...",
+                "country": "...",
+                "phone": "...",
+                "description": "...",
+                "type": "PROSPECT|PARTNER"
+            }}
+        }}
+    ],
     "errors": [],
-    "reason": "error description if status is failure"
-}}"""
+    "reason": ""
+}}
+
+If any error occurs → set "status": "failure" and explain in "reason".
+"""
+
+    # === Retry Prompt (with previous failure context) ===
+    if is_retry:
+        logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try}/{max_tries})")
+
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
+        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
+
+        prompt = f"""PREVIOUS COMPANY UPDATE FAILED
+
+Previous AI Response:
+{prev_resp_str}
+
+Failure Reason: {prev_reason}
+
+This is retry attempt {current_try} of {max_tries}.
+
+Please fix the issue and correctly update the companies.
+
+Companies to Update:
+{json.dumps(to_update, indent=2)}
+
+{base_prompt}
+
+COMMON ISSUES TO FIX:
+- Invalid or malformed JSON
+- Wrong field names (e.g. 'companyName' instead of 'name')
+- Missing company ID in update_company call
+- Returning extra text or markdown
+- Not using update_company tool properly
+
+YOU MUST RETURN ONLY CLEAN, VALID JSON."""
     else:
-        # This is the initial attempt - use initial prompt
-        logging.info("Initial attempt - using initial prompt")
-        
-        prompt = f"""Update companies in HubSpot.
-
-Companies to Update:
-{json.dumps(to_update, indent=2)}
-
-Steps:
-1. For each company, invoke update_company with the id and changes
-2. Collect the updated company id, company name, domain, state, city, country, phone, type and display in tabular format. If any details not found, show as blank in table.
-
-Return ONLY this JSON structure (no other text):
-{{
-    "status": "success|failure",
-    "updated_companies": [{{"id": "123", "details": {{ "name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}}} ...],
-    "errors": [],
-    "reason": "error description if status is failure"
-}}"""
+        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
+        prompt = base_prompt
 
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
-        parsed = json.loads(response)
-        status = parsed.get("status", "unknown")
-        updated = parsed.get("updated_companies", [])
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response: {response[:1000]}...")
+
+        parsed = json.loads(response.strip())
+        status = parsed.get("status")
+
+        if status != "success":
+            raise Exception(parsed.get("reason", "LLM returned status != success"))
+
+        updated_companies = parsed.get("updated_companies", [])
         errors = parsed.get("errors", [])
-        reason = parsed.get("reason", "")
-        
-        if status == "success":
-            ti.xcom_push(key="updated_companies", value=updated)
-            ti.xcom_push(key="companies_update_errors", value=errors)
-            ti.xcom_push(key="company_update_status", value={"status": "success"})
-            ti.xcom_push(key="company_update_response", value=parsed)
-            logging.info(f"Updated {len(updated)} companies")
-            return updated
-        else:
-            # Push failure status and response for next retry
-            ti.xcom_push(key="updated_companies", value=[])
-            ti.xcom_push(key="companies_update_errors", value=errors)
-            ti.xcom_push(key="company_update_status", value={"status": "failure", "reason": reason})
-            ti.xcom_push(key="company_update_response", value=parsed)
-            logging.error(f"Company update failed: {reason}")
-            raise Exception(f"update_companies failed: {reason}")
-            
+
+        # === SUCCESS ===
+        result = {
+            "updated_companies": updated_companies,
+            "companies_update_errors": errors,
+            "company_update_status": {"status": "success"},
+            "company_update_response": parsed
+        }
+
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
+
+        logging.info(f"SUCCESS: Updated {len(updated_companies)} companies on attempt {current_try}")
+        return updated_companies
+
     except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_companies", value=[])
-        ti.xcom_push(key="companies_update_errors", value=[str(e)])
-        ti.xcom_push(key="company_update_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-        ti.xcom_push(key="company_update_response", value={"raw_response": response})
-        raise Exception(f"update_companies failed: JSON parsing error - {str(e)}")
+        error_msg = f"Invalid JSON from AI: {e}\nRaw: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
     except Exception as e:
-        logging.error(f"Error updating companies: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_companies", value=[])
-        ti.xcom_push(key="companies_update_errors", value=[str(e)])
-        ti.xcom_push(key="company_update_status", value={"status": "failure", "reason": str(e)})
-        ti.xcom_push(key="company_update_response", value={"raw_response": response})
-        raise Exception(f"update_companies failed: {str(e)}")
+        error_msg = str(e) or "Unknown error during company update"
+        is_final = current_try >= max_tries
+
+        status_type = "final_failure" if is_final else "failure"
+        fallback = {
+            "updated_companies": [],
+            "companies_update_errors": [error_msg],
+            "company_update_status": {"status": status_type, "reason": error_msg},
+            "company_update_response": {"raw_response": response} if response else None
+        }
+
+        for k, v in fallback.items():
+            ti.xcom_push(key=k, value=v)
+
+        if is_final:
+            logging.error(f"FINAL FAILURE: Company update failed after {max_tries} attempts: {error_msg}")
+            raise  # Task fails in Airflow
+        else:
+            logging.warning(f"Company update failed → retrying (attempt {current_try}/{max_tries})")
+            raise
 
 def update_deals(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("deals", [])
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    # Get current attempt number
+    task_instance = context['task_instance']
+    current_try_number = task_instance.try_number
+    max_tries = task_instance.max_tries
+    
+    logging.info(f"=== UPDATE DEALS - Attempt {current_try_number}/{max_tries} ===")
     
     # Check if this is a retry by pulling previous status
     previous_status = ti.xcom_pull(key="deal_update_status")
     previous_response = ti.xcom_pull(key="deal_update_response")
     
     if not to_update:
+        logging.info("No deals to update")
         ti.xcom_push(key="updated_deals", value=[])
+        ti.xcom_push(key="deals_update_errors", value=[])
         return []
     
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
+    # Determine if this is a retry (attempt > 1)
+    is_retry = current_try_number > 1
+    
+    if is_retry:
         # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt for deal updates")
-        previous_reason = previous_status.get("reason", "Unknown error")
+        logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try_number}/{max_tries})")
+        
+        if previous_status is None:
+            previous_reason = "Unknown error (no previous status found)"
+        else:
+            previous_reason = previous_status.get("reason", "Unknown error")
+        
+        if previous_response is None:
+            previous_response_str = "No previous response available"
+        else:
+            previous_response_str = json.dumps(previous_response, indent=2)
         
         prompt = f"""Previous attempt to update deals failed.
 
 Previous Response:
-{json.dumps(previous_response, indent=2)}
+{previous_response_str}
 
 Previous Failure Reason: {previous_reason}
+
+This is retry attempt {current_try_number} of {max_tries}.
 
 Please analyze the error and retry updating the deals:
 
@@ -2127,7 +2204,7 @@ IMPORTANT: Respond with ONLY a valid JSON object.
 Steps:
 1. Review the previous error and identify the root cause
 2. For each deal, invoke update_deal with the id and changes in the exact format:
-    update_deal(task_id, {{
+    update_deal(deal_id, {{
      "properties": {{
        "dealName": "",
        "dealLabelName": "",
@@ -2136,9 +2213,37 @@ Steps:
        "dealOwnerName": ""
      }}
    }})
+3. HubSpot Deal Stage Label Configuration
 
-3. Collect the updated deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
+When updating or creating a deal in HubSpot via API (or automation), always use the following **internal IDs** as the `dealLabelName` (or equivalent field) in the request payload.  
 
+However, when displaying the stage to users (in UI, reports, emails, dashboards, etc.), always show the corresponding **human-readable Display Name**.
+
+| Internal ID (use in API request body) | Display Name (show to users)       |
+|---------------------------------------|------------------------------------|
+| appointmentscheduled                  | Appointment Scheduled              |
+| qualifiedtobuy                        | Qualified To Buy                   |
+| presentationscheduled                 | Presentation Scheduled             |
+| decisionmakerboughtin                 | Decision Maker Bought In           |
+| contractsent                          | Contract Sent                      |
+| closedwon                             | Closed Won                         |
+| closedlost                            | Closed Lost                        |
+
+**Important rules:**
+- The value sent in the API request **must** be the exact Internal ID (lowercase, no spaces).
+- Never send the Display Name in the request body — it will cause errors or mismatches.
+- Always map and display the user-friendly Display Name in any front-end interface, notifications, or reporting tools.
+
+Example API payload snippet:
+```json
+{{
+  "dealLabelName": "appointmentscheduled"   // correct
+  // "dealLabelName": "Appointment Scheduled"  // incorrect – will fail
+}}
+4. Use all the properties exactly as provided in the input for updating the deal.
+5. Use the deal owner id for updating the deal owner instead of name.
+6. Collect the updated deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
+7. While returning the dealLabelName should be the deal stage name instead of ID. for e.g, if contractsent then return Contract Sent.
 Return JSON:
 {{
     "status": "success|failure",
@@ -2150,14 +2255,14 @@ Return JSON:
 If error, set status as failure, error message in reason and include individual errors in the errors array."""
     else:
         # This is the initial attempt - use initial prompt
-        logging.info("Initial attempt - using initial prompt for deal updates")
+        logging.info(f"INITIAL ATTEMPT - Using initial prompt (attempt {current_try_number}/{max_tries})")
         
         prompt = f"""Update deals: {json.dumps(to_update, indent=2)}
 IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
 1. For each deal, invoke update_deal with the id and changes in the exact format:
-    update_deal(task_id, {{
+    update_deal(deal_id, {{
      "properties": {{
        "dealName": "",
        "dealLabelName": "",
@@ -2167,8 +2272,37 @@ Steps:
      }}
    }})
 2. Deal owner Id should be used in above request body instead of name.
-3. Collect the updated deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
+3. HubSpot Deal Stage Label Configuration
 
+When updating or creating a deal in HubSpot via API (or automation), always use the following **internal IDs** as the `dealLabelName` (or equivalent field) in the request payload.  
+
+However, when displaying the stage to users (in UI, reports, emails, dashboards, etc.), always show the corresponding **human-readable Display Name**.
+
+| Internal ID (use in API request body) | Display Name (show to users)       |
+|---------------------------------------|------------------------------------|
+| appointmentscheduled                  | Appointment Scheduled              |
+| qualifiedtobuy                        | Qualified To Buy                   |
+| presentationscheduled                 | Presentation Scheduled             |
+| decisionmakerboughtin                 | Decision Maker Bought In           |
+| contractsent                          | Contract Sent                      |
+| closedwon                             | Closed Won                         |
+| closedlost                            | Closed Lost                        |
+
+**Important rules:**
+- The value sent in the API request **must** be the exact Internal ID (lowercase, no spaces).
+- Never send the Display Name in the request body — it will cause errors or mismatches.
+- Always map and display the user-friendly Display Name in any front-end interface, notifications, or reporting tools.
+
+Example API payload snippet:
+```json
+{{
+  "dealLabelName": "appointmentscheduled"   // correct
+  // "dealLabelName": "Appointment Scheduled"  // incorrect – will fail
+}}
+4. Use all the properties exactly as provided in the input for updating the deal.
+5. Use the deal owner id for updating the deal owner instead of name.
+6. Collect the updated deal id, deal name, deal label name, close date, deal owner name in tabular format. If any details not found, show as blank in table.
+7. While returning the dealLabelName should be the deal stage name instead of ID. for e.g, if contractsent then return Contract Sent.
 Return JSON:
 {{
     "status": "success|failure",
@@ -2181,355 +2315,392 @@ If error, set status as failure, error message in reason and include individual 
 
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
-        parsed = json.loads(response)
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        parsed = json.loads(response)       
         status = parsed.get("status", "unknown")
-        updated = parsed.get("updated_deals", [])
+        updated_deals = parsed.get("updated_deals", [])
         errors = parsed.get("errors", [])
         reason = parsed.get("reason", "")
-        
+
+        # Prepare final result dict (will be pushed all at once)
+        result = {
+            "updated_deals": updated_deals if status == "success" else [],
+            "deals_update_errors": errors,
+            "deal_update_status": {"status": "success", "reason": reason},
+            "deal_update_response": parsed
+        }
+
         if status == "success":
-            ti.xcom_push(key="updated_deals", value=updated)
-            ti.xcom_push(key="deal_update_status", value={"status": "success"})
-            ti.xcom_push(key="deal_update_response", value=parsed)
-            logging.info(f"Updated {len(updated)} deals")
-            return updated
+            logging.info(f"Successfully updated {len(updated_deals)} deals on attempt {current_try_number}")
+            # Push all at once
+            for key, value in result.items():
+                ti.xcom_push(key=key, value=value)
+            return updated_deals
+
         else:
-            # Push failure status and response for next retry
-            ti.xcom_push(key="updated_deals", value=[])
-            ti.xcom_push(key="deals_errors", value=errors)
-            ti.xcom_push(key="deal_update_status", value={"status": "failure", "reason": reason})
-            ti.xcom_push(key="deal_update_response", value=parsed)
-            logging.error(f"Deal update failed: {reason}")
-            raise Exception(f"update_deals failed: {reason}")
-            
+            # LLM reported failure
+            raise Exception(reason or "LLM returned status='failure'")
     except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_deals", value=[])
-        ti.xcom_push(key="deals_errors", value=[str(e)])
-        ti.xcom_push(key="deal_update_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-        ti.xcom_push(key="deal_update_response", value={"raw_response": response})
-        raise Exception(f"update_deals failed: JSON parsing error - {str(e)}")
+        error_msg = f"Invalid JSON from AI: {e}\nRaw response: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)   
     except Exception as e:
-        logging.error(f"Error updating deals: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_deals", value=[])
-        ti.xcom_push(key="deals_errors", value=[str(e)])
-        ti.xcom_push(key="deal_update_status", value={"status": "failure", "reason": str(e)})
-        ti.xcom_push(key="deal_update_response", value={"raw_response": response})
-        raise Exception(f"update_deals failed: {str(e)}")
-    
+        error_msg = str(e) if str(e) else "Unknown error during deal update"
+        is_final_attempt = current_try_number >= max_tries
+        
+        status_type = "final_failure" if is_final_attempt else "failure"
+        result = {
+            "updated_deals": [],
+            "deals_update_errors": [error_msg],
+            "deal_update_status": {"status": status_type, "reason": error_msg},
+            "deal_update_response": {"raw_response": response} if 'response' in locals() else None
+        }
+
+        # Push everything once
+        for key, value in result.items():
+            ti.xcom_push(key=key, value=value)
+
+        if is_final_attempt:
+            logging.error(f"FINAL FAILURE after {max_tries} attempts: {error_msg}")
+            raise  # This will mark task as failed
+        else:
+            logging.warning(f"Attempt {current_try_number}/{max_tries} failed → retrying...")
+            raise
+
 def update_meetings(ti, **context):
+    """Update meetings in HubSpot with full retry support"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("meetings", [])
-    
-    # Check if this is a retry by pulling previous status
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+
+    # === Retry Context ===
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== UPDATE MEETINGS - Attempt {current_try}/{max_tries} ===")
+
     previous_status = ti.xcom_pull(key="meeting_update_status")
     previous_response = ti.xcom_pull(key="meeting_update_response")
-    
+    is_retry = current_try > 1
+
     if not to_update:
-        ti.xcom_push(key="updated_meetings", value=[])
+        logging.info("No meetings to update")
+        result = {
+            "updated_meetings": [],
+            "meeting_update_status": {"status": "success"},
+            "meeting_update_response": {"status": "success", "updated_meetings": []}
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
         return []
-    
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
-        # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt for meetings")
-        previous_reason = previous_status.get("reason", "Unknown error")
-        
-        prompt = f"""Previous attempt to update meetings failed.
 
-Previous Response:
-{json.dumps(previous_response, indent=2)}
-
-Previous Failure Reason: {previous_reason}
-
-Please analyze the error and retry updating the meetings:
+    # === Base Prompt ===
+    base_prompt = f"""Update the following meetings in HubSpot.
 
 Meetings to Update:
 {json.dumps(to_update, indent=2)}
 
-Steps:
-1. Review the previous error and identify the root cause
-2. For each meeting, invoke update_meeting with the id and changes
-3. Collect the updated ID, Title, Start Time (EST), End Time (EST), Location, Outcome in tabular format
-4. Always use `hs_timestamp` in YYYY-MM-DDTHH:MM:SSZ format while updating meetings
+Rules:
+- Always use `hs_timestamp` in ISO format: YYYY-MM-DDTHH:MM:SSZ (UTC)
+- Convert any EST/EDT times to UTC before updating
+- Use update_meeting(meeting_id, {{ "properties": {{ ... }} }})
 
-Return ONLY this JSON structure (no other text):
+Return ONLY this exact JSON:
 {{
-    "status": "success|failure",
-    "updated_meetings": [{{"id": "123", "details": {{ "meeting_title": "...", "start_time": "...", "end_time": "...", "location": "...", "outcome": "...", "timestamp": "...", "attendees": [], "meeting_type": "..."}}}} ...],
-    "errors": ["Error message 1", "Error message 2"],
-    "reason": "error description if status is failure"
-}}"""
+    "status": "success",
+    "updated_meetings": [
+        {{
+            "id": "123",
+            "details": {{
+                "meeting_title": "...",
+                "start_time": "2025-04-15T14:00:00Z",
+                "end_time": "2025-04-15T15:00:00Z",
+                "location": "...",
+                "outcome": "...",
+                "timestamp": "2025-04-15T14:00:00Z",
+                "attendees": ["contact123", "contact456"],
+                "meeting_type": "discovery_call|demo|follow_up"
+            }}
+        }}
+    ],
+    "errors": [],
+    "reason": ""
+}}
+"""
+
+    if is_retry:
+        logging.info(f"RETRY → Using enhanced prompt (attempt {current_try}/{max_tries})")
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No status"
+        prev_resp = json.dumps(previous_response, indent=2) if previous_response else "None"
+
+        prompt = f"""PREVIOUS MEETING UPDATE FAILED
+
+Previous Response:
+{prev_resp}
+
+Failure Reason: {prev_reason}
+
+Retry #{current_try} of {max_tries} — Fix the issue and return valid JSON.
+
+Meetings to Update:
+{json.dumps(to_update, indent=2)}
+
+{base_prompt}
+
+FIX THESE COMMON ISSUES:
+- Invalid JSON (missing commas, wrong quotes)
+- Wrong timestamp format (must be ISO UTC with Z)
+- Using display time instead of hs_timestamp
+- Missing id in update_meeting call
+- Returning text outside JSON
+
+RETURN ONLY CLEAN JSON."""
     else:
-        # This is the initial attempt - use initial prompt
-        logging.info("Initial attempt - using initial prompt for meetings")
-        
-        prompt = f"""Update meetings: {json.dumps(to_update, indent=2)}
-IMPORTANT: Respond with ONLY a valid JSON object.
-
-Steps:
-1. For each meeting, invoke update_meeting with the id and changes.
-2. Collect the updated ID, Title, Start Time (EST), End Time (EST), Location, Outcome in tabular format.
-3. Always use `hs_timestamp` in YYYY-MM-DDTHH:MM:SSZ format while updating meetings.
-
-Return ONLY this JSON structure (no other text):
-{{
-    "status": "success|failure",
-    "updated_meetings": [{{"id": "123", "details": {{ "meeting_title": "...", "start_time": "...", "end_time": "...", "location": "...", "outcome": "...", "timestamp": "...", "attendees": [], "meeting_type": "..."}}}} ...],
-    "errors": ["Error message 1", "Error message 2"],
-    "reason": "error description if status is failure"
-}}"""
+        logging.info(f"Initial attempt {current_try}/{max_tries}")
+        prompt = base_prompt
 
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
-        parsed = json.loads(response)
-        status = parsed.get("status", "unknown")
-        updated = parsed.get("updated_meetings", [])
-        errors = parsed.get("errors", [])
-        reason = parsed.get("reason", "")
-        
-        if status == "success":
-            ti.xcom_push(key="updated_meetings", value=updated)
-            ti.xcom_push(key="meeting_update_status", value={"status": "success"})
-            ti.xcom_push(key="meeting_update_response", value=parsed)
-            logging.info(f"Updated {len(updated)} meetings")
-            return updated
-        else:
-            # Push failure status and response for next retry
-            ti.xcom_push(key="updated_meetings", value=[])
-            ti.xcom_push(key="meeting_update_status", value={"status": "failure", "reason": reason})
-            ti.xcom_push(key="meeting_update_response", value=parsed)
-            logging.error(f"Meeting update failed: {reason}")
-            raise Exception(f"update_meetings failed: {reason}")
-            
-    except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_meetings", value=[])
-        ti.xcom_push(key="meeting_update_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-        ti.xcom_push(key="meeting_update_response", value={"raw_response": response})
-        raise Exception(f"update_meetings failed: JSON parsing error - {str(e)}")
-    except Exception as e:
-        logging.error(f"Error updating meetings: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_meetings", value=[])
-        ti.xcom_push(key="meeting_update_status", value={"status": "failure", "reason": str(e)})
-        ti.xcom_push(key="meeting_update_response", value={"raw_response": response})
-        raise Exception(f"update_meetings failed: {str(e)}")
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response: {response[:1000]}...")
 
+        parsed = json.loads(response.strip())
+        if parsed.get("status") != "success":
+            raise Exception(parsed.get("reason", "Status != success"))
+
+        updated = parsed.get("updated_meetings", [])
+
+        result = {
+            "updated_meetings": updated,
+            "meeting_update_status": {"status": "success"},
+            "meeting_update_response": parsed
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
+
+        logging.info(f"SUCCESS: Updated {len(updated)} meetings on attempt {current_try}")
+        return updated
+
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON: {e}\nRaw: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
+    except Exception as e:
+        error_msg = str(e) or "Unknown error"
+        is_final = current_try >= max_tries
+        status_type = "final_failure" if is_final else "failure"
+
+        fallback = {
+            "updated_meetings": [],
+            "meeting_update_status": {"status": status_type, "reason": error_msg},
+            "meeting_update_response": {"raw_response": response} if response else None
+        }
+        for k, v in fallback.items():
+            ti.xcom_push(key=k, value=v)
+
+        if is_final:
+            logging.error(f"FINAL FAILURE: update_meetings failed after {max_tries} attempts")
+            raise
+        else:
+            logging.warning(f"update_meetings failed → retrying ({current_try}/{max_tries})")
+            raise
 def update_notes(ti, **context):
+    """Update notes in HubSpot with full retry support"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("notes", [])
-    
-    # Check if this is a retry by pulling previous status
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== UPDATE NOTES - Attempt {current_try}/{max_tries} ===")
+
     previous_status = ti.xcom_pull(key="note_update_status")
     previous_response = ti.xcom_pull(key="note_update_response")
-    
+    is_retry = current_try > 1
+
     if not to_update:
-        ti.xcom_push(key="updated_notes", value=[])
+        logging.info("No notes to update")
+        result = {
+            "updated_notes": [],
+            "note_update_status": {"status": "success"},
+            "note_update_response": {"status": "success", "updated_notes": []}
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
         return []
-    
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
-        # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt for notes")
-        previous_reason = previous_status.get("reason", "Unknown error")
-        
-        prompt = f"""Previous attempt to update notes failed.
 
-Previous Response:
-{json.dumps(previous_response, indent=2)}
-
-Previous Failure Reason: {previous_reason}
-
-Please analyze the error and retry updating the notes:
+    base_prompt = f"""Update the following notes in HubSpot.
 
 Notes to Update:
 {json.dumps(to_update, indent=2)}
 
-Steps:
-1. Review the previous error and identify the root cause
-2. For each note, invoke update_note with the id and changes
-3. Collect the updated Note id, Note body, last modified date in tabular format
-4. Always use `hs_timestamp` in YYYY-MM-DDTHH:MM:SSZ format while updating notes
+Rules:
+- Use update_note(note_id, {{ "properties": {{ "hs_note_body": "..." }} }})
+- Always set `hs_timestamp` to current UTC time in format: YYYY-MM-DDTHH:MM:SSZ
 
-Return ONLY this JSON structure (no other text):
+Return ONLY this JSON:
 {{
-    "status": "success|failure",
-    "updated_notes": [{{"id": "123", "details": {{ "note_content": "...", "timestamp": "..."}}}} ...],
-    "errors": ["Error message 1", "Error message 2"],
-    "reason": "error description if status is failure"
-}}"""
+    "status": "success",
+    "updated_notes": [
+        {{
+            "id": "123",
+            "details": {{
+                "note_content": "Full updated note body...",
+                "timestamp": "2025-04-15T10:30:00Z"
+            }}
+        }}
+    ],
+    "errors": [],
+    "reason": ""
+}}
+"""
+
+    if is_retry:
+        logging.info(f"RETRY → Using enhanced prompt (attempt {current_try}/{max_tries})")
+        prev_reason = previous_status.get("reason", "Unknown") if previous_status else "No status"
+        prev_resp = json.dumps(previous_response, indent=2) if previous_response else "None"
+
+        prompt = f"""PREVIOUS NOTE UPDATE FAILED
+
+Previous Response:
+{prev_resp}
+
+Failure Reason: {prev_reason}
+
+Retry #{current_try} of {max_tries}
+
+Notes to Update:
+{json.dumps(to_update, indent=2)}
+
+{base_prompt}
+
+YOU MUST FIX:
+- Malformed JSON
+- Missing hs_timestamp
+- Wrong field names
+- Extra text outside JSON
+- Not calling update_note tool
+
+RETURN ONLY VALID JSON."""
     else:
-        # This is the initial attempt - use initial prompt
-        logging.info("Initial attempt - using initial prompt for notes")
-        
-        prompt = f"""Update notes: {json.dumps(to_update, indent=2)}
-IMPORTANT: Respond with ONLY a valid JSON object.
-
-Steps:
-1. For each note, invoke update_note with the id and changes.
-2. Collect the updated Note id, Note body, last modified date in tabular format.
-3. Always use `hs_timestamp` in YYYY-MM-DDTHH:MM:SSZ format while updating notes.
-
-Return ONLY this JSON structure (no other text):
-{{
-    "status": "success|failure",
-    "updated_notes": [{{"id": "123", "details": {{ "note_content": "...", "timestamp": "..."}}}} ...],
-    "errors": ["Error message 1", "Error message 2"],
-    "reason": "error description if status is failure"
-}}"""
+        logging.info(f"Initial attempt {current_try}/{max_tries}")
+        prompt = base_prompt
 
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
-        parsed = json.loads(response)
-        status = parsed.get("status", "unknown")
-        updated = parsed.get("updated_notes", [])
-        errors = parsed.get("errors", [])
-        reason = parsed.get("reason", "")
-        
-        if status == "success":
-            ti.xcom_push(key="updated_notes", value=updated)
-            ti.xcom_push(key="note_update_status", value={"status": "success"})
-            ti.xcom_push(key="note_update_response", value=parsed)
-            logging.info(f"Updated {len(updated)} notes")
-            return updated
-        else:
-            # Push failure status and response for next retry
-            ti.xcom_push(key="updated_notes", value=[])
-            ti.xcom_push(key="note_update_status", value={"status": "failure", "reason": reason})
-            ti.xcom_push(key="note_update_response", value=parsed)
-            logging.error(f"Note update failed: {reason}")
-            raise Exception(f"update_notes failed: {reason}")
-            
-    except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_notes", value=[])
-        ti.xcom_push(key="note_update_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-        ti.xcom_push(key="note_update_response", value={"raw_response": response})
-        raise Exception(f"update_notes failed: JSON parsing error - {str(e)}")
-    except Exception as e:
-        logging.error(f"Error updating notes: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_notes", value=[])
-        ti.xcom_push(key="note_update_status", value={"status": "failure", "reason": str(e)})
-        ti.xcom_push(key="note_update_response", value={"raw_response": response})
-        raise Exception(f"update_notes failed: {str(e)}")
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response: {response[:1000]}...")
 
+        parsed = json.loads(response.strip())
+        if parsed.get("status") != "success":
+            raise Exception(parsed.get("reason", "Status != success"))
+
+        updated = parsed.get("updated_notes", [])
+
+        result = {
+            "updated_notes": updated,
+            "note_update_status": {"status": "success"},
+            "note_update_response": parsed
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
+
+        logging.info(f"SUCCESS: Updated {len(updated)} notes on attempt {current_try}")
+        return updated
+
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON: {e}\nRaw: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
+    except Exception as e:
+        error_msg = str(e) or "Unknown error"
+        is_final = current_try >= max_tries
+        status_type = "final_failure" if is_final else "failure"
+
+        fallback = {
+            "updated_notes": [],
+            "note_update_status": {"status": status_type, "reason": error_msg},
+            "note_update_response": {"raw_response": response} if response else None
+        }
+        for k, v in fallback.items():
+            ti.xcom_push(key=k, value=v)
+
+        if is_final:
+            logging.error(f"FINAL FAILURE: update_notes failed after {max_tries} attempts")
+            raise
+        else:
+            logging.warning(f"update_notes failed → retrying ({current_try}/{max_tries})")
+            raise
 
 def update_tasks(ti, **context):
+    """Update HubSpot tasks with full retry support and owner preservation"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     owner_info = ti.xcom_pull(key="owner_info", default={})
     to_update = analysis_results.get("entities_to_update", {}).get("tasks", [])
-    
-    # Check if this is a retry by pulling previous status
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+
+    # === Retry Context ===
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== UPDATE TASKS - Attempt {current_try}/{max_tries} ===")
+
     previous_status = ti.xcom_pull(key="task_update_status")
     previous_response = ti.xcom_pull(key="task_update_response")
-    
+    is_retry = current_try > 1
+
     if not to_update:
-        ti.xcom_push(key="updated_tasks", value=[])
+        logging.info("No tasks to update")
+        result = {
+            "updated_tasks": [],
+            "task_update_status": {"status": "success"},
+            "task_update_response": {"status": "success", "updated_tasks": []}
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
         return []
-    
-    # Get current task details to preserve original information
+
+    # === Build enriched task data with corrected owners ===
     selected_entities = analysis_results.get("selected_entities", {})
     current_tasks = selected_entities.get("tasks", [])
-    
-    # Get task owners from owner_info (corrected owners)
     task_owners = owner_info.get("task_owners", [])
-    
-    # Build task details map with corrected owner information
+
     task_details_map = {}
     for task in current_tasks:
         task_id = task.get("taskId") or task.get("id")
         if task_id:
             task_details_map[task_id] = task
-    
-    # Map corrected owners to tasks being updated
+
+    # Enrich each task update with correct owner (from owner_info override)
     for task_update in to_update:
         task_id = task_update.get("taskId") or task_update.get("id")
-        if task_id and task_id in task_details_map:
-            # Get task_index from the original task
-            original_task = task_details_map[task_id]
-            task_index = original_task.get("task_index")
-            
-            # Find matching corrected owner
-            if task_index:
-                matching_owner = next((owner for owner in task_owners if owner.get("task_index") == task_index), None)
-                if matching_owner:
-                    # Add corrected owner info to the update
-                    task_update["task_owner_id"] = matching_owner.get("task_owner_id", "71346067")
-                    task_update["task_owner_name"] = matching_owner.get("task_owner_name", "Kishore")
-                else:
-                    # Use existing owner info if no corrected owner found
-                    task_update["task_owner_id"] = original_task.get("task_owner_id", "71346067")
-                    task_update["task_owner_name"] = original_task.get("task_owner_name", "Kishore")
-    
-    # Determine if this is a retry or initial attempt
-    if previous_status and previous_response:
-        # This is a retry - use retry prompt
-        logging.info("Retry detected - using retry prompt for tasks")
-        previous_reason = previous_status.get("reason", "Unknown error")
-        
-        prompt = f"""Previous attempt to update tasks failed.
+        if not task_id or task_id not in task_details_map:
+            continue
 
-Previous Response:
-{json.dumps(previous_response, indent=2)}
+        original = task_details_map[task_id]
+        task_index = original.get("task_index")
 
-Previous Failure Reason: {previous_reason}
+        # Prefer corrected owner from owner_info
+        if task_index is not None:
+            matched_owner = next((o for o in task_owners if o.get("task_index") == task_index), None)
+            if matched_owner:
+                task_update["task_owner_id"] = matched_owner.get("task_owner_id", "71346067")
+                task_update["task_owner_name"] = matched_owner.get("task_owner_name", "Kishore")
+            else:
+                task_update["task_owner_id"] = original.get("task_owner_id", "71346067")
+                task_update["task_owner_name"] = original.get("task_owner_name", "Kishore")
+        else:
+            task_update["task_owner_id"] = original.get("task_owner_id", "71346067")
+            task_update["task_owner_name"] = original.get("task_owner_name", "Kishore")
 
-Please analyze the error and retry updating the tasks:
-
-Tasks to update: {json.dumps(to_update, indent=2)}
-Current task details: {json.dumps(task_details_map, indent=2)}
-
-CRITICAL INSTRUCTIONS:
-1. Review the previous error and identify the root cause
-2. For each task update, call update_task with this EXACT format:
-   
-   update_task(task_id, {{
-     "properties": {{
-       "hs_timestamp": "",
-       "hs_task_body": "",
-       "hs_task_subject": "", 
-       "hs_task_priority": "",
-       "hs_task_status": "",
-       "hubspot_owner_id": ""
-     }}
-   }})
-
-3. PRESERVE original task descriptions from task_details_map
-4. Convert due_date changes to hs_timestamp format
-5. Use the task's existing owner ID from the original task details
-6. Use the task's existing owner id and invoke get_all_owners to get the owners name
-7. After each update, call search_tasks(task_id) to get updated details
-
-Return ONLY this JSON structure (no other text):
-{{
-  "status": "success|failure",
-  "updated_tasks": [{{
-    "id": "task_id",
-    "details": {{
-      "task_details": "",
-      "task_owner_name": "", 
-      "task_owner_id": "",
-      "due_date": "",
-      "priority": ""
-    }}
-  }}],
-  "errors": [],
-  "reason": "error description if status is failure"
-}}"""
-    else:
-        # This is the initial attempt - use initial prompt
-        logging.info("Initial attempt - using initial prompt for tasks")
-        
-        prompt = f"""Update tasks in HubSpot.
+    # === Base Prompt (shared) ===
+    base_prompt = f"""Update tasks in HubSpot.
 
 Tasks to update: {json.dumps(to_update, indent=2)}
 Current task details: {json.dumps(task_details_map, indent=2)}
@@ -2585,66 +2756,102 @@ Return ONLY this JSON structure (no other text):
   "errors": [],
   "reason": "error description if status is failure"
 }}"""
-    
+
+    # === Retry Prompt ===
+    if is_retry:
+        logging.info(f"RETRY → Using enhanced prompt (attempt {current_try}/{max_tries})")
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No status"
+        prev_resp = json.dumps(previous_response, indent=2) if previous_response else "None"
+
+        prompt = f"""PREVIOUS TASK UPDATE FAILED
+
+Previous AI Response:
+{prev_resp}
+
+Failure Reason: {prev_reason}
+
+This is retry #{current_try} of {max_tries} — FIX THE ISSUE.
+
+Tasks to Update:
+{json.dumps(to_update, indent=2)}
+
+{base_prompt}
+
+YOU MUST FIX:
+- Invalid JSON (commas, quotes, brackets)
+- Wrong field names (e.g. hs_task_subject vs hs_task_body)
+- Missing hubspot_owner_id
+- Incorrect hs_timestamp format
+- Not preserving original task body
+- Returning extra text
+
+RETURN ONLY CLEAN, VALID JSON."""
+    else:
+        logging.info(f"Initial attempt {current_try}/{max_tries}")
+        prompt = base_prompt
+
     response = None
     try:
-        response = get_ai_response(prompt, expect_json=True)
-        parsed = json.loads(response)
-        status = parsed.get("status", "unknown")
-        updated = parsed.get("updated_tasks", [])
-        errors = parsed.get("errors", [])
-        reason = parsed.get("reason", "")
-        
-        if status == "success":
-            # Validate and restore missing details
-            for task in updated:
-                task_id = task.get("id")
-                if task_id in task_details_map:
-                    original = task_details_map[task_id]
-                    details = task.get("details", {})
-                    
-                    # Preserve task description if not updated
-                    if not details.get("task_details"):
-                        details["task_details"] = original.get("task_details", "")
-                    
-                    # Ensure task_index is preserved
-                    if not details.get("task_index"):
-                        details["task_index"] = original.get("task_index")
-            
-            # Log owner assignments for debugging
-            for task in updated:
-                task_index = task.get("details", {}).get("task_index")
-                owner_name = task.get("details", {}).get("task_owner_name")
-                owner_id = task.get("details", {}).get("task_owner_id")
-                logging.info(f"Updated task {task_index}: Assigned to {owner_name} (ID: {owner_id})")
-            
-            ti.xcom_push(key="updated_tasks", value=updated)
-            ti.xcom_push(key="task_update_status", value={"status": "success"})
-            ti.xcom_push(key="task_update_response", value=parsed)
-            logging.info(f"Updated {len(updated)} tasks")
-            return updated
-        else:
-            # Push failure status and response for next retry
-            ti.xcom_push(key="updated_tasks", value=[])
-            ti.xcom_push(key="task_update_status", value={"status": "failure", "reason": reason})
-            ti.xcom_push(key="task_update_response", value=parsed)
-            logging.error(f"Task update failed: {reason}")
-            raise Exception(f"update_tasks failed: {reason}")
-            
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response: {response[:1000]}...")
+
+        parsed = json.loads(response.strip())
+        if parsed.get("status") != "success":
+            raise Exception(parsed.get("reason", "LLM returned status != success"))
+
+        updated_tasks = parsed.get("updated_tasks", [])
+
+        # === Post-process: Restore missing details (safety net) ===
+        for task in updated_tasks:
+            task_id = task.get("id")
+            if task_id in task_details_map:
+                original = task_details_map[task_id]
+                details = task.setdefault("details", {})
+                if not details.get("task_details"):
+                    details["task_details"] = original.get("task_details", "")
+                if "task_index" not in details:
+                    details["task_index"] = original.get("task_index")
+
+            # Log assignment
+            d = task.get("details", {})
+            logging.info(f"Task {d.get('task_index', task_id)} → Assigned to {d.get('task_owner_name')} (ID: {d.get('task_owner_id')})")
+
+        # === SUCCESS ===
+        result = {
+            "updated_tasks": updated_tasks,
+            "task_update_status": {"status": "success"},
+            "task_update_response": parsed
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
+
+        logging.info(f"SUCCESS: Updated {len(updated_tasks)} tasks on attempt {current_try}")
+        return updated_tasks
+
     except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_tasks", value=[])
-        ti.xcom_push(key="task_update_status", value={"status": "failure", "reason": f"JSON parsing error: {str(e)}"})
-        ti.xcom_push(key="task_update_response", value={"raw_response": response})
-        raise Exception(f"update_tasks failed: JSON parsing error - {str(e)}")
+        error_msg = f"Invalid JSON from AI: {e}\nRaw: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
     except Exception as e:
-        logging.error(f"Error updating tasks: {e}")
-        logging.error(f"Raw response: {response}")
-        ti.xcom_push(key="updated_tasks", value=[])
-        ti.xcom_push(key="task_update_status", value={"status": "failure", "reason": str(e)})
-        ti.xcom_push(key="task_update_response", value={"raw_response": response})
-        raise Exception(f"update_tasks failed: {str(e)}")
+        error_msg = str(e) or "Unknown error during task update"
+        is_final = current_try >= max_tries
+        status_type = "final_failure" if is_final else "failure"
+
+        fallback = {
+            "updated_tasks": [],
+            "task_update_status": {"status": status_type, "reason": error_msg},
+            "task_update_response": {"raw_response": response} if response else None
+        }
+        for k, v in fallback.items():
+            ti.xcom_push(key=k, value=v)
+
+        if is_final:
+            logging.error(f"FINAL FAILURE: update_tasks failed after {max_tries} attempts")
+            raise
+        else:
+            logging.warning(f"update_tasks failed → retrying ({current_try}/{max_tries})")
+            raise
 
 def create_associations(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
@@ -3082,50 +3289,58 @@ def compose_response_html(ti, **context):
         email_content += "</tbody></table>"
     
     # Existing/Used Deals
+    # Existing/Used Deals
     if existing_deals or updated_deals:
-        email_content += """
-        <h3>Deals Used/Updated</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>Deal Name</th>
-                    <th>Deal Stage Label</th>
-                    <th>Deal Amount</th>
-                    <th>Close Date</th>
-                    <th>Deal Owner Name</th>
-                    <th>Status</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
-        for deal in existing_deals:
-            details = deal.get("details", deal)
-            email_content += f"""
-                <tr>
-                    <td>{deal.get("dealId", "")}</td>
-                    <td>{details.get("dealName", "")}</td>
-                    <td>{details.get("dealLabelName", "")}</td>
-                    <td>{details.get("dealAmount", "")}</td>
-                    <td>{details.get("closeDate", "")}</td>
-                    <td>{details.get("dealOwnerName", "")}</td>
-                    <td>Existing</td>
-                </tr>
+        # CHANGED: Filter out deals that were updated from existing_deals
+        updated_deal_ids = [deal.get("id") for deal in updated_deals if deal.get("id")]
+        final_existing_deals = [d for d in existing_deals if d.get("dealId") not in updated_deal_ids]
+        
+        # CHANGED: Only show table if there are deals to display
+        if final_existing_deals or updated_deals:
+            email_content += """
+            <h3>Deals Used/Updated</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Deal Name</th>
+                        <th>Deal Stage Label</th>
+                        <th>Deal Amount</th>
+                        <th>Close Date</th>
+                        <th>Deal Owner Name</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
             """
-        for deal in updated_deals:
-            details = deal.get("details", {})
-            email_content += f"""
-                <tr>
-                    <td>{deal.get("id", "")}</td>
-                    <td>{details.get("dealName", "")}</td>
-                    <td>{details.get("dealLabelName", "")}</td>
-                    <td>{details.get("dealAmount", "")}</td>
-                    <td>{details.get("closeDate", "")}</td>
-                    <td>{details.get("dealOwnerName", "")}</td>
-                    <td>Updated</td>
-                </tr>
-            """
-        email_content += "</tbody></table>"
+            # CHANGED: Use filtered existing deals
+            for deal in final_existing_deals:
+                details = deal.get("details", deal)
+                email_content += f"""
+                    <tr>
+                        <td>{deal.get("dealId", "")}</td>
+                        <td>{details.get("dealName", "")}</td>
+                        <td>{details.get("dealLabelName", "")}</td>
+                        <td>{details.get("dealAmount", "")}</td>
+                        <td>{details.get("closeDate", "")}</td>
+                        <td>{details.get("dealOwnerName", "")}</td>
+                        <td>Existing</td>
+                    </tr>
+                """
+            for deal in updated_deals:
+                details = deal.get("details", {})
+                email_content += f"""
+                    <tr>
+                        <td>{deal.get("id", "")}</td>
+                        <td>{details.get("dealName", "")}</td>
+                        <td>{details.get("dealLabelName", "")}</td>
+                        <td>{details.get("dealAmount", "")}</td>
+                        <td>{details.get("closeDate", "")}</td>
+                        <td>{details.get("dealOwnerName", "")}</td>
+                        <td>Updated</td>
+                    </tr>
+                """
+            email_content += "</tbody></table>"
     # Newly Created Contacts
     if created_contacts:
         email_content += """
@@ -3558,7 +3773,7 @@ def compose_response_html(ti, **context):
     email_content += """
     <div class="closing">
         <p>Please let me know if any adjustments or corrections are needed.</p>
-        <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br>Lowtouch.ai</p>
+        <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">Lowtouch.ai</a></p>
     </div>
 </body>
 </html>"""
@@ -3739,7 +3954,7 @@ with DAG(
     create_contacts_task = PythonOperator(
         task_id="create_contacts",
         python_callable=create_contacts,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3747,7 +3962,7 @@ with DAG(
     create_companies_task = PythonOperator(
         task_id="create_companies",
         python_callable=create_companies,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3755,7 +3970,7 @@ with DAG(
     create_deals_task = PythonOperator(
         task_id="create_deals",
         python_callable=create_deals,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3763,7 +3978,7 @@ with DAG(
     create_meetings_task = PythonOperator(
         task_id="create_meetings",
         python_callable=create_meetings,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3771,7 +3986,7 @@ with DAG(
     create_notes_task = PythonOperator(
         task_id="create_notes",
         python_callable=create_notes,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3779,7 +3994,7 @@ with DAG(
     create_tasks_task = PythonOperator(
         task_id="create_tasks",
         python_callable=create_tasks,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3787,7 +4002,7 @@ with DAG(
     update_contacts_task = PythonOperator(
         task_id="update_contacts",
         python_callable=update_contacts,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3795,7 +4010,7 @@ with DAG(
     update_companies_task = PythonOperator(
         task_id="update_companies",
         python_callable=update_companies,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3803,7 +4018,7 @@ with DAG(
     update_deals_task = PythonOperator(
         task_id="update_deals",
         python_callable=update_deals,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3811,7 +4026,7 @@ with DAG(
     update_meetings_task = PythonOperator(
         task_id="update_meetings",
         python_callable=update_meetings,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3819,7 +4034,7 @@ with DAG(
     update_notes_task = PythonOperator(
         task_id="update_notes",
         python_callable=update_notes,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
@@ -3827,7 +4042,7 @@ with DAG(
     update_tasks_task = PythonOperator(
         task_id="update_tasks",
         python_callable=update_tasks,
-        retries=3,
+        retries=2,
         trigger_rule="all_done",
         provide_context=True
     )
