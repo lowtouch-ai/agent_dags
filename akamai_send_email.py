@@ -304,7 +304,10 @@ def step_1_process_email(ti, **context):
             if "base64_content" in attachment and attachment["base64_content"]:
                 image_attachments.append(attachment["base64_content"])
                 logging.info(f"Found base64 image attachment: {attachment['filename']}")
-    
+
+    ti.xcom_push(key="attachment_type", value=attachment_type)
+    logging.info(f"Determined attachment type: {attachment_type}")
+
     # Extract attachment content (Markdown from Excel/PDF)
     attachment_content = ""
     has_valid_attachment = False
@@ -344,9 +347,35 @@ def step_1_process_email(ti, **context):
 
     logging.info(f"Final current content: {current_content}")
 
-    prompt = f"""Assess the cloud details from the following Markdown table and provide a detailed assessment report:
-                {current_content}
-                Note: If no valid attachment is provided, inform the user to attach one. Do not Include any contact information at the bottom of the report as this is an email report"""
+    if attachment_type == "excel":
+        prompt = f"""
+        Generate a **Final Assessment Report** based on the extracted details from the Excel invoice.
+
+        Report Requirements:
+        - Clear & concise
+        - Bullet points
+        - Highlight key findings, red flags, risks & optimization opportunities
+        - Add cost insights if applicable
+        - Do NOT include contact information
+
+        Extracted Content:
+        {current_content}
+    """
+    else:
+        prompt = f"""
+        Generate a **Cost Comparison Report** based on the cost comparison analysis of the attached Invoice (PDF/Image).
+
+        Report Requirements:
+        - Clear & concise
+        - Bullet points
+        - Highlight key findings, cost savings, performance improvements, and migration opportunities
+        - Do NOT include contact information
+
+        Extracted Content:
+        {current_content}
+
+
+"""
 
     logging.info(f"Final prompt to AI: {prompt}...")
     
@@ -487,6 +516,39 @@ def cost_comparison_compose_email(ti, **context):
     except Exception as e:
         logging.error(f"Error in cost_comparison_compose_email: {str(e)}")
         raise
+
+def combined_excel_pdf_summary(ti, **context):
+    step_1_response = ti.xcom_pull(key="step_1_response")
+    email_content = ti.xcom_pull(key="email_content")
+    conversation = ti.xcom_pull(key="conversation_history") or []
+
+    prompt = f"""Generate a **Final Assessment Report and cost comparison Report** based on the extracted details from the Excel invoice and the attached PDF/Image.
+
+        Report Requirements:
+        - Clear & concise
+        - Bullet points
+        - Highlight key findings, red flags, risks & optimization opportunities
+        - Add cost insights if applicable
+        - Do NOT include contact information
+        - Highlight key findings, **cost savings**, performance improvements, and migration opportunities
+        - The report should combine both assessment and cost comparison aspects seamlessly
+        - Format the report in clean Markdown suitable for email delivery
+        - Do NOT include contact information
+
+    Data extracted:
+    {step_1_response}
+
+    Additional email context:
+    {email_content}
+    """
+
+    final = get_ai_response(prompt, conversation_history=conversation)
+
+    ti.xcom_push(key="markdown_email_content", value=final)
+    ti.xcom_push(key="email_type", value="combined_report")
+    ti.xcom_push(key="conversation_history", value=conversation+[{"role":"assistant","content":final}])
+    return final
+
 # ===== END NEW SECTION =====
 
 def step_2_compose_email(ti, **context):
@@ -642,7 +704,7 @@ def step_4_send_email(ti, **context):
             return "Failed to send email"
             
     except Exception as e:
-        logging.error(f"Error in step_3_send_email: {str(e)}")
+        logging.error(f"Error in step_4_send_email: {str(e)}")
         return f"Error sending email: {str(e)}"
 
 readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'email_responder.md')
@@ -704,6 +766,12 @@ with DAG(
         python_callable=cost_comparison_compose_email,
         provide_context=True
     )
+    combined_flow_task = PythonOperator(
+    task_id="combined_analysis_start",
+    python_callable=combined_excel_pdf_summary,
+    provide_context=True
+)
+
     # ===== END NEW SECTION =====
     
     task_3 = PythonOperator(
@@ -720,8 +788,9 @@ with DAG(
     )
     
     task_1 >> branch_task
-    branch_task >> [excel_flow_start, cost_comparison_flow_start]
+    branch_task >> [excel_flow_start, cost_comparison_flow_start, combined_flow_task]
     excel_flow_start >> task_2 >> task_3
     cost_comparison_flow_start >> cost_comparison_report_task >> cost_comparison_email_task >> task_3
+    combined_flow_task >> task_3
 
     task_3 >> task_4
