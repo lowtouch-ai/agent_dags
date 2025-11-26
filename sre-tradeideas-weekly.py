@@ -8,12 +8,14 @@ from ollama import Client
 from airflow.models import Variable
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 import base64
 import json
 import re
 import html
 import smtplib
 from email.mime.image import MIMEImage
+import os
 
 
 # Configure detailed logging
@@ -722,17 +724,32 @@ a:hover {{
 
 
 def send_sre_email(ti, **context):
-    """Send SRE HTML report via SMTP """
+    """Send SRE HTML report via SMTP with PDF attachment"""
     html_report = ti.xcom_pull(key="sre_html_report")
 
     if not html_report or "<html" not in html_report.lower():
         logging.error("No valid HTML report found in XCom.")
         raise ValueError("HTML report missing or invalid.")
 
+    # === PDF Attachment (same logic as Gmail version) ===
+    pdf_path = ti.xcom_pull(key="sre_pdf_path")
+    pdf_attachment = None
+    if pdf_path and os.path.exists(pdf_path):
+        with open(pdf_path, "rb") as f:
+            pdf_attachment = MIMEApplication(f.read(), _subtype="pdf")
+            pdf_attachment.add_header(
+                "Content-Disposition",
+                "attachment",
+                filename="TradeIdeas_SRE_Report.pdf"
+            )
+        logging.info(f"Attaching PDF: {pdf_path}")
+    else:
+        logging.warning("PDF not found or not generated, skipping attachment")
+
     # Clean up any code block wrappers
     html_body = re.sub(r'```html\s*|```', '', html_report).strip()
 
-    subject = f"SRE Weekly Report – {datetime.utcnow().strftime('%Y-%m-%d')}"
+    subject = f"SRE Daily Report – {datetime.utcnow().strftime('%Y-%m-%d')}"
     recipient = RECEIVER_EMAIL
 
     try:
@@ -742,16 +759,17 @@ def send_sre_email(ti, **context):
         server.starttls()
         server.login(SMTP_USER, SMTP_PASSWORD)
 
-        # Prepare email
-        msg = MIMEMultipart("related")
+        # Prepare email - use "mixed" to support both HTML + attachments (including inline images + file attachments)
+        msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
         msg["From"] = f"TradeIdeas SRE Agent {SMTP_SUFFIX}"
         msg["To"] = recipient
 
-        # Attach the HTML body
-        msg.attach(MIMEText(html_body, "html"))
+        # --- HTML Part (with possible inline images) ---
+        html_part = MIMEMultipart("related")
+        html_part.attach(MIMEText(html_body, "html"))
 
-        # Optional: Inline image support (if your DAG attaches graphs later)
+        # Optional: Inline chart image (unchanged from your original)
         chart_b64 = ti.xcom_pull(key="chart_b64")
         if chart_b64:
             try:
@@ -759,10 +777,20 @@ def send_sre_email(ti, **context):
                 img_part = MIMEImage(img_data, 'png')
                 img_part.add_header('Content-ID', '<chart_image>')
                 img_part.add_header('Content-Disposition', 'inline', filename='chart.png')
-                msg.attach(img_part)
+                html_part.attach(img_part)
                 logging.info("Attached chart image to email.")
             except Exception as e:
                 logging.warning(f"Failed to attach inline image: {str(e)}")
+
+        # Attach the HTML+inline part to the main message
+        msg.attach(html_part)
+
+        # --- PDF Attachment ---
+        if pdf_attachment:
+            msg.attach(pdf_attachment)
+            logging.info("PDF successfully attached to email")
+        else:
+            logging.info("No PDF attachment added")
 
         # Send the email
         server.sendmail(SENDER_EMAIL, recipient, msg.as_string())
@@ -773,6 +801,159 @@ def send_sre_email(ti, **context):
 
     except Exception as e:
         logging.error(f"Failed to send email via SMTP: {str(e)}")
+        raise
+        
+def generate_pdf_report_callable(ti=None, **context):
+    """
+    TradeIdeas SRE PDF – ReportLab (ABSOLUTE FINAL VERSION)
+    • No raw # or ## visible
+    • Tables perfect with text wrap
+    • No small squares
+    • Professional layout
+    """
+    try:
+        md = ti.xcom_pull(key="sre_full_report") or "# No SRE report generated."
+        md = preprocess_markdown(md)
+
+        date_str = YESTERDAY_DATE_STR
+        out_path = f"/tmp/TradeIdeas_SRE_Report_{date_str}.pdf"
+
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_LEFT, TA_CENTER
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Preformatted, PageBreak
+
+        doc = SimpleDocTemplate(
+            out_path,
+            pagesize=A4,
+            leftMargin=28, rightMargin=28,
+            topMargin=30, bottomMargin=30
+        )
+
+        styles = getSampleStyleSheet()
+        title = ParagraphStyle('Title', parent=styles['Title'], fontSize=22, leading=28, alignment=TA_CENTER,
+                               spaceAfter=20, textColor=colors.HexColor("#1a5fb4"), fontName="Helvetica-Bold")
+        h2 = ParagraphStyle('H2', parent=styles['Heading2'], fontSize=15, leading=20, spaceBefore=18, spaceAfter=10,
+                            textColor=colors.HexColor("#1a5fb4"), fontName="Helvetica-Bold")
+        h3 = ParagraphStyle('H3', parent=styles['Heading3'], fontSize=12, leading=16, spaceBefore=12, spaceAfter=8)
+        normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=10, leading=14, spaceAfter=8)
+        small = ParagraphStyle('Small', parent=styles['Normal'], fontSize=9, textColor=colors.gray, spaceAfter=12)
+        code = ParagraphStyle('Code', fontName='Courier', fontSize=8, leading=10,
+                              backColor=colors.HexColor("#f6f8fa"), borderPadding=10,
+                              borderColor=colors.lightgrey, borderWidth=1, borderRadius=4)
+        cell_style = ParagraphStyle('Cell', parent=styles['Normal'], fontSize=8.5, leading=10, alignment=TA_LEFT)
+
+        flowables = []
+
+        lines = md.splitlines()
+        i = 0
+        in_code = False
+        code_lines = []
+
+        while i < len(lines):
+            raw_line = lines[i]
+            stripped = raw_line.strip()
+
+            # === CODE BLOCKS ===
+            if stripped.startswith("```"):
+                if in_code:
+                    flowables.append(Preformatted("\n".join(code_lines), code))
+                    flowables.append(Spacer(1, 10))
+                    code_lines = []
+                in_code = not in_code
+                i += 1
+                continue
+            if in_code:
+                code_lines.append(raw_line)
+                i += 1
+                continue
+
+            # === SKIP HR LINES (no squares) ===
+            if stripped.startswith(("---", "***", "___")):
+                flowables.append(Spacer(1, 14))
+                i += 1
+                continue
+
+            # === HEADINGS – NOW WORKS EVEN WITH LEADING SPACES ===
+            if raw_line.lstrip().startswith("# "):
+                text = raw_line.lstrip("# ").strip()
+                flowables.append(Paragraph(text, title))
+                flowables.append(Spacer(1, 14))
+            elif raw_line.lstrip().startswith("## "):
+                text = raw_line.lstrip("# ").strip()
+                flowables.append(Paragraph(text, h2))
+                flowables.append(Spacer(1, 10))
+            elif raw_line.lstrip().startswith("### "):
+                text = raw_line.lstrip("# ").strip()
+                flowables.append(Paragraph(text, h3))
+                flowables.append(Spacer(1, 8))
+            elif raw_line.lstrip().startswith("#### "):
+                text = raw_line.lstrip("# ").strip()
+                flowables.append(Paragraph(f"<b>{text}</b>", normal))
+
+            # === TABLES – PERFECT TEXT WRAP ===
+            elif "|" in raw_line and i + 1 < len(lines) and re.match(r"^[\s\|:-]*$", lines[i+1].strip()):
+                table_data = []
+                header = [c.strip() for c in raw_line.split("|")[1:-1]]
+                table_data.append(header)
+                i += 2
+                while i < len(lines) and "|" in lines[i]:
+                    row = [c.strip() for c in lines[i].split("|")[1:-1]]
+                    if row:
+                        table_data.append(row)
+                    i += 1
+
+                if len(table_data) > 1:
+                    num_cols = len(table_data[0])
+                    col_width = doc.width / num_cols
+                    wrapped_data = [[Paragraph(html.escape(cell), cell_style) for cell in row] for row in table_data]
+
+                    table = Table(wrapped_data, colWidths=[col_width] * num_cols, repeatRows=1)
+                    table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1a5fb4")),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                        ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
+                        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, -1), 8.5),
+                        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor("#f9f9f9")),
+                        ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                        ('TOPPADDING', (0, 0), (-1, -1), 8),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                    ]))
+                    flowables.append(table)
+                    flowables.append(Spacer(1, 14))
+                continue
+
+            # === NORMAL TEXT ===
+            elif stripped:
+                text = html.escape(raw_line)
+                text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+                text = re.sub(r'__(.*?)__', r'<b>\1</b>', text)
+                text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)
+                text = re.sub(r'`([^`]+)`', r'<font name=Courier>\1</font>', text)
+                flowables.append(Paragraph(text, normal))
+            else:
+                flowables.append(Spacer(1, 6))
+
+            i += 1
+
+        # Footer
+        flowables.append(PageBreak())
+        flowables.append(Paragraph("End of Report", h2))
+        flowables.append(Paragraph("Generated by TradeIdeas SRE Agent • Powered by Airflow + ReportLab", small))
+
+        doc.build(flowables)
+        logging.info(f"PDF generated – PERFECT (no # visible, tables wrapped): {out_path}")
+        ti.xcom_push(key="sre_pdf_path", value=out_path)
+        return out_path
+
+    except Exception as e:
+        logging.error("PDF generation failed", exc_info=True)
         raise
 
 
@@ -814,6 +995,7 @@ with DAG(
 
     t20 = PythonOperator(task_id="overall_summary", python_callable=overall_summary, provide_context=True)
     t21 = PythonOperator(task_id="compile_sre_report", python_callable=compile_sre_report, provide_context=True)
+    t21_1 = PythonOperator(task_id="generate_pdf", python_callable=generate_pdf_report_callable, provide_context=True)
     t22 = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html, provide_context=True)
     t23 = PythonOperator(task_id="send_sre_email", python_callable=send_sre_email, provide_context=True)
 
@@ -999,4 +1181,4 @@ with DAG(
     t4 >> all_pod_data
     all_pod_data >> pod_this_week_markdown >> t20
     all_pod_data >> pod_comparison_markdown >> t20
-    t19 >> t20 >> t21 >> t22 >> t23
+    t19 >> t20 >> t21 >> t21_1 >> t22 >> t23
