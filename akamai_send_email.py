@@ -279,13 +279,13 @@ def step_1_process_email(ti, **context):
     ]
     pdf_mime_types = ["application/pdf"]
     image_mime_types = ["image/png", "image/jpg", "image/jpeg"]
-
+    
     if email_data.get("attachments"):
         logging.info(f"Number of attachments: {len(email_data['attachments'])}")
         for attachment in email_data["attachments"]:
             mime_type = attachment.get("mime_type", "").lower()
             logging.info(f"Checking attachment: {attachment.get('filename')} with MIME type: {mime_type}")
-
+            
             # Detect Excel
             if mime_type in excel_mime_types:
                 attachment_type = "excel"
@@ -359,7 +359,7 @@ def step_1_process_email(ti, **context):
     ti.xcom_push(key="complete_email_thread", value=complete_email_thread)
     ti.xcom_push(key="sender_name", value=sender_name)
     ti.xcom_push(key="image_attachments", value=image_attachments)
-
+    
     logging.info(f"Step 1 completed: {response[:200]}...")
     return response
 
@@ -368,7 +368,7 @@ def branch_by_attachment_type(ti, **context):
     """Branch based on detected attachment type."""
     attachment_type = ti.xcom_pull(key="attachment_type")
     logging.info(f"Branching based on attachment type: {attachment_type}")
-
+    
     if attachment_type == "excel":
         return "excel_flow_start"
     elif attachment_type in ["pdf", "image"]:
@@ -387,16 +387,16 @@ def cost_comparison_generate_report(ti, **context):
         email_content = ti.xcom_pull(key="email_content")
         conversation_history = ti.xcom_pull(key="conversation_history") or []
         image_attachments = ti.xcom_pull(key="image_attachments") or []
-
+        
         prompt = f"""
         Based on the invoice details extracted from the attached PDF or image, generate a comprehensive Cost Comparison Report comparing the current costs with Akamai's offerings.
-
+        
         Extracted Invoice Details:
         {step_1_response}
-
+        
         Email Context:
         {email_content}
-
+        
         Requirements:
         1. Extract all pricing information from the invoice
         2. Compare with equivalent Akamai services and pricing
@@ -408,25 +408,25 @@ def cost_comparison_generate_report(ti, **context):
            - Performance benefits with Akamai
            - Security and reliability improvements
         5. Include a summary section with key recommendations
-
+        
         Format the report in clean HTML suitable for email delivery. Do not include any contact information.
         """
-
+        
         logging.info("Generating cost comparison report...")
         response = get_ai_response(prompt, images=image_attachments if image_attachments else None, conversation_history=conversation_history)
-
+        
         # Update conversation history
         full_history = conversation_history + [
             {"role": "user", "content": prompt},
             {"role": "assistant", "content": response}
         ]
-
+        
         ti.xcom_push(key="cost_comparison_report", value=response)
         ti.xcom_push(key="conversation_history", value=full_history)
-
+        
         logging.info(f"Cost comparison report generated: {response[:200]}...")
         return response
-
+        
     except Exception as e:
         logging.error(f"Error in cost_comparison_generate_report: {str(e)}")
         raise
@@ -436,7 +436,7 @@ def cost_comparison_compose_email(ti, **context):
     try:
         cost_comparison_report = ti.xcom_pull(key="cost_comparison_report")
         sender_name = ti.xcom_pull(key="sender_name") or "Valued Client"
-
+        
         prompt = f"""
         Generate a professional, human-like business email in American English, written in the tone of a senior AI Engineer at lowtouch.ai, to notify the client, addressed by name '{sender_name}', about the cost comparison analysis.
 
@@ -445,45 +445,45 @@ def cost_comparison_compose_email(ti, **context):
 
         Follow this exact structure for the email body, using clean, valid HTML without any additional wrappers like <html> or <body>. Do not omit any sections or elements listed below.
 
-        1. Greeting:
+        1. Greeting: 
         <p>Dear {sender_name},</p>
 
-        2. Opening paragraph:
+        2. Opening paragraph: 
         <p>We have analyzed your invoice and completed a comprehensive cost comparison with Akamai's cloud services. This analysis identifies potential cost savings, performance improvements, and strategic opportunities for your infrastructure. Here is a detailed comparison to guide your decision-making:</p>
 
         3. Cost Comparison Report:
         <h2>Cost Comparison Report</h2>
         {cost_comparison_report}
 
-        4. Signature:
+        4. Signature: 
         <p>Best regards</p>
 
         Ensure the email is natural, professional, and includes the complete cost comparison report. Return only the HTML body content without <html>, <body>, or <head> tags.
         """
-
+        
         conversation_history = ti.xcom_pull(key="conversation_history") or []
         response = get_ai_response(prompt, conversation_history=conversation_history)
-
+        
         # Clean the HTML response
         cleaned_response = re.sub(r'```html\n|```', '', response).strip()
-
+        
         if not cleaned_response.strip().startswith('<'):
             if not cleaned_response.strip().startswith('<'):
                 cleaned_response = f"<div>{cleaned_response}</div>"
-
+        
         # Update history
         full_history = conversation_history + [
             {"role": "user", "content": prompt},
             {"role": "assistant", "content": response}
         ]
-
+        
         ti.xcom_push(key="markdown_email_content", value=cleaned_response)
         ti.xcom_push(key="conversation_history", value=full_history)
         ti.xcom_push(key="email_type", value="cost_comparison")
-
+        
         logging.info(f"Cost comparison email composed: {response[:200]}...")
         return response
-
+        
     except Exception as e:
         logging.error(f"Error in cost_comparison_compose_email: {str(e)}")
         raise
@@ -533,7 +533,7 @@ def step_2_compose_email(ti, **context):
     ti.xcom_push(key="conversation_history", value=full_history)
     ti.xcom_push(key="markdown_email_content", value=cleaned_response)
     ti.xcom_push(key="email_type", value="assessment")
-
+    
     logging.info(f"Step 2 completed: {response[:200]}...")
     return response
 
@@ -607,11 +607,11 @@ def step_4_send_email(ti, **context):
             return "Gmail authentication failed"
 
         sender_email = email_data["headers"].get("From", "")
-
+        
         # ===== NEW: MODIFY SUBJECT BASED ON EMAIL TYPE =====
         email_type = ti.xcom_pull(key="email_type")
         original_subject = email_data['headers'].get('Subject', 'Cloud Assessment')
-
+        
         if email_type == "cost_comparison":
             # Add "Cost Comparison Report" to subject
             if "Cost Comparison Report" not in original_subject:
@@ -625,7 +625,7 @@ def step_4_send_email(ti, **context):
             else:
                 subject = f"Re: {original_subject}"
         # ===== END NEW SECTION =====
-
+        
         in_reply_to = email_data["headers"].get("Message-ID", "")
         references = email_data["headers"].get("References", "")
 
@@ -667,7 +667,7 @@ with DAG(
         python_callable=step_1_process_email,
         provide_context=True
     )
-
+    
     # ===== NEW: BRANCHING TASK =====
     branch_task = BranchPythonOperator(
         task_id="branch_by_attachment_type",
@@ -675,37 +675,37 @@ with DAG(
         provide_context=True
     )
     # ===== END NEW SECTION =====
-
+    
     # ===== NEW: DUMMY TASKS FOR FLOW MARKERS =====
     excel_flow_start = DummyOperator(
         task_id="excel_flow_start"
     )
-
+    
     cost_comparison_flow_start = DummyOperator(
         task_id="cost_comparison_flow_start"
     )
-
+    
     # EXCEL FLOW (Original Assessment Flow)
     task_2 = PythonOperator(
         task_id="step_2_compose_email",
         python_callable=step_2_compose_email,
         provide_context=True
     )
-
+    
     # ===== NEW: COST COMPARISON FLOW TASKS =====
     cost_comparison_report_task = PythonOperator(
         task_id="cost_comparison_generate_report",
         python_callable=cost_comparison_generate_report,
         provide_context=True
     )
-
+    
     cost_comparison_email_task = PythonOperator(
         task_id="cost_comparison_compose_email",
         python_callable=cost_comparison_compose_email,
         provide_context=True
     )
     # ===== END NEW SECTION =====
-
+    
     task_3 = PythonOperator(
         task_id="step_3_convert_to_html",
         python_callable=step_3_convert_to_html,
@@ -718,7 +718,7 @@ with DAG(
         python_callable=step_4_send_email,
         provide_context=True
     )
-
+    
     task_1 >> branch_task
     branch_task >> [excel_flow_start, cost_comparison_flow_start]
     excel_flow_start >> task_2 >> task_3
