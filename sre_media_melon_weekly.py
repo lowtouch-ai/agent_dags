@@ -43,7 +43,7 @@ SMTP_HOST = Variable.get("ltai.v3.mediamelon.smtp.host", "mail.authsmtp.com")
 SMTP_PORT = int(Variable.get("ltai.v3.mediamelon.smtp.port", "587"))
 SMTP_USER = Variable.get("ltai.v3.mediamelon.smtp.user", "")
 SMTP_PASSWORD = Variable.get("ltai.v3.mediamelon.smtp.password", "")
-SMTP_SUFFIX = Variable.get("ltai.v3.mediamelon.smtp.suffix", default_var="via lowtouch.ai <webmaster@ecloudcontrol.com>")
+SMTP_SUFFIX = Variable.get("ltai.v3.mediamelon.smtp.suffix","noreply@mediamelon.com")
 
 MEDIAMELON_FROM_ADDRESS = Variable.get("ltai.v3.mediamelon.mediamelon_from_address", SMTP_USER or "noreply@mediamelon.com")
 MEDIAMELON_TO_ADDRESS = Variable.get("ltai.v3.mediamelon.mediamelon_to_address", MEDIAMELON_FROM_ADDRESS)
