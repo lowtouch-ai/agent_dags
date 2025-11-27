@@ -550,6 +550,7 @@ ROUTING DECISION TREE:
    
    Keywords: "proceed", "confirm", "yes", "update", "modify", "change"
    → Response: {{"task_type": "continuation_dag", "reasoning": "..."}}
+   - **Do not** rely solely on keywords. Instead, understand the context of the message and interpret intent accurately before sending or updating the email.
 
 DECISION LOGIC:
 - Check if message requires ANY action (if not → no_action)

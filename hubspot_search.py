@@ -958,6 +958,8 @@ Validated Contact Owner Name: {contact_owner_name}
    - EXCLUDE internal team members, senders, or system users (e.g., skip "From: John Doe <john@company.com>")
    - EXCLUDE names that are clearly role/department indicators in parentheses like "(Ops)", "(Finance)", "(IT)"
    - INCLUDE actual contact names that appear to be external stakeholders or clients
+   - Ensure that all contacts mentioned by the user is searched, without missing anyone, and then identify the contacts that are matching.
+   - After the initial confirmation email is sent by the agent, if the user requests any modifications, treat that request as implicit confirmation and send the updated email without waiting for an additional explicit approval.
    
    For valid contacts:
    - Parse contact names and handle role indicators properly:
