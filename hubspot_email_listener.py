@@ -499,7 +499,8 @@ SEARCH_DAG CAPABILITIES:
 - Generates engagement summaries for meetings
 - Prepares confirmation emails for user review
 - In context if the user has already created some entities and want to add more entities like additional contact or new deal then a search is needed to check if the entity exists before creating new ones.
-
+- Search for all contacts mentioned by user in the prompt even if there are multiple contacts.If the contact doesnt exist return the response as objects to be created and if there is an existing contact return the existing contact details in the response.
+- Parse the email context and check wether the user is selecting entities based on the confirmation email sent, if yes then ignore those, you dont have the capability in such scenario.
 CONTINUATION_DAG CAPABILITIES:
 - Creates new contacts, companies, deals in HubSpot
 - Updates existing entities based on user modifications. for example, if the deal exists and we need to change the deal amount, or we need to change the task due date to a different date. These are taken as modification. 
@@ -508,6 +509,8 @@ CONTINUATION_DAG CAPABILITIES:
 - Records engagements and associations
 - Handles user confirmations and modifications
 - Parses the latest_message and if it is casual comment for the conversation history add it as notes.
+2. Parse the context other than latest_message and if a confirmation email has already been sent in this thread (you can see it in the chat history), then:
+   - Any user reply that includes modifications (like changing owner, adding contact, updating amount, etc.) with respect to confirmation mail entities should be treated as implicit confirmation to proceed with those changes immediately. Do NOT wait for explicit confirmation keywords like "yes", "proceed", or "confirm". Just apply the changes and send the final updated email.
 
 NO_ACTION CAPABILITIES:
 - Recognizes greetings, closings, and simple acknowledgments
@@ -550,7 +553,8 @@ ROUTING DECISION TREE:
    
    Keywords: "proceed", "confirm", "yes", "update", "modify", "change"
    → Response: {{"task_type": "continuation_dag", "reasoning": "..."}}
-   - **Do not** rely solely on keywords. Instead, understand the context of the message and interpret intent accurately before sending or updating the email.
+   - Do not rely solely on **keywords**; interpret user intent in context and act accordingly.
+   - After the initial confirmation email is sent by the agent, any user response that **does not include the specified keywords** consider that as **implicit confirmation**, and the agent must send the final updated email **without waiting for any further explicit approval**.
 
 DECISION LOGIC:
 - Check if message requires ANY action (if not → no_action)
