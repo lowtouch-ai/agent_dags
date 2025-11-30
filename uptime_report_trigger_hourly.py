@@ -52,7 +52,7 @@ def trigger_uptime_reports(**context):
 
         if not monitor_id or not email:
             continue
-
+        logging.info(f"Processing client: {name} ({client_id}) with monitors: {monitor_ids} for email: {email}")
         try:
             local_now = now_utc.in_timezone(tz)
         except:
@@ -82,26 +82,28 @@ def trigger_uptime_reports(**context):
                 client.trigger_dag(
                     dag_id="uptime_daily_data_report",
                     conf=conf,
-                    run_id=f"manual_daily_{safe_name(client_id)}_{now_utc.format('YYYYMMDD_HHmm')}"
+                    run_id=f"manual_daily_{safe_name(client_id)}_{now_utc.format('YYYYMMDD_HHmmss')}"
                 )
-                logging.info(f"Triggered DAILY report for {name} ({client_id})")
+                logging.info(f"Triggered DAILY report to {name} for the monitor ({monitor_id})")
                 triggered += 1
 
             if should_trigger_weekly:
                 client.trigger_dag(
                     dag_id="uptime_weekly_data_report",
                     conf=conf,
-                    run_id=f"weekly_{safe_name(client_id)}_{now_utc.format('YYYYMMDD')}"
+                    run_id=f"weekly_{safe_name(client_id)}_{now_utc.format('YYYYMMDD_HHmmss')}"
                 )
-                logging.info(f"Triggered WEEKLY report for {name}")
+                logging.info(f"Triggered WEEKLY report to {name} for the monitor ({monitor_id})")
+                triggered += 1
 
             if should_trigger_monthly:
                 client.trigger_dag(
                     dag_id="uptime_monthly_data_report",
                     conf=conf,
-                    run_id=f"monthly_{safe_name(client_id)}_{now_utc.format('YYYYMM')}"
+                    run_id=f"monthly_{safe_name(client_id)}_{now_utc.format('YYYYMMDD_HHmmss')}"
                 )
-                logging.info(f"Triggered MONTHLY report for {name}")
+                logging.info(f"Triggered MONTHLY report to {name} for the monitor ({monitor_id})")
+                triggered += 1
 
     logging.info(f"Total reports triggered: {triggered}")
 
