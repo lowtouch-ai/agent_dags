@@ -1113,7 +1113,7 @@ def step_5_send_report_email(ti, **context):
         structured = json.loads(structured_str)
         monitor_name = structured.get("monitor_information", {}).get("monitor_name", "Default Monitor")
         dynamic_config = ti.xcom_pull(key="dynamic_config")
-        recipient_email = dynamic_config.get("recipient_email")
+        recipient_email = dynamic_config.get("RECIPIENT_EMAIL")
         final_html_content = ti.xcom_pull(key="final_html_content")
         if not final_html_content:
             logging.error("No final HTML content found from previous steps")

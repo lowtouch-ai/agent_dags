@@ -293,7 +293,7 @@ def step_1_fetch_data(ti, **context):
         tz = timezone.utc
 
     # Use client timezone for report period
-    now_local = pendulum.now(client_tz)
+    now_local = pendulum.now(tz)
     today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
 
     # Previous Calendar Week (strict Sun 00:00:00 to Sat 23:59:59 UTC)
@@ -1043,7 +1043,7 @@ def step_5_send_report_email(ti, **context):
         structured = json.loads(structured_str)
         monitor_name = structured.get("monitor_information", {}).get("monitor_name", "Default Monitor")
         dynamic_config = ti.xcom_pull(key="dynamic_config")
-        recipient_email = dynamic_config.get("recipient_email")
+        recipient_email = dynamic_config.get("RECIPIENT_EMAIL")
         final_html_content = ti.xcom_pull(key="final_html_content")
         if not final_html_content:
             logging.error("No final HTML content found from previous steps")
