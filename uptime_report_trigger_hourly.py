@@ -46,7 +46,7 @@ def trigger_uptime_reports(**context):
     for c in clients:
         client_id = c.get("client_id", "unknown")
         tz = c.get("timezone", "UTC")
-        monitor_id = c.get("monitor_id")
+        monitor_ids = c.get("monitor_ids",[])
         email = c.get("recipient_email")
         name = c.get("client_name", client_id)
 
@@ -70,37 +70,38 @@ def trigger_uptime_reports(**context):
         # Monthly: 1st
         should_trigger_monthly = (local_now.day == 1 and is_midnight_window)
 
-        conf = {
-            "monitor_id": monitor_id,
+        base_conf = {
             "recipient_email": email,
             "client_tz": tz,
             "client_name": name,
         }
+        for monitor_id in monitor_ids:
+            monitor_id = str(monitor_id).strip()
+            conf = {**base_conf, "monitor_id": monitor_id}
+            if should_trigger_daily:
+                client.trigger_dag(
+                    dag_id="uptime_daily_data_report",
+                    conf=conf,
+                    run_id=f"manual_daily_{safe_name(client_id)}_{now_utc.format('YYYYMMDD_HHmm')}"
+                )
+                logging.info(f"Triggered DAILY report for {name} ({client_id})")
+                triggered += 1
 
-        if should_trigger_daily:
-            client.trigger_dag(
-                dag_id="uptime_daily_data_report",
-                conf=conf,
-                run_id=f"manual_daily_{safe_name(client_id)}_{now_utc.format('YYYYMMDD_HHmm')}"
-            )
-            logging.info(f"Triggered DAILY report for {name} ({client_id})")
-            triggered += 1
+            if should_trigger_weekly:
+                client.trigger_dag(
+                    dag_id="uptime_weekly_data_report",
+                    conf=conf,
+                    run_id=f"weekly_{safe_name(client_id)}_{now_utc.format('YYYYMMDD')}"
+                )
+                logging.info(f"Triggered WEEKLY report for {name}")
 
-        if should_trigger_weekly:
-            client.trigger_dag(
-                dag_id="uptime_weekly_data_report",
-                conf=conf,
-                run_id=f"weekly_{safe_name(client_id)}_{now_utc.format('YYYYMMDD')}"
-            )
-            logging.info(f"Triggered WEEKLY report for {name}")
-
-        if should_trigger_monthly:
-            client.trigger_dag(
-                dag_id="uptime_monthly_data_report",
-                conf=conf,
-                run_id=f"monthly_{safe_name(client_id)}_{now_utc.format('YYYYMM')}"
-            )
-            logging.info(f"Triggered MONTHLY report for {name}")
+            if should_trigger_monthly:
+                client.trigger_dag(
+                    dag_id="uptime_monthly_data_report",
+                    conf=conf,
+                    run_id=f"monthly_{safe_name(client_id)}_{now_utc.format('YYYYMM')}"
+                )
+                logging.info(f"Triggered MONTHLY report for {name}")
 
     logging.info(f"Total reports triggered: {triggered}")
 
