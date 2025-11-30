@@ -39,9 +39,38 @@ SMTP_SUFFIX = Variable.get("SMTP_FROM_SUFFIX", default_var="via lowtouch.ai <web
 OLLAMA_HOST = "http://agentomatic:8000/"
 UPTIME_API_KEY = Variable.get("UPTIME_API_KEY")
 
-MONITOR_ID = Variable.get("UPTIME_MONITOR_ID")
-RECIPIENT_EMAIL = Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL")
 REPORT_PERIOD = "last 24 hours"
+
+# === DYNAMIC CLIENT-SPECIFIC VARIABLES (injected via trigger) ===
+def get_dynamic_config(**context):
+    conf = context.get("dag_run").conf or {}
+    
+    monitor_id = conf.get("monitor_id") or Variable.get("UPTIME_MONITOR_ID", fallback=None)
+    recipient_email = conf.get("recipient_email") or Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL", fallback=None)
+    client_tz = conf.get("client_tz", "UTC")  # e.g., "Asia/Kolkata", "America/New_York"
+    client_name = conf.get("client_name", "Unknown Client")
+
+    if not monitor_id:
+        raise ValueError("MONITOR_ID is required but not provided via trigger or Variable")
+    if not recipient_email:
+        raise ValueError("RECIPIENT_EMAIL is required but not provided via trigger or Variable")
+
+    logging.info(f"Dynamic config loaded - Client: {client_name}, TZ: {client_tz}, Monitor ID: {monitor_id}")
+
+    return {
+        "MONITOR_ID": monitor_id,
+        "RECIPIENT_EMAIL": recipient_email,
+        "CLIENT_TZ": client_tz,
+        "CLIENT_NAME": client_name,
+    }
+
+# Inject dynamic config into globals (will be used by all functions)
+def init_dynamic_config(**context):
+    config = get_dynamic_config(**context)
+    context['ti'].xcom_push(key="dynamic_config", value=config)
+    # Make available globally in task context
+    globals().update(config)
+    return config
 
 # Added for Slack alert
 SLACK_WEBHOOK_URL = Variable.get("SLACK_WEBHOOK_URL", default_var=None)
@@ -180,7 +209,7 @@ def send_email(recipient, subject, body, in_reply_to="", references="", img_b64=
         logging.error(f"Failed to send email: {str(e)}")
         return None
 
-def fetch_monitor_data(start_ts, end_ts):
+def fetch_monitor_data(start_ts, end_ts, monitor_id):
     url = "https://api.uptimerobot.com/v2/getMonitors"
     payload = {
         'api_key': UPTIME_API_KEY,
@@ -193,7 +222,7 @@ def fetch_monitor_data(start_ts, end_ts):
         'alert_contacts': '1',
         'mwindows': '1',
         'response_times_average': '30',
-        'monitors': MONITOR_ID,
+        'monitors': monitor_id,
         'logs_start_date': str(int(start_ts)),
         'logs_end_date': str(int(end_ts)),
         'response_times_start_date': str(int(start_ts)),
@@ -257,37 +286,44 @@ def parse_monitor_data(monitor):
     return structured, rt_list, logs
 
 def step_1_fetch_data(ti, **context):
-    now = datetime.now(timezone.utc)
-    today_start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    dynamic_config = ti.xcom_pull(key="dynamic_config")
+    client_tz = dynamic_config["CLIENT_TZ"]
+    monitor_id = dynamic_config["MONITOR_ID"]
+    try:
+        tz = timezone(timedelta(hours=int(client_tz))) if client_tz.startswith(('+', '-')) else timezone.strptime(client_tz, '%Z') if len(client_tz) == 3 else __import__('pytz').timezone(client_tz)
+    except:
+        logging.warning(f"Invalid timezone {client_tz}, falling back to UTC")
+        tz = timezone.utc
 
-    # Previous Day (strict 00:00:00 to 23:59:59 UTC)
-    report_day_start_dt = today_start_dt - timedelta(days=1)
-    report_day_end_dt = report_day_start_dt + timedelta(days=1) - timedelta(microseconds=1)
-    report_day_start_ts = int(report_day_start_dt.timestamp())
-    report_day_end_ts = int(report_day_end_dt.timestamp())
-
-    # Day Before Previous (strict 00:00:00 to 23:59:59 UTC)
-    prev_day_start_dt = report_day_start_dt - timedelta(days=1)
-    prev_day_end_dt = prev_day_start_dt + timedelta(days=1) - timedelta(microseconds=1)
-    prev_day_start_ts = int(prev_day_start_dt.timestamp())
-    prev_day_end_ts = int(prev_day_end_dt.timestamp())
-
-    # Previous Calendar Week (strict Sunday 00:00:00 to Saturday 23:59:59 UTC)
-    # Find start of week containing report_day_start_dt (Sunday)
-    days_to_sunday = (report_day_start_dt.weekday() + 1) % 7
-    current_week_start_dt = report_day_start_dt - timedelta(days=days_to_sunday)
-    # Previous week: 7 days before current week start, ending just before current week start
-    prev_week_start_dt = current_week_start_dt - timedelta(days=7)
-    prev_week_end_dt = current_week_start_dt - timedelta(microseconds=1)
-    prev_week_start_ts = int(prev_week_start_dt.timestamp())
-    prev_week_end_ts = int(prev_week_end_dt.timestamp())
+    now_local = datetime.now(tz)
+    today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    logging.info(f"Fetching time periods: Previous Day {report_day_start_ts} ({report_day_start_dt}) to {report_day_end_ts} ({report_day_end_dt}), "
-                 f"Day Before {prev_day_start_ts} ({prev_day_start_dt}) to {prev_day_end_ts} ({prev_day_end_dt}), "
-                 f"Prev Calendar Week {prev_week_start_ts} ({prev_week_start_dt}) to {prev_week_end_ts} ({prev_week_end_dt})")
+    # Report period: Yesterday in client's local time
+    report_day_start_local = today_start_local - timedelta(days=1)
+    report_day_end_local = report_day_start_local + timedelta(days=1) - timedelta(microseconds=1)
+
+    # Convert to UTC timestamps for API
+    report_day_start_ts = int(report_day_start_local.astimezone(timezone.utc).timestamp())
+    report_day_end_ts = int(report_day_end_local.astimezone(timezone.utc).timestamp())
+
+    prev_day_start_local = report_day_start_local - timedelta(days=1)
+    prev_day_end_local = prev_day_start_local + timedelta(days=1) - timedelta(microseconds=1)
+    prev_day_start_ts = int(prev_day_start_local.astimezone(timezone.utc).timestamp())
+    prev_day_end_ts = int(prev_day_end_local.astimezone(timezone.utc).timestamp())
+
+    # Previous week logic (same offset logic)
+    days_to_sunday = (report_day_start_local.weekday() + 1) % 7
+    current_week_start_local = report_day_start_local - timedelta(days=days_to_sunday)
+    prev_week_start_local = current_week_start_local - timedelta(days=7)
+    prev_week_end_local = current_week_start_local - timedelta(microseconds=1)
+
+    prev_week_start_ts = int(prev_week_start_local.astimezone(timezone.utc).timestamp())
+    prev_week_end_ts = int(prev_week_end_local.astimezone(timezone.utc).timestamp())
+
+    logging.info(f"Using client timezone: {client_tz} | Report period (local): {report_day_start_local} to {report_day_end_local}")
     
     # Fetch 1: Main Report (Yesterday) - Filter post-API to enforce bounds
-    monitor = fetch_monitor_data(report_day_start_ts, report_day_end_ts)
+    monitor = fetch_monitor_data(report_day_start_ts, report_day_end_ts, monitor_id)
     logging.info(f"Fetched monitor data: {monitor}")
     # Client-side filter to handle API's loose range enforcement
     filtered_rt = [r for r in monitor.get('response_times', []) if report_day_start_ts <= r.get('datetime', 0) <= report_day_end_ts]
@@ -300,7 +336,7 @@ def step_1_fetch_data(ti, **context):
     df_current = pd.DataFrame(df_current_list)
     
     # Fetch 2: Baseline 1 (Day-before-yesterday) - Filter post-API
-    prev_monitor = fetch_monitor_data(prev_day_start_ts, prev_day_end_ts)
+    prev_monitor = fetch_monitor_data(prev_day_start_ts, prev_day_end_ts, monitor_id)
     logging.info(f"Fetched monitor data: {prev_monitor}")
     filtered_rt_prev = [r for r in prev_monitor.get('response_times', []) if prev_day_start_ts <= r.get('datetime', 0) <= prev_day_end_ts]
     filtered_logs_prev = [l for l in prev_monitor.get('logs', []) if prev_day_start_ts <= l.get('datetime', 0) <= prev_day_end_ts]
@@ -312,7 +348,7 @@ def step_1_fetch_data(ti, **context):
     df_prev_day = pd.DataFrame(df_prev_day_list)
     
     # Fetch 3: Baseline 2 (Previous Calendar Week) - Filter post-API
-    prev_week_monitor = fetch_monitor_data(prev_week_start_ts, prev_week_end_ts)
+    prev_week_monitor = fetch_monitor_data(prev_week_start_ts, prev_week_end_ts, monitor_id)
     filtered_rt_week = [r for r in prev_week_monitor.get('response_times', []) if prev_week_start_ts <= r.get('datetime', 0) <= prev_week_end_ts]
     filtered_logs_week = [l for l in prev_week_monitor.get('logs', []) if prev_week_start_ts <= l.get('datetime', 0) <= prev_week_end_ts]
     prev_week_monitor['response_times'] = filtered_rt_week
@@ -340,7 +376,7 @@ def step_1_fetch_data(ti, **context):
     ti.xcom_push(key="df_prev_day", value=df_prev_day.to_json(orient='records', date_format='iso'))
     ti.xcom_push(key="structured_prev_week", value=json.dumps(structured_prev_week))
     ti.xcom_push(key="df_prev_week", value=df_prev_week.to_json(orient='records', date_format='iso'))
-    ti.xcom_push(key="report_date", value=report_day_start_dt.strftime('%Y-%m-%d'))
+    ti.xcom_push(key="report_date", value=report_day_start_local.strftime('%Y-%m-%d'))
     
     logging.info("Data fetch completed.")
     return structured_current
@@ -1076,7 +1112,8 @@ def step_5_send_report_email(ti, **context):
         structured_str = ti.xcom_pull(key="structured_current")
         structured = json.loads(structured_str)
         monitor_name = structured.get("monitor_information", {}).get("monitor_name", "Default Monitor")
-        
+        dynamic_config = ti.xcom_pull(key="dynamic_config")
+        recipient_email = dynamic_config.get("recipient_email")
         final_html_content = ti.xcom_pull(key="final_html_content")
         if not final_html_content:
             logging.error("No final HTML content found from previous steps")
@@ -1089,12 +1126,12 @@ def step_5_send_report_email(ti, **context):
         subject = f"Daily Uptime Report with Insights for {monitor_name}"
         
         result = send_email(
-            RECIPIENT_EMAIL, subject, final_html_content, img_b64=chart_b64
+            recipient_email, subject, final_html_content, img_b64=chart_b64
         )
         
         if result:
-            logging.info(f"Report email sent successfully to {RECIPIENT_EMAIL}")
-            return f"Email sent successfully to {RECIPIENT_EMAIL}"
+            logging.info(f"Report email sent successfully to {recipient_email}")
+            return f"Email sent successfully to {recipient_email}"
         else:
             logging.error("Failed to send report email")
             return "Failed to send email"
@@ -1115,12 +1152,18 @@ except FileNotFoundError:
 with DAG(
     "uptime_daily_data_report",
     default_args=default_args,
-    schedule_interval="@daily",
+    schedule_interval=None,
     catchup=False,
     doc_md=readme_content,
     tags=["uptime", "report", "daily", "ai-insights"]
 ) as dag:
     
+    init_config = PythonOperator(
+        task_id="init_dynamic_config",
+        python_callable=init_dynamic_config,
+        provide_context=True,
+    )
+
     fetch_data_task = PythonOperator(
         task_id="step_1_fetch_data",
         python_callable=step_1_fetch_data,
@@ -1172,4 +1215,4 @@ with DAG(
     )
     
     # Set up task dependencies serially for analysis steps
-    fetch_data_task >> anomaly_detection_task >> rca_task >> comparative_analysis_task >> combine_analysis_task >> generate_plot_task >> compose_email_task >> send_report_email_task
+    init_config >> fetch_data_task >> anomaly_detection_task >> rca_task >> comparative_analysis_task >> combine_analysis_task >> generate_plot_task >> compose_email_task >> send_report_email_task
