@@ -17,6 +17,7 @@ from matplotlib.dates import HourLocator, DateFormatter, DayLocator
 import io
 import requests
 import smtplib
+import pendulum
 
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -37,9 +38,38 @@ SMTP_SUFFIX = Variable.get("SMTP_FROM_SUFFIX", default_var="via lowtouch.ai <web
 OLLAMA_HOST = "http://agentomatic:8000/"
 UPTIME_API_KEY = Variable.get("UPTIME_API_KEY")
 
-MONITOR_ID = Variable.get("UPTIME_MONITOR_ID")
-RECIPIENT_EMAIL = Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL")
 REPORT_PERIOD = "last 7 days"
+
+# === DYNAMIC CLIENT-SPECIFIC VARIABLES (injected via trigger) ===
+def get_dynamic_config(**context):
+    conf = context.get("dag_run").conf or {}
+    
+    monitor_id = conf.get("monitor_id") or Variable.get("UPTIME_MONITOR_ID", fallback=None)
+    recipient_email = conf.get("recipient_email") or Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL", fallback=None)
+    client_tz = conf.get("client_tz", "UTC")  # e.g., "Asia/Kolkata", "America/New_York"
+    client_name = conf.get("client_name", "Unknown Client")
+
+    if not monitor_id:
+        raise ValueError("MONITOR_ID is required but not provided via trigger or Variable")
+    if not recipient_email:
+        raise ValueError("RECIPIENT_EMAIL is required but not provided via trigger or Variable")
+
+    logging.info(f"Dynamic config loaded - Client: {client_name}, TZ: {client_tz}, Monitor ID: {monitor_id}")
+
+    return {
+        "MONITOR_ID": monitor_id,
+        "RECIPIENT_EMAIL": recipient_email,
+        "CLIENT_TZ": client_tz,
+        "CLIENT_NAME": client_name,
+    }
+
+# Inject dynamic config into globals (will be used by all functions)
+def init_dynamic_config(**context):
+    config = get_dynamic_config(**context)
+    context['ti'].xcom_push(key="dynamic_config", value=config)
+    # Make available globally in task context
+    globals().update(config)
+    return config
 
 # Added for Slack alert
 SLACK_WEBHOOK_URL = Variable.get("SLACK_WEBHOOK_URL", default_var=None)
@@ -178,7 +208,7 @@ def send_email(recipient, subject, body, in_reply_to="", references="", img_b64=
         logging.error(f"Failed to send email: {str(e)}")
         return None
 
-def fetch_monitor_data(start_ts, end_ts):
+def fetch_monitor_data(start_ts, end_ts, monitor_id):
     url = "https://api.uptimerobot.com/v2/getMonitors"
     payload = {
         'api_key': UPTIME_API_KEY,
@@ -191,7 +221,7 @@ def fetch_monitor_data(start_ts, end_ts):
         'alert_contacts': '1',
         'mwindows': '1',
         'response_times_average': '30',
-        'monitors': MONITOR_ID,
+        'monitors': monitor_id,
         'logs_start_date': str(int(start_ts)),
         'logs_end_date': str(int(end_ts)),
         'response_times_start_date': str(int(start_ts)),
@@ -253,12 +283,22 @@ def parse_monitor_data(monitor):
     return structured, rt_list, logs
 
 def step_1_fetch_data(ti, **context):
-    now = datetime.now(timezone.utc)
-    today_start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    dynamic_config = ti.xcom_pull(key="dynamic_config")
+    client_tz = dynamic_config["CLIENT_TZ"]
+    monitor_id = dynamic_config["MONITOR_ID"]
+    try:
+        tz = timezone(timedelta(hours=int(client_tz))) if client_tz.startswith(('+', '-')) else timezone.strptime(client_tz, '%Z') if len(client_tz) == 3 else __import__('pytz').timezone(client_tz)
+    except:
+        logging.warning(f"Invalid timezone {client_tz}, falling back to UTC")
+        tz = timezone.utc
+
+    # Use client timezone for report period
+    now_local = pendulum.now(client_tz)
+    today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
 
     # Previous Calendar Week (strict Sun 00:00:00 to Sat 23:59:59 UTC)
-    days_since_sunday = (today_start_dt.weekday() + 1) % 7  # Days to current Sun 00:00
-    current_week_start_dt = today_start_dt - timedelta(days=days_since_sunday)
+    days_since_sunday = (today_start.weekday() + 1) % 7  # Days to current Sun 00:00
+    current_week_start_dt = today_start - timedelta(days=days_since_sunday)
     report_week_end_dt = current_week_start_dt - timedelta(seconds=1)  # Prev Sat 23:59:59
     report_week_start_dt = current_week_start_dt - timedelta(days=7)         # Prev Sun 00:00
 
@@ -275,7 +315,7 @@ def step_1_fetch_data(ti, **context):
                  f"Baseline {prev_week_start_ts} ({prev_week_start_dt}) to {prev_week_end_ts} ({prev_week_end_dt}), ")
     
     # Fetch + Filter Main
-    monitor = fetch_monitor_data(report_week_start_ts, report_week_end_ts)
+    monitor = fetch_monitor_data(report_week_start_ts, report_week_end_ts, monitor_id)
     logging.info(f"Fetched monitor data: {monitor}")
     filtered_rt = [r for r in monitor.get('response_times', []) if report_week_start_ts <= r.get('datetime', 0) <= report_week_end_ts]
     filtered_logs = [l for l in monitor.get('logs', []) if report_week_start_ts <= l.get('datetime', 0) <= report_week_end_ts]
@@ -286,7 +326,7 @@ def step_1_fetch_data(ti, **context):
     df_current = pd.DataFrame([{'datetime': datetime.fromtimestamp(r['datetime']).isoformat(), 'value': r['value']} for r in rt_current])
     
     # Fetch + Filter Baseline
-    prev_monitor = fetch_monitor_data(prev_week_start_ts, prev_week_end_ts)
+    prev_monitor = fetch_monitor_data(prev_week_start_ts, prev_week_end_ts, monitor_id)
     logging.info(f"Fetched baseline response times: {len(prev_monitor.get('response_times', []))}, logs: {len(prev_monitor.get('logs', []))}")
     filtered_rt_prev = [r for r in prev_monitor.get('response_times', []) if prev_week_start_ts <= r.get('datetime', 0) <= prev_week_end_ts]
     filtered_logs_prev = [l for l in prev_monitor.get('logs', []) if prev_week_start_ts <= l.get('datetime', 0) <= prev_week_end_ts]
@@ -1002,7 +1042,8 @@ def step_5_send_report_email(ti, **context):
         structured_str = ti.xcom_pull(key="structured_current")
         structured = json.loads(structured_str)
         monitor_name = structured.get("monitor_information", {}).get("monitor_name", "Default Monitor")
-        
+        dynamic_config = ti.xcom_pull(key="dynamic_config")
+        recipient_email = dynamic_config.get("recipient_email")
         final_html_content = ti.xcom_pull(key="final_html_content")
         if not final_html_content:
             logging.error("No final HTML content found from previous steps")
@@ -1011,16 +1052,16 @@ def step_5_send_report_email(ti, **context):
         chart_b64 = ti.xcom_pull(key="chart_b64")
         if not chart_b64:
             logging.warning("No chart data found, sending email without image.")
-               
-        subject = f"Weekly Uptime Report with Insights for {monitor_name}"
+                
+        subject = f"Daily Uptime Report with Insights for {monitor_name}"
         
         result = send_email(
-            RECIPIENT_EMAIL, subject, final_html_content, img_b64=chart_b64
+            recipient_email, subject, final_html_content, img_b64=chart_b64
         )
         
         if result:
-            logging.info(f"Report email sent successfully to {RECIPIENT_EMAIL}")
-            return f"Email sent successfully to {RECIPIENT_EMAIL}"
+            logging.info(f"Report email sent successfully to {recipient_email}")
+            return f"Email sent successfully to {recipient_email}"
         else:
             logging.error("Failed to send report email")
             return "Failed to send email"
@@ -1041,12 +1082,18 @@ except FileNotFoundError:
 with DAG(
     "uptime_weekly_data_report", 
     default_args=default_args, 
-    schedule_interval="0 0 * * 1",  # Run every Monday at midnight, 
+    schedule_interval=None,  # Run every Monday at midnight, 
     catchup=False, 
     doc_md=readme_content, 
     tags=["uptime", "report", "weekly", "ai-insights"]
 ) as dag:
     
+    init_config = PythonOperator(
+        task_id="init_dynamic_config",
+        python_callable=init_dynamic_config,
+        provide_context=True,
+    )
+
     fetch_data_task = PythonOperator(
         task_id="step_1_fetch_data",
         python_callable=step_1_fetch_data,
@@ -1098,4 +1145,4 @@ with DAG(
     )
     
     # Set up task dependencies serially for analysis steps
-    fetch_data_task >> anomaly_detection_task >> rca_task >> comparative_analysis_task >> combine_analysis_task >> generate_plot_task >> compose_email_task >> send_report_email_task
+    init_config >> fetch_data_task >> anomaly_detection_task >> rca_task >> comparative_analysis_task >> combine_analysis_task >> generate_plot_task >> compose_email_task >> send_report_email_task
