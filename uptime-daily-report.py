@@ -450,8 +450,8 @@ Logic for analysis (follow steps in order):
 5. Overall: If no spikes, <10% avg change, and no clusters/unusual logs, conclude 'No significant anomalies detected.'.
 
 Return ONLY a single JSON object with the key "anomaly_detection" and its value as a concise summary string (1-3 sentences). Do not include any additional text, explanations, or markdown.
-Example 1 (Normal): {{"anomaly_detection": "Detected 1 isolated spike (>100ms) at 2025-10-24 09:15:00; average response time increased 5.2% (71.6ms) vs the previous week (68.1ms) but no significant anomalies were found."}}
-Example 2 (Spikes and Patterns): {{"anomaly_detection": "Detected multiple spikes (>100ms) on the current day, with the highest at 2025-11-10 11:00:00 (844ms) and others at 2025-11-10 07:00:00 (244ms) and 2025-11-10 09:00:00 (198ms). Average response time increased significantly by 112% (157.34ms) compared to the previous day (74.17ms) and 111% compared to the previous week (74.38ms). Significant anomaly detected regarding response time."}}
+Example 1 (Normal): {{"anomaly_detection": "Detected 1 isolated spike (>100 ms) on 24 October 2025 at 09:15. Average response time increased 5.2 % (71.6 ms) compared to the previous week (68.1 ms), but remains within normal bounds. No significant anomalies were found."}}
+Example 2 (Spikes and Patterns): {{"anomaly_detection": "Detected multiple response-time spikes (>100 ms) on 10 November 2025: highest 844 ms at 11:00 UTC, others at 07:00 UTC (244 ms) and 09:00 UTC (198 ms). Average response time increased +112 % vs previous day and +111 % vs previous week. Significant anomaly detected."}}
 Example 3 (Edge Case): {{"anomaly_detection": "No current data available for anomaly detection."}}
 """    
     response = get_ai_response(prompt)
@@ -512,7 +512,7 @@ Logic for analysis (follow steps in order):
 5. Edge cases: If logs empty, treat as no errors (single bullet); if baselines missing, skip recurrence without noting.
 6. Overall: If multiple, add final bullet summarizing common causes.
  
-Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bulleted points). Do not include any additional text, explanations, or markdown. Example: {{"rca": "- 2025-10-24 09:00:00: Code 408 timeout (duration 45s) - Root cause: Network issue inferred from response spike; no recurrence in baselines. Recommendation: Monitor bandwidth and retry logic.\\n- Common cause: Isolated timeout - No further action needed."}} or {{"rca": "- No errors requiring RCA."}}
+Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bulleted points). Do not include any additional text, explanations, or markdown. Example: {{"rca": "- 24 October 2025 at 09:00 UTC – HTTP 408 Request Timeout detected (duration 45s) - Root cause: Network issue inferred from response spike; no recurrence in baselines. Recommendation: Monitor bandwidth and retry logic.\\n- Common cause: Isolated timeout - No further action needed."}} or {{"rca": "- No errors requiring RCA."}}
 """
     
     response = get_ai_response(prompt)
