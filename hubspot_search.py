@@ -233,7 +233,6 @@ Analyze the content and determine:
         - This includes ALL mentioned individuals regardless of role (e.g., "spoke with Neha", "cc'd Riya", "John from finance", "met Sarah and Priya").
         - Contact information like email or phone number also triggers this.
         - exclude the user name or hubspot owner names.
-        - DO NOT exclude anyone just because they might be internal — search ALL mentioned people.
         - Exclude the contact name used for assigning a task or deal owner.
         - User mentions the contact name of a existing contact.
         - User mentions company name or deal name of a existing contact.
@@ -953,6 +952,13 @@ Validated Contact Owner ID: {contact_owner_id}
 Validated Contact Owner Name: {contact_owner_name}
 ---
 
+CRITICAL RULES — FOLLOW EXACTLY:
+1. Extract and search for EVERY person mentioned — even 5+ names. Never skip anyone.
+2. ALWAYS SHOW EXISTING CONTACTS FIRST:
+   - If a person is found in **contact_search**,show them as **existing contacts** (even if multiple matches)
+   - If no match found,show them as **objects to be created**.
+   - NEVER hide or skip existing contacts — user must always see who already exists
+
 **STRICT INSTRUCTIONS (execute in order):**
 
 1. Extract potential contact names from the thread. Apply these exclusion rules:
@@ -1243,12 +1249,6 @@ LATEST USER MESSAGE:
 {latest_message}
 
 ---
-CRITICAL RULES — FOLLOW EXACTLY:
-1. Extract and search for EVERY person mentioned — even 5+ names. Never skip anyone.
-2. ALWAYS SHOW EXISTING CONTACTS FIRST:
-   - If a person is found in **contact_search**,show them as **existing contacts** (even if multiple matches)
-   - If no match found,show them as **objects to be created**.
-   - NEVER hide or skip existing contacts — user must always see who already exists
 
 **STRICT INSTRUCTIONS (execute in order):**
 
