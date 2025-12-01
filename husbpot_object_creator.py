@@ -2854,75 +2854,79 @@ RETURN ONLY CLEAN, VALID JSON."""
             raise
 
 def create_associations(ti, **context):
+    """Create associations between HubSpot entities with full retry support"""
+    # === Retry Context ===
+    task_instance = context['task_instance']
+    current_try = task_instance.try_number
+    max_tries = task_instance.max_tries
+
+    logging.info(f"=== CREATE ASSOCIATIONS - Attempt {current_try}/{max_tries} ===")
+
+    previous_status = ti.xcom_pull(key="association_creation_status")
+    previous_response = ti.xcom_pull(key="association_creation_response")
+    is_retry = current_try > 1
+
+    # === Load all data ===
     analysis_results = ti.xcom_pull(key="analysis_results")
-    search_results = ti.xcom_pull(key="search_results", default={})
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     thread_history = ti.xcom_pull(key="thread_history", default=[])
     latest_user_message = ti.xcom_pull(key="latest_message", default="")
-    
-    # Get all created entities
+    # Created entities
     created_contacts = ti.xcom_pull(key="created_contacts", default=[])
     created_companies = ti.xcom_pull(key="created_companies", default=[])
     created_deals = ti.xcom_pull(key="created_deals", default=[])
     created_meetings = ti.xcom_pull(key="created_meetings", default=[])
     created_notes = ti.xcom_pull(key="created_notes", default=[])
     created_tasks = ti.xcom_pull(key="created_tasks", default=[])
-    
-    # Get updated entities
+    # Updated entities
     updated_contacts = ti.xcom_pull(key="updated_contacts", default=[])
     updated_companies = ti.xcom_pull(key="updated_companies", default=[])
     updated_deals = ti.xcom_pull(key="updated_deals", default=[])
-    
-    # Get selected existing entities from analysis
+    # Selected existing entities from analysis
     selected_entities = analysis_results.get("selected_entities", {})
-    existing_contact_ids = [str(c.get("contactId")) for c in selected_entities.get("contacts", [])]
-    existing_company_ids = [str(c.get("companyId")) for c in selected_entities.get("companies", [])]
-    existing_deal_ids = [str(d.get("dealId")) for d in selected_entities.get("deals", [])]
-    
-    # FIXED: Collect ALL relevant IDs (new, updated, AND existing)
-    new_contact_ids = [c.get("id") for c in created_contacts]
-    new_company_ids = [c.get("id") for c in created_companies]
-    new_deal_ids = [d.get("id") for d in created_deals]
-    new_meeting_ids = [m.get("id") for m in created_meetings]
-    new_note_ids = [n.get("id") for n in created_notes]
-    new_task_ids = [t.get("id") for t in created_tasks]
-    
-    updated_contact_ids = [c.get("id") for c in updated_contacts]
-    updated_company_ids = [c.get("id") for c in updated_companies]
-    updated_deal_ids = [d.get("id") for d in updated_deals]
-    
-    # FIXED: Combine all IDs instead of using OR logic
+    existing_contact_ids = [str(c.get("contactId")) for c in selected_entities.get("contacts", []) if c.get("contactId")]
+    existing_company_ids = [str(c.get("companyId")) for c in selected_entities.get("companies", []) if c.get("companyId")]
+    existing_deal_ids = [str(d.get("dealId")) for d in selected_entities.get("deals", []) if d.get("dealId")]
+
+    # Extract IDs from created/updated
+    new_contact_ids = [c.get("id") for c in created_contacts if c.get("id")]
+    new_company_ids = [c.get("id") for c in created_companies if c.get("id")]
+    new_deal_ids = [d.get("id") for d in created_deals if d.get("id")]
+    new_meeting_ids = [m.get("id") for m in created_meetings if m.get("id")]
+    new_note_ids = [n.get("id") for n in created_notes if n.get("id")]
+    new_task_ids = [t.get("id") for t in created_tasks if t.get("id")]
+
+    updated_contact_ids = [c.get("id") for c in updated_contacts if c.get("id")]
+    updated_company_ids = [c.get("id") for c in updated_companies if c.get("id")]
+    updated_deal_ids = [d.get("id") for d in updated_deals if d.get("id")]
+
+    # Combine ALL IDs
     all_contact_ids = list(set(new_contact_ids + updated_contact_ids + existing_contact_ids))
     all_company_ids = list(set(new_company_ids + updated_company_ids + existing_company_ids))
     all_deal_ids = list(set(new_deal_ids + updated_deal_ids + existing_deal_ids))
-    
-    logging.info(f"All Contact IDs for association: {all_contact_ids}")
-    logging.info(f"All Company IDs for association: {all_company_ids}")
-    logging.info(f"All Deal IDs for association: {all_deal_ids}")
-    logging.info(f"New Note IDs: {new_note_ids}")
-    logging.info(f"New Task IDs: {new_task_ids}")
-    logging.info(f"New Meeting IDs: {new_meeting_ids}")
-    
-    # Build conversation context
+    logging.info(f"All Contact IDs: {all_contact_ids}")
+    logging.info(f"All Company IDs: {all_company_ids}")
+    logging.info(f"All Deal IDs: {all_deal_ids}")
+    logging.info(f"New Note/Meeting/Task IDs: {new_note_ids}, {new_meeting_ids}, {new_task_ids}")
+
+    # Build clean conversation context
     conversation_context = ""
     for msg in chat_history:
-        role = msg.get("role", "unknown")
+        role = msg.get("role", "unknown").upper()
         content = msg.get("content", "")
-        conversation_context += f"[{role.upper()}]: {content}\n\n"
-    
+        conversation_context += f"[{role}]: {content}\n\n"
+
     for idx, email in enumerate(thread_history, 1):
         content = email.get("content", "").strip()
         if content:
-            from bs4 import BeautifulSoup
             soup = BeautifulSoup(content, "html.parser")
             clean_content = soup.get_text(separator=" ", strip=True)
             sender = email['headers'].get('From', 'Unknown')
-            is_from_bot = email.get('from_bot', False)
-            role_label = "BOT" if is_from_bot else "USER"
+            role_label = "BOT" if email.get('from_bot', False) else "USER"
             conversation_context += f"[{role_label} EMAIL {idx} - From: {sender}]: {clean_content}\n\n"
-    
-    # FIXED: Enhanced prompt with clearer instructions
-    prompt = f"""You are a HubSpot API assistant responsible for creating associations between entities using create_multi_association tool.
+
+    # === Base Prompt ===
+    base_prompt = f"""You are a HubSpot API assistant responsible for creating associations between entities using create_multi_association tool.
 
 FULL CHAT HISTORY:
 {conversation_context}
@@ -2985,93 +2989,121 @@ Remember: Empty string "" for non-applicable fields, comma-separated for multipl
 
 NOW TAKE ACTION: Based on the conversation above, CALL the create_multi_association tool with the appropriate associations.
 """
-    
-    response = get_ai_response(prompt, expect_json=True)
-    
+
+    # === Retry Prompt ===
+    if is_retry:
+        logging.info(f"RETRY → Using enhanced prompt (attempt {current_try}/{max_tries})")
+        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
+        prev_resp = json.dumps(previous_response, indent=2) if previous_response else "None"
+
+        prompt = f"""PREVIOUS ASSOCIATION CREATION FAILED
+
+Previous Response:
+{prev_resp}
+
+Failure Reason: {prev_reason}
+
+Retry #{current_try} of {max_tries} — YOU MUST FIX THIS.
+
+Available IDs:
+Contacts: {all_contact_ids}
+Companies: {all_company_ids}
+Deals: {all_deal_ids}
+Meetings/Notes/Tasks: {new_meeting_ids + new_note_ids + new_task_ids}
+
+{base_prompt}
+
+YOU MUST:
+- Actually CALL create_multi_association
+- Include ALL available IDs
+- Return valid JSON only
+- Fix malformed output, missing fields, or refusal to call tool
+
+RETURN ONLY CLEAN JSON."""
+    else:
+        logging.info(f"Initial attempt {current_try}/{max_tries}")
+        prompt = base_prompt
+
+    response = None
     try:
-        parsed = json.loads(response)
-        associations = parsed.get("association_requests", [])
-        extracted_ids = parsed.get("extracted_ids_from_conversation", {})
-        reasoning = parsed.get("reasoning", "")
-        
-        # Log for debugging
-        if reasoning:
-            logging.info(f"Association reasoning: {reasoning}")
-        if extracted_ids and any(extracted_ids.values()):
-            logging.info(f"Additional IDs extracted from conversation: {extracted_ids}")
-        
-        # FIXED: Ensure we're creating associations even if no new associations are suggested
-        # This handles cases where the AI might not recognize the need for associations
-        if not associations and (new_note_ids or new_task_ids or new_meeting_ids):
-            logging.warning("No associations suggested by AI, creating default associations")
-            
-            # Create default associations for new engagement objects with existing entities
-            default_associations = []
-            
-            # Associate new notes with existing entities
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response: {response[:1000]}...")
+
+        parsed = json.loads(response.strip())
+        association_requests = parsed.get("association_requests", [])
+        ids_from_conversation = parsed.get("ids_from_conversation", {})
+
+        # === DEFAULT FALLBACK: Critical safety net ===
+        if not association_requests and any([
+            new_note_ids, new_task_ids, new_meeting_ids,
+            all_contact_ids, all_company_ids, all_deal_ids
+        ]):
+            logging.warning("AI failed to suggest associations → creating defaults")
+            association_requests = []
+
             for note_id in new_note_ids:
-                if all_contact_ids or all_company_ids or all_deal_ids:
-                    default_associations.append({
-                        "description": "Associate new note with existing entities",
-                        "single": {
-                            "note_id": note_id,
-                            "contact_id": ",".join(all_contact_ids) if all_contact_ids else "",
-                            "company_id": ",".join(all_company_ids) if all_company_ids else "",
-                            "deal_id": ",".join(all_deal_ids) if all_deal_ids else "",
-                            "task_id": "",
-                            "meeting_id": ""
-                        }
-                    })
-            
-            # Associate new tasks with existing entities
+                association_requests.append({"single": {
+                    "note_id": note_id,
+                    "contact_id": ",".join(all_contact_ids) if all_contact_ids else "",
+                    "company_id": ",".join(all_company_ids) if all_company_ids else "",
+                    "deal_id": ",".join(all_deal_ids) if all_deal_ids else "",
+                    "task_id": "", "meeting_id": ""
+                }})
             for task_id in new_task_ids:
-                if all_contact_ids or all_company_ids or all_deal_ids:
-                    default_associations.append({
-                        "description": "Associate new task with existing entities",
-                        "single": {
-                            "task_id": task_id,
-                            "contact_id": ",".join(all_contact_ids) if all_contact_ids else "",
-                            "company_id": ",".join(all_company_ids) if all_company_ids else "",
-                            "deal_id": ",".join(all_deal_ids) if all_deal_ids else "",
-                            "note_id": "",
-                            "meeting_id": ""
-                        }
-                    })
-            
-            # Associate new meetings with existing entities
+                association_requests.append({"single": {
+                    "task_id": task_id,
+                    "contact_id": ",".join(all_contact_ids) if all_contact_ids else "",
+                    "company_id": ",".join(all_company_ids) if all_company_ids else "",
+                    "deal_id": ",".join(all_deal_ids) if all_deal_ids else "",
+                    "note_id": "", "meeting_id": ""
+                }})
             for meeting_id in new_meeting_ids:
-                if all_contact_ids or all_company_ids or all_deal_ids:
-                    default_associations.append({
-                        "description": "Associate new meeting with existing entities",
-                        "single": {
-                            "meeting_id": meeting_id,
-                            "contact_id": ",".join(all_contact_ids) if all_contact_ids else "",
-                            "company_id": ",".join(all_company_ids) if all_company_ids else "",
-                            "deal_id": ",".join(all_deal_ids) if all_deal_ids else "",
-                            "note_id": "",
-                            "task_id": ""
-                        }
-                    })
-            
-            if default_associations:
-                associations = default_associations
-                logging.info(f"Created {len(default_associations)} default associations")
-        
-        ti.xcom_push(key="associations_created", value=associations)
-        ti.xcom_push(key="extracted_conversation_ids", value=extracted_ids)
-        logging.info(f"Total associations to create: {len(associations)}")
-        
-        # Log each association for debugging
-        for idx, assoc in enumerate(associations):
-            logging.info(f"Association {idx + 1}: {assoc}")
-        
-        return associations
-        
+                association_requests.append({"single": {
+                    "meeting_id": meeting_id,
+                    "contact_id": ",".join(all_contact_ids) if all_contact_ids else "",
+                    "company_id": ",".join(all_company_ids) if all_company_ids else "",
+                    "deal_id": ",".join(all_deal_ids) if all_deal_ids else "",
+                    "note_id": "", "task_id": ""
+                }})
+
+        # === SUCCESS ===
+        result = {
+            "associations_created": association_requests,
+            "extracted_conversation_ids": ids_from_conversation,
+            "association_creation_status": {"status": "success"},
+            "association_creation_response": parsed
+        }
+        for k, v in result.items():
+            ti.xcom_push(key=k, value=v)
+
+        logging.info(f"SUCCESS: Created {len(association_requests)} association requests on attempt {current_try}")
+        return association_requests
+
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON from AI: {e}\nRaw: {response}"
+        logging.error(error_msg)
+        raise Exception(error_msg)
+
     except Exception as e:
-        logging.error(f"Error creating associations: {e}")
-        logging.error(f"Raw AI response: {response}")
-        ti.xcom_push(key="associations_created", value=[])
-        return []
+        error_msg = str(e) or "Unknown errorError"
+        is_final = current_try >= max_tries
+        status_type = "final_failure" if is_final else "failure"
+
+        fallback = {
+            "associations_created": [],
+            "extracted_conversation_ids": {},
+            "association_creation_status": {"status": status_type, "reason": error_msg},
+            "association_creation_response": {"raw_response": response} if response else None
+        }
+        for k, v in fallback.items():
+                       ti.xcom_push(key=k, value=v)
+
+        if is_final:
+            logging.error(f"FINAL FAILURE: create_associations failed after {max_tries} attempts")
+            raise
+        else:
+            logging.warning(f"create_associations failed → retrying ({current_try}/{max_tries})")
+            raise
 
 def collect_and_save_results(ti, **context):
     """Collect all results for final email"""
