@@ -229,13 +229,14 @@ Analyze the content and determine:
 2. If a summary is requested, set ALL other flags (search_deals, search_contacts, search_companies, parse_notes, parse_tasks, parse_meetings) to false.
 3. If no summary is requested, determine the following:
    - CONTACTS (search_contacts):
-        - Set to TRUE if a person's name is mentioned (first name, last name, or full name).
-        - This includes contacts in conversational context like "I spoke with John" or "Sarah from ABC Corp".
+        - Set to TRUE if ANY person's name (internal or external employee, stakeholder, client, etc.) is mentioned — even multiple people.
+        - This includes ALL mentioned individuals regardless of role (e.g., "spoke with Neha", "cc'd Riya", "John from finance", "met Sarah and Priya").
         - Contact information like email or phone number also triggers this.
         - exclude the user name or hubspot owner names.
         - Exclude the contact name used for assigning a task or deal owner.
-        - User mentions the contact name of a exiting contact.
+        - User mentions the contact name of a existing contact.
         - User mentions company name or deal name of a existing contact.
+        - Always search every single person mentioned — never skip or filter out any individual.
 
     - COMPANIES (search_companies):
         - Set to TRUE if a company/organization name is mentioned.
@@ -951,6 +952,13 @@ Validated Contact Owner ID: {contact_owner_id}
 Validated Contact Owner Name: {contact_owner_name}
 ---
 
+CRITICAL RULES — FOLLOW EXACTLY:
+1. Extract and search for EVERY person mentioned — even 5+ names. Never skip anyone.
+2. ALWAYS SHOW EXISTING CONTACTS FIRST:
+   - If a person is found in **contact_search**,show them as **existing contacts** (even if multiple matches)
+   - If no match found,show them as **objects to be created**.
+   - NEVER hide or skip existing contacts — user must always see who already exists
+
 **STRICT INSTRUCTIONS (execute in order):**
 
 1. Extract potential contact names from the thread. Apply these exclusion rules:
@@ -958,6 +966,8 @@ Validated Contact Owner Name: {contact_owner_name}
    - EXCLUDE internal team members, senders, or system users (e.g., skip "From: John Doe <john@company.com>")
    - EXCLUDE names that are clearly role/department indicators in parentheses like "(Ops)", "(Finance)", "(IT)"
    - INCLUDE actual contact names that appear to be external stakeholders or clients
+   - SEARCH EVERY SINGLE PERSON mentioned in the email — no matter how many, even if they are employees, internal, or mentioned casually. Never skip anyone. Always set search_contacts = true if any name appears.
+   - IF A CONFIRMATION EMAIL HAS ALREADY BEEN SENT IN THE THREAD: Any reply from the user (even "change owner", "add contact", "wrong amount", "remove task", etc.) means "apply my changes now". NEVER ask for confirmation again. Immediately apply changes and send final updated email. Do NOT wait for "yes", "proceed", "confirmed", or any keyword.
    
    For valid contacts:
    - Parse contact names and handle role indicators properly:
