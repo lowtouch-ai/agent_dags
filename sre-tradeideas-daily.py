@@ -545,7 +545,7 @@ def compile_sre_report(ti, **context):
 
 ---
 
-## 6. Certificate Status
+## 6. Kubernetes Checks
 {kubernetes_ver}
 {k8s_eol}
 {microk8s_exp}

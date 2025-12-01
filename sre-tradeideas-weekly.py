@@ -497,7 +497,7 @@ def compile_sre_report(ti, **context):
 
 ---
 
-## 6. System Status
+## 6. Kubernetes Checks
 {ti.xcom_pull(key="kubernetes_version_check") or "No data"}
 {ti.xcom_pull(key="kubernetes_eol_and_next_version") or "No data"}
 {ti.xcom_pull(key="microk8s_expiry_check") or "No data"}
