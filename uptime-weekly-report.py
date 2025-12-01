@@ -208,6 +208,22 @@ def send_email(recipient, subject, body, in_reply_to="", references="", img_b64=
         logging.error(f"Failed to send email: {str(e)}")
         return None
 
+def human_date(dt):
+    """Convert datetime/pendulum/timestamp → 'Jan 21, 2025'"""
+    if isinstance(dt, (int, float)):
+        dt = datetime.fromtimestamp(dt)
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+        except:
+            try:
+                dt = pendulum.parse(dt)
+            except:
+                return dt  # fallback
+    if hasattr(dt, 'format'):
+        return dt.format('MMM D, YYYY')  # Jan 21, 2025
+    return dt.strftime('%b %d, %Y')
+
 def fetch_monitor_data(start_ts, end_ts, monitor_id):
     url = "https://api.uptimerobot.com/v2/getMonitors"
     payload = {
@@ -615,7 +631,7 @@ def step_3_generate_plot(ti, **context):
             ax.set_ylim(bottom=0, top=df_current['value'].max() * 1.2)
         
         ax.set_title(
-            f"Response Time: Week-over-Week Comparison for {monitor_name} from {report_week_start_dt} to {report_week_end_dt}",
+            f"Response Time: Week-over-Week Comparison for {monitor_name} from {human_date(report_week_start_dt)} to {human_date(report_week_end_dt)}",
             fontsize=18, fontweight='bold', color='black'
         )
         ax.set_xlabel("Datetime", fontsize=14)
@@ -844,7 +860,7 @@ def step_4_compose_email(ti, **context):
     <body>
         <div class="container">
             <div class="header">
-                <h1>{report_type} Uptime Report - {report_week_start_date} to {report_week_end_date}</h1>
+                <h1>{report_type} Uptime Report - {human_date(report_week_start_date)} to {human_date(report_week_end_date)}</h1>
             </div>
             <div class="content">
                 <p>Dear Team,</p>
@@ -895,7 +911,7 @@ def step_4_compose_email(ti, **context):
                         </tr>
                         <tr>
                             <td>Expires On</td>
-                            <td>{ssl_info.get('expiry_date', 'N/A')}</td>
+                            <td>{human_date(ssl_info.get('expiry_date', 'N/A'))}</td>
                         </tr>
                     </table>
                 </div>

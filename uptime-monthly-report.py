@@ -203,6 +203,35 @@ def send_email(recipient, subject, body, in_reply_to="", references="", img_b64=
         logging.error(f"Failed to send email: {str(e)}")
         return None
 
+def human_date(dt):
+    """Convert datetime/pendulum/timestamp → 'Jan 21, 2025'"""
+    if isinstance(dt, (int, float)):
+        dt = datetime.fromtimestamp(dt)
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+        except:
+            try:
+                dt = pendulum.parse(dt)
+            except:
+                return dt  # fallback
+    if hasattr(dt, 'format'):
+        return dt.format('MMM D, YYYY')  # Jan 21, 2025
+    return dt.strftime('%b %d, %Y')
+
+def human_month_year(dt):
+    """
+    Converts any date/timestamp → "January 2025", "March 2025", etc.
+    Perfect for monthly report headers.
+    """
+    if isinstance(dt, (int, float)):
+        dt = datetime.fromtimestamp(dt)
+    if isinstance(dt, str):
+        dt = pendulum.parse(dt)
+    if hasattr(dt, 'format'):
+        return dt.format('MMMM YYYY')   # e.g. January 2025
+    return dt.strftime('%B %Y')         # fallback
+
 def fetch_main_monitor_data(start_ts, end_ts, monitor_id):
     """
     Fetches main monitor data (logs, uptime, ssl) WITHOUT response_times.
@@ -652,7 +681,7 @@ def step_3_generate_plot(ti, **context):
              ax.set_ylim(bottom=0, top=100)
 
         ax.set_title(
-            f"Response Time: Month-over-Month Comparison for {monitor_name} for {report_month_start_dt} to {report_month_end_dt}",
+            f"Response Time: Month-over-Month Comparison for {monitor_name} - {human_month_year(report_month_start_dt)}",
             fontsize=18, fontweight='bold', color='black'
         )
         ax.set_xlabel("Datetime", fontsize=14)
@@ -870,7 +899,7 @@ def step_4_compose_email(ti, **context):
     <body>
         <div class="container">
             <div class="header">
-                <h1>{report_type} Uptime Report - {report_month_start_dt} to {report_month_end_dt}</h1>
+                <h1>{report_type} Uptime Report - {human_month_year(report_month_start_dt)}</h1>
             </div>
             <div class="content">
                 <p>Dear Team,</p>
@@ -921,7 +950,7 @@ def step_4_compose_email(ti, **context):
                         </tr>
                         <tr>
                             <td>Expires On</td>
-                            <td>{ssl_info.get('expiry_date', 'N/A')}</td>
+                            <td>{human_date(ssl_info.get('expiry_date', 'N/A'))}</td>
                         </tr>
                     </table>
                 </div>
