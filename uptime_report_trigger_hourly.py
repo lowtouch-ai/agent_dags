@@ -49,7 +49,8 @@ def trigger_uptime_reports(**context):
         monitor_ids = c.get("monitor_ids",[])
         email = c.get("recipient_email")
         name = c.get("client_name", client_id)
-
+        customer=c.get("customer","Appz")
+        monitoring_team= "CloudOrbit SRE agent" if customer=="CloudOrbit" else "AppZ SRE agent"
         if not monitor_ids or not email:
             continue
         logging.info(f"Processing client: {name} ({client_id}) with monitors: {monitor_ids} for email: {email}")
@@ -74,6 +75,7 @@ def trigger_uptime_reports(**context):
             "recipient_email": email,
             "client_tz": tz,
             "client_name": name,
+            "monitoring_team": monitoring_team
         }
         for monitor_id in monitor_ids:
             monitor_id = str(monitor_id).strip()
