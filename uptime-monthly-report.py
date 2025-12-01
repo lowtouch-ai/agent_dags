@@ -468,7 +468,7 @@ Logic for analysis (follow steps in order):
 
 Return ONLY a single JSON object with the key "anomaly_detection" and its value as a concise summary string (1-3 sentences). Do not include any additional text, explanations, or markdown.
 Example 1 (Normal): {{"anomaly_detection": "Detected 2 spikes >100ms and one down log cluster (2 events, code 408 timeout); however, the average response time improved, dropping 9.12% (from 82.2ms to 74.7ms) compared to the previous 30-day period."}}
-Example 2 (Spikes and Patterns): {{"anomaly_detection": "Detected multiple response-time spikes (>100 ms) on 10 November 2025: highest 844 ms at 11:00 UTC, others at 07:00 (244 ms) and 09:00 (198 ms). Average response time increased +112 % vs previous month. Significant anomaly detected."}}
+Example 2 (Spikes and Patterns): {{"anomaly_detection": "Detected multiple response-time spikes (>100 ms) on 10 November 2025: highest 844 ms at 11:00, others at 07:00 (244 ms) and 09:00 (198 ms). Average response time increased +112 % vs previous month. Significant anomaly detected."}}
 Example 3 (Edge Case): {{"anomaly_detection": "No current data available for anomaly detection."}}
 """
     
