@@ -866,7 +866,7 @@ def step_4_compose_email(ti, **context):
             </div>
             <div class="content">
                 <p>Dear Team,</p>
-                <p>Please find below the {report_type.lower()} uptime report for the date <strong>{report_week_start_date}</strong> to <strong>{report_week_end_date}</strong> for the monitor: <strong>{monitor_name}</strong>.</p>
+                <p>Please find below the {report_type.lower()} uptime report for the date <strong>{human_date(report_week_start_date)}</strong> to <strong>{human_date(report_week_end_date)}</strong> for the monitor: <strong>{monitor_name}</strong>.</p>
                 
                 <div class="section">
                     <h2>Monitor Information</h2>
