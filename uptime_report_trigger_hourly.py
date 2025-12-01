@@ -38,7 +38,7 @@ def trigger_uptime_reports(**context):
     if not clients:
         logging.info("No clients configured")
         return
-
+    logging.info(f"Loaded {len(clients)} clients for uptime report triggering")
     now_utc = pendulum.now("UTC")
     client = Client(None, None)  # Local client (official)
 
@@ -50,7 +50,7 @@ def trigger_uptime_reports(**context):
         email = c.get("recipient_email")
         name = c.get("client_name", client_id)
 
-        if not monitor_id or not email:
+        if not monitor_ids or not email:
             continue
         logging.info(f"Processing client: {name} ({client_id}) with monitors: {monitor_ids} for email: {email}")
         try:
@@ -62,8 +62,8 @@ def trigger_uptime_reports(**context):
         minute = local_now.minute
         is_midnight_window = (hour == 0 and minute < 15)
 
-        # FOR TESTING: Remove condition to trigger immediately
-        should_trigger_daily = True  # ← You removed condition here
+        # Daily: every day at midnight
+        should_trigger_daily = is_midnight_window
 
         # Weekly: Monday
         should_trigger_weekly = (local_now.weekday() == 0 and is_midnight_window)
