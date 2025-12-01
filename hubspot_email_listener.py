@@ -546,9 +546,9 @@ ROUTING DECISION TREE:
 3. **CONFIRM & EXECUTE** (Route to: continuation_dag)  
    When user is:
    - Responding to bot's confirmation request ("proceed", "yes", "confirm", "looks good")
-   - Making corrections to bot's proposed actions
+   - Making corrections to bot's proposed actions.
    - Adding casual comments about existing deals/clients (no new entities) or between the conversation.
-   - Updating existing records without creating new ones
+   - Updating existing records without creating new ones.
    - If the creation of new entities is mentioned instead of proceed after the confirmation mail, then treat it as direct creation without search.
    
    Keywords: "proceed", "confirm", "yes", "update", "modify", "change"

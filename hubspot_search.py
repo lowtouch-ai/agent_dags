@@ -740,7 +740,7 @@ def search_deals(ti, **context):
     deal_owner_name = owner_info.get('deal_owner_name', 'Kishore')
     
 
-    base_prompt = f"""You are a HubSpot Deal Intelligence Assistant. Your role is to analyze the email conversation and:
+    base_prompt = f"""You are a HubSpot Deal Intelligence Assistant. Your role is to analyze the email conversation and
 
 1. **Search** for existing deals by extracting and matching deal names.
 2. **Suggest** new deal drafts **only when the email clearly expresses intent to move forward** (e.g., pricing, timeline, commitment).
@@ -957,7 +957,7 @@ CRITICAL RULES — FOLLOW EXACTLY:
 2. ALWAYS SHOW EXISTING CONTACTS FIRST:
    - If a person is found in **contact_search**,show them as **existing contacts** (even if multiple matches)
    - If no match found,show them as **objects to be created**.
-   - NEVER hide or skip existing contacts — user must always see who already exists
+   - NEVER hide or skip existing contacts — user must always see who already exists.
 
 **STRICT INSTRUCTIONS (execute in order):**
 
