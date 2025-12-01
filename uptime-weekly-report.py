@@ -48,6 +48,7 @@ def get_dynamic_config(**context):
     recipient_email = conf.get("recipient_email") or Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL", fallback=None)
     client_tz = conf.get("client_tz", "UTC")  # e.g., "Asia/Kolkata", "America/New_York"
     client_name = conf.get("client_name", "Unknown Client")
+    monitoring_team = conf.get("monitoring_team", "Appz SRE Agent")
 
     if not monitor_id:
         raise ValueError("MONITOR_ID is required but not provided via trigger or Variable")
@@ -61,6 +62,7 @@ def get_dynamic_config(**context):
         "RECIPIENT_EMAIL": recipient_email,
         "CLIENT_TZ": client_tz,
         "CLIENT_NAME": client_name,
+        "MONITORING_TEAM": monitoring_team
     }
 
 # Inject dynamic config into globals (will be used by all functions)
@@ -1036,11 +1038,13 @@ def step_4_compose_email(ti, **context):
     html += '</div>'  # close section
         
     # Footer
-    html += """
+    get_dynamic_config = ti.xcom_pull(key="dynamic_config")
+    monitoring_team = get_dynamic_config.get("MONITORING_TEAM_NAME")
+    html += f"""
             </div>
             <div class="footer">
                 Best regards,<br>
-                The Monitoring Team
+                {monitoring_team}
                 <center><span style="font-size: 14px; opacity: 0.9;">Powered by lowtouch<span style="color: #fb47de;">.ai</span></span></center>
             </div>
         </div>
