@@ -1142,9 +1142,9 @@ def generate_pdf_report_callable(ti=None, **context):
 with DAG(
     dag_id="sre_mediamelon_sre_report_daily_v1",
     default_args=default_args,
-    schedule_interval="30 5 * * *",  # 05:30 UTC = 11:00 AM IST
+    schedule_interval = "30 4 * * *",  # 10:00 AM IST daily
     catchup=False,
-    tags=["sre", "mediamelon", "daily", "11am-ist"],
+    tags=["sre", "mediamelon", "daily", "10am-ist"],
     max_active_runs=1,
     max_active_tasks=64,
 ) as dag:

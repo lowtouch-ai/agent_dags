@@ -1043,10 +1043,10 @@ def generate_pdf_report_callable(ti=None, **context):
 with DAG(
     dag_id="sre_mediamelon_sre_report_weekly_v1",
     default_args=default_args,
-    schedule_interval="30 6 * * 5",          # ← Every Friday at 06:30 UTC
+    schedule_interval = "30 4 * * 4" ,  # At 04:30 on Thursday (to cover full week ending Friday)
     start_date=datetime(2025, 11, 1),
     catchup=False,
-    tags=["sre", "mediamelon", "weekly", "friday", "eow-report"],
+    tags=["sre", "mediamelon", "weekly", "Thursday", "eow-report"],
     description="Mediamelon SRE Weekly Report generated every Friday (compares this week vs last week)",
     max_active_runs=1,
     max_active_tasks=64,
