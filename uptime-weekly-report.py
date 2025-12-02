@@ -1106,7 +1106,7 @@ def step_5_send_report_email(ti, **context):
         if not chart_b64:
             logging.warning("No chart data found, sending email without image.")
                 
-        subject = f"Daily Uptime Report with Insights for {monitor_name}"
+        subject = f"Weekly Uptime Report with Insights for {monitor_name}"
         
         result = send_email(
             recipient_email, subject, final_html_content, img_b64=chart_b64

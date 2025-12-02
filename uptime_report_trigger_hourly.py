@@ -84,7 +84,7 @@ def trigger_uptime_reports(**context):
                 client.trigger_dag(
                     dag_id="uptime_daily_data_report",
                     conf=conf,
-                    run_id=f"manual_daily_{safe_name(client_id)}_{now_utc.format('YYYYMMDD_HHmmss')}"
+                    run_id=f"daily_{safe_name(client_id)}_{now_utc.format('YYYYMMDD_HHmmss')}"
                 )
                 logging.info(f"Triggered DAILY report to {name} for the monitor ({monitor_id})")
                 triggered += 1
