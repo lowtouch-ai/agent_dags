@@ -226,6 +226,39 @@ def human_date(dt):
             return dt.format(' D MMMM, YYYY')  # 21 January, 2025
     return dt.strftime('%d %B, %Y')
 
+def human_period(start, end):
+    """
+    Returns beautiful, professional date ranges:
+      • Same month:   "15–21 January 2025"
+      • Same year:    "28 Dec – 3 Jan 2025"
+      • Cross year:   "29 Dec 2024 – 4 Jan 2025"
+    """
+    # Handle various input types
+    def to_dt(obj):
+        if isinstance(obj, (int, float)):
+            return pendulum.from_timestamp(obj)
+        if isinstance(obj, str):
+            return pendulum.parse(obj)
+        return pendulum.instance(obj) if isinstance(obj, datetime) else obj
+
+    start_dt = to_dt(start)
+    end_dt = to_dt(end)
+
+    start_day = start_dt.day
+    end_day = end_dt.day
+    start_month = start_dt.format('MMM')
+    end_month = end_dt.format('MMM')
+    start_year = start_dt.year
+    end_year = end_dt.year
+
+    # Same year, different months → "28 Dec – 3 Jan 2025"
+    if start_year == end_year:
+        return f"{start_day} {start_month} to {end_day} {end_month} {start_year}"
+
+    # Different years → "29 Dec 2024 – 4 Jan 2025"
+    else:
+        return f"{start_day} {start_month} {start_year} to {end_day} {end_month} {end_year}"
+    
 def fetch_monitor_data(start_ts, end_ts, monitor_id):
     url = "https://api.uptimerobot.com/v2/getMonitors"
     payload = {
@@ -862,7 +895,7 @@ def step_4_compose_email(ti, **context):
     <body>
         <div class="container">
             <div class="header">
-                <h1>{report_type} Uptime Report - {human_date(report_week_start_date)} to {human_date(report_week_end_date)}</h1>
+                <h1>{report_type} Uptime Report - {human_period(report_week_start_date, report_week_end_date)}</h1>
             </div>
             <div class="content">
                 <p>Dear Team,</p>
