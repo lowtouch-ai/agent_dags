@@ -218,8 +218,8 @@ def human_date(dt):
             except:
                 return dt  # fallback
     if hasattr(dt, 'format'):
-        return dt.format('MMM D, YYYY')  # Jan 21, 2025
-    return dt.strftime('%b %d, %Y')
+            return dt.format('D MMMM, YYYY')  # 21 January, 2025
+    return dt.strftime('%d %B, %Y')
 
 def human_month_year(dt):
     """
