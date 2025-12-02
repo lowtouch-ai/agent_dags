@@ -1819,15 +1819,15 @@ def compose_confirmation_email(ti, **context):
     from_email = email_data["headers"].get("From", "")
     
     email_content = f"""<!DOCTYPE html>
-<html>
 <head>
     <style>
-        table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
-        th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
-        th {{ background-color: #f2f2f2; font-weight: bold; }}
-        h3 {{ color: #333; margin-top: 30px; margin-bottom: 15px; }}
-        .greeting {{ margin-bottom: 20px; }}
-        .closing {{ margin-top: 30px; }}
+        table {{ border-collapse: collapse;width: 100%;margin: 20px 0;border: 1px solid #e0e0e0;font-size: 14px;}}
+        th {{ border: 1px solid #d0d7e2;padding: 12px;background-color: #f3f6fc;color: #333;text-align: left;font-weight: bold;}}
+        td {{ padding: 10px;border: 1px solid #e0e0e0;text-align: left;}}
+        tr:hover {{ background-color: #f9fbff;}}
+        h3 {{color: #333; margin-top: 30px; margin-bottom: 15px; }}
+        .greeting {{ margin-bottom: 20px;}}
+        .closing {{ margin-top: 30px;}}
     </style>
 </head>
 <body>
@@ -1884,7 +1884,7 @@ def compose_confirmation_email(ti, **context):
         <table>
             <thead>
                 <tr>
-                    <th>ID</th>
+                    <th>Company ID</th>
                     <th>Name</th>
                     <th>Domain</th>
                     <th>Address</th>
@@ -1926,7 +1926,7 @@ def compose_confirmation_email(ti, **context):
         <table>
             <thead>
                 <tr>
-                    <th>ID</th>
+                    <th>Deal ID</th>
                     <th>Deal Name</th>
                     <th>Stage</th>
                     <th>Amount</th>

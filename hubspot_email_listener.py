@@ -788,12 +788,18 @@ Reply in 1-2 short, polite, professional sentences.
 - If user asks for HubSpot info: provide concise, accurate answers.
 - Hubspot query rules:
     - If user asks about any contact or contact details call the tool `search_contacts` and answer the question based on the output. The output should be in HTML - table Format .
-      * Ensure that the output strictly returns all of the following fields: ID,Firstname,Lastname,Email,Phone,Job Title,Contact Owner Name,Last Modified Date in tabular format.
-      * When only first name or last name is given,search based on that and if multiple contacts are found ask for clarification to choose a specific one.
+      * Ensure that the output strictly returns all of the following fields: Contact ID,Firstname,Lastname,Email,Phone,Job Title,Contact Owner Name,Last Modified Date in table format.
+      * When only first name or last name is given,search based on that and if multiple contacts are found ask for clarification to choose a specific one after returning the table of contacts found.
+      * Keep each phone number, email, and job title in a single line (no text wrapping across lines).
+      * Ensure phone numbers follow a uniform formatting standard (e.g., +91 98765 43210 or +1 312 555 7241).
+      * Avoid unnecessary line breaks in any field.
+      * Do not follow the pagination rule in email response.If there are 100 matches of a contact,return all 100 in the email itself. 
     - If user asks about any company or company details call the tool `search_companies` and answer the question based on the output. The output should be in HTML - table Format .
-      * Ensure that the output strictly returns all of the following fields: Company Name,Domain,Company Owner,Lifecycle Stage,Associated Deals (IDs + names + stages) in tabular format.
+      * Ensure that the output strictly returns all of the following fields: Company Id, Company Name,Domain,Company Owner,Lifecycle Stage,Associated Deals (IDs + names + stages) in table format.
+      * Do not follow the pagination rule in email response.If there are 100 matches of a company,return all 100 in the email itself.
     - If user asks about any deal or deal details call the tool `search_deals` and answer the question based on the output. The output should be in HTML - table Format .
-      * Ensure that the output strictly returns all of the following fields: Deal Name, Deal ID, Deal Stage, Deal Owner, Deal Amount, Expected Close Date, Associated Company, and Associated Contacts including both names and email addresses in tabular format.
+      * Ensure that the output strictly returns all of the following fields: Deal ID, Deal Name, Deal Stage(Dont take the deal stage id,take the deal stage name(for example if deal stage id is appoinmentschedule,then the deal stage will be APPOINTMENT SCHEDULE)), Deal Owner, Deal Amount, Expected Close Date, Associated Company, and Associated Contacts in table format.
+      * Do not merge, or concatenate the stage name — preserve all spaces, casing, and formatting.
       * Treat current system date as **NOW**.
       * Exclude all deals whose Expected Close Date is prior to NOW.
       * The result set must be sorted on Expected Close Date in ascending order, prioritizing deals with the earliest closing dates
@@ -802,14 +808,24 @@ Reply in 1-2 short, polite, professional sentences.
       * Convert natural language into a valid start_date → end_date range.
       * Return only deals whose Expected Close Date lies within that period.
       * Include today's date when filtering.(Example if the  Query is to check the "deals expiring by this month end" then date Range will be 1 Dec 2025 to 31 Dec 2025)
+      * Do not follow the pagination rule in email response.If there are 100 matches for deals,return all 100 in the email itself. 
     - If user asking a entity detail along with a timeperiod use LTE, GTE or both based on user request. The output should be in HTML - table Format .
+      * Ensure that the output strictly returns all of the following fields:Task_ID,Task Subject,Due Date,Status,Priority.
+      * Do not follow the pagination rule in email response.If there are 100 matches for tasks,return all 100 in the email itself without any followp response.
+- All the **dates** should be in YYYY-MM-DD format and do not include time.
+- If a column has no data for a particular record, give the value for that as **N/A**.
 - Always maintain a friendly and professional tone.
 Your final response must be in below format:
 ```
         <html>
         <head>
             <style>
-                body {{
+        table {{width: 100%;border-collapse: collapse;margin: 20px 0;background: #ffffff;border: 1px solid #e0e0e0;font-size: 14px;}}
+        th {{background-color: #f3f6fc;color: #333;padding: 10px;border: 1px solid #d0d7e2;text-align: left;font-weight: bold;white-space: nowrap;}}
+        td {{padding: 10px;border: 1px solid #e0e0e0;text-align: left;white-space: nowrap;}}
+        h3 {{color: #333;margin-top: 30px;margin-bottom: 15px;}}
+
+            body {{
                     font-family: Arial, sans-serif;
                     line-height: 1.6;
                     color: #333;
