@@ -8,12 +8,14 @@ from ollama import Client
 from airflow.models import Variable
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 import base64
 import json
 import re
 import html
 import smtplib
 from email.mime.image import MIMEImage
+import os
 
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -38,8 +40,19 @@ RECEIVER_EMAIL = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_TO_ADDRESS", def
 OLLAMA_HOST = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_OLLAMA_HOST", "http://agentomatic:8000/")
 
 POD_BATCH_SIZE = 6
-YESTERDAY = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%d')
-TODAY = datetime.utcnow().strftime('%Y-%m-%d')
+# === Precise Date & Time Helpers (computed once per DAG run) ===
+def _get_yesterday_range():
+    yesterday_date = (datetime.utcnow() - timedelta(days=1)).date()
+    start = f"{yesterday_date}T00:00:00Z"
+    end = f"{yesterday_date}T23:59:59Z"
+    return start, end
+
+# For use in prompts (human-readable + precise)
+YESTERDAY_START, YESTERDAY_END = _get_yesterday_range()
+YESTERDAY_FULL_RANGE = f"yesterday ({YESTERDAY_START} to {YESTERDAY_END})"
+
+# For display only
+YESTERDAY_DATE_STR = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%d')
 
 def get_ai_response(prompt, conversation_history=None):
     try:
@@ -79,7 +92,15 @@ def get_ai_response(prompt, conversation_history=None):
 
 # === Generic helper to generate SRE reports ===
 def generate_sre_report(ti, key, description, period=None):
-    prompt = f"You are the SRE TradeIdeas agent. Generate a **complete {description} report for {period or 'last 24 hours'}**"
+    if period == "yesterday":
+        period = YESTERDAY_FULL_RANGE  # ← precise range
+    elif period is None:
+        period = "last 24 hours"
+
+    prompt = f"""You are the SRE TradeIdeas agent.
+Generate a **complete {description} report** for the period: **{period}**.
+Be precise about the time range in your response.
+"""
     response = get_ai_response(prompt)
     ti.xcom_push(key=key, value=response)
     return response
@@ -276,7 +297,6 @@ def compile_pod_sections_today(namespace_results: list, real_counts: dict, **con
 
     # Merge all batches
     merged = {}
-    real_problematic = {}  # We'll fall back to batched value if needed
 
     for batch in namespace_results:
         if not batch or not isinstance(batch, dict):
@@ -284,11 +304,6 @@ def compile_pod_sections_today(namespace_results: list, real_counts: dict, **con
         key = (batch["namespace"], batch["period"])
         if key not in merged:
             merged[key] = {"cpu": [], "memory": []}
-
-        # Save problematic pods info (from any batch — usually consistent)
-        if batch["namespace"] not in real_problematic:
-            real_problematic[batch["namespace"]] = batch.get("problematic_pods", "No problematic pods")
-
         # Extract clean table rows only
         def is_valid_row(line):
             line = line.strip()
@@ -315,20 +330,22 @@ def compile_pod_sections_today(namespace_results: list, real_counts: dict, **con
             continue
 
         data = merged[key_today]
-        actual_count = real_counts.get(ns, "unknown")  # ← This will be 9 and 24
-        problematic = real_problematic.get(ns, "No problematic pods")
+        actual_count = real_counts.get(ns, "unknown") 
+        problematic_pods_data = context['ti'].xcom_pull(task_ids='fetch_real_problematic_pods')
+        problematic = problematic_pods_data.get(ns, "No problematic pods") if problematic_pods_data else "No problematic pods"
 
         sections.append(f"### Namespace: `{ns}`")
         sections.append(f"**Running Pods**: {actual_count} | **Problematic Pods**: {problematic}\n")
 
+        def safe_float(s):
+                try: return float(s)
+                except: return 0.0
+                
         # CPU Table
         if data["cpu"]:
             sections.append("#### CPU Utilization (Last 24h)")
             sections.append("| Pod | Avg (cores) | Max (cores) | Current (cores) |")
             sections.append("|-----|-------------|-------------|-----------------|")
-            def safe_float(s):
-                try: return float(s)
-                except: return 0.0
             sorted_cpu = sorted(data["cpu"], key=lambda x: safe_float(x.split("|")[2].strip()), reverse=True)
             sections.extend(sorted_cpu)
             sections.append("")
@@ -528,7 +545,7 @@ def compile_sre_report(ti, **context):
 
 ---
 
-## 6. Certificate Status
+## 6. Kubernetes Checks
 {kubernetes_ver}
 {k8s_eol}
 {microk8s_exp}
@@ -771,12 +788,27 @@ a:hover {{
 
 
 def send_sre_email(ti, **context):
-    """Send SRE HTML report via SMTP instead of Gmail API"""
+    """Send SRE HTML report via SMTP with PDF attachment"""
     html_report = ti.xcom_pull(key="sre_html_report")
 
     if not html_report or "<html" not in html_report.lower():
         logging.error("No valid HTML report found in XCom.")
         raise ValueError("HTML report missing or invalid.")
+
+    # === PDF Attachment (same logic as Gmail version) ===
+    pdf_path = ti.xcom_pull(key="sre_pdf_path")
+    pdf_attachment = None
+    if pdf_path and os.path.exists(pdf_path):
+        with open(pdf_path, "rb") as f:
+            pdf_attachment = MIMEApplication(f.read(), _subtype="pdf")
+            pdf_attachment.add_header(
+                "Content-Disposition",
+                "attachment",
+                filename="TradeIdeas_SRE_Report.pdf"
+            )
+        logging.info(f"Attaching PDF: {pdf_path}")
+    else:
+        logging.warning("PDF not found or not generated, skipping attachment")
 
     # Clean up any code block wrappers
     html_body = re.sub(r'```html\s*|```', '', html_report).strip()
@@ -791,16 +823,17 @@ def send_sre_email(ti, **context):
         server.starttls()
         server.login(SMTP_USER, SMTP_PASSWORD)
 
-        # Prepare email
-        msg = MIMEMultipart("related")
+        # Prepare email - use "mixed" to support both HTML + attachments (including inline images + file attachments)
+        msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
         msg["From"] = f"TradeIdeas SRE Agent {SMTP_SUFFIX}"
         msg["To"] = recipient
 
-        # Attach the HTML body
-        msg.attach(MIMEText(html_body, "html"))
+        # --- HTML Part (with possible inline images) ---
+        html_part = MIMEMultipart("related")
+        html_part.attach(MIMEText(html_body, "html"))
 
-        # Optional: Inline image support (if your DAG attaches graphs later)
+        # Optional: Inline chart image (unchanged from your original)
         chart_b64 = ti.xcom_pull(key="chart_b64")
         if chart_b64:
             try:
@@ -808,10 +841,20 @@ def send_sre_email(ti, **context):
                 img_part = MIMEImage(img_data, 'png')
                 img_part.add_header('Content-ID', '<chart_image>')
                 img_part.add_header('Content-Disposition', 'inline', filename='chart.png')
-                msg.attach(img_part)
+                html_part.attach(img_part)
                 logging.info("Attached chart image to email.")
             except Exception as e:
                 logging.warning(f"Failed to attach inline image: {str(e)}")
+
+        # Attach the HTML+inline part to the main message
+        msg.attach(html_part)
+
+        # --- PDF Attachment ---
+        if pdf_attachment:
+            msg.attach(pdf_attachment)
+            logging.info("PDF successfully attached to email")
+        else:
+            logging.info("No PDF attachment added")
 
         # Send the email
         server.sendmail(SENDER_EMAIL, recipient, msg.as_string())
@@ -823,8 +866,160 @@ def send_sre_email(ti, **context):
     except Exception as e:
         logging.error(f"Failed to send email via SMTP: {str(e)}")
         raise
+        
+def generate_pdf_report_callable(ti=None, **context):
+    """
+    TradeIdeas SRE PDF – ReportLab (ABSOLUTE FINAL VERSION)
+    • No raw # or ## visible
+    • Tables perfect with text wrap
+    • No small squares
+    • Professional layout
+    """
+    try:
+        md = ti.xcom_pull(key="sre_full_report") or "# No SRE report generated."
+        md = preprocess_markdown(md)
 
+        date_str = YESTERDAY_DATE_STR
+        out_path = f"/tmp/TradeIdeas_SRE_Report_{date_str}.pdf"
 
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_LEFT, TA_CENTER
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Preformatted, PageBreak
+
+        doc = SimpleDocTemplate(
+            out_path,
+            pagesize=A4,
+            leftMargin=28, rightMargin=28,
+            topMargin=30, bottomMargin=30
+        )
+
+        styles = getSampleStyleSheet()
+        title = ParagraphStyle('Title', parent=styles['Title'], fontSize=22, leading=28, alignment=TA_CENTER,
+                               spaceAfter=20, textColor=colors.HexColor("#1a5fb4"), fontName="Helvetica-Bold")
+        h2 = ParagraphStyle('H2', parent=styles['Heading2'], fontSize=15, leading=20, spaceBefore=18, spaceAfter=10,
+                            textColor=colors.HexColor("#1a5fb4"), fontName="Helvetica-Bold")
+        h3 = ParagraphStyle('H3', parent=styles['Heading3'], fontSize=12, leading=16, spaceBefore=12, spaceAfter=8)
+        normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=10, leading=14, spaceAfter=8)
+        small = ParagraphStyle('Small', parent=styles['Normal'], fontSize=9, textColor=colors.gray, spaceAfter=12)
+        code = ParagraphStyle('Code', fontName='Courier', fontSize=8, leading=10,
+                              backColor=colors.HexColor("#f6f8fa"), borderPadding=10,
+                              borderColor=colors.lightgrey, borderWidth=1, borderRadius=4)
+        cell_style = ParagraphStyle('Cell', parent=styles['Normal'], fontSize=8.5, leading=10, alignment=TA_LEFT)
+
+        flowables = []
+
+        lines = md.splitlines()
+        i = 0
+        in_code = False
+        code_lines = []
+
+        while i < len(lines):
+            raw_line = lines[i]
+            stripped = raw_line.strip()
+
+            # === CODE BLOCKS ===
+            if stripped.startswith("```"):
+                if in_code:
+                    flowables.append(Preformatted("\n".join(code_lines), code))
+                    flowables.append(Spacer(1, 10))
+                    code_lines = []
+                in_code = not in_code
+                i += 1
+                continue
+            if in_code:
+                code_lines.append(raw_line)
+                i += 1
+                continue
+
+            # === SKIP HR LINES (no squares) ===
+            if stripped.startswith(("---", "***", "___")):
+                flowables.append(Spacer(1, 14))
+                i += 1
+                continue
+
+            # === HEADINGS – NOW WORKS EVEN WITH LEADING SPACES ===
+            if raw_line.lstrip().startswith("# "):
+                text = raw_line.lstrip("# ").strip()
+                flowables.append(Paragraph(text, title))
+                flowables.append(Spacer(1, 14))
+            elif raw_line.lstrip().startswith("## "):
+                text = raw_line.lstrip("# ").strip()
+                flowables.append(Paragraph(text, h2))
+                flowables.append(Spacer(1, 10))
+            elif raw_line.lstrip().startswith("### "):
+                text = raw_line.lstrip("# ").strip()
+                flowables.append(Paragraph(text, h3))
+                flowables.append(Spacer(1, 8))
+            elif raw_line.lstrip().startswith("#### "):
+                text = raw_line.lstrip("# ").strip()
+                flowables.append(Paragraph(f"<b>{text}</b>", normal))
+
+            # === TABLES – PERFECT TEXT WRAP ===
+            elif "|" in raw_line and i + 1 < len(lines) and re.match(r"^[\s\|:-]*$", lines[i+1].strip()):
+                table_data = []
+                header = [c.strip() for c in raw_line.split("|")[1:-1]]
+                table_data.append(header)
+                i += 2
+                while i < len(lines) and "|" in lines[i]:
+                    row = [c.strip() for c in lines[i].split("|")[1:-1]]
+                    if row:
+                        table_data.append(row)
+                    i += 1
+
+                if len(table_data) > 1:
+                    num_cols = len(table_data[0])
+                    col_width = doc.width / num_cols
+                    wrapped_data = [[Paragraph(html.escape(cell), cell_style) for cell in row] for row in table_data]
+
+                    table = Table(wrapped_data, colWidths=[col_width] * num_cols, repeatRows=1)
+                    table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1a5fb4")),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                        ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
+                        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, -1), 8.5),
+                        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor("#f9f9f9")),
+                        ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                        ('TOPPADDING', (0, 0), (-1, -1), 8),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                    ]))
+                    flowables.append(table)
+                    flowables.append(Spacer(1, 14))
+                continue
+
+            # === NORMAL TEXT ===
+            elif stripped:
+                text = html.escape(raw_line)
+                text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+                text = re.sub(r'__(.*?)__', r'<b>\1</b>', text)
+                text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)
+                text = re.sub(r'`([^`]+)`', r'<font name=Courier>\1</font>', text)
+                flowables.append(Paragraph(text, normal))
+            else:
+                flowables.append(Spacer(1, 6))
+
+            i += 1
+
+        # Footer
+        flowables.append(PageBreak())
+        flowables.append(Paragraph("End of Report", h2))
+        flowables.append(Paragraph("Generated by TradeIdeas SRE Agent • Powered by Airflow + ReportLab", small))
+
+        doc.build(flowables)
+        logging.info(f"PDF generated – PERFECT (no # visible, tables wrapped): {out_path}")
+        ti.xcom_push(key="sre_pdf_path", value=out_path)
+        return out_path
+
+    except Exception as e:
+        logging.error("PDF generation failed", exc_info=True)
+        raise
+        
 # === DAG ===
 with DAG(
     dag_id="sre-tradeideas_daily",
@@ -861,6 +1056,7 @@ with DAG(
     
     t20 = PythonOperator(task_id="overall_summary", python_callable=overall_summary, provide_context=True)
     t21 = PythonOperator(task_id="compile_sre_report", python_callable=compile_sre_report, provide_context=True)
+    t21_1 = PythonOperator(task_id="generate_pdf", python_callable=generate_pdf_report_callable, provide_context=True)
     t22 = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html, provide_context=True)
     t23 = PythonOperator(task_id="send_sre_email", python_callable=send_sre_email, provide_context=True)
     
@@ -874,6 +1070,35 @@ with DAG(
             "Failed to parse Airflow Variable 'ltai.v1.sretradeideas.pod.namespaces' (value was: %s). "
             "Reason: %s. Falling back to hard-coded default namespaces.", pod_namespaces_var, str(e))
         namespaces_list = ["alpha-prod", "tipreprod-prod"]
+
+    @task(task_id="fetch_real_problematic_pods")
+    def fetch_real_problematic_pods(namespaces: List[str]) -> dict:
+        """One clean AI call per namespace — returns real Failed/Pending/Unknown pods"""
+        result = {}
+        for ns in namespaces:
+            prompt = f"""
+            Namespace: `{ns}`
+            Execute this exact Prometheus query:
+            sum by (pod, phase) (kube_pod_status_phase{{namespace="{ns}", phase=~"Failed|Pending|Unknown"}} == 1)
+
+            Return ONLY one of these two exact responses:
+            • If no problematic pods → respond exactly: No problematic pods
+            • If any → respond with one line per pod in this format (no extra text):
+            - my-pod-abc123 (Failed)
+            - another-pod-xyz (Pending)
+
+            Do not include headers, counts, timestamps, or markdown.
+            """
+            response = get_ai_response(prompt).strip()
+            if not response or "no problematic" in response.lower():
+                result[ns] = "No problematic pods"
+            else:
+                result[ns] = response
+            logging.info(f"Problematic pods in {ns}: {result[ns]}")
+        return result
+
+    # Instantiate the task
+    real_problematic_pods_task = fetch_real_problematic_pods(namespaces_list)
 
     @task
     def get_pods_in_namespace(ns: str) -> List[str]:
@@ -894,14 +1119,14 @@ with DAG(
 
         if is_yesterday:
             # === ABSOLUTE TIME RANGE: Full yesterday (UTC 00:00 to 23:59:59) ===
-            start = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%dT00:00:00Z')
-            end   = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%dT23:59:59Z')
+            start = YESTERDAY_START
+            end   = YESTERDAY_END
 
             cpu_prompt = f"""
     Namespace: {ns} — Yesterday (absolute range: {start} to {end})
 
     Run this exact query and process results:
-    sum by (pod) (rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace='{ns}', pod=~"{pod_regex}"}}[5m]))[{start}:{end}]
+    sum by (pod) (rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace=~"{ns}", pod=~"{pod_regex}"}}[5m]))[{start}:{end}]
 
     For each pod:
     - avg_cpu_cores  = MeanTool(values)   → round to 4 decimals
@@ -918,7 +1143,7 @@ with DAG(
     Same namespace and absolute time range ({start} to {end}) — now memory in GB.
 
     Query:
-    sum by (pod) (container_memory_working_set_bytes{{image!="", namespace='{ns}', pod=~"{pod_regex}"}})[{start}:{end}]
+    sum by (pod) (container_memory_working_set_bytes{{image!="", namespace=~"{ns}", pod=~"{pod_regex}"}})[{start}:{end}]
 
     For each pod:
     - avg_memory_gb = MeanTool(values) / 1024 / 1024 / 1024 → round to 2 decimals
@@ -939,13 +1164,13 @@ with DAG(
     Use these exact queries:
 
     Average CPU:
-    avg_over_time(avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace='{ns}', pod=~"{pod_regex}"}}[5m]))[24h:5m])
+    avg_over_time(avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace=~"{ns}", pod=~"{pod_regex}"}}[5m]))[24h:5m])
 
     Max CPU:
-    max_over_time(avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace='{ns}', pod=~"{pod_regex}"}}[5m]))[24h:5m])
+    max_over_time(avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace=~"{ns}", pod=~"{pod_regex}"}}[5m]))[24h:5m])
 
     Current CPU:
-    avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace='{ns}', pod=~"{pod_regex}"}}[5m]))
+    avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace=~"{ns}", pod=~"{pod_regex}"}}[5m]))
 
     Return ONLY this table, sorted by avg_cpu_cores DESC:
     | pod                  | avg_cpu_cores | max_cpu_cores | current_cpu_cores |
@@ -957,13 +1182,13 @@ with DAG(
     Same namespace, last 24 hours — memory in GB.
 
     Average:
-    avg_over_time(sum by(pod)(container_memory_working_set_bytes{{image!="", namespace='{ns}', pod=~"{pod_regex}"}})[24h:5m]) / 1024 / 1024 / 1024
+    avg_over_time(sum by(pod)(container_memory_working_set_bytes{{image!="", namespace=~"{ns}", pod=~"{pod_regex}"}})[24h:5m]) / 1024 / 1024 / 1024
 
     Max:
-    max_over_time(sum by(pod)(container_memory_working_set_bytes{{image!="", namespace='{ns}', pod=~"{pod_regex}"}})[24h:5m]) / 1024 / 1024 / 1024
+    max_over_time(sum by(pod)(container_memory_working_set_bytes{{image!="", namespace=~"{ns}", pod=~"{pod_regex}"}})[24h:5m]) / 1024 / 1024 / 1024
 
     Current:
-    sum by(pod)(container_memory_working_set_bytes{{image!="", namespace='{ns}', pod=~"{pod_regex}"}}) / 1024 / 1024 / 1024
+    sum by(pod)(container_memory_working_set_bytes{{image!="", namespace=~"{ns}", pod=~"{pod_regex}"}}) / 1024 / 1024 / 1024
 
     Return ONLY this table, sorted by avg_memory_gb DESC:
     | pod                  | avg_memory_gb | max_memory_gb | current_memory_gb |
@@ -975,7 +1200,6 @@ with DAG(
             "namespace": ns,
             "period": period,
             "total_running_pods": len(pods_batch),
-            "problematic_pods": "No problematic pods (batched)",
             "cpu": get_ai_response(cpu_prompt).strip(),
             "memory": get_ai_response(mem_prompt).strip()
         }]
@@ -1017,7 +1241,12 @@ with DAG(
 
     # Your existing compile tasks work perfectly with this data
     real_pod_counts = get_real_pod_counts(namespaces_list)
-    pod_today_markdown = compile_pod_sections_today(all_pod_data, real_pod_counts)
+
+    # Make sure it runs before compilation
+    all_pod_data >> real_problematic_pods_task
+
+    # Pass the result into the compile task
+    pod_today_markdown = compile_pod_sections_today(namespace_results=all_pod_data,real_counts=real_pod_counts,problematic_pods_dict=real_problematic_pods_task)
     pod_comparison_markdown = compile_pod_comparison(all_pod_data)
 
     # === DEPENDENCIES ===
@@ -1026,4 +1255,4 @@ with DAG(
     t4 >> all_pod_data
     all_pod_data >> pod_today_markdown >> t20
     all_pod_data >> pod_comparison_markdown >> t20
-    t19 >> t20 >> t21 >> t22 >> t23
+    t19 >> t20 >> t21 >> t21_1 >> t22 >> t23
