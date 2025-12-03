@@ -4,6 +4,7 @@ from typing import Dict, Any
 import re
 import yaml
 import logging
+import requests
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.exceptions import AirflowException
@@ -14,6 +15,7 @@ from ollama import Client
 # -------------------------------
 OLLAMA_HOST = Variable.get("ltai.v1.rfp.OLLAMA_HOST", default_var="http://agentomatic:8000/")
 REGENERATION_AGENT = Variable.get("ltai.v1.rfp.REGENERATION_AGENT", default_var="rfp/regeneration:0.3af")
+RFP_API_BASE = Variable.get("ltai.v1.rfp.RFP_API_BASE", default_var="http://agentconnector:8000")
 MAX_IMPROVEMENT_ATTEMPTS = 3
 QUALITY_THRESHOLD = 8
 
@@ -208,8 +210,17 @@ Return ONLY the clean regenerated text."""
 def format_final_response(**context) -> Dict[str, Any]:
     ti = context["ti"]
     params = context["params"]
+    user_email = params["x-ltai-user-email"]
+    if not user_email:
+        raise ValueError("x-ltai-user-email is required in DAG params")
     workspace_uuid = params["workspace_uuid"]
-    headers = {'WORKSPACE_UUID': workspace_uuid}
+    dag_run_id = context["dag_run"].run_id
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "WORKSPACE_UUID": workspace_uuid,
+        "x-ltai-user-email": user_email
+    }
     final_text: str = ti.xcom_pull(key="final_regenerated_text", task_ids="generate_and_improve")
     rating = ti.xcom_pull(key="final_rating", task_ids="generate_and_improve")
     attempts = ti.xcom_pull(key="improvement_attempts", task_ids="generate_and_improve")
@@ -250,10 +261,62 @@ No additional commentary."""
         }
         raw_yaml = yaml.dump(parsed, sort_keys=False)
 
+    regenerated_text = parsed["regenerated"]
+    is_sensitive = parsed.get("is_sensitive", False)
+
+    # Update the question via API
+    question_id = params["question_id"]
+    if not question_id:
+        raise ValueError("question_id is required in DAG params")
+    update_url = f"{RFP_API_BASE.rstrip('/')}/rfp/questions/{question_id}"
+
+    payload = {
+        "answertext": regenerated_text,
+        "is_sensitive": is_sensitive
+    }
+
+    try:
+        resp = requests.patch(
+            update_url,
+            json=payload,
+            headers= headers | {"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=30
+        )
+        resp.raise_for_status()
+        logging.info(f"Successfully updated question {question_id} via API. Status: {resp.status_code}")
+    except Exception as e:
+        logging.error(f"Failed to update question {question_id}: {e} | Response: {getattr(e.response, 'text', '')}")
+        raise AirflowException(f"API update failed for question {question_id}") from e
+    
+    # Update the project via API
+    project_id = params["project_id"]
+    if not project_id:
+        raise ValueError("project_id is required in DAG params")
+    dag_run_id = context["dag_run"].run_id
+
+    if project_id:
+        project_update_url = f"{RFP_API_BASE.rstrip('/')}/rfp/projects/{project_id}"
+        project_payload = {"processing_dag_run_id": dag_run_id}
+
+        try:
+            proj_resp = requests.patch(
+                url=project_update_url,
+                json=project_payload,
+                headers=headers | {"Content-Type": "application/json", "Accept": "application/json"},
+                timeout=10
+            )
+            proj_resp.raise_for_status()
+            logging.info(f"Updated project {project_id}.processing_dag_run_id → {dag_run_id}")
+        except Exception as exc:
+            logging.error(f"Failed to update project {project_id}: {exc}")
+    else:
+        logging.info("project_id not provided — skipping project update")
+
     ti.xcom_push(key="final_yaml_output", value=raw_yaml)
     ti.xcom_push(key="final_parsed", value=parsed)
+    ti.xcom_push(key="api_update_status", value=resp.status_code)
 
-    logging.info(f"Final regeneration complete. Rating: {rating}/10, Attempts: {attempts}")
+    logging.info(f"Final regeneration complete. Question {question_id} updated, Rating: {rating}/10, Attempts: {attempts}")
     return parsed
 
 
@@ -291,10 +354,13 @@ with DAG(
     - workspace_uuid: Workspace identifier
     """,
     params={
+        "x-ltai-user-email": "",
+        "question_id": "",
         "question": "",
         "current_answer": "",
         "portion_to_regenerate": "",
         "user_instruction": "",
+        "project_id": "",
         "workspace_uuid": ""
     },
 ) as dag:
