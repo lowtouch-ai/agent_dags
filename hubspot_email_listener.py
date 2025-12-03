@@ -776,7 +776,8 @@ SEARCH_DAG CAPABILITIES:
 - Generates engagement summaries for meetings
 - Prepares confirmation emails for user review
 - In context if the user has already created some entities and want to add more entities like additional contact or new deal then a search is needed to check if the entity exists before creating new ones.
-
+- Search for all contacts mentioned by user in the prompt even if there are multiple contacts.If the contact doesnt exist return the response as objects to be created and if there is an existing contact return the existing contact details in the response.
+- Parse the email context and check wether the user is selecting entities based on the confirmation email sent, if yes then ignore those, you dont have the capability in such scenario.
 CONTINUATION_DAG CAPABILITIES:
 - Creates new contacts, companies, deals in HubSpot
 - Updates existing entities based on user modifications. for example, if the deal exists and we need to change the deal amount, or we need to change the task due date to a different date. These are taken as modification.
@@ -785,6 +786,8 @@ CONTINUATION_DAG CAPABILITIES:
 - Records engagements and associations
 - Handles user confirmations and modifications
 - Parses the latest_message and if it is casual comment for the conversation history add it as notes.
+2. Parse the context other than latest_message and if a confirmation email has already been sent in this thread (you can see it in the chat history), then:
+   - Any user reply that includes modifications (like changing owner, adding contact, updating amount, etc.) with respect to confirmation mail entities should be treated as implicit confirmation to proceed with those changes immediately. Do NOT wait for explicit confirmation keywords like "yes", "proceed", or "confirm". Just apply the changes and send the final updated email.
 
 REPORT_DAG CAPABILITIES:
 - Only when the user explictly requests to generate report.
@@ -843,6 +846,8 @@ ROUTING DECISION TREE:
    
    Keywords: "proceed", "confirm", "yes", "update", "modify", "change"
    → Response: {{"task_type": "continuation_dag", "reasoning": "..."}}
+   - Do not rely solely on **keywords**; interpret user intent in context and act accordingly.
+   - After the initial confirmation email is sent by the agent, any user response that **does not include the specified keywords** consider that as **implicit confirmation**, and the agent must send the final updated email **without waiting for any further explicit approval**.
 
 DECISION LOGIC:
 - Check if message requires ANY action (if not → no_action)
@@ -1076,17 +1081,45 @@ Reply in 1-2 short, polite, professional sentences.
 - If user asks for HubSpot info: provide concise, accurate answers.
 - Hubspot query rules:
     - If user asks about any contact or contact details call the tool `search_contacts` and answer the question based on the output. The output should be in HTML - table Format .
+      * Ensure that the output strictly returns all of the following fields: Contact ID,Firstname,Lastname,Email,Phone,Job Title,Contact Owner Name,Last Modified Date in table format.
+      * When only first name or last name is given,search based on that and if multiple contacts are found ask for clarification to choose a specific one after returning the table of contacts found.
+      * Keep each phone number, email, and job title in a single line (no text wrapping across lines).
+      * Ensure phone numbers follow a uniform formatting standard (e.g., +91 98765 43210 or +1 312 555 7241).
+      * Avoid unnecessary line breaks in any field.
+      * Do not follow the pagination rule in email response.If there are 100 matches of a contact,return all 100 in the email itself. 
     - If user asks about any company or company details call the tool `search_companies` and answer the question based on the output. The output should be in HTML - table Format .
+      * Ensure that the output strictly returns all of the following fields: Company Id, Company Name,Domain,Company Owner,Lifecycle Stage,Associated Deals (IDs + names + stages) in table format.
+      * Do not follow the pagination rule in email response.If there are 100 matches of a company,return all 100 in the email itself.
     - If user asks about any deal or deal details call the tool `search_deals` and answer the question based on the output. The output should be in HTML - table Format .
+      * Ensure that the output strictly returns all of the following fields: Deal ID, Deal Name, Deal Stage(Dont take the deal stage id,take the deal stage name(for example if deal stage id is appoinmentschedule,then the deal stage will be APPOINTMENT SCHEDULE)), Deal Owner, Deal Amount, Expected Close Date, Associated Company, and Associated Contacts in table format.
+      * Do not merge, or concatenate the stage name — preserve all spaces, casing, and formatting.
+      * Treat current system date as **NOW**.
+      * Exclude all deals whose Expected Close Date is prior to NOW.
+      * The result set must be sorted on Expected Close Date in ascending order, prioritizing deals with the earliest closing dates
+      * If the user does not specify a time period → return all deals with close date today or later.
+      * If a date range or timeframe is mentioned in the query:
+      * Convert natural language into a valid start_date → end_date range.
+      * Return only deals whose Expected Close Date lies within that period.
+      * Include today's date when filtering.(Example if the  Query is to check the "deals expiring by this month end" then date Range will be 1 Dec 2025 to 31 Dec 2025)
+      * Do not follow the pagination rule in email response.If there are 100 matches for deals,return all 100 in the email itself. 
     - If user asking a entity detail along with a timeperiod use LTE, GTE or both based on user request. The output should be in HTML - table Format.
     - If the user asks about their tasks parse the senders name and invoke `get_all_owners` to get the hubspot owner id and then invoke `search_tasks` to get the tasks assigned to the owner on the sepcified date. The output should be in HTML - table Format.
+      * Ensure that the output strictly returns all of the following fields:Task_ID,Task Subject,Due Date,Status,Priority.
+      * Do not follow the pagination rule in email response.If there are 100 matches for tasks,return all 100 in the email itself without any followp response.
+- All the **dates** should be in YYYY-MM-DD format and do not include time.
+- If a column has no data for a particular record, give the value for that as **N/A**.
 - Always maintain a friendly and professional tone.
 Your final response must be in below format:
 ```
         <html>
         <head>
             <style>
-                body {{
+        table {{width: 100%;border-collapse: collapse;margin: 20px 0;background: #ffffff;border: 1px solid #e0e0e0;font-size: 14px;}}
+        th {{background-color: #f3f6fc;color: #333;padding: 10px;border: 1px solid #d0d7e2;text-align: left;font-weight: bold;white-space: nowrap;}}
+        td {{padding: 10px;border: 1px solid #e0e0e0;text-align: left;white-space: nowrap;}}
+        h3 {{color: #333;margin-top: 30px;margin-bottom: 15px;}}
+
+            body {{
                     font-family: Arial, sans-serif;
                     line-height: 1.6;
                     color: #333;
