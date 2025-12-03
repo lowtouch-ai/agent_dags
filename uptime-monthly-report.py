@@ -1136,7 +1136,7 @@ except FileNotFoundError:
 with DAG(
     "uptime_monthly_data_report", 
     default_args=default_args, 
-    schedule_interval="@monthly", 
+    schedule_interval=None, 
     catchup=False, 
     doc_md=readme_content, 
     tags=["uptime", "report", "monthly", "ai-insights"]
