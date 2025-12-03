@@ -2550,32 +2550,10 @@ def compose_engagement_summary_email(ti, **context):
 <html>
 <head>
     <style>
-        body {{ 
-            font-family: Arial, sans-serif; 
-            line-height: 1.6; 
-            color: #000; 
-        }}
-        table {{ 
-            border-collapse: collapse; 
-            width: 100%; 
-            margin: 20px 0; 
-        }}
-        th, td {{ 
-            border: 1px solid #000; 
-            padding: 12px; 
-            text-align: left; 
-        }}
-        th {{ 
-            background-color: #fff; 
-            color: #000; 
-            font-weight: bold; 
-        }}
-        h3 {{ 
-            color: #000; 
-            margin-top: 30px; 
-            margin-bottom: 15px;
-            font-size: 16px;
-        }}
+            table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
+        th {{ background-color: #f2f2f2; font-weight: bold; }}
+        h3 {{ color: #333; margin-top: 30px; margin-bottom: 15px; }}
         .section {{ 
             margin: 20px 0; 
         }}
