@@ -875,8 +875,7 @@ Return ONLY valid JSON:
         conversation_history=conversation_history_for_ai,
         expect_json=True
     )
-    logging.info(f"AI routing response: {response}")
-    
+    logging.info(f"AI routing response: {response}")   
     # Parse JSON response
     try:
         json_response = json.loads(response)
