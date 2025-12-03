@@ -1101,13 +1101,19 @@ Reply in 1-2 short, polite, professional sentences.
       * Convert natural language into a valid start_date → end_date range.
       * Return only deals whose Expected Close Date lies within that period.
       * Include today's date when filtering.(Example if the  Query is to check the "deals expiring by this month end" then date Range will be 1 Dec 2025 to 31 Dec 2025)
+      * When the user asks for deals expiring by this month end, ALWAYS apply the date filter as follows:
+        - gte must be strictly set to today's date (current system date)
+        - lte must be strictly set to the last date of the current month
+        - You must NEVER include or return any deals with dates earlier than today.
+        - Even if the user does not explicitly mention 'from today', you must assume that the date range ALWAYS starts from today.
+        - Do NOT include any past dates under any circumstances.(Example: If today is 03-Dec-2025, then the filter MUST be:gte = 03-Dec-2025,lte = 31-Dec-2025 and the response MUST only include deals whose expiry date lies within this range)
       * Do not follow the pagination rule in email response.If there are 100 matches for deals,return all 100 in the email itself. 
     - If user asking a entity detail along with a timeperiod use LTE, GTE or both based on user request. The output should be in HTML - table Format.
     - If the user asks about their tasks parse the senders name and invoke `get_all_owners` to get the hubspot owner id and then invoke `search_tasks` to get the tasks assigned to the owner on the sepcified date. The output should be in HTML - table Format.
       * Ensure that the output strictly returns all of the following fields:Task_ID,Task Subject,Due Date,Status,Priority.
       * Do not follow the pagination rule in email response.If there are 100 matches for tasks,return all 100 in the email itself without any followp response.
 - All the **dates** should be in YYYY-MM-DD format and do not include time.
-- If a column has no data for a particular record, give the value for that as **N/A**.
+- If a column has no data for a particular record, give the value for that as **N/A**.Do not leave any coloumn blank.
 - Always maintain a friendly and professional tone.
 Your final response must be in below format:
 ```
