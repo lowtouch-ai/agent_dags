@@ -226,6 +226,7 @@ def validate_and_fix_questions(**context):
     missing_str_upper = missing_str.upper()
     if "COMPLETE" in missing_str_upper:
         logging.info("All questions validated - no missing (COMPLETE detected)")
+        context["ti"].xcom_push(key="questions_with_id", value=questions_with_id)
         context["ti"].xcom_push(key="missing_questions", value=[])
         return questions_dict
 
@@ -246,6 +247,7 @@ def validate_and_fix_questions(**context):
 
     if not missing_list:
         context["ti"].xcom_push(key="missing_questions", value=[])
+        context["ti"].xcom_push(key="questions_with_id", value=questions_with_id)
         return questions_dict
 
     # Extract missing only
