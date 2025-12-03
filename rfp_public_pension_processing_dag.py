@@ -9,16 +9,14 @@ import requests
 from io import BytesIO
 from pypdf import PdfReader
 from ollama import Client
-import uuid
 import re
 
 # =============================================================================
-# Configuration (shared with selector)
+# Configuration
 # =============================================================================
 OLLAMA_HOST = Variable.get("ltai.v1.rfp.OLLAMA_HOST", default_var="http://agentomatic:8000")
 RFP_API_BASE = Variable.get("ltai.v1.rfp.RFP_API_BASE", default_var="http://agentconnector:8000")
-MODEL_FOR_EXTRACTION = "rfp/autogeneration:0.3af"  # Reuse or specify if different
-MODEL_FOR_ANSWERING = "rfp/autogeneration:0.3af"
+MODEL_FOR_EXTRACTION = "rfp/autogeneration:0.3af"
 
 default_args = {
     "owner": "lowtouch.ai",
@@ -28,16 +26,17 @@ default_args = {
 }
 
 # =============================================================================
-# Helper Functions (reused/adapted)
+# Helper Functions
 # =============================================================================
 def get_ai_response(prompt, headers=None):
+    """Call Ollama API and return response text"""
     try:
         if not prompt or not isinstance(prompt, str):
             raise ValueError("Invalid prompt provided.")
         
         client = Client(host=OLLAMA_HOST, headers=headers)
         response = client.chat(
-            model=MODEL_FOR_EXTRACTION,  # Or MODEL_FOR_ANSWERING as needed
+            model=MODEL_FOR_EXTRACTION,
             messages=[{"role": "user", "content": prompt}],
             stream=False
         )
@@ -49,7 +48,18 @@ def get_ai_response(prompt, headers=None):
         logging.error(f"AI call failed: {e}")
         raise
 
+def extract_json_from_response(response_text):
+    """Extract JSON from AI response, handling code blocks"""
+    match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+    if match:
+        response_text = match.group(1).strip()
+    return json.loads(response_text)
+
+# =============================================================================
+# Task 1: Fetch PDF and Extract Text
+# =============================================================================
 def fetch_pdf_from_api(**context):
+    """Download PDF from API and extract text content"""
     conf = context["dag_run"].conf or {}
     project_id = conf.get("project_id")
     
@@ -57,8 +67,7 @@ def fetch_pdf_from_api(**context):
         raise ValueError("project_id is required in dag_run.conf")
 
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/rfpfile"
-    
-    logging.info(f"Downloading and extracting text for project_id={project_id}")
+    logging.info(f"Downloading PDF for project_id={project_id}")
 
     try:
         response = requests.get(url, timeout=90)
@@ -70,7 +79,7 @@ def fetch_pdf_from_api(**context):
 
         logging.info(f"Downloaded PDF: {len(pdf_bytes):,} bytes")
 
-        # Extract text directly here
+        # Extract text from PDF
         reader = PdfReader(BytesIO(pdf_bytes))
         text = ""
         page_count = len(reader.pages)
@@ -87,8 +96,6 @@ def fetch_pdf_from_api(**context):
             logging.warning("No text extracted from PDF")
 
         logging.info(f"Successfully extracted {len(text):,} characters")
-
-        # ONLY push plain text → safe for JSON/XCom
         context["ti"].xcom_push(key="extracted_text", value=text)
         return text
 
@@ -96,38 +103,20 @@ def fetch_pdf_from_api(**context):
         logging.error(f"Failed during download or text extraction: {e}")
         raise
 
-
-def update_answer_via_api(question_id, answer, is_sensitive):
-    """Update answer via API using question ID"""
-    url = f"{RFP_API_BASE}/rfp/questions/{question_id}"
-    payload = {
-        "answertext": answer,
-        "is_sensitive": is_sensitive
-    }
-    headers = {"Content-Type": "application/json"}
-    
-    response = requests.patch(url, json=payload, headers=headers, timeout=30)
-    response.raise_for_status()
-    logging.info(f"Updated answer for question ID {question_id}")
-    return response.json()
-
-
-
 # =============================================================================
 # Task 2: Extract Questions with AI
 # =============================================================================
 def extract_questions_with_ai(**context):
+    """Use AI to extract all questions from RFP text and create them in database"""
     extracted_text = context["ti"].xcom_pull(task_ids="fetch_pdf_from_api", key="extracted_text")
-    # workspace_uuid = context["ti"].xcom_pull(task_ids="generate_workspace_uuid", key="workspace_uuid")
     conf = context["dag_run"].conf
     project_id = conf["project_id"]
-    workspace_uuid=conf['workspace_uuid']
-    headers = {"WORKSPACE_UUID": workspace_uuid}
+    workspace_uuid = conf['workspace_uuid']
+    x_ltai_user_email = conf['x-ltai-user-email']
+    headers = {"WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
     
     if len(extracted_text.strip()) < 50:
         raise ValueError("Insufficient text for question extraction")
-
-    preview = extracted_text[:2000] + "..." if len(extracted_text) > 2000 else extracted_text
 
     prompt = f"""
 You are an expert at extracting questions from Public Pension RFPs.
@@ -137,28 +126,23 @@ Analyze the RFP document and extract ALL questions. Questions are typically numb
 Return ONLY a valid JSON dictionary in this exact format:
 {{"1": "Full question text here", "2": "Another question", "3.1": "Subquestion text"}}
 
-Include question numbers as keys (strings). Do not add explanations, metadata, or extra text. Use the full document preview below.
+Include question numbers as keys (strings). Do not add explanations, metadata, or extra text.
 
-Document preview : {extracted_text}
+Document preview: {extracted_text}
 """
-#         response_text = get_ai_response(prompt, headers=headers)
 
     raw_json = get_ai_response(prompt, headers=headers)
-    # Extract JSON from code blocks if present
-    match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', raw_json)
-    if match:
-        raw_json = match.group(1).strip()
+    
     try:
-        questions_dict = json.loads(raw_json)
+        questions_dict = extract_json_from_response(raw_json)
     except json.JSONDecodeError as e:
         logging.error(f"Failed to parse AI response as JSON: {raw_json[:500]}")
         raise
-    context["ti"].xcom_push(key="questions_dict", value=questions_dict)
+    
     logging.info(f"Extracted {len(questions_dict)} questions via AI")
     
-    # This will hold: {"1": {"text": "...", "id": 123}, "2.1": {"text": "...", "id": 124}}
+    # Create questions in database and store IDs
     questions_with_id = {}
-
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/questions"
 
     for idx, (q_num, q_text) in enumerate(questions_dict.items(), start=1):
@@ -174,7 +158,8 @@ Document preview : {extracted_text}
             resp = requests.post(url, json=payload, timeout=20)
             resp.raise_for_status()
             data = resp.json()
-            question_id = data.get("questionid") 
+            question_id = data.get("questionid")
+            
             if not question_id:
                 logging.warning(f"No ID returned for question {q_num}")
                 continue
@@ -191,6 +176,7 @@ Document preview : {extracted_text}
     if not questions_with_id:
         raise ValueError("No questions were successfully created in backend")
 
+    context["ti"].xcom_push(key="questions_dict", value=questions_dict)
     context["ti"].xcom_push(key="questions_with_id", value=questions_with_id)
     logging.info(f"Created {len(questions_with_id)} questions in backend")
     return questions_with_id
@@ -199,88 +185,80 @@ Document preview : {extracted_text}
 # Task 3: Validate & Fix Missing Questions
 # =============================================================================
 def validate_and_fix_questions(**context):
+    """Validate extracted questions and add any missing ones"""
     questions_dict = context["ti"].xcom_pull(task_ids="extract_questions_with_ai", key="questions_dict")
     questions_with_id = context["ti"].xcom_pull(task_ids="extract_questions_with_ai", key="questions_with_id")
     current_keys = sorted(questions_dict.keys(), key=lambda x: (x.split('.')[0], int(x.split('.')[-1]) if '.' in x else 0))
     conf = context["dag_run"].conf
     project_id = conf["project_id"]
-    workspace_uuid=conf['workspace_uuid']
-    headers = {"WORKSPACE_UUID": workspace_uuid}
+    workspace_uuid = conf['workspace_uuid']
+    x_ltai_user_email = conf['x-ltai-user-email']
+    headers = {"WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
     
     prompt_validate = f"""
-        Review these extracted questions against the RFP document. List ONLY the question numbers that appear MISSING (e.g., "1.2, 4, 5.1-5.3").
+Review these extracted questions against the RFP document. List ONLY the question numbers that appear MISSING (e.g., "1.2, 4, 5.1-5.3").
 
-        Extracted keys: {json.dumps(current_keys)}
+Extracted keys: {json.dumps(current_keys)}
 
-        Document preview:
-        {questions_dict}
+Document preview: {questions_dict}
 
-        IMPORTANT: Respond with ONLY "COMPLETE" if all questions are extracted, or ONLY a comma-separated list of missing numbers. Do not include any explanations, analysis, lists, or markdown. No additional text.
+IMPORTANT: Respond with ONLY "COMPLETE" if all questions are extracted, or ONLY a comma-separated list of missing numbers. Do not include any explanations, analysis, lists, or markdown. No additional text.
 
-        Response format: Comma-separated missing numbers OR "COMPLETE"
-    """
+Response format: Comma-separated missing numbers OR "COMPLETE"
+"""
 
     missing_str = get_ai_response(prompt_validate, headers=headers).strip()
     logging.info(f"Raw validation response: '{missing_str}'")
     
-    missing_str_upper = missing_str.upper()
-    if "COMPLETE" in missing_str_upper:
-        logging.info("All questions validated - no missing (COMPLETE detected)")
+    if "COMPLETE" in missing_str.upper():
+        logging.info("All questions validated - no missing questions found")
         context["ti"].xcom_push(key="questions_with_id", value=questions_with_id)
-        context["ti"].xcom_push(key="missing_questions", value=[])
-        return questions_dict
+        return questions_with_id
 
-    # Parse missing (assume comma-separated, but clean up)
+    # Parse missing question numbers
     missing_raw = [m.strip() for m in missing_str.split(',') if m.strip()]
-    # Filter to only question-like patterns (e.g., 1.2, 4, 5.1-5.3)
     question_pattern = re.compile(r'^\d+(\.\d+)?(-?\d+(\.\d+)?)?$')
     missing_list = []
+    
     for item in missing_raw:
-        # Clean prefixes like "MISSING: "
         cleaned = re.sub(r'^MISSING:\s*', '', item.strip(), flags=re.IGNORECASE)
         if question_pattern.match(cleaned):
             missing_list.append(cleaned)
-        else: 
+        else:
             logging.warning(f"Skipping invalid missing item: '{item}' -> cleaned '{cleaned}'")
     
-    logging.info(f"Missing questions identified (after filtering): {missing_list}")
+    logging.info(f"Missing questions identified: {missing_list}")
 
     if not missing_list:
-        context["ti"].xcom_push(key="missing_questions", value=[])
         context["ti"].xcom_push(key="questions_with_id", value=questions_with_id)
-        return questions_dict
+        return questions_with_id
 
-    # Extract missing only
+    # Extract missing questions
     prompt_missing = f"""
-        Extract ONLY these missing questions from the document. Do not touch existing ones.
+Extract ONLY these missing questions from the document. Do not touch existing ones.
 
-        Missing numbers: {', '.join(missing_list)}
+Missing numbers: {', '.join(missing_list)}
 
-        Return ONLY a valid JSON object (dict) with these keys and their question text. No other text, explanations, or markdown.
+Return ONLY a valid JSON object (dict) with these keys and their question text. No other text, explanations, or markdown.
 
-        Example: {{"3.3": "What is the deadline?", "5.2": "Describe the process."}}
+Example: {{"3.3": "What is the deadline?", "5.2": "Describe the process."}}
 
-        Document preview:
-        {questions_dict}
-    """
+Document preview: {questions_dict}
+"""
 
     missing_dict_str = get_ai_response(prompt_missing, headers=headers).strip()
     logging.info(f"Raw missing extraction response: '{missing_dict_str}'")
     
     try:
-        # Extract JSON from code blocks if present
-        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', missing_dict_str)
-        if match:
-            missing_dict_str = match.group(1).strip()
-        
-        missing_dict = json.loads(missing_dict_str)
+        missing_dict = extract_json_from_response(missing_dict_str)
     except json.JSONDecodeError as e:
         logging.error(f"Failed to parse JSON from missing extraction: {e}. Raw response: '{missing_dict_str}'")
         raise
     
+    # Create missing questions in database
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/questions"
 
-    for idx, (q_num, q_text) in enumerate(missing_dict.items(), start=len(questions_dict)+1):
+    for idx, (q_num, q_text) in enumerate(missing_dict.items(), start=len(questions_dict) + 1):
         if not isinstance(q_text, str) or not q_text.strip():
             continue
 
@@ -293,7 +271,8 @@ def validate_and_fix_questions(**context):
             resp = requests.post(url, json=payload, timeout=20)
             resp.raise_for_status()
             data = resp.json()
-            question_id = data.get("questionid") 
+            question_id = data.get("questionid")
+            
             if not question_id:
                 logging.warning(f"No ID returned for missing question {q_num}")
                 continue
@@ -307,77 +286,112 @@ def validate_and_fix_questions(**context):
         except Exception as e:
             logging.error(f"Failed to create missing question {q_num}: {e}")
     
-    # logging.info(f"Added {added_count} missing questions. Total now: {len(questions_dict)}")
-    context["ti"].xcom_push(key="missing_questions", value=missing_list)
     context["ti"].xcom_push(key="questions_with_id", value=questions_with_id)
+    logging.info(f"Total questions after validation: {len(questions_with_id)}")
     return questions_with_id
 
 # =============================================================================
-# Task 4: Generate Answers for All Questions
+# Task 4: Generate Answers with AI
 # =============================================================================
-def generate_answers_for_questions(**context):
-    conf = context["dag_run"].conf or {}
-    # project_id = conf.get("project_id")
+def generate_answers_with_ai(**context):
+    """Generate answers for all questions using AI"""
     questions_with_id = context["ti"].xcom_pull(task_ids="validate_and_fix_questions", key="questions_with_id")
-    # headers = context["ti"].xcom_pull(task_ids="extract_questions_with_ai", key="ai_headers")
     conf = context["dag_run"].conf
-    project_id = conf["project_id"]
-    workspace_uuid=conf['workspace_uuid']
-    headers = {"WORKSPACE_UUID": workspace_uuid}
-    answers_generated = 0
+    workspace_uuid = conf['workspace_uuid']
+    x_ltai_user_email = conf['x-ltai-user-email']
+    headers = {"WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
+    
+    answers_dict = {}
+    
     for q_num, question_data in questions_with_id.items():
         question_text = question_data["text"]
         question_id = question_data["id"]
         
         prompt_answer = f"""
-            You are an expert answering Public Pension RFP questions for our firm.
+You are an expert answering Public Pension RFP questions for our firm.
 
-            Question {q_num}: {question_text}
+Question {q_num}: {question_text}
 
-            Provide a complete, professional answer. Use bullet points if needed. Be concise yet thorough.
-            
-            IMPORTANT: Respond with ONLY a valid JSON object in this exact format:
-            {{"answer": "your detailed answer here", "is_sensitive": true}}
-            
-        """
+Provide a complete, professional answer. Use bullet points if needed. Be concise yet thorough.
+
+IMPORTANT: Respond with ONLY a valid JSON object in this exact format:
+{{"answer": "your detailed answer here", "is_sensitive": true}}
+"""
         
         try:
             response_str = get_ai_response(prompt_answer, headers=headers).strip()
+            response_data = extract_json_from_response(response_str)
             
-            # Extract JSON from code blocks if present
-            match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_str)
-            if match:
-                response_str = match.group(1).strip()
-            
-            response_data = json.loads(response_str)
             answer = response_data.get("answer", "")
             is_sensitive = response_data.get("is_sensitive", False)
             
             if not answer:
-                logging.warning(f"Empty answer received for Q{q_num}, skipping update")
+                logging.warning(f"Empty answer received for Q{q_num}, skipping")
                 continue
             
-            update_answer_via_api(question_id, answer, is_sensitive)
-            answers_generated += 1
-            logging.info(f"Generated & updated answer for Q{q_num} (ID: {question_id})")
+            answers_dict[question_id] = {
+                "answer": answer,
+                "is_sensitive": is_sensitive,
+                "question_num": q_num
+            }
+            logging.info(f"Generated answer for Q{q_num} (ID: {question_id})")
             
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse JSON response for Q{q_num}: {e}. Raw response: '{response_str}'")
         except Exception as e:
-            logging.error(f"Failed to generate/update answer for Q{q_num}: {e}")
-            # Continue to next - don't fail whole DAG
+            logging.error(f"Failed to generate answer for Q{q_num}: {e}")
     
-    logging.info(f"Completed {answers_generated}/{len(questions_with_id)} answers")
-    return {"total": len(questions_with_id), "generated": answers_generated}
+    context["ti"].xcom_push(key="answers_dict", value=answers_dict)
+    logging.info(f"Generated {len(answers_dict)}/{len(questions_with_id)} answers")
+    return answers_dict
+
 # =============================================================================
-# Task 5: Finalize (signal back via completion)
+# Task 5: Update Answers to Database
+# =============================================================================
+def update_answers_to_database(**context):
+    """Update all generated answers to the database via API"""
+    answers_dict = context["ti"].xcom_pull(task_ids="generate_answers_with_ai", key="answers_dict")
+    
+    if not answers_dict:
+        logging.warning("No answers to update")
+        return {"total": 0, "updated": 0}
+    
+    updated_count = 0
+    
+    for question_id, answer_data in answers_dict.items():
+        answer = answer_data["answer"]
+        is_sensitive = answer_data["is_sensitive"]
+        question_num = answer_data["question_num"]
+        
+        url = f"{RFP_API_BASE}/rfp/questions/{question_id}"
+        payload = {
+            "answertext": answer,
+            "is_sensitive": is_sensitive
+        }
+        headers = {"Content-Type": "application/json"}
+        
+        try:
+            response = requests.patch(url, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+            updated_count += 1
+            logging.info(f"Updated answer for Q{question_num} (ID: {question_id})")
+        except Exception as e:
+            logging.error(f"Failed to update answer for Q{question_num} (ID: {question_id}): {e}")
+    
+    logging.info(f"Updated {updated_count}/{len(answers_dict)} answers to database")
+    return {"total": len(answers_dict), "updated": updated_count}
+
+# =============================================================================
+# Task 6: Log Completion
 # =============================================================================
 def log_completion(**context):
+    """Log final completion status"""
     conf = context["dag_run"].conf or {}
     project_id = conf.get("project_id")
-    questions_count = len(context["ti"].xcom_pull(task_ids="validate_and_fix_questions", key="questions_dict") or {})
-    logging.info(f"Public Pension Processing DAG completed for project_id={project_id} | Questions processed: {questions_count}")
-    # No explicit signal needed - parent waits for completion
+    questions_with_id = context["ti"].xcom_pull(task_ids="validate_and_fix_questions", key="questions_with_id")
+    questions_count = len(questions_with_id) if questions_with_id else 0
+    
+    logging.info(f"RFP Processing DAG completed for project_id={project_id} | Questions processed: {questions_count}")
 
 # =============================================================================
 # DAG Definition
@@ -386,7 +400,7 @@ with DAG(
     dag_id="rfp_public_pension_processing_dag",
     default_args=default_args,
     description="Processes Public Pension RFPs: Extracts questions, generates answers, updates via API",
-    schedule=None,  # Triggered only
+    schedule=None,
     start_date=datetime(2025, 1, 1),
     catchup=False,
     tags=["lowtouch", "rfp", "public-pension", "processing"],
@@ -402,14 +416,12 @@ with DAG(
     render_template_as_native_obj=True,
 ) as dag:
 
-
     fetch_pdf = PythonOperator(
         task_id="fetch_pdf_from_api",
         python_callable=fetch_pdf_from_api,
         provide_context=True,
     )
 
-    
     extract_questions = PythonOperator(
         task_id="extract_questions_with_ai",
         python_callable=extract_questions_with_ai,
@@ -423,8 +435,14 @@ with DAG(
     )
 
     generate_answers = PythonOperator(
-        task_id="generate_answers_for_questions",
-        python_callable=generate_answers_for_questions,
+        task_id="generate_answers_with_ai",
+        python_callable=generate_answers_with_ai,
+        provide_context=True,
+    )
+
+    update_answers = PythonOperator(
+        task_id="update_answers_to_database",
+        python_callable=update_answers_to_database,
         provide_context=True,
     )
 
@@ -435,5 +453,5 @@ with DAG(
         trigger_rule=TriggerRule.ALL_SUCCESS,
     )
 
-    # Flow
-    fetch_pdf >> extract_questions >> validate_fix_questions >> generate_answers >> finalize
+    # Task dependencies
+    fetch_pdf >> extract_questions >> validate_fix_questions >> generate_answers >> update_answers >> finalize

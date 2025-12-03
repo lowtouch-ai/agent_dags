@@ -1,11 +1,10 @@
 from datetime import datetime
 from airflow import DAG
-from airflow.operators.python import PythonOperator,BranchPythonOperator
+from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.trigger_rule import TriggerRule
-from airflow.models import Variable , Param
+from airflow.models import Variable, Param
 import logging
-import json
 from ollama import Client
 from pypdf import PdfReader
 from io import BytesIO
@@ -15,8 +14,6 @@ import requests
 # Configuration
 # =============================================================================
 
-# Mapping: document_type_code → target processing DAG ID
-# Multiple document types can map to the same processing DAG
 DOCUMENT_TYPE_TO_DAG = {
     "RFP_PUBLIC_PENSION":   "rfp_public_pension_processing_dag",
     "RFP_CORP_PENSION":     "rfp_corporate_pension_processing_dag",
@@ -32,7 +29,7 @@ DOCUMENT_TYPE_TO_DAG = {
 
 AUTO_DETECTION_MODEL = "rfp/autogeneration:0.3"
 OLLAMA_HOST = Variable.get("ltai.v1.rfp.OLLAMA_HOST", default_var="http://agentomatic:8000")
-RFP_API_BASE = "http://agentconnector:8000"  # Change if needed
+RFP_API_BASE = "http://agentconnector:8000"
 
 default_args = {
     "owner": "lowtouch.ai",
@@ -43,11 +40,11 @@ default_args = {
 
 def get_ai_response(prompt, conversation_history=None,headers=None):
     try:
-        logging.debug(f"Query received: {prompt}")
+        logging.debug(f"Query received: {prompt[:200]}...")
         
         if not prompt or not isinstance(prompt, str):
             raise ValueError("Invalid prompt provided.")
-        headers=headers
+        
         client = Client(host=OLLAMA_HOST, headers=headers)
         logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model '{AUTO_DETECTION_MODEL}'")
 
@@ -71,9 +68,33 @@ def get_ai_response(prompt, conversation_history=None,headers=None):
         raise
 
 # =============================================================================
-# Task 1: Fetch PDF from API using project_id
+# Task Functions
 # =============================================================================
-def fetch_pdf_from_api(**context):
+
+def check_fast_path(**context):
+    """
+    Check if user provided document_type directly.
+    If yes, skip AI classification. If no, proceed with full flow.
+    """
+    conf = context["dag_run"].conf or {}
+    doc_type = conf.get("document_type", "AUTO").strip().upper()
+
+    if doc_type != "AUTO" and doc_type in DOCUMENT_TYPE_TO_DAG:
+        logging.info(f"Fast-path activated! User provided document_type = {doc_type}")
+        # Push the document type so map_to_processing_dag can use it
+        context["ti"].xcom_push(key="document_type", value=doc_type)
+        # Skip to trigger step directly
+        return "trigger_processing_dag"
+    else:
+        logging.info("No valid document_type in conf → proceeding with AI classification")
+        return "fetch_pdf_from_api"
+
+
+def fetch_pdf_and_extract_text(**context):
+    """
+    Fetch PDF from API using project_id and extract text.
+    Combined task for efficiency.
+    """
     conf = context["dag_run"].conf or {}
     project_id = conf.get("project_id")
     
@@ -81,8 +102,7 @@ def fetch_pdf_from_api(**context):
         raise ValueError("project_id is required in dag_run.conf")
 
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/rfpfile"
-    
-    logging.info(f"Downloading and extracting text for project_id={project_id}")
+    logging.info(f"Downloading PDF for project_id={project_id} from {url}")
 
     try:
         response = requests.get(url, timeout=90)
@@ -94,7 +114,7 @@ def fetch_pdf_from_api(**context):
 
         logging.info(f"Downloaded PDF: {len(pdf_bytes):,} bytes")
 
-        # Extract text directly here
+        # Extract text from PDF
         reader = PdfReader(BytesIO(pdf_bytes))
         text = ""
         page_count = len(reader.pages)
@@ -109,10 +129,10 @@ def fetch_pdf_from_api(**context):
         if not text.strip():
             text = "[NO_TEXT_EXTRACTED - Likely scanned/image-based PDF]"
             logging.warning("No text extracted from PDF")
+        else:
+            logging.info(f"Successfully extracted {len(text):,} characters")
 
-        logging.info(f"Successfully extracted {len(text):,} characters")
-
-        # ONLY push plain text → safe for JSON/XCom
+        # Push extracted text to XCom
         context["ti"].xcom_push(key="extracted_text", value=text)
         return text
 
@@ -120,44 +140,24 @@ def fetch_pdf_from_api(**context):
         logging.error(f"Failed during download or text extraction: {e}")
         raise
 
-# =============================================================================
-# Task 2: Extract text from downloaded PDF
-# =============================================================================
-def extract_text_from_pdf(**context):
-    # This gets the return value of the previous task
-    pdf_bytes = context["ti"].xcom_pull(task_ids="fetch_pdf_from_api")
 
-    if not isinstance(pdf_bytes, (bytes, bytearray)):
-        raise TypeError(f"Expected bytes, got {type(pdf_bytes)}")
-
-    reader = PdfReader(BytesIO(pdf_bytes))  # Now safe — pdf_bytes is real bytes
-    text = ""
-    for page in reader.pages:
-        page_text = page.extract_text()
-        if page_text:
-            text += page_text + "\n"
-
-    if not text.strip():
-        text = "[NO_TEXT_EXTRACTED - possibly scanned PDF]"
-        logging.warning("No text extracted — document may be image-based")
-
-    logging.info(f"Extracted {len(text):,} characters from PDF")
-    context["ti"].xcom_push(key="extracted_text", value=text)
-    return text
-
-# =============================================================================
-# Task 3: Classify document type using AI agent
-# =============================================================================
 def classify_document_with_ai(**context):
-    extracted_text = context["ti"].xcom_pull(task_ids="fetch_pdf_from_api", key="extracted_text")
+    """
+    Use AI to classify the document type based on extracted text.
+    """
+    extracted_text = context["ti"].xcom_pull(
+        task_ids="fetch_pdf_from_api", 
+        key="extracted_text"
+    )
+    
     workspace_uuid = context["dag_run"].conf.get("workspace_uuid", "")
-    headers = {"WORKSPACE_UUID": workspace_uuid} if workspace_uuid else None
+    x_ltai_user_email = context["dag_run"].conf.get("x-ltai-user-email", "")
+    headers = {"WORKSPACE_UUID": workspace_uuid , "x-ltai-user-email":x_ltai_user_email} 
+    
     if not extracted_text or len(extracted_text.strip()) < 50:
         raise ValueError("Insufficient text extracted for classification")
 
     # Truncate if too long (Ollama has context limits)
-    preview = extracted_text[:1000] + "..." if len(extracted_text) > 1000 else extracted_text
-
     prompt = f"""
 You are an expert classifier for investment management RFP and due diligence documents.
 
@@ -183,9 +183,10 @@ Answer with only the code:
 """
 
     try:
-        detected_type = get_ai_response(prompt,headers=headers).strip().upper()
+        detected_type = get_ai_response(prompt, headers=headers).strip().upper()
         logging.info(f"AI classified document as: {detected_type}")
 
+        # Validate and correct AI response
         if detected_type not in DOCUMENT_TYPE_TO_DAG:
             # Try to recover by matching known patterns
             for key in DOCUMENT_TYPE_TO_DAG.keys():
@@ -203,14 +204,38 @@ Answer with only the code:
         logging.error(f"Document classification failed: {e}")
         raise
 
-# =============================================================================
-# Task 4: Map to target DAG
-# =============================================================================
+
 def get_target_dag_id(**context):
-    doc_type = context["ti"].xcom_pull(task_ids="classify_document_with_ai", key="document_type")
-    target_dag = DOCUMENT_TYPE_TO_DAG[doc_type]
+    """
+    Map document type to target processing DAG.
+    Works for both fast-path and AI classification flows.
+    """
+    # Try to get from fast-path first, then from classification
+    doc_type = context["ti"].xcom_pull(
+        task_ids="fast_path_or_full_flow", 
+        key="document_type"
+    )
+    
+    if not doc_type:
+        doc_type = context["ti"].xcom_pull(
+            task_ids="classify_document_with_ai", 
+            key="document_type"
+        )
+    
+    if not doc_type:
+        raise ValueError("No document_type found in XCom")
+    
+    target_dag = DOCUMENT_TYPE_TO_DAG.get(doc_type)
+    
+    if not target_dag:
+        raise ValueError(f"Unknown document type: {doc_type}")
+    
     logging.info(f"Mapped {doc_type} → {target_dag}")
+    
+    # Push target DAG ID for trigger task
+    context["ti"].xcom_push(key="target_dag_id", value=target_dag)
     return target_dag
+
 
 # =============================================================================
 # DAG Definition
@@ -225,22 +250,24 @@ with DAG(
     catchup=False,
     tags=["lowtouch", "rfp", "ai-classifier", "document-routing"],
     max_active_runs=10,
-    render_template_as_native_obj=True,  # Required for Param to work properly
+    render_template_as_native_obj=True,
     params={
+        "x-ltai-user-email": Param(
+            type="string",
+            title="User Email",
+            description="Email of the user initiating the DAG run",
+        ),
         "project_id": Param(
             type="integer",
             minimum=1,
             title="Project ID",
             description="The numeric ID of the RFP project (e.g., 123)",
-            examples=[123, 456],
         ),
         "workspace_uuid": Param(
             type="string",
             title="Workspace UUID",
-            description="The UUID of the workspace (e.g., '550e8400-e29b-41d4-a716-446655440000')",
-            examples=["550e8400-e29b-41d4-a716-446655440000"],
+            description="The UUID of the workspace",
         ),
-        # Optional: let user override auto-detection if they know the type
         "document_type": Param(
             default="AUTO",
             type="string",
@@ -250,57 +277,48 @@ with DAG(
         ),
     },
 ) as dag:
-    def check_fast_path(**context):
-        conf = context["dag_run"].conf or {}
-        doc_type = conf.get("document_type", "AUTO").strip().upper()
 
-        if doc_type != "AUTO" and doc_type in DOCUMENT_TYPE_TO_DAG:
-            logging.info(f"Fast-path activated! User forced document_type = {doc_type}")
-            context["ti"].xcom_push(key="document_type", value=doc_type)
-            return "map_to_processing_dag"  # Skip everything → go straight to mapping
-        else:
-            logging.info("No valid document_type in conf → proceeding with AI classification")
-            return "fetch_pdf_from_api"
+    # Check if fast-path or full flow
     fast_path_branch = BranchPythonOperator(
         task_id="fast_path_or_full_flow",
         python_callable=check_fast_path,
         provide_context=True,
     )
     
+    # Fetch PDF and extract text
     fetch_pdf = PythonOperator(
         task_id="fetch_pdf_from_api",
-        python_callable=fetch_pdf_from_api,
+        python_callable=fetch_pdf_and_extract_text,
         provide_context=True,
     )
 
-    extract_text = PythonOperator(
-        task_id="extract_text_from_pdf",
-        python_callable=extract_text_from_pdf,
-        provide_context=True,
-    )
-
+    # Classify document using AI
     classify_doc = PythonOperator(
         task_id="classify_document_with_ai",
         python_callable=classify_document_with_ai,
         provide_context=True,
     )
 
-    map_dag = PythonOperator(
-        task_id="map_to_processing_dag",
-        python_callable=get_target_dag_id,
-        provide_context=True,
-    )
-
+    # Trigger the appropriate processing DAG
     trigger_processing = TriggerDagRunOperator(
         task_id="trigger_processing_dag",
-        trigger_dag_id="{{ ti.xcom_pull(task_ids='map_to_processing_dag') }}",
+        trigger_dag_id="{{ ti.xcom_pull(task_ids='fast_path_or_full_flow', key='document_type') | "
+                        "default(ti.xcom_pull(task_ids='classify_document_with_ai', key='document_type'), true) | "
+                        "map_doc_type_to_dag }}",
         wait_for_completion=True,
         reset_dag_run=True,
         execution_date="{{ execution_date }}",
-        conf="{{ dag_run.conf }}",  # Passes project_id, etc.
-        trigger_rule=TriggerRule.ALL_SUCCESS,
+        conf="{{ dag_run.conf }}",
+        trigger_rule=TriggerRule.NONE_FAILED,
     )
+    
+    # Add custom Jinja filter for mapping
+    def map_doc_type_to_dag(doc_type):
+        return DOCUMENT_TYPE_TO_DAG.get(doc_type, "")
+    
+    dag.user_defined_filters = {"map_doc_type_to_dag": map_doc_type_to_dag}
 
+    # Log completion
     finalize = PythonOperator(
         task_id="log_completion",
         python_callable=lambda **ctx: logging.info(
@@ -310,8 +328,7 @@ with DAG(
         trigger_rule=TriggerRule.ALL_SUCCESS,
     )
 
-    # Flow
-    fast_path_branch >> [fetch_pdf, map_dag]  # Branch: either full flow or direct to map
-
-    fetch_pdf >> classify_doc >> map_dag
-    map_dag >> trigger_processing >> finalize
+    # Define task flow
+    fast_path_branch >> [fetch_pdf, trigger_processing]
+    fetch_pdf >> classify_doc >> trigger_processing
+    trigger_processing >> finalize
