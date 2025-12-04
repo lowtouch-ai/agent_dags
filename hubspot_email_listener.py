@@ -1740,7 +1740,7 @@ Determine:
 2. Filters needed (date ranges, statuses, etc.)
 3. Properties to include in the report
 4. Sort order if specified
-5. If the user asks question like which all deals expire by this month or this year, then always take the current date or todays date as GTE and the month end or year end date as LTE.
+5. If the user asks question like which all deals expire by this month or this year, then always take the current date or todays date as GTE and the month end or year end date as LTE. Donot include the date that is already past the current date.
 6. Dates should only be given as YYYY-MM-DD.
 7. Include `hubspot_owner_id` in the request body of contact entity type.
 Return ONLY a JSON object with this structure:
