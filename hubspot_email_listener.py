@@ -43,6 +43,7 @@ SERVER_URL = Variable.get("ltai.v3.hubspot.server.url")
 HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")
 HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
 REPORT_ARCHIVE_DIR = "/appz/cache/archive/reports/hubspot"
+HUBSPOT_UI_URL = Variable.get("ltai.v3.hubspot.ui.url")
 
 def authenticate_gmail():
     try:
@@ -1235,7 +1236,7 @@ Your final response must be in below format:
                     mark_message_as_read(service, email_id)
                     
                     # Push to report queue
-                    ti.xcom_push(key="report_emails", value=[email])
+                    ti.xcom_push(key="general_query_report", value=[email])
                     trigger_report_dag(**kwargs)
                     
                     continue
@@ -1615,10 +1616,17 @@ def trigger_report_dag(**kwargs):
     """Enhanced trigger_report_dag with professional report email formatting"""
     DEAL_STAGE_LABELS = get_deal_stage_labels()
     ti = kwargs['ti']
-    report_emails = ti.xcom_pull(task_ids="branch_task", key="report_emails") or []
-    report_emails = ti.xcom_pull(task_ids="handle_general_queries", key="report_emails") or []
-   
-    if not report_emails:
+    report_emails = ti.xcom_pull(key="report_emails")
+    general_report_emails = ti.xcom_pull(key="general_query_report")
+    
+    # Ensure both are lists (handle None case)
+    report_emails = report_emails if report_emails is not None else []
+    general_report_emails = general_report_emails if general_report_emails is not None else []
+    
+    # Combine both sources
+    all_report_emails = report_emails + general_report_emails
+    
+    if not all_report_emails:
         logging.info("No report emails to process")
         return
    
@@ -1823,6 +1831,7 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                 for record in results_data:
                     props = record.get("properties", {})
                     record_id = record.get("id")
+                
                     row = {"_record_id": record_id}
                    
                     if entity_type == "contacts":
@@ -1843,7 +1852,7 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                             "Postal Code": props.get("zip", ""),
                             "Country": props.get("country", ""),
                             "Contact Owner": owner_name,
-                            "_hubspot_url": f"https://app.hubspot.com/contacts/contact/{record_id}"
+                            "_hubspot_url": f"{HUBSPOT_UI_URL}/contact/{record_id}"
                         })
                    
                     elif entity_type == "companies":
@@ -1857,7 +1866,7 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                             "Country": props.get("country", ""),
                             "Phone": props.get("phone", ""),
                             "Type": props.get("type", ""),
-                            "_hubspot_url": f"https://app.hubspot.com/contacts/company/{record_id}"
+                            "_hubspot_url": f"{HUBSPOT_UI_URL}/company/{record_id}"
                         })
                    
                     elif entity_type == "deals":
@@ -1898,7 +1907,7 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                             "Close Date": close_date_dt,
                             "Deal Stage": stage_label,
                             "Deal Owner": owner_name,
-                            "_hubspot_url": f"https://app.hubspot.com/deals/deal/{record_id}"
+                            "_hubspot_url": f"{HUBSPOT_UI_URL}/deal/{record_id}"
                         })
                    
                     formatted_data.append(row)
