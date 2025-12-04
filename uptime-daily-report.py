@@ -18,6 +18,7 @@ from matplotlib.dates import HourLocator, MinuteLocator, DateFormatter
 import io
 import requests
 import smtplib
+import pendulum
 
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -39,9 +40,40 @@ SMTP_SUFFIX = Variable.get("SMTP_FROM_SUFFIX", default_var="via lowtouch.ai <web
 OLLAMA_HOST = "http://agentomatic:8000/"
 UPTIME_API_KEY = Variable.get("UPTIME_API_KEY")
 
-MONITOR_ID = Variable.get("UPTIME_MONITOR_ID")
-RECIPIENT_EMAIL = Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL")
 REPORT_PERIOD = "last 24 hours"
+
+# === DYNAMIC CLIENT-SPECIFIC VARIABLES (injected via trigger) ===
+def get_dynamic_config(**context):
+    conf = context.get("dag_run").conf or {}
+    
+    monitor_id = conf.get("monitor_id") or Variable.get("UPTIME_MONITOR_ID", fallback=None)
+    recipient_email = conf.get("recipient_email") or Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL", fallback=None)
+    client_tz = conf.get("client_tz", "UTC")  # e.g., "Asia/Kolkata", "America/New_York"
+    client_name = conf.get("client_name", "Unknown Client")
+    monitoring_team = conf.get("monitoring_team", "Appz SRE Agent")
+
+    if not monitor_id:
+        raise ValueError("MONITOR_ID is required but not provided via trigger or Variable")
+    if not recipient_email:
+        raise ValueError("RECIPIENT_EMAIL is required but not provided via trigger or Variable")
+
+    logging.info(f"Dynamic config loaded - Client: {client_name}, TZ: {client_tz}, Monitor ID: {monitor_id}")
+
+    return {
+        "MONITOR_ID": monitor_id,
+        "RECIPIENT_EMAIL": recipient_email,
+        "CLIENT_TZ": client_tz,
+        "CLIENT_NAME": client_name,
+        "MONITORING_TEAM": monitoring_team
+    }
+
+# Inject dynamic config into globals (will be used by all functions)
+def init_dynamic_config(**context):
+    config = get_dynamic_config(**context)
+    context['ti'].xcom_push(key="dynamic_config", value=config)
+    # Make available globally in task context
+    globals().update(config)
+    return config
 
 # Added for Slack alert
 SLACK_WEBHOOK_URL = Variable.get("SLACK_WEBHOOK_URL", default_var=None)
@@ -180,7 +212,23 @@ def send_email(recipient, subject, body, in_reply_to="", references="", img_b64=
         logging.error(f"Failed to send email: {str(e)}")
         return None
 
-def fetch_monitor_data(start_ts, end_ts):
+def human_date(dt):
+    """Convert datetime/pendulum/timestamp → 'Jan 21, 2025'"""
+    if isinstance(dt, (int, float)):
+        dt = datetime.fromtimestamp(dt)
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+        except:
+            try:
+                dt = pendulum.parse(dt)
+            except:
+                return dt  # fallback
+    if hasattr(dt, 'format'):
+            return dt.format('D MMMM, YYYY')  # 21 January, 2025
+    return dt.strftime('%d %B, %Y')
+
+def fetch_monitor_data(start_ts, end_ts, monitor_id):
     url = "https://api.uptimerobot.com/v2/getMonitors"
     payload = {
         'api_key': UPTIME_API_KEY,
@@ -193,7 +241,7 @@ def fetch_monitor_data(start_ts, end_ts):
         'alert_contacts': '1',
         'mwindows': '1',
         'response_times_average': '30',
-        'monitors': MONITOR_ID,
+        'monitors': monitor_id,
         'logs_start_date': str(int(start_ts)),
         'logs_end_date': str(int(end_ts)),
         'response_times_start_date': str(int(start_ts)),
@@ -257,37 +305,44 @@ def parse_monitor_data(monitor):
     return structured, rt_list, logs
 
 def step_1_fetch_data(ti, **context):
-    now = datetime.now(timezone.utc)
-    today_start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    dynamic_config = ti.xcom_pull(key="dynamic_config")
+    client_tz = dynamic_config["CLIENT_TZ"]
+    monitor_id = dynamic_config["MONITOR_ID"]
+    try:
+        tz = timezone(timedelta(hours=int(client_tz))) if client_tz.startswith(('+', '-')) else timezone.strptime(client_tz, '%Z') if len(client_tz) == 3 else __import__('pytz').timezone(client_tz)
+    except:
+        logging.warning(f"Invalid timezone {client_tz}, falling back to UTC")
+        tz = timezone.utc
 
-    # Previous Day (strict 00:00:00 to 23:59:59 UTC)
-    report_day_start_dt = today_start_dt - timedelta(days=1)
-    report_day_end_dt = report_day_start_dt + timedelta(days=1) - timedelta(microseconds=1)
-    report_day_start_ts = int(report_day_start_dt.timestamp())
-    report_day_end_ts = int(report_day_end_dt.timestamp())
-
-    # Day Before Previous (strict 00:00:00 to 23:59:59 UTC)
-    prev_day_start_dt = report_day_start_dt - timedelta(days=1)
-    prev_day_end_dt = prev_day_start_dt + timedelta(days=1) - timedelta(microseconds=1)
-    prev_day_start_ts = int(prev_day_start_dt.timestamp())
-    prev_day_end_ts = int(prev_day_end_dt.timestamp())
-
-    # Previous Calendar Week (strict Sunday 00:00:00 to Saturday 23:59:59 UTC)
-    # Find start of week containing report_day_start_dt (Sunday)
-    days_to_sunday = (report_day_start_dt.weekday() + 1) % 7
-    current_week_start_dt = report_day_start_dt - timedelta(days=days_to_sunday)
-    # Previous week: 7 days before current week start, ending just before current week start
-    prev_week_start_dt = current_week_start_dt - timedelta(days=7)
-    prev_week_end_dt = current_week_start_dt - timedelta(microseconds=1)
-    prev_week_start_ts = int(prev_week_start_dt.timestamp())
-    prev_week_end_ts = int(prev_week_end_dt.timestamp())
+    now_local = datetime.now(tz)
+    today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    logging.info(f"Fetching time periods: Previous Day {report_day_start_ts} ({report_day_start_dt}) to {report_day_end_ts} ({report_day_end_dt}), "
-                 f"Day Before {prev_day_start_ts} ({prev_day_start_dt}) to {prev_day_end_ts} ({prev_day_end_dt}), "
-                 f"Prev Calendar Week {prev_week_start_ts} ({prev_week_start_dt}) to {prev_week_end_ts} ({prev_week_end_dt})")
+    # Report period: Yesterday in client's local time
+    report_day_start_local = today_start_local - timedelta(days=1)
+    report_day_end_local = report_day_start_local + timedelta(days=1) - timedelta(microseconds=1)
+
+    # Convert to UTC timestamps for API
+    report_day_start_ts = int(report_day_start_local.astimezone(timezone.utc).timestamp())
+    report_day_end_ts = int(report_day_end_local.astimezone(timezone.utc).timestamp())
+
+    prev_day_start_local = report_day_start_local - timedelta(days=1)
+    prev_day_end_local = prev_day_start_local + timedelta(days=1) - timedelta(microseconds=1)
+    prev_day_start_ts = int(prev_day_start_local.astimezone(timezone.utc).timestamp())
+    prev_day_end_ts = int(prev_day_end_local.astimezone(timezone.utc).timestamp())
+
+    # Previous week logic (same offset logic)
+    days_to_sunday = (report_day_start_local.weekday() + 1) % 7
+    current_week_start_local = report_day_start_local - timedelta(days=days_to_sunday)
+    prev_week_start_local = current_week_start_local - timedelta(days=7)
+    prev_week_end_local = current_week_start_local - timedelta(microseconds=1)
+
+    prev_week_start_ts = int(prev_week_start_local.astimezone(timezone.utc).timestamp())
+    prev_week_end_ts = int(prev_week_end_local.astimezone(timezone.utc).timestamp())
+
+    logging.info(f"Using client timezone: {client_tz} | Report period (local): {report_day_start_local} to {report_day_end_local}")
     
     # Fetch 1: Main Report (Yesterday) - Filter post-API to enforce bounds
-    monitor = fetch_monitor_data(report_day_start_ts, report_day_end_ts)
+    monitor = fetch_monitor_data(report_day_start_ts, report_day_end_ts, monitor_id)
     logging.info(f"Fetched monitor data: {monitor}")
     # Client-side filter to handle API's loose range enforcement
     filtered_rt = [r for r in monitor.get('response_times', []) if report_day_start_ts <= r.get('datetime', 0) <= report_day_end_ts]
@@ -300,7 +355,7 @@ def step_1_fetch_data(ti, **context):
     df_current = pd.DataFrame(df_current_list)
     
     # Fetch 2: Baseline 1 (Day-before-yesterday) - Filter post-API
-    prev_monitor = fetch_monitor_data(prev_day_start_ts, prev_day_end_ts)
+    prev_monitor = fetch_monitor_data(prev_day_start_ts, prev_day_end_ts, monitor_id)
     logging.info(f"Fetched monitor data: {prev_monitor}")
     filtered_rt_prev = [r for r in prev_monitor.get('response_times', []) if prev_day_start_ts <= r.get('datetime', 0) <= prev_day_end_ts]
     filtered_logs_prev = [l for l in prev_monitor.get('logs', []) if prev_day_start_ts <= l.get('datetime', 0) <= prev_day_end_ts]
@@ -312,7 +367,7 @@ def step_1_fetch_data(ti, **context):
     df_prev_day = pd.DataFrame(df_prev_day_list)
     
     # Fetch 3: Baseline 2 (Previous Calendar Week) - Filter post-API
-    prev_week_monitor = fetch_monitor_data(prev_week_start_ts, prev_week_end_ts)
+    prev_week_monitor = fetch_monitor_data(prev_week_start_ts, prev_week_end_ts, monitor_id)
     filtered_rt_week = [r for r in prev_week_monitor.get('response_times', []) if prev_week_start_ts <= r.get('datetime', 0) <= prev_week_end_ts]
     filtered_logs_week = [l for l in prev_week_monitor.get('logs', []) if prev_week_start_ts <= l.get('datetime', 0) <= prev_week_end_ts]
     prev_week_monitor['response_times'] = filtered_rt_week
@@ -340,7 +395,7 @@ def step_1_fetch_data(ti, **context):
     ti.xcom_push(key="df_prev_day", value=df_prev_day.to_json(orient='records', date_format='iso'))
     ti.xcom_push(key="structured_prev_week", value=json.dumps(structured_prev_week))
     ti.xcom_push(key="df_prev_week", value=df_prev_week.to_json(orient='records', date_format='iso'))
-    ti.xcom_push(key="report_date", value=report_day_start_dt.strftime('%Y-%m-%d'))
+    ti.xcom_push(key="report_date", value=report_day_start_local.strftime('%Y-%m-%d'))
     
     logging.info("Data fetch completed.")
     return structured_current
@@ -395,8 +450,8 @@ Logic for analysis (follow steps in order):
 5. Overall: If no spikes, <10% avg change, and no clusters/unusual logs, conclude 'No significant anomalies detected.'.
 
 Return ONLY a single JSON object with the key "anomaly_detection" and its value as a concise summary string (1-3 sentences). Do not include any additional text, explanations, or markdown.
-Example 1 (Normal): {{"anomaly_detection": "Detected 1 isolated spike (>100ms) at 2025-10-24 09:15:00; average response time increased 5.2% (71.6ms) vs the previous week (68.1ms) but no significant anomalies were found."}}
-Example 2 (Spikes and Patterns): {{"anomaly_detection": "Detected multiple spikes (>100ms) on the current day, with the highest at 2025-11-10 11:00:00 (844ms) and others at 2025-11-10 07:00:00 (244ms) and 2025-11-10 09:00:00 (198ms). Average response time increased significantly by 112% (157.34ms) compared to the previous day (74.17ms) and 111% compared to the previous week (74.38ms). Significant anomaly detected regarding response time."}}
+Example 1 (Normal): {{"anomaly_detection": "Detected 1 isolated spike (>100 ms) on 24 October 2025 at 09:15. Average response time increased 5.2 % (71.6 ms) compared to the previous week (68.1 ms), but remains within normal bounds. No significant anomalies were found."}}
+Example 2 (Spikes and Patterns): {{"anomaly_detection": "Detected multiple response-time spikes (>100 ms) on 10 November 2025: highest 844 ms at 11:00, others at 07:00 (244 ms) and 09:00 (198 ms). Average response time increased +112 % vs previous day and +111 % vs previous week. Significant anomaly detected."}}
 Example 3 (Edge Case): {{"anomaly_detection": "No current data available for anomaly detection."}}
 """    
     response = get_ai_response(prompt)
@@ -457,7 +512,7 @@ Logic for analysis (follow steps in order):
 5. Edge cases: If logs empty, treat as no errors (single bullet); if baselines missing, skip recurrence without noting.
 6. Overall: If multiple, add final bullet summarizing common causes.
  
-Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bulleted points). Do not include any additional text, explanations, or markdown. Example: {{"rca": "- 2025-10-24 09:00:00: Code 408 timeout (duration 45s) - Root cause: Network issue inferred from response spike; no recurrence in baselines. Recommendation: Monitor bandwidth and retry logic.\\n- Common cause: Isolated timeout - No further action needed."}} or {{"rca": "- No errors requiring RCA."}}
+Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bulleted points). Do not include any additional text, explanations, or markdown. Example: {{"rca": "- 24 October 2025 at 09:00 – HTTP 408 Request Timeout detected (duration 45s) - Root cause: Network issue inferred from response spike; no recurrence in baselines. Recommendation: Monitor bandwidth and retry logic.\\n- Common cause: Isolated timeout - No further action needed."}} or {{"rca": "- No errors requiring RCA."}}
 """
     
     response = get_ai_response(prompt)
@@ -647,7 +702,7 @@ def step_3_generate_plot(ti, **context):
             ax.set_ylim(bottom=0, top=100)
         
         ax.set_title(
-            f"Response Time on {report_date} with Baselines for {monitor_name}",
+            f"Response Time on {human_date(report_date)} with Baselines for {monitor_name}",
             fontsize=18, fontweight='bold', color='black'
         )
         ax.set_xlabel("Datetime (UTC)", fontsize=14)
@@ -712,7 +767,7 @@ def step_4_compose_email(ti, **context):
         structured = {}
         analysis = {}
         logs = []
-        report_date = datetime.now().strftime('%Y-%m-%d')
+        report_date = human_date(datetime.now().strftime('%Y-%m-%d'))
         chart_html = '<p style="color: #dc3545; font-weight: bold;">Failed to load report data.</p>'
 
     # 3. Define Embedded CSS Styles
@@ -874,11 +929,11 @@ def step_4_compose_email(ti, **context):
     <body>
         <div class="container">
             <div class="header">
-                <h1>{report_type} Uptime Report - {report_date}</h1>
+                <h1>{report_type} Uptime Report - {human_date(report_date)}</h1>
             </div>
             <div class="content">
                 <p>Dear Team,</p>
-                <p>Please find below the {report_type.lower()} uptime report for the date <strong>{report_date}</strong> for the monitor: <strong>{monitor_name}</strong>.</p>
+                <p>Please find below the {report_type.lower()} uptime report for the date <strong>{human_date(report_date)}</strong> for the monitor: <strong>{monitor_name}</strong>.</p>
                 
                 <div class="section">
                     <h2>Monitor Information</h2>
@@ -929,7 +984,7 @@ def step_4_compose_email(ti, **context):
                         </tr>
                         <tr>
                             <td>Expires On</td>
-                            <td>{ssl_info.get('expiry_date', 'N/A')}</td>
+                            <td>{human_date(ssl_info.get('expiry_date', 'N/A'))}</td>
                         </tr>
                     </table>
                 </div>
@@ -1054,11 +1109,13 @@ def step_4_compose_email(ti, **context):
     html += '</div>'  # close section
         
     # Footer
-    html += """
+    dynamic_config = ti.xcom_pull(key="dynamic_config")
+    monitoring_team = dynamic_config.get("MONITORING_TEAM")
+    html += f"""
             </div>
             <div class="footer">
                 Best regards,<br>
-                The Monitoring Team
+                {monitoring_team}
                 <center><span style="font-size: 14px; opacity: 0.9;">Powered by lowtouch<span style="color: #fb47de;">.ai</span></span></center>
             </div>
         </div>
@@ -1076,7 +1133,8 @@ def step_5_send_report_email(ti, **context):
         structured_str = ti.xcom_pull(key="structured_current")
         structured = json.loads(structured_str)
         monitor_name = structured.get("monitor_information", {}).get("monitor_name", "Default Monitor")
-        
+        dynamic_config = ti.xcom_pull(key="dynamic_config")
+        recipient_email = dynamic_config.get("RECIPIENT_EMAIL")
         final_html_content = ti.xcom_pull(key="final_html_content")
         if not final_html_content:
             logging.error("No final HTML content found from previous steps")
@@ -1089,12 +1147,12 @@ def step_5_send_report_email(ti, **context):
         subject = f"Daily Uptime Report with Insights for {monitor_name}"
         
         result = send_email(
-            RECIPIENT_EMAIL, subject, final_html_content, img_b64=chart_b64
+            recipient_email, subject, final_html_content, img_b64=chart_b64
         )
         
         if result:
-            logging.info(f"Report email sent successfully to {RECIPIENT_EMAIL}")
-            return f"Email sent successfully to {RECIPIENT_EMAIL}"
+            logging.info(f"Report email sent successfully to {recipient_email}")
+            return f"Email sent successfully to {recipient_email}"
         else:
             logging.error("Failed to send report email")
             return "Failed to send email"
@@ -1115,12 +1173,18 @@ except FileNotFoundError:
 with DAG(
     "uptime_daily_data_report",
     default_args=default_args,
-    schedule_interval="@daily",
+    schedule_interval=None,
     catchup=False,
     doc_md=readme_content,
     tags=["uptime", "report", "daily", "ai-insights"]
 ) as dag:
     
+    init_config = PythonOperator(
+        task_id="init_dynamic_config",
+        python_callable=init_dynamic_config,
+        provide_context=True,
+    )
+
     fetch_data_task = PythonOperator(
         task_id="step_1_fetch_data",
         python_callable=step_1_fetch_data,
@@ -1172,4 +1236,4 @@ with DAG(
     )
     
     # Set up task dependencies serially for analysis steps
-    fetch_data_task >> anomaly_detection_task >> rca_task >> comparative_analysis_task >> combine_analysis_task >> generate_plot_task >> compose_email_task >> send_report_email_task
+    init_config >> fetch_data_task >> anomaly_detection_task >> rca_task >> comparative_analysis_task >> combine_analysis_task >> generate_plot_task >> compose_email_task >> send_report_email_task

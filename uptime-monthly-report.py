@@ -17,6 +17,7 @@ from matplotlib.dates import DayLocator, DateFormatter
 import io
 import requests
 import smtplib
+import pendulum
 
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -37,9 +38,40 @@ SMTP_SUFFIX = Variable.get("SMTP_FROM_SUFFIX", default_var="via lowtouch.ai <web
 OLLAMA_HOST = "http://agentomatic:8000/"
 UPTIME_API_KEY = Variable.get("UPTIME_API_KEY")
 
-MONITOR_ID = Variable.get("UPTIME_MONITOR_ID")
-RECIPIENT_EMAIL = Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL")
 REPORT_PERIOD = "last 30 days"
+
+# === DYNAMIC CLIENT-SPECIFIC VARIABLES (injected via trigger) ===
+def get_dynamic_config(**context):
+    conf = context.get("dag_run").conf or {}
+    logging.info(f"Trigger conf received: {conf}")
+    monitor_id = conf.get("monitor_id") or Variable.get("UPTIME_MONITOR_ID", fallback=None)
+    recipient_email = conf.get("recipient_email") or Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL", fallback=None)
+    client_tz = conf.get("client_tz", "UTC")  # e.g., "Asia/Kolkata", "America/New_York"
+    client_name = conf.get("client_name", "Unknown Client")
+    monitoring_team = conf.get("monitoring_team", "Appz SRE Agent")
+
+    if not monitor_id:
+        raise ValueError("MONITOR_ID is required but not provided via trigger or Variable")
+    if not recipient_email:
+        raise ValueError("RECIPIENT_EMAIL is required but not provided via trigger or Variable")
+
+    logging.info(f"Dynamic config loaded - Client: {client_name}, TZ: {client_tz}, Monitor ID: {monitor_id}")
+
+    return {
+        "MONITOR_ID": monitor_id,
+        "RECIPIENT_EMAIL": recipient_email,
+        "CLIENT_TZ": client_tz,
+        "CLIENT_NAME": client_name,
+        "MONITORING_TEAM": monitoring_team
+    }
+
+# Inject dynamic config into globals (will be used by all functions)
+def init_dynamic_config(**context):
+    config = get_dynamic_config(**context)
+    context['ti'].xcom_push(key="dynamic_config", value=config)
+    # Make available globally in task context
+    globals().update(config)
+    return config
 
 # Added for Slack alert
 SLACK_WEBHOOK_URL = Variable.get("SLACK_WEBHOOK_URL", default_var=None)
@@ -173,7 +205,36 @@ def send_email(recipient, subject, body, in_reply_to="", references="", img_b64=
         logging.error(f"Failed to send email: {str(e)}")
         return None
 
-def fetch_main_monitor_data(start_ts, end_ts):
+def human_date(dt):
+    """Convert datetime/pendulum/timestamp → 'Jan 21, 2025'"""
+    if isinstance(dt, (int, float)):
+        dt = datetime.fromtimestamp(dt)
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+        except:
+            try:
+                dt = pendulum.parse(dt)
+            except:
+                return dt  # fallback
+    if hasattr(dt, 'format'):
+            return dt.format('D MMMM, YYYY')  # 21 January, 2025
+    return dt.strftime('%d %B, %Y')
+
+def human_month_year(dt):
+    """
+    Converts any date/timestamp → "January 2025", "March 2025", etc.
+    Perfect for monthly report headers.
+    """
+    if isinstance(dt, (int, float)):
+        dt = datetime.fromtimestamp(dt)
+    if isinstance(dt, str):
+        dt = pendulum.parse(dt)
+    if hasattr(dt, 'format'):
+        return dt.format('MMMM YYYY')   # e.g. January 2025
+    return dt.strftime('%B %Y')         # fallback
+
+def fetch_main_monitor_data(start_ts, end_ts, monitor_id):
     """
     Fetches main monitor data (logs, uptime, ssl) WITHOUT response_times.
     """
@@ -186,7 +247,7 @@ def fetch_main_monitor_data(start_ts, end_ts):
         'custom_uptime_ratios': '1-7-30-365',
         'ssl': '1',
         'alert_contacts': '1',
-        'monitors': MONITOR_ID,
+        'monitors': monitor_id,
         'logs_start_date': str(int(start_ts)),
         'logs_end_date': str(int(end_ts)),
     }
@@ -200,7 +261,7 @@ def fetch_main_monitor_data(start_ts, end_ts):
         raise ValueError("No monitor data found")
     return data['monitors'][0]
 
-def fetch_chunked_response_times(start_dt, end_dt):
+def fetch_chunked_response_times(start_dt, end_dt, monitor_id):
     """
     Fetches response_times in 7-day chunks to bypass API limits.
     """
@@ -231,7 +292,7 @@ def fetch_chunked_response_times(start_dt, end_dt):
             'format': 'json',
             'response_times': '1',
             'response_times_average': '30', # Use 30-min avg for granularity
-            'monitors': MONITOR_ID,
+            'monitors': monitor_id,
             'response_times_start_date': str(start_ts),
             'response_times_end_date': str(end_ts),
         }
@@ -308,8 +369,18 @@ def parse_monitor_data(monitor, rt_list):
     return structured
 
 def step_1_fetch_data(ti, **context):
-    now = datetime.now(timezone.utc)
-    today_start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    dynamic_config = ti.xcom_pull(key="dynamic_config")
+    client_tz = dynamic_config["CLIENT_TZ"]
+    monitor_id = dynamic_config["MONITOR_ID"]
+    try:
+        tz = timezone(timedelta(hours=int(client_tz))) if client_tz.startswith(('+', '-')) else timezone.strptime(client_tz, '%Z') if len(client_tz) == 3 else __import__('pytz').timezone(client_tz)
+    except:
+        logging.warning(f"Invalid timezone {client_tz}, falling back to UTC")
+        tz = timezone.utc
+
+    # Use client timezone for report period
+    now_local = pendulum.now(tz)
+    today_start_dt = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     current_month_start_dt = today_start_dt.replace(day=1)
 
     # Current 30-day period
@@ -323,16 +394,16 @@ def step_1_fetch_data(ti, **context):
     logging.info(f"Fetching time periods: Current {current_start_dt} to {current_end_dt}, Previous {prev_start_dt} to {prev_end_dt}")
     
     # Fetch current period data
-    monitor_current = fetch_main_monitor_data(int(current_start_dt.timestamp()), int(current_end_dt.timestamp()))
-    rt_current = fetch_chunked_response_times(current_start_dt, current_end_dt)
+    monitor_current = fetch_main_monitor_data(int(current_start_dt.timestamp()), int(current_end_dt.timestamp()), monitor_id)
+    rt_current = fetch_chunked_response_times(current_start_dt, current_end_dt, monitor_id)
     structured_current = parse_monitor_data(monitor_current, rt_current)
     logs = monitor_current.get('logs', [])
     df_current_list = [{'datetime': datetime.fromtimestamp(r['datetime']).isoformat(), 'value': r['value']} for r in rt_current]
     df_current = pd.DataFrame(df_current_list)
     
     # Fetch previous period data
-    monitor_prev = fetch_main_monitor_data(int(prev_start_dt.timestamp()), int(prev_end_dt.timestamp()))
-    rt_prev = fetch_chunked_response_times(prev_start_dt, prev_end_dt)
+    monitor_prev = fetch_main_monitor_data(int(prev_start_dt.timestamp()), int(prev_end_dt.timestamp()), monitor_id)
+    rt_prev = fetch_chunked_response_times(prev_start_dt, prev_end_dt, monitor_id)
     structured_prev = parse_monitor_data(monitor_prev, rt_prev)
     df_prev_list = [{'datetime': datetime.fromtimestamp(r['datetime']).isoformat(), 'value': r['value']} for r in rt_prev]
     df_prev = pd.DataFrame(df_prev_list)
@@ -397,7 +468,7 @@ Logic for analysis (follow steps in order):
 
 Return ONLY a single JSON object with the key "anomaly_detection" and its value as a concise summary string (1-3 sentences). Do not include any additional text, explanations, or markdown.
 Example 1 (Normal): {{"anomaly_detection": "Detected 2 spikes >100ms and one down log cluster (2 events, code 408 timeout); however, the average response time improved, dropping 9.12% (from 82.2ms to 74.7ms) compared to the previous 30-day period."}}
-Example 2 (Spikes and Patterns): {{"anomaly_detection": "Detected multiple spikes (>100ms) in the past month, with the highest at 2025-11-10 11:00:00 (844ms) and others at 2025-11-10 07:00:00 (244ms) and 2025-11-10 09:00:00 (198ms). Average response time increased significantly by 112% (157.34ms) compared to the previous month (74.17ms). Significant anomaly detected regarding response time."}}
+Example 2 (Spikes and Patterns): {{"anomaly_detection": "Detected multiple response-time spikes (>100 ms) on 10 November 2025: highest 844 ms at 11:00, others at 07:00 (244 ms) and 09:00 (198 ms). Average response time increased +112 % vs previous month. Significant anomaly detected."}}
 Example 3 (Edge Case): {{"anomaly_detection": "No current data available for anomaly detection."}}
 """
     
@@ -448,7 +519,7 @@ Logic for analysis (follow steps in order):
 5. Edge cases: If logs empty, treat as no errors (single bullet); if previous missing, skip recurrence without noting.
 6. Overall: If multiple, add final bullet summarizing common causes.
 
-Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bulleted points). Do not include any additional text, explanations, or markdown. Example: {{"rca": "- 2025-10-17 10:00:00: Code 500 server error (duration 120s) - Root cause: Overload inferred from preceding high response times (avg 250ms); recurred from previous 30-day period (2 similar). Recommendation: Add autoscaling and monitor CPU usage.\\n- Common cause: Server overload - Implement load balancing."}} or {{"rca": "- No errors requiring RCA."}}
+Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bulleted points). Do not include any additional text, explanations, or markdown. Example: {{"rca": "- 17 October 2025, 10:00: Code 500 server error (duration 120s) - Root cause: Overload inferred from preceding high response times (avg 250ms); recurred from previous 30-day period (2 similar). Recommendation: Add autoscaling and monitor CPU usage.\\n- Common cause: Server overload - Implement load balancing."}} or {{"rca": "- No errors requiring RCA."}}
 """
     
     response = get_ai_response(prompt)
@@ -612,7 +683,7 @@ def step_3_generate_plot(ti, **context):
              ax.set_ylim(bottom=0, top=100)
 
         ax.set_title(
-            f"Response Time: Month-over-Month Comparison for {monitor_name} for {report_month_start_dt} to {report_month_end_dt}",
+            f"Response Time: Month-over-Month Comparison for {monitor_name} - {human_month_year(report_month_start_dt)}",
             fontsize=18, fontweight='bold', color='black'
         )
         ax.set_xlabel("Datetime", fontsize=14)
@@ -830,11 +901,11 @@ def step_4_compose_email(ti, **context):
     <body>
         <div class="container">
             <div class="header">
-                <h1>{report_type} Uptime Report - {report_month_start_dt} to {report_month_end_dt}</h1>
+                <h1>{report_type} Uptime Report - {human_month_year(report_month_start_dt)}</h1>
             </div>
             <div class="content">
                 <p>Dear Team,</p>
-                <p>Please find below the {report_type.lower()} uptime report for the date <strong>{report_month_start_dt}</strong> to <strong>{report_month_end_dt}</strong> for the monitor: <strong>{monitor_name}</strong>.</p>
+                <p>Please find below the {report_type.lower()} uptime report for the date <strong>{human_date(report_month_start_dt)}</strong> to <strong>{human_date(report_month_end_dt)}</strong> for the monitor: <strong>{monitor_name}</strong>.</p>
                 
                 <div class="section">
                     <h2>Monitor Information</h2>
@@ -881,7 +952,7 @@ def step_4_compose_email(ti, **context):
                         </tr>
                         <tr>
                             <td>Expires On</td>
-                            <td>{ssl_info.get('expiry_date', 'N/A')}</td>
+                            <td>{human_date(ssl_info.get('expiry_date', 'N/A'))}</td>
                         </tr>
                     </table>
                 </div>
@@ -1001,11 +1072,13 @@ def step_4_compose_email(ti, **context):
     html += '</div>'  # close section
         
     # Footer
-    html += """
+    dynamic_config = ti.xcom_pull(key="dynamic_config")
+    monitoring_team = dynamic_config.get("MONITORING_TEAM")
+    html += f"""
             </div>
             <div class="footer">
                 Best regards,<br>
-                The Monitoring Team
+                {monitoring_team}
                 <center><span style="font-size: 14px; opacity: 0.9;">Powered by lowtouch<span style="color: #fb47de;">.ai</span></span></center>
             </div>
         </div>
@@ -1023,7 +1096,8 @@ def step_5_send_report_email(ti, **context):
         structured_str = ti.xcom_pull(key="structured_current")
         structured = json.loads(structured_str)
         monitor_name = structured.get("monitor_information", {}).get("monitor_name", "Default Monitor")
-        
+        dynamic_config = ti.xcom_pull(key="dynamic_config")
+        recipient_email = dynamic_config.get("RECIPIENT_EMAIL")
         final_html_content = ti.xcom_pull(key="final_html_content")
         if not final_html_content:
             logging.error("No final HTML content found from previous steps")
@@ -1036,12 +1110,12 @@ def step_5_send_report_email(ti, **context):
         subject = f"Monthly Uptime Report with Insights for {monitor_name}"
         
         result = send_email(
-            RECIPIENT_EMAIL, subject, final_html_content, img_b64=chart_b64
+            recipient_email, subject, final_html_content, img_b64=chart_b64
         )
         
         if result:
-            logging.info(f"Report email sent successfully to {RECIPIENT_EMAIL}")
-            return f"Email sent successfully to {RECIPIENT_EMAIL}"
+            logging.info(f"Report email sent successfully to {recipient_email}")
+            return f"Email sent successfully to {recipient_email}"
         else:
             logging.error("Failed to send report email")
             return "Failed to send email"
@@ -1062,12 +1136,18 @@ except FileNotFoundError:
 with DAG(
     "uptime_monthly_data_report", 
     default_args=default_args, 
-    schedule_interval="@monthly", 
+    schedule_interval=None, 
     catchup=False, 
     doc_md=readme_content, 
     tags=["uptime", "report", "monthly", "ai-insights"]
 ) as dag:
     
+    init_config = PythonOperator(
+        task_id="init_dynamic_config",
+        python_callable=init_dynamic_config,
+        provide_context=True,
+    )
+
     fetch_data_task = PythonOperator(
         task_id="step_1_fetch_data",
         python_callable=step_1_fetch_data,
@@ -1118,4 +1198,4 @@ with DAG(
         provide_context=True
     )
     
-    fetch_data_task >> anomaly_detection_task >> rca_task >> comparative_analysis_task >> combine_analysis_task >> generate_plot_task >> compose_email_task >> send_report_email_task
+    init_config >> fetch_data_task >> anomaly_detection_task >> rca_task >> comparative_analysis_task >> combine_analysis_task >> generate_plot_task >> compose_email_task >> send_report_email_task
