@@ -428,7 +428,7 @@ def update_run_id_and_log(**context):
 # DAG Definition
 # =============================================================================
 with DAG(
-    dag_id="rfp_public_pension_processing_dag",
+    dag_id="rfp_ocio_processing_dag",
     default_args=default_args,
     description="Processes OCIO RFPs: Extracts questions, generates answers, updates via API",
     schedule=None,
