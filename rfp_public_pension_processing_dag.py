@@ -382,12 +382,43 @@ def update_answers_to_database(**context):
     return {"total": len(answers_dict), "updated": updated_count}
 
 # =============================================================================
-# Task 6: Log Completion
+# Task 6: Update Run ID & Log Completion
 # =============================================================================
-def log_completion(**context):
-    """Log final completion status"""
+def update_run_id_and_log(**context):
+    """Update processing_dag_run_id via API and log final completion status"""
     conf = context["dag_run"].conf or {}
     project_id = conf.get("project_id")
+    workspace_uuid = conf.get("workspace_uuid", "")
+    user_email = conf.get("x-ltai-user-email", "")
+    dag_run_id = context["dag_run"].run_id
+
+    if not project_id:
+        logging.warning("No project_id found in configuration. Skipping API update.")
+        return
+    
+    url = f"{RFP_API_BASE}/rfp/projects/{project_id}"
+    payload = {"processing_dag_run_id": dag_run_id}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    if workspace_uuid:
+        headers["WORKSPACE_UUID"] = workspace_uuid
+    else:
+        logging.warning("WORKSPACE_UUID not provided in DAG params.")
+
+    if user_email:
+        headers["x-ltai-user-email"] = user_email
+    else:
+        logging.warning("x-ltai-user-email not provided in DAG params.")
+
+    try:
+        response = requests.patch(url, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        logging.info(f"Successfully updated project {project_id} with processing_dag_run_id: {dag_run_id}")
+    except Exception as e:
+        logging.error(f"Failed to update project {project_id} run_id: {e}")
+
     questions_with_id = context["ti"].xcom_pull(task_ids="validate_and_fix_questions", key="questions_with_id")
     questions_count = len(questions_with_id) if questions_with_id else 0
     
@@ -411,6 +442,16 @@ with DAG(
             minimum=1,
             title="Project ID",
             description="RFP project ID from selector",
+        ),
+        "workspace_uuid": Param(
+            type="string",
+            title="Workspace UUID",
+            description="The UUID of the workspace",
+        ),
+        "x-ltai-user-email": Param(
+            type="string",
+            title="User Email",
+            description="Email of the user initiating the DAG run",
         ),
     },
     render_template_as_native_obj=True,
@@ -448,7 +489,7 @@ with DAG(
 
     finalize = PythonOperator(
         task_id="log_completion",
-        python_callable=log_completion,
+        python_callable=update_run_id_and_log,
         provide_context=True,
         trigger_rule=TriggerRule.ALL_SUCCESS,
     )

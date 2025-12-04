@@ -236,6 +236,48 @@ def get_target_dag_id(**context):
     context["ti"].xcom_push(key="target_dag_id", value=target_dag)
     return target_dag
 
+def update_project_selector_run_id(**context):
+    """
+    Update the project record in the database with the selector_dag_run_id
+    upon successful completion.
+    """
+    conf = context["dag_run"].conf or {}
+    project_id = conf.get("project_id")
+    workspace_uuid = conf.get("workspace_uuid", "")
+    user_email = conf.get("x-ltai-user-email", "")
+    dag_run_id = context["dag_run"].run_id
+    
+    if not project_id:
+        logging.warning("No project_id found in configuration. Skipping API update.")
+        return
+
+    update_url = f"{RFP_API_BASE}/rfp/projects/{project_id}"
+    payload = {
+        "selector_dag_run_id": dag_run_id
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    if workspace_uuid:
+        headers["WORKSPACE_UUID"] = workspace_uuid
+    else:
+        logging.warning("WORKSPACE_UUID not provided in DAG params.")
+    if user_email:
+        headers["x-ltai-user-email"] = user_email
+    else:
+        logging.warning("x-ltai-user-email not provided in DAG params.")
+
+    try:
+        response = requests.patch(url=update_url, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        logging.info(f"Successfully updated project {project_id} with selector_dag_run_id: {dag_run_id}")
+
+    except Exception as e:
+        logging.error(f"Failed to update project {project_id}: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+             logging.error(f"API Response: {e.response.text}")
+        raise
 
 # =============================================================================
 # DAG Definition
@@ -321,9 +363,7 @@ with DAG(
     # Log completion
     finalize = PythonOperator(
         task_id="log_completion",
-        python_callable=lambda **ctx: logging.info(
-            f"Selector DAG completed successfully for project_id={ctx['dag_run'].conf.get('project_id')}"
-        ),
+        python_callable=update_project_selector_run_id,
         provide_context=True,
         trigger_rule=TriggerRule.ALL_SUCCESS,
     )
