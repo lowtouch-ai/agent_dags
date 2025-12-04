@@ -659,6 +659,11 @@ def export_to_file(data, export_format='excel', filename=None, export_dir='/appz
             df = data.copy()
         else:
             raise ValueError("Unsupported data type")
+        
+        # CRITICAL FIX: Remove timezone info from all datetime columns
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                df[col] = df[col].dt.tz_localize(None)
 
         # CRITICAL FIX: Sanitize all string columns to remove illegal Excel characters
         def sanitize_excel_value(val):
@@ -697,6 +702,31 @@ def export_to_file(data, export_format='excel', filename=None, export_dir='/appz
         with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
             df_display.to_excel(writer, sheet_name='Sheet1', index=False)
             worksheet = writer.sheets['Sheet1']
+
+            # Apply formatting to data rows
+            for row in worksheet.iter_rows(min_row=2, max_row=worksheet.max_row, min_col=1, max_col=worksheet.max_column):
+                for cell in row:
+                    col_letter = cell.column_letter
+                    col_name = df_display.columns[cell.column - 1]  # 0-indexed
+
+                    # Format Date columns (e.g., "Close Date", "Created Date", etc.)
+                    if "date" in col_name.lower() or col_name in ["Close Date", "Expected Close Date", "Created At", "Last Modified"]:
+                        if cell.value and isinstance(cell.value, datetime):
+                            cell.number_format = 'DD-MMM-YYYY'  # Changed to DD-MMM-YYYY
+
+                    # Format Amount columns with $ currency
+                    if col_name in ["Amount", "Deal Amount", "Total Value"]:
+                        if cell.value:
+                            try:
+                                if isinstance(cell.value, str):
+                                    # Clean and convert string amounts like "$1,234" or "1234"
+                                    clean_val = re.sub(r'[^\d.]', '', str(cell.value))
+                                    cell.value = float(clean_val) if clean_val else 0
+                                else:
+                                    cell.value = float(cell.value or 0)
+                                cell.number_format = '$#,##0'  # US Dollar format with $ symbol
+                            except:
+                                pass
 
             # Apply hyperlinks if specified
             if hyperlinks and 'Sheet1' in hyperlinks:
@@ -1115,6 +1145,14 @@ Reply in 1-2 short, polite, professional sentences.
 - All the **dates** should be in YYYY-MM-DD format and do not include time.
 - If a column has no data for a particular record, give the value for that as **N/A**.Do not leave any coloumn blank.
 - Always maintain a friendly and professional tone.
+
+**IMPORTANT: Response Format**
+Return ONLY a JSON object with this structure:
+{{
+    "trigger_report": false
+}}
+
+**CRITICAL RULE**: If the query results contain MORE THAN 10 records, you MUST set "trigger_report": true
 Your final response must be in below format:
 ```
         <html>
@@ -1175,7 +1213,33 @@ Your final response must be in below format:
 """
 
                 ai_response = get_ai_response(prompt=prompt, expect_json=False)
-                logging.info(f"AI generated response before cleaning: {ai_response}")   
+                logging.info(f"AI generated response before cleaning: {ai_response}")
+
+                # ← REMOVE THIS LINE → ai_response = None
+
+                # Try to parse JSON first (because we expect { "trigger_report": ... } when >10 records)
+                try:
+                    ai_response = json.loads(ai_response)
+                except json.JSONDecodeError:
+                    ai_response = extract_json_from_text(ai_response)
+
+                # Validate it's a dict
+                if not isinstance(ai_response, dict):
+                    raise ValueError(f"AI response is not a dict: {ai_response}")
+
+                # Check if we need to trigger full report instead
+                if ai_response.get("trigger_report", False):
+                    logging.info(f"AI detected >10 results, triggering report DAG for email {email_id}")
+                    
+                    # Mark email as read (will fail later due to scopes – see below)
+                    mark_message_as_read(service, email_id)
+                    
+                    # Push to report queue
+                    ti.xcom_push(key="report_emails", value=[email])
+                    trigger_report_dag(**kwargs)
+                    
+                    continue
+  
                 match = re.search(r'```html.*?\n(.*?)```', ai_response, re.DOTALL)
                 if match:
                     ai_response = match.group(1).strip()
@@ -1552,24 +1616,25 @@ def trigger_report_dag(**kwargs):
     DEAL_STAGE_LABELS = get_deal_stage_labels()
     ti = kwargs['ti']
     report_emails = ti.xcom_pull(task_ids="branch_task", key="report_emails") or []
-    
+    report_emails = ti.xcom_pull(task_ids="handle_general_queries", key="report_emails") or []
+   
     if not report_emails:
         logging.info("No report emails to process")
         return
-    
+   
     service = authenticate_gmail()
     if not service:
         logging.error("Gmail authentication failed, cannot send reports")
         return
-    
+   
     owner_cache = {}
-    
+   
     def get_owner_name(owner_id):
         if not owner_id:
             return "Unassigned"
         if owner_id in owner_cache:
             return owner_cache[owner_id]
-        
+       
         try:
             url = f"{HUBSPOT_BASE_URL}/crm/v3/owners/{owner_id}"
             headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
@@ -1586,16 +1651,7 @@ def trigger_report_dag(**kwargs):
             logging.warning(f"Failed to fetch owner {owner_id}: {e}")
             owner_cache[owner_id] = "Unknown Owner"
             return "Unknown Owner"
-    
-    def format_date(timestamp_ms):
-        if not timestamp_ms:
-            return ""
-        try:
-            dt = datetime.fromtimestamp(int(timestamp_ms) / 1000)
-            return dt.strftime("%Y-%m-%d")
-        except:
-            return str(timestamp_ms)
-    
+   
     def format_currency(amount):
         """Format amount as currency"""
         if not amount:
@@ -1604,18 +1660,18 @@ def trigger_report_dag(**kwargs):
             return f"₹{int(float(amount)):,}"
         except:
             return f"₹{amount}"
-    
+   
     def get_filter_summary(filters, entity_type):
         """Generate human-readable filter summary"""
         if not filters:
             return "No filters applied"
-        
+       
         summaries = []
         for f in filters:
             prop = f.get("propertyName", "")
             op = f.get("operator", "")
             val = f.get("value", "")
-            
+           
             # Readable operator names
             op_map = {
                 "EQ": "equals",
@@ -1627,15 +1683,15 @@ def trigger_report_dag(**kwargs):
                 "CONTAINS_TOKEN": "contains",
                 "NOT_CONTAINS_TOKEN": "does not contain"
             }
-            
+           
             # Special handling for deal stages
             if prop == "dealstage" and entity_type == "deals":
                 val = DEAL_STAGE_LABELS.get(val, val)
-            
+           
             summaries.append(f"{prop} {op_map.get(op, op)} {val}")
-        
+       
         return " • ".join(summaries)
-    
+   
     for email in report_emails:
         try:
             headers = email.get("headers", {})
@@ -1647,13 +1703,13 @@ def trigger_report_dag(**kwargs):
             name_match = re.search(r'^([^<]+)', sender_email)
             if name_match:
                 sender_name = name_match.group(1).strip()
-            
+           
             ai_response = None
             report_filepath = None
             report_filename = None
             report_success = False
             report_payload = None
-            
+           
             try:
                 # Get conversation history
                 conversation_history_for_ai = []
@@ -1667,12 +1723,10 @@ def trigger_report_dag(**kwargs):
                                 "prompt": user_msg["content"],
                                 "response": assistant_msg["content"]
                             })
-                
+               
                 # AI Analysis
                 analysis_prompt = f"""You are a HubSpot data analyst. Analyze this request and determine what data to search for.
-
 User request: "{email.get("content", "").strip()}"
-
 Determine:
 1. Entity type: contacts, companies, or deals
 2. Filters needed (date ranges, statuses, etc.)
@@ -1681,7 +1735,6 @@ Determine:
 5. If the user asks question like which all deals expire by this month or this year, then always take the current date or todays date as GTE and the month end or year end date as LTE.
 6. Dates should only be given as YYYY-MM-DD.
 7. Include `hubspot_owner_id` in the request body of contact entity type.
-
 Return ONLY a JSON object with this structure:
 {{
     "entity_type": "deals",
@@ -1692,40 +1745,39 @@ Return ONLY a JSON object with this structure:
     "sort": {{"propertyName": "closedate", "direction": "ASCENDING"}},
     "report_title": "Deals Filtered by Deal Stage"
 }}
-
 Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOKEN.
 """
-                
+               
                 analysis_response = get_ai_response(
                     prompt=analysis_prompt,
                     conversation_history=conversation_history_for_ai,
                     expect_json=True
                 )
-                
+               
                 try:
                     analysis_data = json.loads(analysis_response)
                 except:
                     analysis_data = extract_json_from_text(analysis_response)
-                
+               
                 if not analysis_data or "entity_type" not in analysis_data:
                     raise ValueError("Invalid analysis response from AI")
-                
+               
                 entity_type = analysis_data.get("entity_type", "contacts").lower()
                 filters = analysis_data.get("filters", [])
                 properties = analysis_data.get("properties", [])
                 sort = analysis_data.get("sort")
                 report_title = analysis_data.get("report_title", "HubSpot Report")
-                
+               
                 # Default properties
                 base_properties = {
                     "contacts": ['firstname', 'lastname', 'email', 'phone', 'jobtitle', 'address', 'city', 'state', 'country', 'hs_object_id', 'hubspot_owner_id'],
                     "companies": ['name', 'domain', 'phone', 'address', 'city', 'state', 'zip', 'country', 'industry', 'type', 'hs_object_id'],
                     "deals": ['dealname', 'amount', 'closedate', 'dealstage', 'pipeline', 'hubspot_owner_id', 'hs_object_id']
                 }
-                
+               
                 default_props = base_properties.get(entity_type, [])
                 final_properties = list(set(default_props + (properties or [])))
-                
+               
                 # Execute search
                 if entity_type == "contacts":
                     search_results = search_contacts(filters=filters, properties=final_properties)
@@ -1735,12 +1787,11 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                     search_results = search_deals(filters=filters, properties=final_properties)
                 else:
                     raise ValueError(f"Invalid entity type: {entity_type}")
-                
+               
                 results_data = search_results.get("results", [])
-                
+               
                 if not results_data:
                     raise ValueError("No data found matching the search criteria")
-
                 report_payload = build_report_payload(
                     entity_type=entity_type,
                     filters=filters,
@@ -1749,38 +1800,37 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                     original_query=email.get("content", "").strip(),
                     timezone_str="EST"
                 )
-
                 if not report_payload:
                     raise ValueError("Failed to build report payload")
-                
+               
                 # ⭐ NEW: Archive report immediately
                 archive_result = archive_report(report_payload)
                 if not archive_result.get("success"):
                     logging.warning(f"Failed to archive report: {archive_result.get('error')}")
-                
+               
                 # Extract report_id for logging
                 report_id = report_payload.get("report_id")
                 logging.info(f"✓ Report archived: report_id={report_id}, "
                            f"archive_path={archive_result.get('filepath')}")
-                
+               
                 # Calculate summary statistics
                 record_count = len(results_data)
                 total_value = 0
                 unique_owners = set()
-                
+               
                 # Format data with helper columns
                 formatted_data = []
                 for record in results_data:
                     props = record.get("properties", {})
                     record_id = record.get("id")
                     row = {"_record_id": record_id}
-                    
+                   
                     if entity_type == "contacts":
                         full_name = f"{props.get('firstname', '')} {props.get('lastname', '')}".strip()
                         owner_name = get_owner_name(props.get("hubspot_owner_id"))
                         if props.get("hubspot_owner_id"):
                             unique_owners.add(props.get("hubspot_owner_id"))
-                        
+                       
                         row.update({
                             "Contact ID": record_id,
                             "Contact Name": full_name or "No Name",
@@ -1795,7 +1845,7 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                             "Contact Owner": owner_name,
                             "_hubspot_url": f"https://app.hubspot.com/contacts/contact/{record_id}"
                         })
-                    
+                   
                     elif entity_type == "companies":
                         row.update({
                             "Company ID": record_id,
@@ -1809,15 +1859,15 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                             "Type": props.get("type", ""),
                             "_hubspot_url": f"https://app.hubspot.com/contacts/company/{record_id}"
                         })
-                    
+                   
                     elif entity_type == "deals":
                         owner_name = get_owner_name(props.get("hubspot_owner_id"))
                         if props.get("hubspot_owner_id"):
                             unique_owners.add(props.get("hubspot_owner_id"))
-                        
+                       
                         stage_id = props.get("dealstage")
                         stage_label = DEAL_STAGE_LABELS.get(stage_id, "Unknown Stage")
-                        
+                       
                         # Add to total value
                         amount = props.get("amount")
                         if amount:
@@ -1825,41 +1875,56 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                                 total_value += float(amount)
                             except:
                                 pass
-                        
+
+                        close_date_value = props.get("closedate")
+                        if close_date_value:
+                            try:
+                                # Check if it's a timestamp string like "2025-12-02T00:00:00Z"
+                                if isinstance(close_date_value, str) and ('T' in close_date_value or '-' in close_date_value):
+                                    from dateutil import parser
+                                    close_date_dt = parser.parse(close_date_value).replace(tzinfo=None)
+                                else:
+                                    # It's a millisecond timestamp
+                                    close_date_dt = datetime.fromtimestamp(int(close_date_value) / 1000)
+                            except:
+                                close_date_dt = None
+                        else:
+                            close_date_dt = None
+                       
                         row.update({
                             "Deal ID": record_id,
                             "Deal Name": props.get("dealname", "Untitled Deal"),
                             "Amount": props.get("amount", ""),
-                            "Close Date": format_date(props.get("closedate")),
+                            "Close Date": close_date_dt,
                             "Deal Stage": stage_label,
                             "Deal Owner": owner_name,
                             "_hubspot_url": f"https://app.hubspot.com/deals/deal/{record_id}"
                         })
-                    
+                   
                     formatted_data.append(row)
-                
+               
                 # Column order
                 column_order = {
                     "contacts": ["Contact ID", "Contact Name", "Job Title", "Email", "Phone", "Street Address", "City", "State/Region", "Country", "Contact Owner"],
                     "companies": ["Company ID", "Company Name", "Domain", "Street Address", "City", "State/Region", "Country", "Phone", "Type"],
                     "deals": ["Deal ID", "Deal Name", "Amount", "Deal Stage", "Close Date", "Deal Owner"]
                 }
-                
+               
                 df = pd.DataFrame(formatted_data)
                 ordered_cols = column_order.get(entity_type, df.columns.tolist())
-                
+               
                 # Reorder only visible columns, keep helper columns
                 visible_cols = [col for col in ordered_cols if col in df.columns]
                 df_final = df[visible_cols + ['_hubspot_url']]
-                
+               
                 # Make sure the ID column is first
                 id_col = "Deal ID" if entity_type == "deals" else \
                          "Contact ID" if entity_type == "contacts" else "Company ID"
-                
+               
                 if id_col in df_final.columns:
                     cols = [id_col] + [c for c in df_final.columns if c != id_col and c != '_hubspot_url'] + ['_hubspot_url']
                     df_final = df_final[cols]
-                
+               
                 # Export with hyperlinks
                 export_result = export_to_file(
                     data=df_final,
@@ -1874,33 +1939,32 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                         }
                     }
                 )
-                
+               
                 if not export_result.get("success"):
                     raise ValueError(f"Export failed: {export_result.get('error', 'Unknown error')}")
-                
+               
                 report_filepath = export_result["filepath"]
                 report_filename = export_result["filename"]
                 report_success = True
-                
+               
                 logging.info(f"✓ Report generated successfully: {report_filepath}")
-                
+               
                 # Generate timestamp with timezone
                 from datetime import timezone
                 import pytz
-                
+               
                 timezone_str = "Asia/Kolkata"
                 tz = pytz.timezone(timezone_str)
                 current_time = datetime.now(tz)
-                timestamp_str = current_time.strftime("%Y-%m-%dT%H:%M:%S%z")
-                # Format as +05:30 instead of +0530
-                timestamp_str = timestamp_str[:-2] + ':' + timestamp_str[-2:]
-                
+                # Format date as dd-Mon-yyyy (e.g., 03-Dec-2025)
+                data_as_of_formatted = current_time.strftime("%d-%b-%Y")
+               
                 # Build filter summary
                 filter_summary = get_filter_summary(filters, entity_type)
-                
+               
                 # Owner summary
                 owner_summary = f"{len(unique_owners)} owner(s)" if unique_owners else "All owners"
-                
+               
                 # Success HTML - Professional, clean format
                 ai_response = f"""
 <html>
@@ -1922,13 +1986,12 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
             font-weight: bold;
             color: #000000;
             margin: 20px 0 10px 0;
-            border-bottom: 2px solid #000000;
             padding-bottom: 8px;
         }}
         .metadata {{
             font-size: 13px;
             color: #333333;
-            margin: 10px 0 20px 0;
+            margin: 10px 0 25px 0;
         }}
         .stats-section {{
             margin: 25px 0;
@@ -1936,8 +1999,7 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
         .stat-row {{
             display: flex;
             justify-content: space-between;
-            padding: 8px 0;
-            border-bottom: 1px solid #e0e0e0;
+            padding: 12px 0;
         }}
         .stat-label {{
             font-weight: 600;
@@ -1946,6 +2008,7 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
         .stat-value {{
             color: #000000;
             font-weight: bold;
+            margin-left: 8px
         }}
         .message {{
             margin: 20px 0;
@@ -1979,17 +2042,14 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
     <div class="greeting">
         <p>Hello {sender_name},</p>
     </div>
-    
+   
     <div class="report-title">
         {report_title}
     </div>
-
     <div class="metadata">
-        Report ID: {report_id}<br>
-        Data as of: {report_payload.get('data_as_of')} (timezone: {report_payload.get('timezone')})<br>
-        Generated: {report_payload.get('request_timestamp')}
+        Data as of: {data_as_of_formatted}
     </div>
-    
+   
     <div class="stats-section">
         <div class="stat-row">
             <span class="stat-label">TOTAL {entity_type.upper()}</span>
@@ -2006,26 +2066,25 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
             <span class="stat-value">{owner_summary}</span>
         </div>
     </div>
-    
+   
     <div class="message">
-        <p>Your HubSpot report has been generated successfully. The attached Excel file includes clickable links in the <strong>{id_col}</strong> column that will take you directly to each record in HubSpot.</p>
+        <p>Please find the attached Excel file containing your detailed report.</p>
     </div>
-    
+   
     <div class="closing">
-        <p>If you need this data in a different format, with additional filters, or have any questions about the results, just reply to this email.</p>
+        <p>If you need any further assistance or have questions regarding the results, please feel free to let me know.</p>
     </div>
-    
+   
     <div class="signature">
         <div class="signature-line"><strong>Best regards,</strong></div>
         <div class="signature-line">The HubSpot Assistant Team</div>
-        <div class="company">
-            Powered by <a href="http://lowtouch.ai">lowtouch.ai</a>
+        <div class="company"><a href="http://lowtouch.ai">lowtouch.ai</a>
         </div>
     </div>
 </body>
 </html>
 """
-            
+           
             except Exception as report_error:
                 logging.error(f"Report generation failed for email {email_id}: {report_error}", exc_info=True)
                 if report_payload:
@@ -2034,12 +2093,12 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                         "timestamp": datetime.now(pytz.timezone("EST")).isoformat()
                     })
                     report_payload["partial"] = True
-                    archive_report(report_payload)  # Archive failed attempt
-                
+                    archive_report(report_payload) # Archive failed attempt
+               
                 report_success = False
                 ai_response = None
                 report_filepath = None
-            
+           
             # Determine which response to use
             if report_success and ai_response:
                 final_response = ai_response
@@ -2081,19 +2140,19 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
     <div class="greeting">
         <p>Hello {sender_name},</p>
     </div>
-    
+   
     <div class="message">
         <p>Thank you for requesting a report from the HubSpot Assistant.</p>
-        
+       
         <p>We're currently experiencing a temporary technical issue that is preventing us from generating your report at this time. Our engineering team has been notified and is actively working on a resolution.</p>
-        
+       
         <p>Your request has been logged, and we'll process it as soon as the system is back online. We apologize for any inconvenience this may cause.</p>
     </div>
-    
+   
     <div class="closing">
         <p>If this is urgent, please feel free to reach out directly, and we'll assist you manually.</p>
     </div>
-    
+   
     <div class="signature">
         <p>Best regards,<br>
         The HubSpot Assistant Team<br>
@@ -2103,26 +2162,26 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
 </html>
 """
                 log_prefix = "FALLBACK Report"
-            
+           
             # Build and send email (keep your existing send logic)
             try:
                 msg = MIMEMultipart()
                 msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
                 msg["To"] = sender_email
-                
+               
                 subject = headers.get("Subject", "Your HubSpot Report")
                 if not subject.lower().startswith("re:"):
                     subject = f"Re: {subject}"
                 msg["Subject"] = subject
-                
+               
                 original_message_id = headers.get("Message-ID", "")
                 if original_message_id:
                     msg["In-Reply-To"] = original_message_id
                     references = headers.get("References", "")
                     msg["References"] = f"{references} {original_message_id}".strip() if references else original_message_id
-                
+               
                 msg.attach(MIMEText(final_response, "html"))
-                
+               
                 if report_success and report_filepath and os.path.exists(report_filepath):
                     with open(report_filepath, "rb") as f:
                         part = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -2131,24 +2190,24 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                     part.add_header("Content-Disposition", f"attachment; filename={report_filename}")
                     msg.attach(part)
                     logging.info(f"✓ Attached report file: {report_filename}")
-                
+               
                 raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
                 service.users().messages().send(userId="me", body={"raw": raw}).execute()
                 mark_message_as_read(service, email_id)
-                
+               
                 logging.info(f"✓ {log_prefix} email sent to {sender_email}")
-            
+           
             except Exception as send_error:
                 logging.error(f"Failed to send email for {email_id}: {send_error}", exc_info=True)
                 mark_message_as_read(service, email_id)
-        
+       
         except Exception as outer_error:
             logging.error(f"Unexpected error processing report email {email.get('id', 'unknown')}: {outer_error}", exc_info=True)
             try:
                 mark_message_as_read(service, email.get("id", ""))
             except:
                 pass
-    
+   
     logging.info(f"✓ Report DAG completed processing {len(report_emails)} emails")
 
 def no_email_found(**kwargs):
