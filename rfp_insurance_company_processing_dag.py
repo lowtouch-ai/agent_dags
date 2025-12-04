@@ -62,6 +62,8 @@ def fetch_pdf_from_api(**context):
     """Download PDF from API and extract text content"""
     conf = context["dag_run"].conf or {}
     project_id = conf.get("project_id")
+    workspace_uuid = conf.get("workspace_uuid", "")
+    user_email = conf.get("x-ltai-user-email", "")
     
     if not project_id:
         raise ValueError("project_id is required in dag_run.conf")
@@ -70,7 +72,18 @@ def fetch_pdf_from_api(**context):
     logging.info(f"Downloading PDF for project_id={project_id}")
 
     try:
-        response = requests.get(url, timeout=90)
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        if workspace_uuid:
+            headers["WORKSPACE_UUID"] = workspace_uuid
+        
+        if user_email:
+            headers["x-ltai-user-email"] = user_email
+        else:
+            logging.warning("x-ltai-user-email not provided in DAG params.")
+        response = requests.get(url, headers=headers, timeout=90)
         response.raise_for_status()
 
         pdf_bytes = response.content
@@ -155,7 +168,18 @@ Document preview: {extracted_text}
         }
 
         try:
-            resp = requests.post(url, json=payload, timeout=20)
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+            if workspace_uuid:
+                headers["WORKSPACE_UUID"] = workspace_uuid
+            
+            if x_ltai_user_email:
+                headers["x-ltai-user-email"] = x_ltai_user_email
+            else:
+                logging.warning("x-ltai-user-email not provided in DAG params.")
+            resp = requests.post(url, json=payload, headers=headers, timeout=20)
             resp.raise_for_status()
             data = resp.json()
             question_id = data.get("questionid")
@@ -268,7 +292,18 @@ Document preview: {questions_dict}
         }
 
         try:
-            resp = requests.post(url, json=payload, timeout=20)
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+            if workspace_uuid:
+                headers["WORKSPACE_UUID"] = workspace_uuid
+            
+            if x_ltai_user_email:
+                headers["x-ltai-user-email"] = x_ltai_user_email
+            else:
+                logging.warning("x-ltai-user-email not provided in DAG params.")
+            resp = requests.post(url, json=payload, headers=headers, timeout=20)
             resp.raise_for_status()
             data = resp.json()
             question_id = data.get("questionid")

@@ -97,6 +97,8 @@ def fetch_pdf_and_extract_text(**context):
     """
     conf = context["dag_run"].conf or {}
     project_id = conf.get("project_id")
+    workspace_uuid = conf.get("workspace_uuid", "")
+    user_email = conf.get("x-ltai-user-email", "")
     
     if not project_id:
         raise ValueError("project_id is required in dag_run.conf")
@@ -105,7 +107,18 @@ def fetch_pdf_and_extract_text(**context):
     logging.info(f"Downloading PDF for project_id={project_id} from {url}")
 
     try:
-        response = requests.get(url, timeout=90)
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        if workspace_uuid:
+            headers["WORKSPACE_UUID"] = workspace_uuid
+        
+        if user_email:
+            headers["x-ltai-user-email"] = user_email
+        else:
+            logging.warning("x-ltai-user-email not provided in DAG params.")
+        response = requests.get(url, headers=headers, timeout=90)
         response.raise_for_status()
 
         pdf_bytes = response.content
