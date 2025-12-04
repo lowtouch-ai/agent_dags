@@ -386,7 +386,9 @@ IMPORTANT: Respond with ONLY a valid JSON object in this exact format:
 def update_answers_to_database(**context):
     """Update all generated answers to the database via API"""
     answers_dict = context["ti"].xcom_pull(task_ids="generate_answers_with_ai", key="answers_dict")
-    
+    conf = context["dag_run"].conf
+    workspace_uuid = conf['workspace_uuid']
+    x_ltai_user_email = conf['x-ltai-user-email']
     if not answers_dict:
         logging.warning("No answers to update")
         return {"total": 0, "updated": 0}
@@ -403,7 +405,7 @@ def update_answers_to_database(**context):
             "answertext": answer,
             "is_sensitive": is_sensitive
         }
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", "Accept": "application/json", "WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
         
         try:
             response = requests.patch(url, json=payload, headers=headers, timeout=30)
@@ -415,7 +417,6 @@ def update_answers_to_database(**context):
     
     logging.info(f"Updated {updated_count}/{len(answers_dict)} answers to database")
     return {"total": len(answers_dict), "updated": updated_count}
-
 # =============================================================================
 # Task 6: Update Run ID & Log Completion
 # =============================================================================
