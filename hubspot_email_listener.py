@@ -39,7 +39,6 @@ HUBSPOT_FROM_ADDRESS = Variable.get("ltai.v3.hubspot.from.address")
 GMAIL_CREDENTIALS = Variable.get("ltai.v3.hubspot.gmail.credentials")
 LAST_PROCESSED_EMAIL_FILE = "/appz/cache/hubspot_last_processed_email.json"
 OLLAMA_HOST = Variable.get("ltai.v3.hubspot.ollama.host","http://agentomatic:8000")
-SERVER_URL = Variable.get("ltai.v3.hubspot.server.url")
 HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")
 HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
 HUBSPOT_UI_URL = Variable.get("ltai.v3.hubspot.ui.url")
