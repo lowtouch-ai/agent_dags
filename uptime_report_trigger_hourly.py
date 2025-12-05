@@ -61,7 +61,7 @@ def trigger_uptime_reports(**context):
 
         hour = local_now.hour
         minute = local_now.minute
-        is_midnight_window = (hour == 0 and minute < 15)
+        is_midnight_window = (hour == 0)
 
         # Daily: every day at midnight
         should_trigger_daily = is_midnight_window
