@@ -308,6 +308,7 @@ GENERAL RULES:
 - If user mentions specific entities: Select only those entities, but still create all proposed new objects
 - If user says to skip/exclude something: Remove only that item
 - If user wants to modify: Identify the changes needed
+- When generating the final response, you MUST include every single detail exactly as it appears in the confirmation email.This should include notes, tasks, created objects, existing objects, field values, owners, timestamps, and any other metadata.No detail may be skipped, shortened, summarized, or omitted.All items must be reproduced fully and exactly as provided in the confirmation email.If a section exists (such as notes, tasks, created objects, existing objects, or any other entity), you must include it in full in the final output, even if it appears lengthy.Never assume something is optional. Everything in the confirmation email is mandatory and must appear.
 - For casual comments: Create a note with the comment
 - Current timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 
 Return ONLY valid JSON (no markdown, no explanations):
@@ -1519,7 +1520,7 @@ NOTES TO CREATE:
             "id": "123",
             "details": {{
                 "note_content": "[User] mentioned Follow up on Q4 budget approval",
-                "timestamp": "2025-04-05T10:30:00Z"
+                "timestamp": "YYYY-MM-DD"
             }}
         }}
     ],
@@ -1691,7 +1692,7 @@ Steps:
    - hubspot_owner_id: Use the EXACT task_owner_id from the task (DO NOT change this)
    - hs_task_status: "NOT_STARTED"
    - hs_task_priority: The priority field (HIGH/MEDIUM/LOW)
-   - hs_timestamp: Convert due_date to milliseconds since epoch
+   - hs_timestamp: Return due_date only in YYYY-MM-DDTHH:MM:SSZ format. No epoch time, no milliseconds.
 2. Return the created task ID and properties including the ACTUAL owner name used
 
 EXAMPLE for task with task_owner_id "159242825":
@@ -1702,7 +1703,7 @@ create_task({{
         "hubspot_owner_id": "159242825",  // MUST use this exact ID
         "hs_task_status": "NOT_STARTED",
         "hs_task_priority": "MEDIUM",
-        "hs_timestamp": "1729641600000"
+        "hs_timestamp": "2024-08-22T12:00:00Z"
     }}
 }})
 
@@ -1716,7 +1717,7 @@ Return ONLY this JSON structure (no other text):
                 "task_details": "value",
                 "task_owner_name": "actual_owner_name_from_api",
                 "task_owner_id": "actual_owner_id_used",
-                "due_date": "value",
+                "due_date": "YYYY-MM-DD",
                 "priority": "value",
                 "task_index": task_index_number
             }}

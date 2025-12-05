@@ -248,20 +248,23 @@ Analyze the content and determine:
 
     - DEALS (search_deals):
         - Set to TRUE ONLY if ANY of these conditions are met:
-            a) User explicitly mention the name of a existing deal name.
-            b) User explicitly mention the name of contact or name of company.
+            a) User explicitly mention the name of a existing deal name.The user refers to an existing deal in any way (e.g., “this deal”, “the ABC deal”, “update the opportunity”, “for this pipeline item”).
+            b) User explicitly mention the name of contact or name of company and the context implies an action related to CRM entities(deal lookup, linking, creation, follow-up, updating, etc.).
             c) User is talking about creating entities for existing deals, contacts or company.
-            d) User is creating followup tasks, notes, or meetings for existing deals.
-            e) User explicitly mentions creating a deal, opportunity, or sale
+            d) User is creating followup tasks, notes, or meetings for existing deals.The user is creating or modifying follow-ups, tasks, notes, or meetings that relate to an existing deal.
+            e) User explicitly mentions creating a deal, opportunity, or sale.The user clearly states they want to create a deal/opportunity,propose a deal,open a new opportunity,add something to the pipeline
             f) User states the client/contact is interested in moving forward with a purchase, contract, or agreement
             g) User mentions pricing discussions, proposals sent, quotes provided, or contract negotiations
             h) User indicates a clear buying intent from the client (e.g., "they want to proceed", "ready to sign", "committed to purchase")
         - Set to FALSE for:
             - Initial conversations or introductions
             - Exploratory discussions without commitment
-            - Interest without explicit forward movement (e.g., "interested in learning more", "exploring options", "could turn into something")
-            - Future potential without current action
+            - Interest without explicit forward movement (e.g., "interested in learning more", "exploring options", "could turn into something").Meeting summaries that only shows interest,good engagement,strong opportunity,potential alignment,exploratory discussion without any clear buying signal or creation request.
+            - No Deal Movement Discussions about:platform walkthroughsdemosdiscovery conversationsuse-case alignmentwithout any explicit mention of purchase intent or deal creation.
+            - Future potential without current action.Statements like:“This could turn into something”“They're interested in learning more”,“It's a strong opportunity”.do NOT count as a deal unless the user clearly states commercial next steps.
+            - Administrative or Context-Only Inputs:General updates, notes, or summaries without CRM action or buying intent.
             - Client may be interested or impressed, but no explicit intent to buy or move forward is stated.
+            - **DO NOT treat ANY topics, areas of interest, use cases, bullet points, capabilities, product features, or discussion points as deals.Even if the text contains Areas of interest(e.g., “Autonomous Workflows”),Use cases,Capabilities,Bullet points,Topics from a meeting,these should never be interpreted as deals.**
 
     - NOTES (parse_notes):
         - Set to TRUE ONLY if a conversation, call, or meeting with a client HAS ALREADY OCCURRED
@@ -272,17 +275,22 @@ Analyze the content and determine:
             - Thoughts or observations without an actual interaction
 
     - TASKS (parse_tasks):
-        - Set to TRUE ONLY if there is an EXPLICIT action item or follow-up task mentioned. Check for headings next steps, followup steps, if found set tasks to true.
-        - Look for phrases like: "need to...", "should...", "must...", "follow up on...", "send them...", "schedule...", "remind me to..."
+        - Set parse_tasks to TRUE if the text contains any real, actionable next steps based on intent—regardless of specific words. A task exists when:
+            1. A commitment is made.A meeting, follow-up, review, or discussion is scheduled or requested.
+            2. A request is made.Someone asks for deeper exploration, a review, a demo, a document, or internal support.
+            3. An implied obligation exists.A future event requires preparation, coordination, or internal actions to fulfill.Someone expresses interest in going deeper on a topic, implying preparation.
+            4. The text describes an upcoming time-bound activity.Any future session, follow-up review, or jointly planned next step.
         - Set to FALSE for:
-            - Vague possibilities (e.g., "this could turn into something", "might be good to connect")
-            - General hopes or thoughts without specific action items
-            - Statements like "stay connected" or "follow up soon" without specific tasks
+            1. The text is purely descriptive with no expectations of future action.
+            2. The statements are vague (“could be”, “might be good”) and not tied to concrete events.
+            3. Relationship or sentiment statements contain no specific next step.
+            4. There is no implied preparation or commitment.
 
     - MEETINGS (parse_meetings):
         - Set to TRUE ONLY if ALL of these conditions are met:
             a) A meeting has already occurred (past tense)
-            b) Specific meeting details are provided: date, time, duration, and/or timezone
+            b) Specific meeting details are provided for already held meeting only.
+            c) Only create meeting if all the details including Title,Start Time,End Time,Location(Offline or online),Outcome and Attendees are given.Do not create meetings if any of the details are missing.
         - Set to FALSE for:
             - Conversations or calls without formal meeting details
             - Future meeting intentions without confirmed details
