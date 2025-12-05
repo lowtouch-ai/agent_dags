@@ -1237,7 +1237,11 @@ Your final response must be in below format:
                         
                         mark_message_as_read(service, email_id)
                         ti.xcom_push(key="general_query_report", value=[email])
-                        return "trigger_report_dag"
+                        # Call trigger_report_dag directly
+                        kwargs_copy = kwargs.copy()
+                        kwargs_copy['ti'] = ti
+                        trigger_report_dag(**kwargs_copy)
+                        continue
                     else:
                         # trigger_report is false, but we still need HTML
                         # The AI should have included HTML in the response string
@@ -1862,7 +1866,6 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                             try:
                                 # Check if it's a timestamp string like "2025-12-02T00:00:00Z"
                                 if isinstance(close_date_value, str) and ('T' in close_date_value or '-' in close_date_value):
-                                    from dateutil import parser
                                     close_date_dt = parser.parse(close_date_value).replace(tzinfo=None)
                                 else:
                                     # It's a millisecond timestamp
@@ -2229,7 +2232,7 @@ with DAG(
         provide_context=True
     )
 
-    handle_general_queries_task = BranchPythonOperator(
+    handle_general_queries_task = PythonOperator(
     task_id="handle_general_queries",
     python_callable=handle_general_queries,
     provide_context=True,
@@ -2248,4 +2251,3 @@ with DAG(
     )
 
     fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_general_queries_task, trigger_report_task, no_email_found_task]
-    branch_task >> handle_general_queries_task >> trigger_report_task
