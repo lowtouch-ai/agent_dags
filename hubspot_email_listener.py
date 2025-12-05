@@ -1075,16 +1075,20 @@ def handle_general_queries(**kwargs):
     
     if not unread_emails:
         logging.info("No emails requiring friendly response")
-        return
+        return []  # Return empty list to allow explicit dependencies to work
     
     service = authenticate_gmail()
     if not service:
         logging.error("Gmail authentication failed, cannot send responses")
-        return
+        return []  # Return empty list to allow explicit dependencies to work
     
     # Define signature once
     EMAIL_SIGNATURE = "HubSpot via lowtouch.ai Team"
     AGENT_NAME = "HubSpot Assistant"
+
+    # Track if any email needs a report
+    needs_report = False
+    report_emails = []
 
     for email in unread_emails:
         try:
@@ -1236,8 +1240,9 @@ Your final response must be in below format:
                         logging.info(f"AI detected >10 results, triggering report DAG for email {email_id}")
                         
                         mark_message_as_read(service, email_id)
-                        ti.xcom_push(key="general_query_report", value=[email])
-                        return "trigger_report_dag"
+                        report_emails.append(email)
+                        needs_report = True
+                        continue  # Skip sending email, will be handled by report DAG
                     else:
                         # trigger_report is false, but we still need HTML
                         # The AI should have included HTML in the response string
@@ -1411,6 +1416,19 @@ Your final response must be in below format:
             except:
                 pass
             continue
+    
+    # After processing all emails, push report emails to XCom if needed
+    if needs_report and report_emails:
+        ti.xcom_push(key="general_query_report", value=report_emails)
+        logging.info(f"Processed {len(unread_emails)} emails, {len(report_emails)} need reports")
+    else:
+        # Push empty list to XCom so trigger_report_dag knows there are no reports
+        ti.xcom_push(key="general_query_report", value=[])
+        logging.info(f"Processed {len(unread_emails)} emails, no reports needed")
+    
+    # Always return trigger_report_dag to ensure it runs after handle_general_queries
+    # The trigger_report_dag function will check if there are any emails to process
+    return ["trigger_report_dag"]
 
 def get_deal_stage_labels():
     """
