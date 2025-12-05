@@ -6,7 +6,7 @@ from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from airflow.models import Variable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 import json
 import time
@@ -15,6 +15,15 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import re
 from ollama import Client
+import requests
+import uuid
+import openpyxl
+import pandas as pd
+from email.mime.base import MIMEBase
+from email import encoders
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font
+import pytz
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -26,10 +35,15 @@ default_args = {
     "retry_delay": timedelta(seconds=15),
 }
 
-HUBSPOT_FROM_ADDRESS = Variable.get("HUBSPOT_FROM_ADDRESS")
-GMAIL_CREDENTIALS = Variable.get("HUBSPOT_GMAIL_CREDENTIALS")
+HUBSPOT_FROM_ADDRESS = Variable.get("ltai.v3.hubspot.from.address")
+GMAIL_CREDENTIALS = Variable.get("ltai.v3.hubspot.gmail.credentials")
 LAST_PROCESSED_EMAIL_FILE = "/appz/cache/hubspot_last_processed_email.json"
-OLLAMA_HOST = "http://agentomatic:8000/"
+OLLAMA_HOST = Variable.get("ltai.v3.hubspot.ollama.host","http://agentomatic:8000")
+SERVER_URL = Variable.get("ltai.v3.hubspot.server.url")
+HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")
+HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
+HUBSPOT_UI_URL = Variable.get("ltai.v3.hubspot.ui.url")
+
 def authenticate_gmail():
     try:
         creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
@@ -458,6 +472,297 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
         else:
             return f"<html><body>Error processing AI request: {str(e)}</body></html>"
 
+def search_hubspot_entities(entity_type, filters=None, properties=None, limit=100, sort=None, max_results=None):
+    """
+    Search HubSpot CRM entities with automatic pagination support.
+    
+    Args:
+        entity_type (str): Type of entity - 'contacts', 'companies', or 'deals'
+        filters (list): List of filter groups for search
+        properties (list): List of properties to return
+        limit (int): Results per page (default: 100, max: 200)
+        sort (dict): Sorting configuration
+        max_results (int): Maximum total results to fetch (None = fetch all)
+    
+    Returns:
+        dict: Search results with 'results' containing list of all entities
+    """
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/{entity_type}/search"
+        
+        headers = {
+            "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        # Build base search payload
+        payload = {
+            "limit": min(limit, 200),
+            "properties": properties or []
+        }
+        
+        if filters:
+            payload["filterGroups"] = [{"filters": filters}]
+        
+        if sort:
+            payload["sorts"] = [sort]
+        
+        all_results = []
+        after = None
+        page = 1
+        
+        while True:
+            # Add pagination parameter if available
+            if after:
+                payload["after"] = after
+            
+            logging.info(f"Fetching page {page} for {entity_type} (after={after})")
+            
+            # Make API request
+            response = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            
+            results = response.json()
+            current_batch = results.get('results', [])
+            all_results.extend(current_batch)
+            
+            logging.info(f"Page {page}: Retrieved {len(current_batch)} {entity_type} (Total: {len(all_results)})")
+            
+            # Check if we've reached max_results limit
+            if max_results and len(all_results) >= max_results:
+                all_results = all_results[:max_results]
+                logging.info(f"Reached max_results limit of {max_results}")
+                break
+            
+            # Check for pagination
+            paging = results.get('paging', {})
+            next_page = paging.get('next', {})
+            after = next_page.get('after')
+            
+            # Break if no more pages
+            if not after:
+                logging.info(f"No more pages. Total {entity_type} fetched: {len(all_results)}")
+                break
+            
+            page += 1
+        
+        return {"results": all_results, "total": len(all_results)}
+        
+    except requests.exceptions.RequestException as e:
+        logging.error(f"HubSpot API error for {entity_type}: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            logging.error(f"Response content: {e.response.text}")
+        return {"results": [], "error": str(e)}
+    except Exception as e:
+        logging.error(f"Unexpected error searching {entity_type}: {str(e)}")
+        return {"results": [], "error": str(e)}
+
+
+def search_contacts(filters=None, properties=None, limit=200, max_results=None):
+    """
+    Search HubSpot contacts with pagination support.
+    
+    Args:
+        filters (list): Filter criteria
+        properties (list): Properties to return
+        limit (int): Results per page (max 200)
+        max_results (int): Maximum total results (None = fetch all)
+    
+    Returns:
+        dict: Search results with all pages combined
+    """
+    default_properties = [
+        'firstname', 'lastname', 'email', 'phone', 
+        'jobtitle', 'address', 'city', 'state', 'zip', 'country',
+        'createdate', 'lastmodifieddate', 'hs_object_id', 'hubspot_owner_id'
+    ]
+    
+    return search_hubspot_entities(
+        entity_type='contacts',
+        filters=filters,
+        properties=properties or default_properties,
+        limit=limit,
+        max_results=max_results
+    )
+
+
+def search_companies(filters=None, properties=None, limit=200, max_results=None):
+    """
+    Search HubSpot companies with pagination support.
+    
+    Args:
+        filters (list): Filter criteria
+        properties (list): Properties to return
+        limit (int): Results per page (max 200)
+        max_results (int): Maximum total results (None = fetch all)
+    
+    Returns:
+        dict: Search results with all pages combined
+    """
+    default_properties = [
+        'name', 'domain', 'phone',
+        'address', 'city', 'state', 'zip', 'country',
+        'industry', 'type', 'hs_object_id'
+    ]
+    
+    return search_hubspot_entities(
+        entity_type='companies',
+        filters=filters,
+        properties=properties or default_properties,
+        limit=limit,
+        max_results=max_results
+    )
+
+
+def search_deals(filters=None, properties=None, limit=200, max_results=None):
+    """
+    Search HubSpot deals with pagination support.
+    
+    Args:
+        filters (list): Filter criteria
+        properties (list): Properties to return
+        limit (int): Results per page (max 200)
+        max_results (int): Maximum total results (None = fetch all)
+    
+    Returns:
+        dict: Search results with all pages combined
+    """
+    default_properties = [
+        'dealname', 'amount', 'dealstage', 'pipeline', 'closedate',
+        'createdate', 'hubspot_owner_id', 'hs_object_id'
+    ]
+    final_properties = list(set(default_properties + (properties or [])))
+    
+    return search_hubspot_entities(
+        entity_type='deals',
+        filters=filters,
+        properties=final_properties,
+        limit=limit,
+        max_results=max_results
+    )
+
+def export_to_file(data, export_format='excel', filename=None, export_dir='/appz/cache/exports', hyperlinks=None):
+    try:
+        os.makedirs(export_dir, exist_ok=True)
+        if filename is None:
+            filename = f"export_{uuid.uuid4()}"
+        filename = os.path.splitext(filename)[0]
+
+        filepath = os.path.join(export_dir, f"{filename}.xlsx")
+
+        if isinstance(data, dict):
+            data = list(data.values())[0] if len(data) == 1 else data
+
+        if isinstance(data, (list, dict)):
+            df = pd.DataFrame(data)
+        elif isinstance(data, pd.DataFrame):
+            df = data.copy()
+        else:
+            raise ValueError("Unsupported data type")
+        
+        # CRITICAL FIX: Remove timezone info from all datetime columns
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                df[col] = df[col].dt.tz_localize(None)
+
+        # CRITICAL FIX: Sanitize all string columns to remove illegal Excel characters
+        def sanitize_excel_value(val):
+            """Remove illegal characters that openpyxl cannot write to Excel."""
+            if pd.isna(val):
+                return val
+            if not isinstance(val, str):
+                return val
+            
+            # Remove illegal XML characters (control characters except tab, newline, carriage return)
+            # Excel XML spec doesn't allow: 0x00-0x08, 0x0B-0x0C, 0x0E-0x1F, 0x7F-0x9F
+            illegal_chars = re.compile(
+                r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]'
+            )
+            sanitized = illegal_chars.sub('', val)
+            
+            # Also replace other problematic characters with safe alternatives
+            sanitized = sanitized.replace('\x0B', ' ')  # Vertical tab
+            sanitized = sanitized.replace('\x0C', ' ')  # Form feed
+            
+            return sanitized
+
+        # Apply sanitization to all columns
+        for col in df.columns:
+            if df[col].dtype == 'object':  # String columns
+                df[col] = df[col].apply(sanitize_excel_value)
+
+        # Keep helper columns for hyperlinks
+        df_with_helpers = df.copy()
+
+        # Define which columns to display (exclude helper columns)
+        display_columns = [col for col in df.columns if not col.startswith('_')]
+        df_display = df[display_columns]
+
+        # Write to Excel
+        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+            df_display.to_excel(writer, sheet_name='Sheet1', index=False)
+            worksheet = writer.sheets['Sheet1']
+
+            # Apply formatting to data rows
+            for row in worksheet.iter_rows(min_row=2, max_row=worksheet.max_row, min_col=1, max_col=worksheet.max_column):
+                for cell in row:
+                    col_letter = cell.column_letter
+                    col_name = df_display.columns[cell.column - 1]  # 0-indexed
+
+                    # Format Date columns (e.g., "Close Date", "Created Date", etc.)
+                    if "date" in col_name.lower() or col_name in ["Close Date", "Expected Close Date", "Created At", "Last Modified"]:
+                        if cell.value and isinstance(cell.value, datetime):
+                            cell.number_format = 'DD-MMM-YYYY'  # Changed to DD-MMM-YYYY
+
+                    # Format Amount columns with $ currency
+                    if col_name in ["Amount", "Deal Amount", "Total Value"]:
+                        if cell.value:
+                            try:
+                                if isinstance(cell.value, str):
+                                    # Clean and convert string amounts like "$1,234" or "1234"
+                                    clean_val = re.sub(r'[^\d.]', '', str(cell.value))
+                                    cell.value = float(clean_val) if clean_val else 0
+                                else:
+                                    cell.value = float(cell.value or 0)
+                                cell.number_format = '$#,##0'  # US Dollar format with $ symbol
+                            except:
+                                pass
+
+            # Apply hyperlinks if specified
+            if hyperlinks and 'Sheet1' in hyperlinks:
+                link_config = hyperlinks['Sheet1']
+                for display_col_name, config in link_config.items():
+                    if display_col_name not in df_display.columns:
+                        logging.warning(f"Column {display_col_name} not found for hyperlink")
+                        continue
+
+                    url_col = config.get('url_column', '_hubspot_url')
+                    if url_col not in df_with_helpers.columns:
+                        logging.warning(f"URL column {url_col} not found")
+                        continue
+
+                    col_idx = df_display.columns.get_loc(display_col_name) + 1  # +1 for Excel
+                    col_letter = get_column_letter(col_idx)
+
+                    for row_idx in range(len(df_with_helpers)):
+                        url = df_with_helpers.iloc[row_idx][url_col]
+                        if pd.notna(url) and str(url).strip():
+                            cell = worksheet[f"{col_letter}{row_idx + 2}"]  # +2: header + 0-index
+                            cell.hyperlink = str(url)
+                            cell.font = Font(color="0563C1", underline="single")
+                            cell.style = "Hyperlink"
+
+        logging.info(f"Exported with working hyperlinks: {filepath}")
+        return {
+            "success": True,
+            "filepath": filepath,
+            "filename": f"{filename}.xlsx",
+            "format": "excel"
+        }
+    except Exception as e:
+        logging.error(f"Export failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
 def branch_function(**kwargs):
     ti = kwargs['ti']
     unread_emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="unread_emails")
@@ -475,23 +780,25 @@ def branch_function(**kwargs):
             "email_number": idx,
             "from": headers.get("From", "Unknown"),
             "subject": headers.get("Subject", "No Subject"),
-            "latest_message": email.get("content", ""),  # Full latest user message
+            "latest_message": email.get("content", ""),
             "is_reply": email.get("is_reply", False)
         }
         email_details.append(email_info)
         logging.info(f"email details is: {email_details}")
     
-    # Enhanced routing prompt with FULL conversation context
+    # Enhanced routing prompt with REPORT INTENT capability
     prompt = f"""You are an AI email router that determines which workflow to execute based on user messages.
 
 ANALYZE THE LATEST MESSAGE AND ROUTE APPROPRIATELY:
 
 EMAILS TO CLASSIFY:
 {email_details}
+
 Important Instructions:
     - You are not capable of calling any APIs or tools.
     - You should only answer based on your knowledge and the provided email details.
-    - Hubspot functions include: searching and creating contacts, companies, deals, meetings, tasks, logging notes, and summarizing engagements, casual comments based on context etc.
+    - Hubspot functions include: searching and creating contacts, companies, deals, meetings, tasks, logging notes, and summarizing engagements, generating reports, casual comments based on context etc.
+
 SEARCH_DAG CAPABILITIES:
 - Searches for existing contacts, companies, deals in HubSpot only if followup entities like notes meetings, tasks or another contact or company or deal needs to be created based on user request.
 - Extracts entity information from conversations
@@ -503,7 +810,7 @@ SEARCH_DAG CAPABILITIES:
 - Parse the email context and check wether the user is selecting entities based on the confirmation email sent, if yes then ignore those, you dont have the capability in such scenario.
 CONTINUATION_DAG CAPABILITIES:
 - Creates new contacts, companies, deals in HubSpot
-- Updates existing entities based on user modifications. for example, if the deal exists and we need to change the deal amount, or we need to change the task due date to a different date. These are taken as modification. 
+- Updates existing entities based on user modifications. for example, if the deal exists and we need to change the deal amount, or we need to change the task due date to a different date. These are taken as modification.
 - Logs meeting notes and minutes
 - Creates tasks with owners and due dates
 - Records engagements and associations
@@ -512,14 +819,19 @@ CONTINUATION_DAG CAPABILITIES:
 2. Parse the context other than latest_message and if a confirmation email has already been sent in this thread (you can see it in the chat history), then:
    - Any user reply that includes modifications (like changing owner, adding contact, updating amount, etc.) with respect to confirmation mail entities should be treated as implicit confirmation to proceed with those changes immediately. Do NOT wait for explicit confirmation keywords like "yes", "proceed", or "confirm". Just apply the changes and send the final updated email.
 
+REPORT_DAG CAPABILITIES:
+- Only when the user explictly requests to generate report.
+
 NO_ACTION CAPABILITIES:
 - Recognizes greetings, closings, and simple acknowledgments
 - Outputs friendly responses without further action
 - Handles questions about bot capabilities or general chat
 - Does not perform any HubSpot operations. Only answer the hubspot queries.
 - Ignore casual comments about hubspot context.
-- Handles blank emails without content or context. 
+- Handles blank emails without content or context.
 - Handles any direct queries including hubspot. For example IS there a deal called X in hubspot? or what is the status of deal Y in hubspot? These do not require any action, just a friendly response.
+- Hubspot tasks due today.
+
 ROUTING DECISION TREE:
 
 1. **NO ACTION NEEDED** (Return: no_action)
@@ -528,11 +840,22 @@ ROUTING DECISION TREE:
    - Simple acknowledgments: "ok", "got it", "understood", "sounds good"
    - Questions about bot capabilities or general chat
    - If the email lacks content or context.
-   - Information retrieveing questions from hubspot database.
-   - Information out of hubspot. 
+   - Information retrieving questions from hubspot database.
+   - Information out of hubspot.
    → Response: {{"task_type": "no_action", "message": "friendly_response"}}
 
-2. **SEARCH & ANALYZE** (Route to: search_dag)
+2. **GENERATE REPORT** (Route to: report_dag)
+   When user explicitly requests:
+   - Reports from HubSpot data
+   
+   Keywords: "report", "generate report"
+   Examples:
+   - "Generate a report of all deals closed this quarter"
+   - "Create a sales pipeline report"
+   
+   → Response: {{"task_type": "report_dag", "reasoning": "..."}}
+
+3. **SEARCH & ANALYZE** (Route to: search_dag)
    When user needs to:
    - Search for existing contacts, companies, or deals only if followup entities like notes meetings, tasks or another contact or company or deal needs to be created based on user request.
    - Create NEW entities (deals, contacts, companies, meetings, tasks)
@@ -543,7 +866,7 @@ ROUTING DECISION TREE:
    Keywords: "create", "add", "new", "log meeting", "find", "search", "summarize", "what do we know about"
    → Response: {{"task_type": "search_dag", "reasoning": "..."}}
 
-3. **CONFIRM & EXECUTE** (Route to: continuation_dag)  
+4. **CONFIRM & EXECUTE** (Route to: continuation_dag)
    When user is:
    - Responding to bot's confirmation request ("proceed", "yes", "confirm", "looks good")
    - Making corrections to bot's proposed actions
@@ -558,12 +881,13 @@ ROUTING DECISION TREE:
 
 DECISION LOGIC:
 - Check if message requires ANY action (if not → no_action)
+- For action requests: Is this explicitly asking for a REPORT? → report_dag
 - For action requests: Is this creating/searching NEW entities? → search_dag
 - For action requests: Is this confirming/modifying bot's proposal? → continuation_dag
 - When unclear: Default to search_dag for safety
 
 Return ONLY valid JSON:
-{{"task_type": "no_action|search_dag|continuation_dag", "reasoning": "brief explanation"}}
+{{"task_type": "no_action|report_dag|search_dag|continuation_dag", "reasoning": "brief explanation"}}
 """
     
     logging.info(f"Sending routing prompt to AI with {len(email_details)} emails and conversation context")
@@ -586,7 +910,7 @@ Return ONLY valid JSON:
         conversation_history=conversation_history_for_ai,
         expect_json=True
     )
-    logging.info(f"AI routing response: {response}")
+    logging.info(f"AI routing response: {response}")   
     # Parse JSON response
     try:
         json_response = json.loads(response)
@@ -599,7 +923,12 @@ Return ONLY valid JSON:
         reasoning = json_response.get("reasoning", "No reasoning provided")
         logging.info(f"✓ AI DECISION: {task_type}, REASONING: {reasoning}")
         
-        if "continuation" in task_type:
+        if "report" in task_type:
+            ti.xcom_push(key="report_emails", value=unread_emails)
+            logging.info(f"→ Routing {len(unread_emails)} emails to report_dag")
+            return "trigger_report_dag"
+            
+        elif "continuation" in task_type:
             ti.xcom_push(key="reply_emails", value=unread_emails)
             logging.info(f"→ Routing {len(unread_emails)} emails to continuation_dag")
             return "trigger_continuation_dag"
@@ -613,12 +942,6 @@ Return ONLY valid JSON:
             ti.xcom_push(key="no_action_emails", value=unread_emails)
             logging.info("→ No action needed for the emails")
             return "handle_general_queries"
-    
-
-    logging.warning("AI failed to provide valid response, using fallback routing to no_action")
-    ti.xcom_push(key="no_action_emails", value=unread_emails)
-    logging.info(f"→ Fallback: Routing {len(unread_emails)} email(s) to handle_general_queries")
-    return "handle_general_queries"
 
 
 def extract_latest_reply(email_content):
@@ -815,12 +1138,21 @@ Reply in 1-2 short, polite, professional sentences.
         - Even if the user does not explicitly mention 'from today', you must assume that the date range ALWAYS starts from today.
         - Do NOT include any past dates under any circumstances.(Example: If today is 03-Dec-2025, then the filter MUST be:gte = 03-Dec-2025,lte = 31-Dec-2025 and the response MUST only include deals whose expiry date lies within this range)
       * Do not follow the pagination rule in email response.If there are 100 matches for deals,return all 100 in the email itself. 
-    - If user asking a entity detail along with a timeperiod use LTE, GTE or both based on user request. The output should be in HTML - table Format .
+    - If user asking a entity detail along with a timeperiod use LTE, GTE or both based on user request. The output should be in HTML - table Format.
+    - If the user asks about their tasks parse the senders name and invoke `get_all_owners` to get the hubspot owner id and then invoke `search_tasks` to get the tasks assigned to the owner on the sepcified date. The output should be in HTML - table Format.
       * Ensure that the output strictly returns all of the following fields:Task_ID,Task Subject,Due Date,Status,Priority.
       * Do not follow the pagination rule in email response.If there are 100 matches for tasks,return all 100 in the email itself without any followp response.
 - All the **dates** should be in YYYY-MM-DD format and do not include time.
 - If a column has no data for a particular record, give the value for that as **N/A**.Do not leave any coloumn blank.
 - Always maintain a friendly and professional tone.
+
+**IMPORTANT: Response Format**
+Return ONLY a JSON object with this structure:
+{{
+    "trigger_report": false
+}}
+
+**CRITICAL RULE**: If the query results contain MORE THAN 10 records, you MUST set "trigger_report": true
 Your final response must be in below format:
 ```
         <html>
@@ -881,7 +1213,33 @@ Your final response must be in below format:
 """
 
                 ai_response = get_ai_response(prompt=prompt, expect_json=False)
-                logging.info(f"AI generated response before cleaning: {ai_response}")   
+                logging.info(f"AI generated response before cleaning: {ai_response}")
+
+                # ← REMOVE THIS LINE → ai_response = None
+
+                # Try to parse JSON first (because we expect { "trigger_report": ... } when >10 records)
+                try:
+                    ai_response = json.loads(ai_response)
+                except json.JSONDecodeError:
+                    ai_response = extract_json_from_text(ai_response)
+
+                # Validate it's a dict
+                if not isinstance(ai_response, dict):
+                    raise ValueError(f"AI response is not a dict: {ai_response}")
+
+                # Check if we need to trigger full report instead
+                if ai_response.get("trigger_report", False):
+                    logging.info(f"AI detected >10 results, triggering report DAG for email {email_id}")
+                    
+                    # Mark email as read (will fail later due to scopes – see below)
+                    mark_message_as_read(service, email_id)
+                    
+                    # Push to report queue
+                    ti.xcom_push(key="general_query_report", value=[email])
+                    trigger_report_dag(**kwargs)
+                    
+                    continue
+  
                 match = re.search(r'```html.*?\n(.*?)```', ai_response, re.DOTALL)
                 if match:
                     ai_response = match.group(1).strip()
@@ -1022,6 +1380,787 @@ Your final response must be in below format:
             except:
                 pass
             continue
+
+def get_deal_stage_labels():
+    """
+    Fetch all pipelines and stages from HubSpot and return a mapping:
+    { 'appointmentscheduled': 'Appointment Scheduled', ... }
+    """
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/pipelines/deals"
+        headers = {
+            "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.get(endpoint, headers=headers, timeout=30)
+        response.raise_for_status()
+        pipelines_data = response.json().get("results", [])
+
+        stage_mapping = {}
+        for pipeline in pipelines_data:
+            pipeline_label = pipeline.get("label", "")
+            stages = pipeline.get("stages", [])
+            for stage in stages:
+                stage_id = stage.get("id")
+                stage_label = stage.get("label")
+                if stage_id and stage_label:
+                    stage_mapping[stage_id] = stage_label
+                    # Optional: include pipeline name for context
+                    # stage_mapping[stage_id] = f"{stage_label} ({pipeline_label})"
+
+        logging.info(f"Loaded {len(stage_mapping)} deal stage labels from HubSpot")
+        return stage_mapping
+
+    except Exception as e:
+        logging.error(f"Failed to fetch deal stage labels: {e}")
+        return {}
+
+def build_report_log(entity_type, filters, results_data, requester_email, 
+                     original_query, timezone_str="Asia/Kolkata"):
+    """
+    Build report log JSON for logging purposes only (no disk write).
+    
+    Args:
+        entity_type (str): Type of entity (deals, contacts, companies)
+        filters (list): Applied filters from search
+        results_data (list): Query results from HubSpot
+        requester_email (str): Email of person requesting report
+        original_query (str): Original user query text
+        timezone_str (str): Timezone for timestamps
+        
+    Returns:
+        dict: Report log structure for logging
+    """
+    try:
+        # Generate unique report ID
+        report_id = str(uuid.uuid4())
+        
+        # Get timezone-aware timestamps
+        tz = pytz.timezone(timezone_str)
+        request_time = datetime.now(tz)
+        data_as_of = datetime.now(tz)
+        
+        # Format timestamps as ISO 8601 with timezone
+        request_timestamp = request_time.isoformat()
+        data_as_of_timestamp = data_as_of.isoformat()
+        
+        # Extract requester_id from email
+        requester_id = f"user:{requester_email}"
+        
+        # Build filter representation
+        filter_dict = {}
+        for f in filters:
+            prop_name = f.get("propertyName")
+            operator = f.get("operator")
+            value = f.get("value")
+            
+            # Convert to report-friendly format
+            if operator == "GT":
+                filter_dict[f"{prop_name}_gt"] = value
+            elif operator == "GTE":
+                filter_dict[f"{prop_name}_from"] = value
+            elif operator == "LT":
+                filter_dict[f"{prop_name}_lt"] = value
+            elif operator == "LTE":
+                filter_dict[f"{prop_name}_to"] = value
+            elif operator == "EQ":
+                filter_dict[prop_name] = value
+            else:
+                filter_dict[f"{prop_name}_{operator.lower()}"] = value
+        
+        # Format results based on entity type
+        formatted_results = []
+        total_value = 0
+        highest_deal = None
+        
+        for record in results_data:
+            props = record.get("properties", {})
+            record_id = record.get("id")
+            
+            if entity_type == "deals":
+                amount = float(props.get("amount", 0) or 0)
+                formatted_record = {
+                    "dealId": record_id,
+                    "dealName": props.get("dealname", ""),
+                    "amount": amount,
+                    "close_date": props.get("closedate", ""),
+                    "stage": props.get("dealstage", ""),
+                    "pipeline": props.get("pipeline", ""),
+                    "ownerName": props.get("hubspot_owner_name", "")
+                }
+                
+                total_value += amount
+                if highest_deal is None or amount > highest_deal["amount_converted"]:
+                    highest_deal = {
+                        "dealId": record_id,
+                        "amount_converted": amount
+                    }
+                    
+            elif entity_type == "contacts":
+                formatted_record = {
+                    "contactId": record_id,
+                    "firstName": props.get("firstname", ""),
+                    "lastName": props.get("lastname", ""),
+                    "email": props.get("email", ""),
+                    "phone": props.get("phone", ""),
+                    "jobTitle": props.get("jobtitle", "")
+                }
+                
+            elif entity_type == "companies":
+                formatted_record = {
+                    "companyId": record_id,
+                    "companyName": props.get("name", ""),
+                    "domain": props.get("domain", ""),
+                    "industry": props.get("industry", ""),
+                    "phone": props.get("phone", "")
+                }
+            
+            formatted_results.append(formatted_record)
+        
+        # Build aggregates
+        aggregates = {}
+        if entity_type == "deals":
+            aggregates = {
+                "total_deals": len(formatted_results),
+                "total_value_converted": total_value,
+                "highest_deal": highest_deal
+            }
+        else:
+            aggregates = {
+                f"total_{entity_type}": len(formatted_results)
+            }
+        
+        # Build complete report log
+        report_log = {
+            "report_id": report_id,
+            "report_type": f"hubspot_{entity_type}",
+            "requester_id": requester_id,
+            "request_timestamp": request_timestamp,
+            "data_as_of": data_as_of_timestamp,
+            "filters": filter_dict,
+            "results_count": len(formatted_results),
+            "results": formatted_results,
+            "aggregates": aggregates,
+            "pagination": {
+                "page_size": 500,
+                "next_cursor": None
+            },
+            "partial": False,
+            "failures": []
+        }
+        
+        return report_log
+        
+    except Exception as e:
+        logging.error(f"Failed to build report log: {e}", exc_info=True)
+        return None
+
+def trigger_report_dag(**kwargs):
+    """Enhanced trigger_report_dag with professional report email formatting"""
+    DEAL_STAGE_LABELS = get_deal_stage_labels()
+    ti = kwargs['ti']
+    report_emails = ti.xcom_pull(key="report_emails")
+    general_report_emails = ti.xcom_pull(key="general_query_report")
+    
+    # Ensure both are lists (handle None case)
+    report_emails = report_emails if report_emails is not None else []
+    general_report_emails = general_report_emails if general_report_emails is not None else []
+    
+    # Combine both sources
+    all_report_emails = report_emails + general_report_emails
+    
+    if not all_report_emails:
+        logging.info("No report emails to process")
+        return
+   
+    service = authenticate_gmail()
+    if not service:
+        logging.error("Gmail authentication failed, cannot send reports")
+        return
+   
+    owner_cache = {}
+   
+    def get_owner_name(owner_id):
+        if not owner_id:
+            return "Unassigned"
+        if owner_id in owner_cache:
+            return owner_cache[owner_id]
+       
+        try:
+            url = f"{HUBSPOT_BASE_URL}/crm/v3/owners/{owner_id}"
+            headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                name = f"{data.get('firstName', '')} {data.get('lastName', '')}".strip()
+                owner_cache[owner_id] = name or "Unknown Owner"
+                return owner_cache[owner_id]
+            else:
+                owner_cache[owner_id] = "Unknown Owner"
+                return "Unknown Owner"
+        except Exception as e:
+            logging.warning(f"Failed to fetch owner {owner_id}: {e}")
+            owner_cache[owner_id] = "Unknown Owner"
+            return "Unknown Owner"
+   
+    def format_currency(amount):
+        """Format amount as currency"""
+        if not amount:
+            return "$0"
+        try:
+            return f"${int(float(amount)):,}"
+        except:
+            return f"${amount}"
+   
+    def get_filter_summary(filters, entity_type):
+        """Generate human-readable filter summary"""
+        if not filters:
+            return "No filters applied"
+       
+        summaries = []
+        for f in filters:
+            prop = f.get("propertyName", "")
+            op = f.get("operator", "")
+            val = f.get("value", "")
+           
+            # Readable operator names
+            op_map = {
+                "EQ": "equals",
+                "NEQ": "not equals",
+                "GT": "greater than",
+                "GTE": "greater than or equal to",
+                "LT": "less than",
+                "LTE": "less than or equal to",
+                "CONTAINS_TOKEN": "contains",
+                "NOT_CONTAINS_TOKEN": "does not contain"
+            }
+           
+            # Special handling for deal stages
+            if prop == "dealstage" and entity_type == "deals":
+                val = DEAL_STAGE_LABELS.get(val, val)
+           
+            summaries.append(f"{prop} {op_map.get(op, op)} {val}")
+       
+        return " • ".join(summaries)
+   
+    for email in report_emails:
+        try:
+            headers = email.get("headers", {})
+            sender_email = headers.get("From", "")
+            email_id = email.get("id", "unknown")
+            email_match = re.search(r'<(.+?)>', sender_email)
+            clean_sender_email = email_match.group(1) if email_match else sender_email.lower()
+            sender_name = "there"
+            name_match = re.search(r'^([^<]+)', sender_email)
+            if name_match:
+                sender_name = name_match.group(1).strip()
+           
+            ai_response = None
+            report_filepath = None
+            report_filename = None
+            report_success = False
+           
+            try:
+                # Get conversation history
+                conversation_history_for_ai = []
+                chat_history = email.get("chat_history", [])
+                for i in range(0, len(chat_history), 2):
+                    if i + 1 < len(chat_history):
+                        user_msg = chat_history[i]
+                        assistant_msg = chat_history[i + 1]
+                        if user_msg["role"] == "user" and assistant_msg["role"] == "assistant":
+                            conversation_history_for_ai.append({
+                                "prompt": user_msg["content"],
+                                "response": assistant_msg["content"]
+                            })
+               
+                # AI Analysis
+                analysis_prompt = f"""You are a HubSpot data analyst. Analyze this request and determine what data to search for.
+User request: "{email.get("content", "").strip()}"
+Determine:
+1. Entity type: contacts, companies, or deals
+2. Filters needed (date ranges, statuses, etc.)
+3. Properties to include in the report
+4. Sort order if specified
+5. If the user asks question like which all deals expire by this month or this year, then always take the current date or todays date as GTE and the month end or year end date as LTE. Donot include the date that is already past the current date.
+6. Dates should only be given as YYYY-MM-DD.
+7. Include `hubspot_owner_id` in the request body of contact entity type.
+8. The report_title should be meaningful of what data is retrieved. For e.g, If the user asks get me the deals expiring for this month then the title should be Deals expiring in dec or the current month.
+Return ONLY a JSON object with this structure:
+{{
+    "entity_type": "deals",
+    "filters": [
+        {{"propertyName": "dealstage", "operator": "EQ", "value": "appointmentscheduled"}}
+    ],
+    "properties": ["dealname", "amount", "dealstage", "closedate"],
+    "sort": {{"propertyName": "closedate", "direction": "ASCENDING"}},
+    "report_title": "Deals Filtered by Deal Stage"
+}}
+Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOKEN.
+"""
+               
+                analysis_response = get_ai_response(
+                    prompt=analysis_prompt,
+                    conversation_history=conversation_history_for_ai,
+                    expect_json=True
+                )
+               
+                try:
+                    analysis_data = json.loads(analysis_response)
+                except:
+                    analysis_data = extract_json_from_text(analysis_response)
+               
+                if not analysis_data or "entity_type" not in analysis_data:
+                    raise ValueError("Invalid analysis response from AI")
+               
+                entity_type = analysis_data.get("entity_type", "contacts").lower()
+                filters = analysis_data.get("filters", [])
+                properties = analysis_data.get("properties", [])
+                sort = analysis_data.get("sort")
+                report_title = analysis_data.get("report_title", "HubSpot Report")
+               
+                # Default properties
+                base_properties = {
+                    "contacts": ['firstname', 'lastname', 'email', 'phone', 'jobtitle', 'address', 'city', 'state', 'country', 'hs_object_id', 'hubspot_owner_id'],
+                    "companies": ['name', 'domain', 'phone', 'address', 'city', 'state', 'zip', 'country', 'industry', 'type', 'hs_object_id'],
+                    "deals": ['dealname', 'amount', 'closedate', 'dealstage', 'pipeline', 'hubspot_owner_id', 'hs_object_id']
+                }
+               
+                default_props = base_properties.get(entity_type, [])
+                final_properties = list(set(default_props + (properties or [])))
+               
+                # Execute search
+                if entity_type == "contacts":
+                    search_results = search_contacts(filters=filters, properties=final_properties)
+                elif entity_type == "companies":
+                    search_results = search_companies(filters=filters, properties=final_properties)
+                elif entity_type == "deals":
+                    search_results = search_deals(filters=filters, properties=final_properties)
+                else:
+                    raise ValueError(f"Invalid entity type: {entity_type}")
+               
+                results_data = search_results.get("results", [])
+               
+                if not results_data:
+                    raise ValueError("No data found matching the search criteria")
+                report_log = build_report_log(
+                    entity_type=entity_type,
+                    filters=filters,
+                    results_data=results_data,
+                    requester_email=clean_sender_email,
+                    original_query=email.get("content", "").strip(),
+                    timezone_str="Asia/Kolkata"
+                )
+
+                if report_log:
+                    # Log the report metadata as structured JSON
+                    logging.info(f"REPORT_GENERATED: {json.dumps(report_log, indent=2)}")
+                    
+                    # Extract report_id for reference
+                    report_id = report_log.get("report_id")
+                    logging.info(f"✓ Report generated: report_id={report_id}, "
+                            f"entity_type={entity_type}, results_count={len(results_data)}")
+                else:
+                    logging.warning("Failed to build report log")
+
+               
+                # Calculate summary statistics
+                record_count = len(results_data)
+                total_value = 0
+                unique_owners = set()
+               
+                # Format data with helper columns
+                formatted_data = []
+                for record in results_data:
+                    props = record.get("properties", {})
+                    record_id = record.get("id")
+                
+                    row = {"_record_id": record_id}
+                   
+                    if entity_type == "contacts":
+                        full_name = f"{props.get('firstname', '')} {props.get('lastname', '')}".strip()
+                        owner_name = get_owner_name(props.get("hubspot_owner_id"))
+                        if props.get("hubspot_owner_id"):
+                            unique_owners.add(props.get("hubspot_owner_id"))
+                       
+                        row.update({
+                            "Contact ID": record_id,
+                            "Contact Name": full_name or "No Name",
+                            "Job Title": props.get("jobtitle", ""),
+                            "Email": props.get("email", ""),
+                            "Phone": props.get("phone", ""),
+                            "Street Address": props.get("address", ""),
+                            "City": props.get("city", ""),
+                            "State/Region": props.get("state", ""),
+                            "Postal Code": props.get("zip", ""),
+                            "Country": props.get("country", ""),
+                            "Contact Owner": owner_name,
+                            "_hubspot_url": f"{HUBSPOT_UI_URL}/contact/{record_id}"
+                        })
+                   
+                    elif entity_type == "companies":
+                        row.update({
+                            "Company ID": record_id,
+                            "Company Name": props.get("name", "Unnamed Company"),
+                            "Domain": props.get("domain", ""),
+                            "Street Address": props.get("address", ""),
+                            "City": props.get("city", ""),
+                            "State/Region": props.get("state", ""),
+                            "Country": props.get("country", ""),
+                            "Phone": props.get("phone", ""),
+                            "Type": props.get("type", ""),
+                            "_hubspot_url": f"{HUBSPOT_UI_URL}/company/{record_id}"
+                        })
+                   
+                    elif entity_type == "deals":
+                        owner_name = get_owner_name(props.get("hubspot_owner_id"))
+                        if props.get("hubspot_owner_id"):
+                            unique_owners.add(props.get("hubspot_owner_id"))
+                       
+                        stage_id = props.get("dealstage")
+                        stage_label = DEAL_STAGE_LABELS.get(stage_id, "Unknown Stage")
+                       
+                        # Add to total value
+                        amount = props.get("amount")
+                        if amount:
+                            try:
+                                total_value += float(amount)
+                            except:
+                                pass
+
+                        close_date_value = props.get("closedate")
+                        if close_date_value:
+                            try:
+                                # Check if it's a timestamp string like "2025-12-02T00:00:00Z"
+                                if isinstance(close_date_value, str) and ('T' in close_date_value or '-' in close_date_value):
+                                    from dateutil import parser
+                                    close_date_dt = parser.parse(close_date_value).replace(tzinfo=None)
+                                else:
+                                    # It's a millisecond timestamp
+                                    close_date_dt = datetime.fromtimestamp(int(close_date_value) / 1000)
+                            except:
+                                close_date_dt = None
+                        else:
+                            close_date_dt = None
+                       
+                        row.update({
+                            "Deal ID": record_id,
+                            "Deal Name": props.get("dealname", "Untitled Deal"),
+                            "Amount": props.get("amount", ""),
+                            "Close Date": close_date_dt,
+                            "Deal Stage": stage_label,
+                            "Deal Owner": owner_name,
+                            "_hubspot_url": f"{HUBSPOT_UI_URL}/deal/{record_id}"
+                        })
+                   
+                    formatted_data.append(row)
+               
+                # Column order
+                column_order = {
+                    "contacts": ["Contact ID", "Contact Name", "Job Title", "Email", "Phone", "Street Address", "City", "State/Region", "Country", "Contact Owner"],
+                    "companies": ["Company ID", "Company Name", "Domain", "Street Address", "City", "State/Region", "Country", "Phone", "Type"],
+                    "deals": ["Deal ID", "Deal Name", "Amount", "Deal Stage", "Close Date", "Deal Owner"]
+                }
+               
+                df = pd.DataFrame(formatted_data)
+                ordered_cols = column_order.get(entity_type, df.columns.tolist())
+               
+                # Reorder only visible columns, keep helper columns
+                visible_cols = [col for col in ordered_cols if col in df.columns]
+                df_final = df[visible_cols + ['_hubspot_url']]
+               
+                # Make sure the ID column is first
+                id_col = "Deal ID" if entity_type == "deals" else \
+                         "Contact ID" if entity_type == "contacts" else "Company ID"
+               
+                if id_col in df_final.columns:
+                    cols = [id_col] + [c for c in df_final.columns if c != id_col and c != '_hubspot_url'] + ['_hubspot_url']
+                    df_final = df_final[cols]
+               
+                # Export with hyperlinks
+                export_result = export_to_file(
+                    data=df_final,
+                    export_format='excel',
+                    filename=f"hubspot_{entity_type}_report",
+                    export_dir='/appz/cache/exports',
+                    hyperlinks={
+                        'Sheet1': {
+                            id_col: {
+                                'url_column': '_hubspot_url'
+                            }
+                        }
+                    }
+                )
+               
+                if not export_result.get("success"):
+                    raise ValueError(f"Export failed: {export_result.get('error', 'Unknown error')}")
+               
+                report_filepath = export_result["filepath"]
+                report_filename = export_result["filename"]
+                report_success = True
+               
+                logging.info(f"✓ Report generated successfully: {report_filepath}")
+               
+                # Generate timestamp with timezone
+                from datetime import timezone
+                import pytz
+               
+                timezone_str = "Asia/Kolkata"
+                tz = pytz.timezone(timezone_str)
+                current_time = datetime.now(tz)
+                # Format date as dd-Mon-yyyy (e.g., 03-Dec-2025)
+                data_as_of_formatted = current_time.strftime("%d-%b-%Y")
+               
+                # Build filter summary
+                filter_summary = get_filter_summary(filters, entity_type)
+               
+                # Owner summary
+                owner_summary = f"{len(unique_owners)} owner(s)" if unique_owners else "All owners"
+               
+                # Success HTML - Professional, clean format
+                ai_response = f"""
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif;
+            line-height: 1.6;
+            color: #000000;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{
+            margin-bottom: 20px;
+        }}
+        .report-title {{
+            font-size: 18px;
+            font-weight: bold;
+            color: #000000;
+            margin: 20px 0 10px 0;
+            padding-bottom: 8px;
+        }}
+        .metadata {{
+            font-size: 13px;
+            color: #333333;
+            margin: 10px 0 25px 0;
+        }}
+        .stats-section {{
+            margin: 25px 0;
+        }}
+        .stat-row {{
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+        }}
+        .stat-label {{
+            font-weight: 600;
+            color: #000000;
+        }}
+        .stat-value {{
+            color: #000000;
+            font-weight: bold;
+            margin-left: 8px
+        }}
+        .message {{
+            margin: 20px 0;
+            color: #000000;
+        }}
+        .closing {{
+            margin-top: 25px;
+            color: #000000;
+        }}
+        .signature {{
+            margin-top: 30px;
+            padding-top: 15px;
+            border-top: 1px solid #cccccc;
+        }}
+        .signature-line {{
+            margin: 3px 0;
+            color: #000000;
+        }}
+        .company {{
+            color: #666666;
+            font-size: 13px;
+            margin-top: 8px;
+        }}
+        .company a {{
+            color: #0066cc;
+            text-decoration: none;
+        }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+    </div>
+   
+    <div class="report-title">
+        {report_title}
+    </div>
+    <div class="metadata">
+        Data as of: {data_as_of_formatted}
+    </div>
+   
+    <div class="stats-section">
+        <div class="stat-row">
+            <span class="stat-label">TOTAL {entity_type.upper()}</span>
+            <span class="stat-value">{record_count}</span>
+        </div>
+        {"" if entity_type != "deals" else f'''
+        <div class="stat-row">
+            <span class="stat-label">TOTAL VALUE</span>
+            <span class="stat-value">{format_currency(total_value)}</span>
+        </div>
+        '''}
+    </div>
+   
+    <div class="message">
+        <p>Please find the attached Excel file containing your detailed report.</p>
+    </div>
+   
+    <div class="closing">
+        <p>If you need any further assistance or have questions regarding the results, please feel free to let me know.</p>
+    </div>
+   
+    <div class="signature">
+        <div class="signature-line"><strong>Best regards,</strong></div>
+        <div class="signature-line">The HubSpot Assistant Team</div>
+        <div class="company"><a href="http://lowtouch.ai">lowtouch.ai</a>
+        </div>
+    </div>
+</body>
+</html>
+"""
+           
+            except Exception as report_error:
+                logging.error(f"Report generation failed for email {email_id}: {report_error}", exc_info=True)              
+                failed_log = {
+                    "report_id": str(uuid.uuid4()),
+                    "report_type": f"hubspot_{entity_type if 'entity_type' in locals() else 'unknown'}",
+                    "requester_id": f"user:{clean_sender_email}",
+                    "request_timestamp": datetime.now(pytz.timezone("Asia/Kolkata")).isoformat(),
+                    "partial": True,
+                    "failures": [{"error": str(report_error), "timestamp": datetime.now().isoformat()}]
+                }
+                logging.error(f"REPORT_FAILED: {json.dumps(failed_log)}")
+                
+                report_success = False
+                ai_response = None
+                report_filepath = None
+           
+            # Determine which response to use
+            if report_success and ai_response:
+                final_response = ai_response
+                log_prefix = "SUCCESS Report"
+            else:
+                # Fallback error message (keep your existing fallback)
+                final_response = f"""
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{
+            margin-bottom: 15px;
+        }}
+        .message {{
+            margin: 15px 0;
+        }}
+        .closing {{
+            margin-top: 15px;
+        }}
+        .signature {{
+            margin-top: 15px;
+            font-weight: bold;
+        }}
+        .company {{
+            color: #666;
+            font-size: 0.9em;
+        }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+    </div>
+   
+    <div class="message">
+        <p>Thank you for requesting a report from the HubSpot Assistant.</p>
+       
+        <p>We're currently experiencing a temporary technical issue that is preventing us from generating your report at this time. Our engineering team has been notified and is actively working on a resolution.</p>
+       
+        <p>Your request has been logged, and we'll process it as soon as the system is back online. We apologize for any inconvenience this may cause.</p>
+    </div>
+   
+    <div class="closing">
+        <p>If this is urgent, please feel free to reach out directly, and we'll assist you manually.</p>
+    </div>
+   
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai" class="company">Lowtouch.ai</a></p>
+    </div>
+</body>
+</html>
+"""
+                log_prefix = "FALLBACK Report"
+           
+            # Build and send email (keep your existing send logic)
+            try:
+                msg = MIMEMultipart()
+                msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
+                msg["To"] = sender_email
+               
+                subject = headers.get("Subject", "Your HubSpot Report")
+                if not subject.lower().startswith("re:"):
+                    subject = f"Re: {subject}"
+                msg["Subject"] = subject
+               
+                original_message_id = headers.get("Message-ID", "")
+                if original_message_id:
+                    msg["In-Reply-To"] = original_message_id
+                    references = headers.get("References", "")
+                    msg["References"] = f"{references} {original_message_id}".strip() if references else original_message_id
+               
+                msg.attach(MIMEText(final_response, "html"))
+               
+                if report_success and report_filepath and os.path.exists(report_filepath):
+                    with open(report_filepath, "rb") as f:
+                        part = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        part.set_payload(f.read())
+                    encoders.encode_base64(part)
+                    part.add_header("Content-Disposition", f"attachment; filename={report_filename}")
+                    msg.attach(part)
+                    logging.info(f"✓ Attached report file: {report_filename}")
+               
+                raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
+                service.users().messages().send(userId="me", body={"raw": raw}).execute()
+                mark_message_as_read(service, email_id)
+               
+                logging.info(f"✓ {log_prefix} email sent to {sender_email}")
+           
+            except Exception as send_error:
+                logging.error(f"Failed to send email for {email_id}: {send_error}", exc_info=True)
+                mark_message_as_read(service, email_id)
+       
+        except Exception as outer_error:
+            logging.error(f"Unexpected error processing report email {email.get('id', 'unknown')}: {outer_error}", exc_info=True)
+            try:
+                mark_message_as_read(service, email.get("id", ""))
+            except:
+                pass
+   
+    logging.info(f"✓ Report DAG completed processing {len(report_emails)} emails")
+
 def no_email_found(**kwargs):
     logging.info("No new emails or replies found to process.")
 
@@ -1072,10 +2211,16 @@ with DAG(
     provide_context=True
     )
 
+    trigger_report_task = PythonOperator(
+        task_id="trigger_report_dag",
+        python_callable=trigger_report_dag,
+        provide_context=True
+    )
+
     no_email_found_task = PythonOperator(
         task_id="no_email_found_task",
         python_callable=no_email_found,
         provide_context=True
     )
 
-    fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_general_queries_task,no_email_found_task]
+    fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_general_queries_task, trigger_report_task, no_email_found_task]
