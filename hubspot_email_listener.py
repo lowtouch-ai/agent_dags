@@ -1213,41 +1213,72 @@ Your final response must be in below format:
 """
 
                 ai_response = get_ai_response(prompt=prompt, expect_json=False)
-                logging.info(f"AI generated response before cleaning: {ai_response}")
+                logging.info(f"AI generated response (raw): {ai_response}")
 
-                # ← REMOVE THIS LINE → ai_response = None
-
-                # Try to parse JSON first (because we expect { "trigger_report": ... } when >10 records)
+                # ===== NEW CODE STARTS HERE =====
+                # First, try to detect if this is a JSON response with trigger_report
+                parsed_json = None
                 try:
-                    ai_response = json.loads(ai_response)
+                    # Try direct JSON parse
+                    parsed_json = json.loads(ai_response)
+                    logging.info(f"Parsed as JSON: {parsed_json}")
                 except json.JSONDecodeError:
-                    ai_response = extract_json_from_text(ai_response)
+                    # Try extracting JSON from text
+                    parsed_json = extract_json_from_text(ai_response)
+                    if parsed_json:
+                        logging.info(f"Extracted JSON from text: {parsed_json}")
 
-                # Validate it's a dict
-                if not isinstance(ai_response, dict):
-                    raise ValueError(f"AI response is not a dict: {ai_response}")
-
-                # Check if we need to trigger full report instead
-                if ai_response.get("trigger_report", False):
-                    logging.info(f"AI detected >10 results, triggering report DAG for email {email_id}")
-                    
-                    # Mark email as read (will fail later due to scopes – see below)
-                    mark_message_as_read(service, email_id)
-                    
-                    # Push to report queue
-                    ti.xcom_push(key="general_query_report", value=[email])
-                    trigger_report_dag(**kwargs)
-                    
-                    continue
-  
-                match = re.search(r'```html.*?\n(.*?)```', ai_response, re.DOTALL)
-                if match:
-                    ai_response = match.group(1).strip()
+                # Check if we got a valid response with trigger_report flag
+                if parsed_json and isinstance(parsed_json, dict) and "trigger_report" in parsed_json:
+                    # We have a valid JSON response with trigger_report
+                    if parsed_json.get("trigger_report", False):
+                        # More than 10 records - trigger report DAG
+                        logging.info(f"AI detected >10 results, triggering report DAG for email {email_id}")
+                        
+                        mark_message_as_read(service, email_id)
+                        ti.xcom_push(key="general_query_report", value=[email])
+                        return "trigger_report_dag"
+                    else:
+                        # trigger_report is false, but we still need HTML
+                        # The AI should have included HTML in the response string
+                        # Extract HTML from the original ai_response string
+                        if isinstance(ai_response, str):
+                            # Look for HTML in markdown block
+                            match = re.search(r'```html.*?\n(.*?)```', ai_response, re.DOTALL)
+                            if match:
+                                ai_response = match.group(1).strip()
+                                logging.info(f"Extracted HTML from markdown code block")
+                            else:
+                                # Check if HTML exists directly in response
+                                if '<html' in ai_response.lower() or '<body' in ai_response.lower():
+                                    # Remove the JSON part and keep only HTML
+                                    html_match = re.search(r'(<html.*?</html>)', ai_response, re.DOTALL | re.IGNORECASE)
+                                    if html_match:
+                                        ai_response = html_match.group(1).strip()
+                                        logging.info(f"Extracted HTML directly from response")
+                                    else:
+                                        raise ValueError("Response contains HTML tags but couldn't extract valid HTML")
+                                else:
+                                    raise ValueError("AI response has trigger_report=false but no HTML content found")
+                        else:
+                            raise ValueError("Expected string response containing HTML")
                 else:
-                    # No HTML code block found, use response directly
-                    ai_response = ai_response.strip()
-                logging.info(f"AI generated response :{ai_response}")
-                if not ai_response or len(ai_response) < 5 or "error" in ai_response.lower():
+                    # Not a JSON response, treat entire response as HTML
+                    if isinstance(ai_response, str):
+                        match = re.search(r'```html.*?\n(.*?)```', ai_response, re.DOTALL)
+                        if match:
+                            ai_response = match.group(1).strip()
+                        else:
+                            ai_response = ai_response.strip()
+                    else:
+                        raise ValueError(f"Unexpected response type: {type(ai_response)}")
+                
+                # ===== NEW CODE ENDS HERE =====
+
+                logging.info(f"Final AI response (first 200 chars): {str(ai_response)[:200]}...")
+                
+                # Validate we have usable HTML
+                if not ai_response or len(ai_response) < 5 or "error" in str(ai_response).lower():
                     raise ValueError("Invalid AI response")
 
             except Exception as ai_error:
@@ -1560,19 +1591,16 @@ def trigger_report_dag(**kwargs):
     """Enhanced trigger_report_dag with professional report email formatting"""
     DEAL_STAGE_LABELS = get_deal_stage_labels()
     ti = kwargs['ti']
-    report_emails = ti.xcom_pull(key="report_emails")
-    general_report_emails = ti.xcom_pull(key="general_query_report")
+    report_emails = ti.xcom_pull(key="report_emails") or []
+    general_report_emails = ti.xcom_pull(key="general_query_report") or []
     
-    # Ensure both are lists (handle None case)
-    report_emails = report_emails if report_emails is not None else []
-    general_report_emails = general_report_emails if general_report_emails is not None else []
-    
-    # Combine both sources
     all_report_emails = report_emails + general_report_emails
     
     if not all_report_emails:
-        logging.info("No report emails to process")
+        logging.info("No report emails to process (both XCom keys empty)")
         return
+    
+    logging.info(f"Processing {len(all_report_emails)} report email(s) from general query")
    
     service = authenticate_gmail()
     if not service:
@@ -1644,7 +1672,7 @@ def trigger_report_dag(**kwargs):
        
         return " • ".join(summaries)
    
-    for email in report_emails:
+    for email in all_report_emails:
         try:
             headers = email.get("headers", {})
             sender_email = headers.get("From", "")
@@ -2201,11 +2229,11 @@ with DAG(
         provide_context=True
     )
 
-    handle_general_queries_task = PythonOperator(
+    handle_general_queries_task = BranchPythonOperator(
     task_id="handle_general_queries",
     python_callable=handle_general_queries,
-    provide_context=True
-    )
+    provide_context=True,
+)
 
     trigger_report_task = PythonOperator(
         task_id="trigger_report_dag",
@@ -2220,3 +2248,4 @@ with DAG(
     )
 
     fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_general_queries_task, trigger_report_task, no_email_found_task]
+    branch_task >> handle_general_queries_task >> trigger_report_task
