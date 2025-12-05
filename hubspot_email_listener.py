@@ -24,6 +24,7 @@ from email import encoders
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font
 import pytz
+from dateutil import parser
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -1901,9 +1902,6 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                
                 logging.info(f"✓ Report generated successfully: {report_filepath}")
                
-                # Generate timestamp with timezone
-                from datetime import timezone
-                import pytz
                
                 timezone_str = "Asia/Kolkata"
                 tz = pytz.timezone(timezone_str)
