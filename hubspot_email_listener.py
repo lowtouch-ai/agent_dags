@@ -42,7 +42,6 @@ OLLAMA_HOST = Variable.get("ltai.v3.hubspot.ollama.host","http://agentomatic:800
 SERVER_URL = Variable.get("ltai.v3.hubspot.server.url")
 HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")
 HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
-REPORT_ARCHIVE_DIR = "/appz/cache/archive/reports/hubspot"
 HUBSPOT_UI_URL = Variable.get("ltai.v3.hubspot.ui.url")
 
 def authenticate_gmail():
@@ -1417,61 +1416,21 @@ def get_deal_stage_labels():
         logging.error(f"Failed to fetch deal stage labels: {e}")
         return {}
 
-def archive_report(report_data):
+def build_report_log(entity_type, filters, results_data, requester_email, 
+                     original_query, timezone_str="Asia/Kolkata"):
     """
-    Archive report payload to disk for audit trail.
-    
-    Args:
-        report_data (dict): Complete report payload matching schema
-        
-    Returns:
-        dict: Archive result with success status and filepath
-    """
-    try:
-        # Create archive directory if it doesn't exist
-        os.makedirs(REPORT_ARCHIVE_DIR, exist_ok=True)
-        
-        report_id = report_data.get("report_id")
-        if not report_id:
-            raise ValueError("report_id is required for archiving")
-        
-        # Archive filepath
-        archive_path = os.path.join(REPORT_ARCHIVE_DIR, f"{report_id}.json")
-        
-        # Write report to archive
-        with open(archive_path, 'w') as f:
-            json.dump(report_data, f, indent=2)
-        
-        logging.info(f"✓ Archived report {report_id} to {archive_path}")
-        
-        return {
-            "success": True,
-            "filepath": archive_path,
-            "report_id": report_id
-        }
-        
-    except Exception as e:
-        logging.error(f"Failed to archive report: {e}", exc_info=True)
-        return {
-            "success": False,
-            "error": str(e)
-        }
-
-def build_report_payload(entity_type, filters, results_data, requester_email, 
-                         original_query, timezone_str="EST"):
-    """
-    Build complete report payload matching audit schema.
+    Build report log JSON for logging purposes only (no disk write).
     
     Args:
         entity_type (str): Type of entity (deals, contacts, companies)
-        filters (list): Applied filters
-        results_data (list): Query results
+        filters (list): Applied filters from search
+        results_data (list): Query results from HubSpot
         requester_email (str): Email of person requesting report
         original_query (str): Original user query text
         timezone_str (str): Timezone for timestamps
         
     Returns:
-        dict: Complete report payload for archiving
+        dict: Report log structure for logging
     """
     try:
         # Generate unique report ID
@@ -1480,12 +1439,11 @@ def build_report_payload(entity_type, filters, results_data, requester_email,
         # Get timezone-aware timestamps
         tz = pytz.timezone(timezone_str)
         request_time = datetime.now(tz)
+        data_as_of = datetime.now(tz)
         
         # Format timestamps as ISO 8601 with timezone
         request_timestamp = request_time.isoformat()
-        
-        # Simulate data retrieval time (in real scenario, capture actual query time)
-        data_as_of = datetime.now(tz).isoformat()
+        data_as_of_timestamp = data_as_of.isoformat()
         
         # Extract requester_id from email
         requester_id = f"user:{requester_email}"
@@ -1526,15 +1484,10 @@ def build_report_payload(entity_type, filters, results_data, requester_email,
                     "dealId": record_id,
                     "dealName": props.get("dealname", ""),
                     "amount": amount,
-                    "currency": props.get("deal_currency_code", "INR"),
-                    "amount_converted": amount,  # Assuming INR, no conversion needed
                     "close_date": props.get("closedate", ""),
                     "stage": props.get("dealstage", ""),
                     "pipeline": props.get("pipeline", ""),
-                    "ownerName": props.get("hubspot_owner_name", ""),
-                    "ownerEmail": props.get("hubspot_owner_email", ""),
-                    "companyName": props.get("company_name", ""),
-                    "dealUrl": f"https://app.hubspot.com/contacts/deals/{record_id}"
+                    "ownerName": props.get("hubspot_owner_name", "")
                 }
                 
                 total_value += amount
@@ -1551,9 +1504,7 @@ def build_report_payload(entity_type, filters, results_data, requester_email,
                     "lastName": props.get("lastname", ""),
                     "email": props.get("email", ""),
                     "phone": props.get("phone", ""),
-                    "jobTitle": props.get("jobtitle", ""),
-                    "ownerName": props.get("hubspot_owner_name", ""),
-                    "contactUrl": f"https://app.hubspot.com/contacts/contact/{record_id}"
+                    "jobTitle": props.get("jobtitle", "")
                 }
                 
             elif entity_type == "companies":
@@ -1562,13 +1513,12 @@ def build_report_payload(entity_type, filters, results_data, requester_email,
                     "companyName": props.get("name", ""),
                     "domain": props.get("domain", ""),
                     "industry": props.get("industry", ""),
-                    "phone": props.get("phone", ""),
-                    "companyUrl": f"https://app.hubspot.com/contacts/company/{record_id}"
+                    "phone": props.get("phone", "")
                 }
             
             formatted_results.append(formatted_record)
         
-        # Build aggregates (deals only)
+        # Build aggregates
         aggregates = {}
         if entity_type == "deals":
             aggregates = {
@@ -1581,16 +1531,13 @@ def build_report_payload(entity_type, filters, results_data, requester_email,
                 f"total_{entity_type}": len(formatted_results)
             }
         
-        # Build complete report payload
-        report_payload = {
+        # Build complete report log
+        report_log = {
             "report_id": report_id,
             "report_type": f"hubspot_{entity_type}",
             "requester_id": requester_id,
-            "requester_email": requester_email,
             "request_timestamp": request_timestamp,
-            "data_as_of": data_as_of,
-            "timezone": timezone_str,
-            "original_query": original_query,
+            "data_as_of": data_as_of_timestamp,
             "filters": filter_dict,
             "results_count": len(formatted_results),
             "results": formatted_results,
@@ -1603,13 +1550,10 @@ def build_report_payload(entity_type, filters, results_data, requester_email,
             "failures": []
         }
         
-        logging.info(f"✓ Built report payload: report_id={report_id}, "
-                    f"entity_type={entity_type}, results_count={len(formatted_results)}")
-        
-        return report_payload
+        return report_log
         
     except Exception as e:
-        logging.error(f"Failed to build report payload: {e}", exc_info=True)
+        logging.error(f"Failed to build report log: {e}", exc_info=True)
         return None
 
 def trigger_report_dag(**kwargs):
@@ -1663,11 +1607,11 @@ def trigger_report_dag(**kwargs):
     def format_currency(amount):
         """Format amount as currency"""
         if not amount:
-            return "₹0"
+            return "$0"
         try:
-            return f"₹{int(float(amount)):,}"
+            return f"${int(float(amount)):,}"
         except:
-            return f"₹{amount}"
+            return f"${amount}"
    
     def get_filter_summary(filters, entity_type):
         """Generate human-readable filter summary"""
@@ -1716,7 +1660,6 @@ def trigger_report_dag(**kwargs):
             report_filepath = None
             report_filename = None
             report_success = False
-            report_payload = None
            
             try:
                 # Get conversation history
@@ -1743,6 +1686,7 @@ Determine:
 5. If the user asks question like which all deals expire by this month or this year, then always take the current date or todays date as GTE and the month end or year end date as LTE. Donot include the date that is already past the current date.
 6. Dates should only be given as YYYY-MM-DD.
 7. Include `hubspot_owner_id` in the request body of contact entity type.
+8. The report_title should be meaningful of what data is retrieved. For e.g, If the user asks get me the deals expiring for this month then the title should be Deals expiring in dec or the current month.
 Return ONLY a JSON object with this structure:
 {{
     "entity_type": "deals",
@@ -1800,26 +1744,26 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                
                 if not results_data:
                     raise ValueError("No data found matching the search criteria")
-                report_payload = build_report_payload(
+                report_log = build_report_log(
                     entity_type=entity_type,
                     filters=filters,
                     results_data=results_data,
                     requester_email=clean_sender_email,
                     original_query=email.get("content", "").strip(),
-                    timezone_str="EST"
+                    timezone_str="Asia/Kolkata"
                 )
-                if not report_payload:
-                    raise ValueError("Failed to build report payload")
-               
-                # ⭐ NEW: Archive report immediately
-                archive_result = archive_report(report_payload)
-                if not archive_result.get("success"):
-                    logging.warning(f"Failed to archive report: {archive_result.get('error')}")
-               
-                # Extract report_id for logging
-                report_id = report_payload.get("report_id")
-                logging.info(f"✓ Report archived: report_id={report_id}, "
-                           f"archive_path={archive_result.get('filepath')}")
+
+                if report_log:
+                    # Log the report metadata as structured JSON
+                    logging.info(f"REPORT_GENERATED: {json.dumps(report_log, indent=2)}")
+                    
+                    # Extract report_id for reference
+                    report_id = report_log.get("report_id")
+                    logging.info(f"✓ Report generated: report_id={report_id}, "
+                            f"entity_type={entity_type}, results_count={len(results_data)}")
+                else:
+                    logging.warning("Failed to build report log")
+
                
                 # Calculate summary statistics
                 record_count = len(results_data)
@@ -2070,10 +2014,6 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
             <span class="stat-value">{format_currency(total_value)}</span>
         </div>
         '''}
-        <div class="stat-row">
-            <span class="stat-label">OWNER FILTER</span>
-            <span class="stat-value">{owner_summary}</span>
-        </div>
     </div>
    
     <div class="message">
@@ -2095,15 +2035,17 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
 """
            
             except Exception as report_error:
-                logging.error(f"Report generation failed for email {email_id}: {report_error}", exc_info=True)
-                if report_payload:
-                    report_payload["failures"].append({
-                        "error": str(report_error),
-                        "timestamp": datetime.now(pytz.timezone("EST")).isoformat()
-                    })
-                    report_payload["partial"] = True
-                    archive_report(report_payload) # Archive failed attempt
-               
+                logging.error(f"Report generation failed for email {email_id}: {report_error}", exc_info=True)              
+                failed_log = {
+                    "report_id": str(uuid.uuid4()),
+                    "report_type": f"hubspot_{entity_type if 'entity_type' in locals() else 'unknown'}",
+                    "requester_id": f"user:{clean_sender_email}",
+                    "request_timestamp": datetime.now(pytz.timezone("Asia/Kolkata")).isoformat(),
+                    "partial": True,
+                    "failures": [{"error": str(report_error), "timestamp": datetime.now().isoformat()}]
+                }
+                logging.error(f"REPORT_FAILED: {json.dumps(failed_log)}")
+                
                 report_success = False
                 ai_response = None
                 report_filepath = None
