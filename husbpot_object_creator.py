@@ -33,6 +33,8 @@ default_args = {
 HUBSPOT_FROM_ADDRESS = Variable.get("ltai.v3.hubspot.from.address")
 GMAIL_CREDENTIALS = Variable.get("ltai.v3.hubspot.gmail.credentials")
 OLLAMA_HOST = Variable.get("ltai.v3.hubspot.ollama.host","http://agentomatic:8000")
+DEFAULT_OWNER_NAME = Variable.get("ltai.v3.hubspot.default.owner.name")
+DEFAULT_OWNER_ID = Variable.get("ltai.v3.hubspot.default.owner.id")
 TASK_THRESHOLD = 15
 def authenticate_gmail():
     try:
@@ -625,17 +627,17 @@ Steps:
 
 Return this exact JSON structure:
 {{
-    "contact_owner_id": "71346067",
-    "contact_owner_name": "Kishore",
+    "contact_owner_id": "{DEFAULT_OWNER_ID}",
+    "contact_owner_name": "{DEFAULT_OWNER_NAME}",
     "contact_owner_message": "No contact owner specified, so assigning to default owner Kishore." OR "The specified contact owner '[parsed_owner]' is not valid, so assigning to default owner Kishore." OR "Contact owner specified as [name]",
-    "deal_owner_id": "71346067",
-    "deal_owner_name": "Kishore",
+    "deal_owner_id": "{DEFAULT_OWNER_ID}",
+    "deal_owner_name": "{DEFAULT_OWNER_NAME}",
     "deal_owner_message": "No deal owner specified, so assigning to default owner Kishore." OR "The specified deal owner '[parsed_owner]' is not valid, so assigning to default owner Kishore." OR "Deal owner specified as [name]",
     "task_owners": [
         {{
             "task_index": 1,
-            "task_owner_id": "71346067",
-            "task_owner_name": "Kishore",
+            "task_owner_id": "{DEFAULT_OWNER_ID}",
+            "task_owner_name": "{DEFAULT_OWNER_NAME}",
             "task_owner_message": "No task owner specified for task [task_index], so assigning to default owner Kishore." OR "The specified task owner '[parsed_owner]' for task [task_index] is not valid, so assigning to default owner Kishore." OR "Task owner for task [task_index] specified as [name]"
         }}
     ],
@@ -659,8 +661,8 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
     except Exception as e:
         logging.error(f"Error processing owner AI response: {e}")
         default_owner = {
-            "deal_owner_id": "71346067",
-            "deal_owner_name": "Kishore",
+            "deal_owner_id": DEFAULT_OWNER_ID,
+            "deal_owner_name": DEFAULT_OWNER_NAME,
             "deal_owner_message": f"Error: {str(e)}, using default owner Kishore",
             "task_owners": [],
             "all_owners_table": []
@@ -698,8 +700,8 @@ def check_task_threshold(ti, **context):
     task_owner_mapping = []
     for idx, task in enumerate(tasks_to_create, 1):
         matching_owner = next((owner for owner in task_owners if owner.get('task_index') == idx), None)
-        task_owner_id = matching_owner.get('task_owner_id', '71346067') if matching_owner else '71346067'
-        task_owner_name = matching_owner.get('task_owner_name', 'Kishore') if matching_owner else 'Kishore'
+        task_owner_id = matching_owner.get('task_owner_id', DEFAULT_OWNER_ID) if matching_owner else DEFAULT_OWNER_ID
+        task_owner_name = matching_owner.get('task_owner_name', DEFAULT_OWNER_NAME) if matching_owner else DEFAULT_OWNER_NAME
         
         task_owner_mapping.append({
             'task_index': idx,
@@ -815,8 +817,8 @@ def create_contacts(ti, **context):
         return []
 
     # Inject owner info
-    contact_owner_id = owner_info.get("contact_owner_id", "71346067")
-    contact_owner_name = owner_info.get("contact_owner_name", "Kishore")
+    contact_owner_id = owner_info.get("contact_owner_id", DEFAULT_OWNER_ID)
+    contact_owner_name = owner_info.get("contact_owner_name", DEFAULT_OWNER_NAME)
     for contact in to_create_contacts:
         contact.setdefault("contactOwnerName", contact_owner_name)
         contact.setdefault("contactOwnerId", contact_owner_id)
@@ -1134,8 +1136,8 @@ def create_deals(ti, **context):
         return []
 
     # Inject owner info
-    deal_owner_id = owner_info.get("deal_owner_id", "71346067")
-    deal_owner_name = owner_info.get("deal_owner_name", "Kishore")
+    deal_owner_id = owner_info.get("deal_owner_id", DEFAULT_OWNER_ID)
+    deal_owner_name = owner_info.get("deal_owner_name", DEFAULT_OWNER_NAME)
     for deal in to_create_deals:
         deal.setdefault("dealOwnerName", deal_owner_name)
         deal.setdefault("dealOwnerId", deal_owner_id)
@@ -1666,11 +1668,11 @@ def create_tasks(ti, **context):
     for idx, task in enumerate(to_create_tasks, 1):
         matching_owner = next((o for o in task_owners if o.get("task_index") == idx), None)
         if matching_owner:
-            task["task_owner_id"] = matching_owner.get("task_owner_id", "71346067")
-            task["task_owner_name"] = matching_owner.get("task_owner_name", "Kishore")
+            task["task_owner_id"] = matching_owner.get("task_owner_id", DEFAULT_OWNER_ID)
+            task["task_owner_name"] = matching_owner.get("task_owner_name", DEFAULT_OWNER_NAME)
         else:
-            task.setdefault("task_owner_id", "71346067")
-            task.setdefault("task_owner_name", "Kishore")
+            task.setdefault("task_owner_id", DEFAULT_OWNER_ID)
+            task.setdefault("task_owner_name", DEFAULT_OWNER_NAME)
 
     logging.info(f"Tasks prepared with owners: {json.dumps(to_create_tasks, indent=2)}")
 
@@ -1727,7 +1729,7 @@ Return ONLY this JSON structure (no other text):
     "reason": "error description if status is failure"
 }}
 
-CRITICAL: Preserve the task_owner_id from the input. Do not default to Kishore (71346067) unless explicitly specified."""
+CRITICAL: Preserve the task_owner_id from the input. Do not default to Kishore ({DEFAULT_OWNER_ID}) unless explicitly specified."""
 
     # === Build Final Prompt (Retry vs Initial) ===
     if is_retry:
@@ -2691,14 +2693,14 @@ def update_tasks(ti, **context):
         if task_index is not None:
             matched_owner = next((o for o in task_owners if o.get("task_index") == task_index), None)
             if matched_owner:
-                task_update["task_owner_id"] = matched_owner.get("task_owner_id", "71346067")
-                task_update["task_owner_name"] = matched_owner.get("task_owner_name", "Kishore")
+                task_update["task_owner_id"] = matched_owner.get("task_owner_id", DEFAULT_OWNER_ID)
+                task_update["task_owner_name"] = matched_owner.get("task_owner_name", DEFAULT_OWNER_NAME)
             else:
-                task_update["task_owner_id"] = original.get("task_owner_id", "71346067")
-                task_update["task_owner_name"] = original.get("task_owner_name", "Kishore")
+                task_update["task_owner_id"] = original.get("task_owner_id", DEFAULT_OWNER_ID)
+                task_update["task_owner_name"] = original.get("task_owner_name", DEFAULT_OWNER_NAME)
         else:
-            task_update["task_owner_id"] = original.get("task_owner_id", "71346067")
-            task_update["task_owner_name"] = original.get("task_owner_name", "Kishore")
+            task_update["task_owner_id"] = original.get("task_owner_id", DEFAULT_OWNER_ID)
+            task_update["task_owner_name"] = original.get("task_owner_name", DEFAULT_OWNER_NAME)
 
     # === Base Prompt (shared) ===
     base_prompt = f"""Update tasks in HubSpot.
@@ -3661,7 +3663,7 @@ def compose_response_html(ti, **context):
     # )
     
     # if has_deals_or_tasks and owner_info:
-    #     chosen_deal_owner_id = owner_info.get("deal_owner_id", "71346067")
+    #     chosen_deal_owner_id = owner_info.get("deal_owner_id", "DEFAULT_OWNER_ID")
     #     chosen_deal_owner_name = owner_info.get("deal_owner_name", "Kishore")
     #     deal_owner_msg = owner_info.get("deal_owner_message", "")
     #     task_owners = owner_info.get("task_owners", [])
