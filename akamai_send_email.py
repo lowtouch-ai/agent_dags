@@ -224,44 +224,27 @@ def get_ai_response(prompt, images=None, conversation_history=None):
         logging.error(f"Error in get_ai_response: {str(e)}")
         return f"<html><body>An error occurred while processing your request: {str(e)}</body></html>"
 
-def send_email(service, to_email, subject, body_html, in_reply_to=None, references=None, thread_id=None):
-    """
-    Correct Gmail threading: always use messages().send() with threadId.
-    """
+def send_email(service, recipient, subject, body, in_reply_to, references):
     try:
-        msg = MIMEMultipart("alternative")
-        msg["From"] = CLOUD_ASSESS_FROM_ADDRESS
-        msg["To"] = to_email
+        logging.debug(f"Preparing email to {recipient} with subject: {subject}")
+        msg = MIMEMultipart()
+        msg["From"] = f"Akamai-presales via lowtouch.ai <{CLOUD_ASSESS_FROM_ADDRESS}>"
+        msg["To"] = recipient
         msg["Subject"] = subject
 
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to
-
-        # Build References chain
-        ref_list = []
         if references:
-            ref_list.extend(references.split())
-        if in_reply_to and in_reply_to not in ref_list:
-            ref_list.append(in_reply_to)
+            msg["References"] = references
 
-        if ref_list:
-            msg["References"] = " ".join(ref_list[-20:])
+        msg.attach(MIMEText(body, "html"))
 
-        # Attach HTML
-        msg.attach(MIMEText(body_html, "html", "utf-8"))
+        raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
 
-        # Encode message
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-
-        body = {"raw": raw}
-
-        # 🔥 CORRECT WAY — Messages API allows threadId
-        if thread_id:
-            body["threadId"] = thread_id
-
+        # Gmail threading WORKS when ONLY raw is sent
         result = service.users().messages().send(
             userId="me",
-            body=body
+            body={"raw": raw_msg}
         ).execute()
 
         logging.info(f"Gmail message sent. Threading active. Message-ID: {result.get('id')}")
@@ -390,11 +373,36 @@ def step_1_process_email(ti, **context):
         Generate a **Final Assessment Report** based on the extracted details from the Excel invoice.
 
         Report Requirements:
-        - Clear & concise
-        - Bullet points
-        - Highlight key findings, red flags, risks & optimization opportunities
-        - Add cost insights if applicable
-        - Do NOT include contact information
+
+        • Ensure the report is clear, concise, and easy to follow.
+        - Avoid long paragraphs; keep explanations sharp and to the point.
+        - Use well-organized headings and bullet points for readability.
+
+        • Present all insights in structured bullet points.
+        - Break down findings into logical sections (e.g., Cost, Performance, Risks, Optimization).
+        - Use sub-bullets wherever additional detail is needed.
+
+        • Highlight all key findings from the analysis.
+        - Summarize the most important observations clearly.
+        - Focus on insights that impact cost, performance, reliability, or operational efficiency.
+        • Identify and detail any red flags or risks.
+        - Include issues related to cost inefficiencies, misconfigurations, performance bottlenecks,security gaps, or architectural concerns.
+        - Clearly explain why each risk matters and its potential business impact.
+
+        • Provide optimization opportunities.
+        - Suggest practical improvements that enhance cost efficiency, performance, security,or architectural robustness.
+        - Include actionable recommendations whenever possible.
+
+        • Add cost insights when applicable.
+        - Highlight cost drivers, unnecessary spending, and areas where optimization can reduce costs.
+        - Include savings potential only when relevant to the analysis.
+
+        • Maintain a strictly professional and neutral tone.
+        - Focus on facts, insights, and recommendations.
+        - Avoid promotional language and any form of contact information.
+        • Format the entire report in clean Markdown.
+
+        - Use headings, subheadings, and bullet points to ensure email-ready readability.
 
         Extracted Content:
         {current_content}
@@ -403,11 +411,29 @@ def step_1_process_email(ti, **context):
         prompt = f"""
         Generate a **Cost Comparison Report** based on the cost comparison analysis of the attached Invoice (PDF/Image).
 
+        Cost Comparison 
         Report Requirements:
-        - Clear & concise
-        - Bullet points
-        - Highlight key findings, cost savings, performance improvements, and migration opportunities
-        - Do NOT include contact information
+        • Extract all pricing details from the provided invoice, PDF, or image.
+        • Identify each service and map it to the closest equivalent Akamai service.
+        • Provide a clear side-by-side comparison between the current provider and Akamai, including:
+            - Service name and type
+            - Units, usage, and pricing structure
+            - Monthly and annual cost differences
+            - Percentage and absolute savings
+        • Highlight key findings and insights from the cost analysis.
+        • Emphasize cost savings, optimization opportunities, performance improvements, and migration benefits.
+        • Include observations on security, reliability, and operational improvements with Akamai.
+        • Present all information in clear, readable bullet points.
+        • Maintain a concise, professional tone.
+        • Follow the general report rules:
+            - Use clean Markdown formatting
+            - Do NOT include any contact information
+        • Only include services that have a valid mapped equivalent in Akamai.
+        • Do NOT display or mention any service where no Akamai match is found.
+        • The report should contain only the compared items and their cost differences.
+        • All unmatched services must be silently ignored—do not state “no match found” or similar phrasing.
+
+
 
 Extracted Content:
 {current_content}
@@ -417,13 +443,35 @@ Extracted Content:
 Generate a **Combined Assessment and Cost Comparison Report** based on both the Excel file and the PDF/Image invoice.
 
 Report Requirements:
-- Clear & concise
-- Use bullet points
-- Section 1: Assessment Report (from Excel data)
-  - Key findings, red flags, risks & optimization opportunities
-- Section 2: Cost Comparison Report (from PDF/Image invoice)
-  - Cost savings, performance improvements, and migration opportunities
-- Do NOT include contact information
+
+• Keep the entire report clear, concise, and easy to read.
+   - Avoid unnecessary wording and long paragraphs.
+   - Prioritize clarity and actionable insights.
+
+• Use clean, structured bullet points throughout the report.
+   - Break items into sub-bullets when deeper explanation is needed.
+   - Ensure each point is meaningful and directly tied to the analysis.
+
+• Section 1: Assessment Report (generated from Excel data)
+   - Summarize key findings from the assessment.
+   - Identify and clearly highlight red flags, risks, misconfigurations, and inefficiencies.
+   - Provide optimization opportunities, focusing on:
+        • Performance improvements
+        • Configuration enhancements
+        • Operational efficiency gains
+   - Ensure each insight is specific, actionable, and tied to data from the Excel file.
+• Section 2: Cost Comparison Report (generated from PDF/Image invoice)
+   - Extract and compare relevant cost items with equivalent Akamai services.
+   - Highlight cost savings opportunities (both absolute and percentage).
+   - Summarize performance improvements that Akamai services provide.
+   - Detail migration benefits such as:
+        • Reliability and uptime improvements
+        • Security enhancements
+        • Operational simplification
+   - Present the comparison and savings in bullet points that are clear and digestible.
+• Do NOT include any contact information anywhere in the output.
+   - The report should be strictly analytical and insight-driven.
+
 
 Extracted Content:
 {current_content}
@@ -482,14 +530,15 @@ Content from AI:
 {step_1_response}
 
 Requirements:
-1. Greeting with their name
-2. Polite explanation that attachments are needed
-3. List what types of files we accept:
-   - Excel files (.xlsx, .xls) for cloud assessment
-   - PDF or Image files for cost comparison
-   - Both types for a combined report
-4. Friendly closing
-5. Professional signature
+1. Begin with a greeting addressed to the recipient by name.
+2. Provide a polite and clear explanation stating that the required attachments were not included in the email and are needed to proceed with the analysis.
+3. Specify the accepted file types and their purpose:
+   • Excel files (.xlsx, .xls) — used for generating detailed cloud assessment reports
+   • PDF or Image files — used for generating cost comparison summaries
+   • Both file types — used for producing a combined final report that includes
+     both assessment and cost comparison
+4. End with a friendly and professional closing message.
+5. Include a clean, professional signature at the end of the email.
 
 Format as clean HTML suitable for email. Do not include contact information.
 Return only the HTML body content without html, head, or body tags.
@@ -531,17 +580,37 @@ def cost_comparison_generate_report(ti, **context):
         {email_content}
         
         Requirements:
-        1. Extract all pricing information from the invoice
-        2. Compare with equivalent Akamai services and pricing
-        3. Highlight cost savings opportunities
-        4. Provide detailed analysis of:
-           - Current spending breakdown
-           - Akamai equivalent services
-           - Potential cost savings (percentage and absolute values)
-           - Performance benefits with Akamai
-           - Security and reliability improvements
-        5. Include a summary section with key recommendations
-        
+        1. Extract all pricing information from the provided invoice.
+        • Identify all line items, units, usage-based charges, taxes, and total costs.
+        • Organize the extracted pricing into a clear, structured breakdown.
+
+        2. Compare the extracted services with the equivalent Akamai services.
+        • Map each invoice service to the closest Akamai offering.
+        • Provide equivalent Akamai pricing for each mapped service.
+
+        3. Highlight all cost-saving opportunities.
+        • Show savings in both percentage and absolute values.
+        • Include monthly and annual savings projections where applicable.
+
+        4. Deliver a detailed analysis covering:
+        • Current spending breakdown (per service, per unit, or per usage metric)
+        • Equivalent Akamai services and how they differ from the current provider
+        • Potential cost savings (with calculations, percentages, and clear reasoning)
+        • Performance benefits expected with Akamai services
+        • Security, reliability, and operational improvements gained by migrating
+
+        5. Provide a final summary section with clear, actionable recommendations.
+        • Summarize cost opportunities
+        • Summarize performance and security advantages
+        • Summarize migration recommendations and business value
+
+        6.Formatting Requirements:
+        • Use clear, concise, professional bullet points.
+        • Maintain consistent structure throughout the report.
+        • Do NOT include any contact information.
+        • Format the entire output in clean Markdown suitable for email delivery.
+
+                
         Format the report in clean HTML suitable for email delivery. Do not include any contact information.
         """
         
@@ -630,16 +699,45 @@ def combined_excel_pdf_summary(ti, **context):
 
         prompt = f"""Generate a **Final Assessment Report and cost comparison Report** based on the extracted details from the Excel invoice and the attached PDF/Image.
 
-        Report Requirements:
-        - Clear & concise
-        - Bullet points
-        - Highlight key findings, red flags, risks & optimization opportunities
-        - Add cost insights if applicable
-        - Do NOT include contact information
-        - Highlight key findings, **cost savings**, performance improvements, and migration opportunities
-        - The report should combine both assessment and cost comparison aspects seamlessly
-        - Format the report in clean Markdown suitable for email delivery
-        - Do NOT include contact information
+      You must follow these instructions strictly when generating the final output:
+
+        1. OUTPUT DECISION LOGIC
+        - If an Excel assessment report is provided:
+            • Generate a detailed Assessment Summary.
+            • Include key findings, risks, red flags, optimization opportunities, and performance insights.
+        - If a PDF or image is provided:
+            • Generate a detailed Cost Comparison Summary.
+            • Identify which provided service is being compared to which Akamai service.
+            • Include cost breakdown, savings, risks, optimization opportunities, and performance benefits.
+        - If both Excel and PDF/image files are provided:
+            • Combine both outputs into one seamless, unified report.
+            • Include both the Assessment Summary and the Cost Comparison Summary.
+
+        2. WRITING STYLE & FORMAT REQUIREMENTS
+        • Keep the tone clear, concise, and professional.
+        • Use bullet points for all findings.
+        • Highlight key findings, red flags, risks, optimization opportunities.
+        • Include cost insights, cost savings, and performance improvements when applicable.
+        • Ensure the report blends assessment + cost comparison naturally when both exist.
+        • Format everything in clean Markdown suitable for email delivery.
+        • Do NOT include any contact information anywhere in the output.
+
+        3. COST COMPARISON EXPECTATIONS (PDF/IMAGE)
+        • Identify the exact services being compared (provided service vs Akamai equivalent).
+        • Provide detailed cost component comparison.
+        • Include savings analysis (monthly & annual).
+        • Detail optimization or migration opportunities.
+        • Include performance or reliability benefits where applicable.
+
+        4. ASSESSMENT REPORT EXPECTATIONS (EXCEL)
+        • Extract and summarize all relevant findings from the assessment report.
+        • List risks, gaps, performance issues, misconfigurations, and improvement recommendations.
+        • Present insights in actionable and easy-to-read bullet points.
+
+        5. GENERAL RULES
+        • Keep the output structured, readable, and email-ready.
+        • Use Markdown headings, sub-headings, and bullet points.
+        • Never include phone numbers or email/contact information.
 
     Data extracted:
     {step_1_response}
@@ -655,18 +753,11 @@ Structure the email as follows:
 2. Opening paragraph:
 <p>We have completed both the cloud assessment and cost comparison analysis based on your submitted files. This comprehensive report provides insights into your current infrastructure and identifies cost optimization opportunities with Akamai's services.</p>
 
-3. Table of Contents:
-<h2>Report Contents</h2>
-<ul>
-<li><a href="#assessment">Cloud Assessment Report</a></li>
-<li><a href="#cost-comparison">Cost Comparison Report</a></li>
-</ul>
-
-4. Assessment Report Section:
+3. Assessment Report Section:
 <h2 id="assessment">Cloud Assessment Report</h2>
 [Generate assessment report content here]
 
-5. Cost Comparison Section:
+4. Cost Comparison Section:
 <h2 id="cost-comparison">Cost Comparison Report</h2>
 [Generate cost comparison content here]
 
@@ -723,12 +814,16 @@ def step_2_compose_email(ti, **context):
 
         2. Opening paragraph: <p>We have received your filled details and completed the cloud assessment for Akamai. This assessment analyzes your current setup to identify strengths, areas for improvement, and strategic opportunities. Here is a insightful summary to guide next steps:</p>
 
-3. Assessment Report:
-<h2>Assessment Report</h2>
-{content_appended}
+        3. Assessment Report:
+        <h2>Assessment Report</h2>
+        {content_appended}
+        
+        4. Cost Comparison Report:
+        <h2>Cost Comparison Report</h2>
+        {content_appended}
 
-4. Signature: 
-<p>Best regards</p>
+        4. Signature: 
+        <p>Best regards</p>
 
 Ensure the email is natural, professional, and concise. Return only the HTML body content without html, head, or body tags.
 """
@@ -834,47 +929,20 @@ def step_4_send_email(ti, **context):
             return "Error: No content to send"
         
         service = authenticate_gmail()
-        if not service:
-            logging.error("Gmail authentication failed, aborting email response.")
-            return "Gmail authentication failed"
 
-        # Get sender email safely
-        sender_email = ti.xcom_pull(key="sender_email")
-        if not sender_email:
-            sender_email = next(
-                (h["value"] for h in email_data.get("headers", []) if h.get("name", "").lower() == "from"),
-                "unknown@example.com"
-            )
+        sender_email = email_data["headers"].get("From", "")
+        subject = f"Re: {email_data['headers'].get('Subject', 'Cloud Assessment')}"
+        
+        in_reply_to = email_data["headers"].get("Message-ID", "")
+        references = email_data["headers"].get("References", "")
 
-        # === THREADING INFORMATION ===
-        original_message_id = email_data["headers"].get("Message-ID", "")
-        original_references = email_data["headers"].get("References", "")
-        original_thread_id   = email_data.get("threadId")          # This is the Gmail thread ID
-
-        # === BUILD SUBJECT – strip any existing "Re:" to avoid Re: Re: Re: ===
-        original_subject = email_data["headers"].get("Subject", "Cloud Assessment")
-        clean_subject = re.sub(r'^Re:\s*', '', original_subject, flags=re.IGNORECASE).strip()
-
-        email_type = ti.xcom_pull(key="email_type", default="assessment")
-
-        if email_type == "cost_comparison":
-            subject = f"Re: {clean_subject} - Cost Comparison Report"
-        elif email_type == "combined_report":
-            subject = f"Re: {clean_subject} - Assessment & Cost Comparison"
-        elif email_type == "no_attachment":
-            subject = f"Re: {clean_subject} - Attachment Needed"
-        else:
-            subject = f"Re: {clean_subject} - Assessment Report"
-
-        # === SEND EMAIL WITH PERFECT THREADING ===
         result = send_email(
-            service=service,
-            to_email=sender_email,
-            subject=subject,
-            body_html=final_html_content,
-            in_reply_to=original_message_id,
-            references=original_references,
-            thread_id=original_thread_id           # guarantees perfect Gmail threading
+            service,
+            sender_email,
+            subject,
+            final_html_content,
+            in_reply_to,
+            references
         )
         
         if result:
