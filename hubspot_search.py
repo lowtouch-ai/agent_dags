@@ -681,6 +681,7 @@ def summarize_engagement_details_360(ti, **context):
                 - Do not use contact, company, or deal info from XCom; rely solely on thread content and email data.
                 - If no contact name is found, return {{"error": "No contact name found in thread content"}}.
                 - Ensure summaries and call strategy are tailored to the context in the thread.
+                - use the date format as MMM-DD-YYYY for close_date.
 
                 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
@@ -2769,7 +2770,7 @@ def compose_engagement_summary_email(ti, **context):
 <body>
     <div class="greeting">
         <p>Hello {from_email},</p>
-        <p>Here is the comprehensive engagement summary you requested:</p>
+        <p>Here is the detailed engagement summary you requested:</p>
     </div>
 """
 
@@ -2821,34 +2822,6 @@ def compose_engagement_summary_email(ti, **context):
             company_summary.get('company_name', 'N/A'),
             company_summary.get('domain', 'N/A')
         )
-
-    if has_deals:
-        email_content += """
-        <h3>Deal Information</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>Deal Name</th>
-                    <th>Stage</th>
-                    <th>Amount</th>
-                    <th>Close Date</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
-        for deal in meaningful_deals:
-            email_content += f"""
-                <tr>
-                    <td>{deal.get("deal_name", "N/A")}</td>
-                    <td>{deal.get("stage", "N/A")}</td>
-                    <td>{deal.get("amount", "N/A")}</td>
-                    <td>{deal.get("close_date", "N/A")}</td>
-                </tr>
-            """
-        email_content += """
-            </tbody>
-        </table>
-        """
 
     if has_deals:
         email_content += """\
@@ -2923,7 +2896,7 @@ def compose_engagement_summary_email(ti, **context):
     if has_deal_360:
         email_content += f"""\
     <div>
-        <h3>Deal 360° Intelligence – Live External Research (Perplexity)</h3>
+        <h3>Deal 360° Intelligence – External Insights</h3>
         <ul>"""
         for activity in deal_360:
             email_content += f"<li>{activity}</li>"
@@ -2933,7 +2906,7 @@ def compose_engagement_summary_email(ti, **context):
     email_content += """
     <div class="closing">
         <p>This summary provides a comprehensive overview to help you prepare for your upcoming engagement.</p>
-        <p>If you need any clarifications or additional information, please don't hesitate to ask.</p>
+        <p>If you need any clarifications or additional information, please let me know.</p>
         <br>
         <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">Lowtouch.ai</a></p>
     </div>
