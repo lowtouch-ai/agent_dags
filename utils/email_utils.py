@@ -49,11 +49,13 @@ def authenticate_gmail(credentials_json, expected_email):
     except Exception as e:
         logging.error(f"Gmail authentication error: {str(e)}")
         return None
-
-def send_email(service, recipient, subject, body, in_reply_to, references, cc=None, bcc=None, thread_id=None):
+   
+    
+def send_email(service, recipient, subject, body, in_reply_to, references, 
+               from_address, cc=None, bcc=None, thread_id=None):
     """
     Send email reply maintaining proper thread continuity with CC and BCC support.
-    Now uses multipart/alternative for better HTML rendering compatibility.
+    Uses multipart/alternative for better HTML rendering compatibility.
     
     Args:
         service: Gmail API service instance
@@ -62,6 +64,7 @@ def send_email(service, recipient, subject, body, in_reply_to, references, cc=No
         body: HTML body content
         in_reply_to: Message-ID of the email being replied to
         references: References header from original email
+        from_address: Email address to send from
         cc: Comma-separated string or list of CC recipients (optional)
         bcc: Comma-separated string or list of BCC recipients (optional)
         thread_id: Gmail thread ID to maintain conversation
@@ -71,7 +74,7 @@ def send_email(service, recipient, subject, body, in_reply_to, references, cc=No
         
         # Create multipart/alternative message for text/plain + text/html
         msg = MIMEMultipart('alternative')
-        msg["From"] = f"Recruitment Agent via lowtouch.ai <{expected_email}>"  # Use expected_email from auth context; adjust as needed
+        msg["From"] = f"Recruitment Agent via lowtouch.ai <{from_address}>"
         msg["To"] = recipient
         
         # Add CC recipients if provided
@@ -101,7 +104,11 @@ def send_email(service, recipient, subject, body, in_reply_to, references, cc=No
         
         # Build References header: original references + message being replied to
         if references and in_reply_to:
-            msg["References"] = f"{references} {in_reply_to}".strip()
+            # Ensure in_reply_to isn't already in references to avoid duplication
+            if in_reply_to not in references:
+                msg["References"] = f"{references} {in_reply_to}".strip()
+            else:
+                msg["References"] = references
         elif in_reply_to:
             msg["References"] = in_reply_to
         elif references:
@@ -110,18 +117,22 @@ def send_email(service, recipient, subject, body, in_reply_to, references, cc=No
         if msg.get("References"):
             logging.debug(f"Set References: {msg['References']}")
         
-        # Generate plain-text fallback by stripping HTML tags (simple regex; improve if needed)
+        # Generate plain-text fallback by stripping HTML tags
         plain_body = re.sub(r'<[^>]+>', '', body)  # Strips all tags
         plain_body = re.sub(r'\s+', ' ', plain_body).strip()  # Normalize whitespace
+        plain_body = re.sub(r'&nbsp;', ' ', plain_body)  # Replace HTML entities
+        plain_body = re.sub(r'&[a-z]+;', '', plain_body)  # Remove other HTML entities
         
-        # Attach plain-text part first (fallback)
-        msg.attach(MIMEText(plain_body, "plain"))
+        # # Attach plain-text part first (fallback for non-HTML clients)
+        # part_plain = MIMEText(plain_body, "plain", "utf-8")
+        # msg.attach(part_plain)
         
-        # Attach HTML part second (preferred)
-        msg.attach(MIMEText(body, "html"))
+        # Attach HTML part second (preferred by HTML-capable clients)
+        part_html = MIMEText(body, "html", "utf-8")
+        msg.attach(part_html)
         
-        # Encode message
-        raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
+        # Encode message for Gmail API
+        raw_msg = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
         
         # Build request body with threadId if available
         request_body = {"raw": raw_msg}
@@ -129,7 +140,7 @@ def send_email(service, recipient, subject, body, in_reply_to, references, cc=No
             request_body["threadId"] = thread_id
             logging.debug(f"Sending to thread: {thread_id}")
         
-        # Send email
+        # Send email via Gmail API
         result = service.users().messages().send(
             userId="me",
             body=request_body
@@ -138,10 +149,6 @@ def send_email(service, recipient, subject, body, in_reply_to, references, cc=No
         logging.info(f"Email sent successfully: {result.get('id')} in thread {result.get('threadId')}")
         logging.info(f"Recipients - To: {recipient}, Cc: {cc if cc else 'None'}, Bcc: {bcc if bcc else 'None'}")
         return result
-        
-    except Exception as e:
-        logging.error(f"Failed to send email: {str(e)}", exc_info=True)
-        return None
         
     except Exception as e:
         logging.error(f"Failed to send email: {str(e)}", exc_info=True)
@@ -407,53 +414,3 @@ def process_email_attachments(service, message_id, payload, attachment_dir):
     return attachments
 
 
-def send_email(service, to_email, subject, body, in_reply_to=None, references=None, thread_id=None):
-    """
-    Send an email using Gmail API.
-    
-    Args:
-        service: Gmail API service object
-        to_email: Recipient email address
-        subject: Email subject
-        body: Email body (plain text or HTML)
-        in_reply_to: Message-ID of email being replied to
-        references: References header for threading
-        thread_id: Gmail thread ID for reply threading
-        
-    Returns:
-        Sent message object or None if failed
-    """
-    try:
-        message = MIMEMultipart()
-        message['To'] = to_email
-        message['Subject'] = subject
-        
-        if in_reply_to:
-            message['In-Reply-To'] = in_reply_to
-        
-        if references:
-            message['References'] = references
-        
-        # Attach body
-        message.attach(MIMEText(body, 'plain'))
-        
-        # Encode message
-        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
-        
-        # Send message
-        send_params = {
-            'userId': 'me',
-            'body': {'raw': raw_message}
-        }
-        
-        if thread_id:
-            send_params['body']['threadId'] = thread_id
-        
-        sent_message = service.users().messages().send(**send_params).execute()
-        
-        logging.info(f"Email sent successfully to {to_email}, Message ID: {sent_message['id']}")
-        return sent_message
-        
-    except Exception as e:
-        logging.error(f"Error sending email to {to_email}: {str(e)}")
-        return None

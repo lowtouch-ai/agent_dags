@@ -11,6 +11,9 @@ import logging
 import json
 import sys
 import os
+from email.utils import parseaddr
+import statistics
+import re
 
 try:
     sys.path.append(os.path.dirname(os.path.realpath(__file__)))
@@ -19,7 +22,7 @@ except Exception as e:
     logging.error(f"Error appending to sys.path: {e}")
 
 # Import your email utilities if needed
-from agent_dags.utils.email_utils import authenticate_gmail
+from agent_dags.utils.email_utils import authenticate_gmail, send_email, mark_email_as_read
 from agent_dags.utils.agent_utils import get_ai_response, extract_json_from_text
 
 # Configuration constants
@@ -296,8 +299,6 @@ def send_response_email(**kwargs):
     Uses the email_utils for authentication and sending.
     """
     ti = kwargs['ti']
-    logging.info(f"GMAIL_CREDENTIALS: {GMAIL_CREDENTIALS}")
-    logging.info(f"RECRUITMENT_FROM_ADDRESS: {RECRUITMENT_FROM_ADDRESS}") 
     email_data = kwargs['dag_run'].conf.get('email_data', {})
     score_data = ti.xcom_pull(task_ids='get_the_score_for_cv_analysis', key='score_data')
     cv_data = ti.xcom_pull(task_ids='extract_cv_content', key='cv_data')
@@ -357,14 +358,32 @@ def send_response_email(**kwargs):
     else:
         # Selection email (initial assessment)
         MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
-        agent_response_prompt = f"""Compose a personalized response email for a selected candidate. Include:
-        - Greeting with candidate name if available from CV: {cv_data}
-        - Congratulations on matching the role: {score_data.get('remarks', '')}
-        - Key strengths from analysis: {score_data}
-        - Next steps: Initial assessment questions (e.g., availability for interview, preferred times)
-        - Call to action: Reply with answers
-        Output only clean, valid HTML for the email body. Use professional tone. No technical placeholders.
-        """
+        agent_response_prompt = f"""Compose a personalized response email for a selected candidate after initial screening. Include the following structure in the email body:
+
+- Greeting: Use a professional greeting with the candidate's name if available from the CV data: {cv_data}. If no name is available, use 'Dear Candidate'.
+
+- Introduction: Briefly thank them for their application and express enthusiasm about their potential fit for the role.
+
+- Next Steps: Present initial assessment questions divided into two sections:
+  - General Screening Questions:
+    - Give a brief introduction about yourself to help us assess your communication skills.
+    - Are you comfortable with a [full-time / part-time / contract / hybrid / remote / on-site] work arrangement?
+    - What is your notice period with your current employer (or how soon can you start if not employed)?
+    - What are your base salary expectations for this role? (Provide a range if possible.)
+    - Are you open to relocating to [City/Region] if the role requires it, or do you already live within commuting distance? (Specify location if applicable)
+    - Why are you interested in this role and our company?
+  - Role-Specific Questions: Tailor these to the job role (e.g., for Data Scientist/ML Engineer):
+    - How many years of experience do you have building and deploying machine learning models in production?
+    - Are you proficient in Python and libraries such as TensorFlow, PyTorch, scikit-learn, or Pandas?
+    - Do you have experience with [specific domain/tools, e.g., NLP, computer vision, big data tools like Spark]? (Customize based on job)
+    - Education/Certification (if required): Do you hold a [Bachelor’s/Master’s/PhD] degree in [specific field] or a related discipline? (Specify degree/field)
+    - Do you hold any relevant certifications (e.g., PMP, AWS Certified, Scrum Master, etc.)? (List relevant ones)
+
+- Call to Action: Encourage them to reply with their answers to these questions at their earliest convenience. Mention that responses will help advance them to the next stage, such as an interview.
+- IMPORTANT: make the email completely professional, concise, and clear. Use a friendly yet formal tone. And avoid using subheaders which are unprofessional.
+
+Use a professional, encouraging tone throughout. Output only clean, valid HTML for the email body (e.g., use <p>, <ul>, <li> for lists, <h2> for section headers). No technical placeholders—replace any dynamic elements with actual values if provided, or use sensible defaults. Ensure the email is concise yet comprehensive.
+"""
         jd_data = ti.xcom_pull(task_ids='get_the_jd_for_cv_analysis', key='jd_data')
         agent_response_prompt += f"\nJob details: {jd_data}"
         response = get_ai_response(agent_response_prompt, stream=False, model=MODEL_NAME)
@@ -374,39 +393,7 @@ def send_response_email(**kwargs):
         body = match.group(1).strip() if match else response.strip()
         # Fallback if not valid HTML
         if not body.strip().startswith('<!DOCTYPE') and not body.strip().startswith('<html'):
-            body = f"""
-            <!DOCTYPE html>
-            <html lang="en">
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0"
-                <title>Application Update</title>
-                <style>
-                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f4f4f4; }}
-                    .email-container {{ background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1); }}
-                    .greeting {{ font-size: 18px; margin-bottom: 20px; }}
-                    .content {{ margin-bottom: 20px; }}
-                    .closing {{ margin-top: 30px; font-style: italic; }}
-                    .signature {{ margin-top: 20px; text-align: center; font-weight: bold; }}
-                    .company {{ color: #007bff; }}
-                </style>
-            </head>
-            <body>
-                <div class="email-container">
-                    <p class="greeting">Dear Candidate,</p>
-                    <div class="content">
-                        <p>Thank you for applying! We're excited to inform you that your profile is a strong match for our open position based on our initial review.</p>
-                        <p>Your total match score is {score_data.get('total_score', 'N/A')}/100. Key highlights include strong alignment in must-have skills and experience.</p>
-                        <p>To proceed, could you please reply with your availability for a 30-minute initial assessment call next week? Also, share any specific questions you have about the role.</p>
-                    </div>
-                    <p class="closing">Best regards,<br>The Recruitment Team</p>
-                    <div class="signature">
-                        <strong class="company">Lowtouch.ai</strong>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
+            body = body.strip()
         logging.info("Candidate selected, sending initial assessment email.")
     # Authenticate
     service = authenticate_gmail(GMAIL_CREDENTIALS, RECRUITMENT_FROM_ADDRESS)
@@ -417,11 +404,12 @@ def send_response_email(**kwargs):
     cc = None  # Add logic if needed
     bcc = None  # Add logic if needed
     subject = f"Re: {subject}"
-    result = send_email(service, sender_email, subject, body, original_message_id, references,thread_id=thread_id)
+    result = send_email(service, sender_email, subject, body, original_message_id, references, 
+                   RECRUITMENT_FROM_ADDRESS, cc=cc, bcc=bcc, thread_id=thread_id)
     if result:
         logging.info(f"Email sent successfully to {sender_email}")
         # Optionally mark original as read
-        mark_email_as_read(service, email_data.get('id'))
+        # mark_email_as_read(service, email_data.get('id'))
         return f"Email sent successfully to {sender_email}"
     else:
         logging.error("Failed to send email")

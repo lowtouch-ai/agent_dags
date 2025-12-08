@@ -9,7 +9,7 @@ import base64
 import re
 from PIL import Image
 import io
-
+from ollama import Client
 
 def sanitize_text(text):
     """
@@ -343,13 +343,22 @@ def get_ai_response(prompt, agent_url="http://agentomatic:8000", conversation_hi
         logging.error(f"Error in get_ai_response: {str(e)}")
         # raise f"An error occurred while processing your request: {str(e)}"
         return f"An error occurred while processing your request: {str(e)}"
-    
-    
+
+import json
 def extract_json_from_text(text):
-    try:
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group())
-    except Exception:
-        return None
+    # Improved regex: Match a standalone JSON object (not nested in larger text)
+    # This looks for { ... } that's not inside quotes or other braces
+    pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+    matches = re.findall(pattern, text, re.DOTALL)
+    
+    for match in matches:  # Try each potential match
+        try:
+            parsed = json.loads(match)
+            if isinstance(parsed, dict):  # Ensure it's an object, not array/primitive
+                return parsed
+        except json.JSONDecodeError as e:
+            logging.debug(f"JSON parse failed on match '{match[:100]}...': {e}")
+            continue
+    
+    logging.warning("No valid JSON object found in text.")
     return None
