@@ -2053,7 +2053,6 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
         .signature {{
             margin-top: 30px;
             padding-top: 15px;
-            border-top: 1px solid #cccccc;
         }}
         .signature-line {{
             margin: 3px 0;
@@ -2082,17 +2081,15 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
         Data as of: {data_as_of_formatted}
     </div>
    
-    <div class="stats-section">
-        <div class="stat-row">
-            <span class="stat-label">Total {entity_type.lower()}</span>
-            <span class="stat-value">{record_count}</span>
-        </div>
-        {"" if entity_type != "deals" else f'''
-        <div class="stat-row">
-            <span class="stat-label">Total Value</span>
-            <span class="stat-value">{format_currency(total_value)}</span>
-        </div>
-        '''}
+    <div class="summary" style="margin: 30px 0;">
+        <h3 style="margin: 0 0 15px 0; color: #2c3e50;">Summary</h3>
+        <ul style="margin: 10px 0; padding-left: 20px;">
+            <li><strong>Total {entity_type}:</strong> {record_count}</li>
+            {""
+             if entity_type.lower() != "deals" and entity_type.lower() != "deal" else
+             f'<li><strong>Total Value:</strong> {currency_symbol}{format_currency(total_value)}</li>'
+            }
+        </ul>
     </div>
    
     <div class="message">
