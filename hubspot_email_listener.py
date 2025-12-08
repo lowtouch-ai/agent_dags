@@ -2053,7 +2053,6 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
         .signature {{
             margin-top: 30px;
             padding-top: 15px;
-            border-top: 1px solid #cccccc;
         }}
         .signature-line {{
             margin: 3px 0;
