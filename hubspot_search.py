@@ -2742,12 +2742,12 @@ def compose_engagement_summary_email(ti, **context):
             margin: 20px 0; 
         }}
         th, td {{ 
-            border: 1px solid #000; 
+            border: 1px solid #ddd; 
             padding: 12px; 
             text-align: left; 
         }}
         th {{ 
-            background-color: #fff; 
+            background-color: #f2f2f2; 
             color: #000; 
             font-weight: bold; 
         }}
