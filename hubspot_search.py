@@ -226,8 +226,11 @@ IMPORTANT:
     - You are not capable of calling any APIs or Tool. You should answer based on your knowledge.
 Analyze the content and determine:
 1. Is the user requesting a summary of a client or deal before their next meeting? Look for phrases like "summarize details for contact name", "summary for deal name", or explicit mentions of preparing for an upcoming meeting.
-2. If a summary or summary 360 is requested, set ALL other flags (search_deals, search_contacts, search_companies, parse_notes, parse_tasks, parse_meetings) to false.
-3. If no summary is requested, determine the following:
+2. If a summary is requested, set ALL other flags (search_deals, search_contacts, search_companies, parse_notes, parse_tasks, parse_meetings) to false.
+3. Determine if the user is requesting a 360° enhanced summary with external research. Look for phrases like:
+"360 view", "full 360", "deal 360", "research the company", "background on", "web search", "perplexity", "company intel", "who are they", "what do we know about this company", etc.
+→ If detected → set "request_summary_360": true. set ALL other flags (search_deals, search_contacts, search_companies, parse_notes, parse_tasks, parse_meetings) to false.
+4. If no summary is requested, determine the following:
    - CONTACTS (search_contacts):
         - Set to TRUE if ANY person's name is mentioned (first name, last name, or full name) — even multiple people.
         - This includes ALL mentioned individuals regardless of role (e.g., "spoke with Neha", "cc'd Riya", "John from finance", "met Sarah and Priya").
@@ -551,6 +554,7 @@ Steps:
       - Ensure the strategy is actionable, spans at least 3-5 paragraphs, and incorporates specific examples or data where applicable.
 Important Instructions:
 - use the first name and lastname both to search for contacts, if given.
+- use the date format as MMM-DD-YYYY for close_date.
 Return this exact JSON structure:
 {{
     "contact_summary": {{
