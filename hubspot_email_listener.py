@@ -632,6 +632,7 @@ def search_deals(filters=None, properties=None, limit=200, max_results=None):
         'createdate', 'hubspot_owner_id', 'hs_object_id'
     ]
     final_properties = list(set(default_properties + (properties or [])))
+    logging.info(f"property is:{final_properties}")
     
     return search_hubspot_entities(
         entity_type='deals',
@@ -712,7 +713,7 @@ def export_to_file(data, export_format='excel', filename=None, export_dir='/appz
                     # Format Date columns (e.g., "Close Date", "Created Date", etc.)
                     if "date" in col_name.lower() or col_name in ["Close Date", "Expected Close Date", "Created At", "Last Modified"]:
                         if cell.value and isinstance(cell.value, datetime):
-                            cell.number_format = 'DD-MMM-YYYY'  # Changed to DD-MMM-YYYY
+                            cell.number_format = 'MMM DD, YYYY'  # Changed to DD-MMM-YYYY
 
                     # Format Amount columns with $ currency
                     if col_name in ["Amount", "Deal Amount", "Total Value"]:
@@ -1147,13 +1148,18 @@ Reply in 1-2 short, polite, professional sentences.
 - Always maintain a friendly and professional tone.
 
 **IMPORTANT: Response Format**
-Return ONLY a JSON object with this structure:
-{{
-    "trigger_report": false
-}}
+You MUST return your response in this EXACT format:
 
-**CRITICAL RULE**: If the query results contain MORE THAN 10 records, you MUST set "trigger_report": true
-Your final response must be in below format:
+1. First, a JSON object on its own line:
+{{"trigger_report": false}}
+
+2. Then, immediately followed by the HTML email content
+
+**CRITICAL RULES**: 
+- If the query results contain MORE THAN 10 records, set "trigger_report": true (and HTML is optional)
+- If trigger_report is false, you MUST include the complete HTML email response
+- NEVER return ONLY the JSON without HTML when trigger_report is false
+Your final response must be in below format if the trigger_report is false:
 ```
         <html>
         <head>
@@ -1243,6 +1249,22 @@ Your final response must be in below format:
                         trigger_report_dag(**kwargs_copy)
                         continue
                     else:
+                        html_content = None
+                        if isinstance(ai_response, str):
+                            match = re.search(r'```html.*?\n(.*?)```', ai_response, re.DOTALL)
+                            if match:
+                                html_content = match.group(1).strip()
+                            else:
+                                html_match = re.search(r'(<html.*?</html>)', ai_response, re.DOTALL | re.IGNORECASE)
+                                if html_match:
+                                    html_content = html_match.group(1).strip()
+                        
+                        # ⭐ VALIDATION: If no HTML found, raise error to trigger fallback
+                        if not html_content or '<html' not in html_content.lower():
+                            raise ValueError("AI returned trigger_report=false but provided no HTML content")
+                        
+                        ai_response = html_content
+                        logging.info(f"Extracted HTML content successfully")
                         # trigger_report is false, but we still need HTML
                         # The AI should have included HTML in the response string
                         # Extract HTML from the original ai_response string
@@ -1710,26 +1732,48 @@ def trigger_report_dag(**kwargs):
                 # AI Analysis
                 analysis_prompt = f"""You are a HubSpot data analyst. Analyze this request and determine what data to search for.
 User request: "{email.get("content", "").strip()}"
-Determine:
-1. Entity type: contacts, companies, or deals
-2. Filters needed (date ranges, statuses, etc.)
-3. Properties to include in the report
-4. Sort order if specified
-5. If the user asks question like which all deals expire by this month or this year, then always take the current date or todays date as GTE and the month end or year end date as LTE. Donot include the date that is already past the current date.
-6. Dates should only be given as YYYY-MM-DD.
-7. Include `hubspot_owner_id` in the request body of contact entity type.
-8. The report_title should be meaningful of what data is retrieved. For e.g, If the user asks get me the deals expiring for this month then the title should be Deals expiring in dec or the current month.
-Return ONLY a JSON object with this structure:
+
+IMPORTANT RULES:
+1. For company-related queries (e.g., "deals associated with company XYZ"):
+   - Use the "associations.company" property to filter by company id
+   - Parse the company name and search the company using search_company tool and get the id for the filters.
+   - Operator should be CONTAINS_TOKEN for partial matches
+   - Example: {{"propertyName": "associations.company", "operator": "CONTAINS_TOKEN", "value": "123"}}
+
+2. For contact-related queries (e.g., "deals for contact John Doe"):
+   - Use the "associations.contact" property to filter by contact id
+   -  Parse the contact name and search the contact using search_contact tool and get the id for the filters. ALways use
+   - Example: {{"propertyName": "associations.contact", "operator": "CONTAINS_TOKEN", "value": "123"}}
+
+3. For date ranges:
+   - Always use YYYY-MM-DD format
+   - Use GTE for "from" dates and LTE for "to" dates
+   - For "this month", use GTE=today and LTE=end_of_month
+   - NEVER include past dates before today unless explicitly requested
+
+4. For deal properties:
+   - dealstage: Use exact stage IDs (e.g., "appointmentscheduled")
+   - dealname: Use CONTAINS_TOKEN for partial matches
+   - amount: Use GT/GTE/LT/LTE for range queries
+   - closedate: Use GT/GTE/LT/LTE for date ranges 
+
+5. For contact properties:
+   - Include hubspot_owner_id in properties list
+   - email, firstname, lastname: Use CONTAINS_TOKEN for partial matches
+
+6. Report title should describe what data is shown (e.g., "Deals Associated with Company XYZ")
+
+Return ONLY a valid JSON object:
 {{
-    "entity_type": "deals",
+    "entity_type": "deals|contacts|companies",
     "filters": [
-        {{"propertyName": "dealstage", "operator": "EQ", "value": "appointmentscheduled"}}
+        {{"propertyName": "property_name", "operator": "EQ|NEQ|GT|GTE|LT|LTE|CONTAINS_TOKEN|NOT_CONTAINS_TOKEN", "value": "filter_value"}}
     ],
-    "properties": ["dealname", "amount", "dealstage", "closedate"],
-    "sort": {{"propertyName": "closedate", "direction": "ASCENDING"}},
-    "report_title": "Deals Filtered by Deal Stage"
+    "properties": ["list", "of", "properties"],
+    "sort": {{"propertyName": "property_name", "direction": "ASCENDING|DESCENDING"}},
+    "report_title": "Descriptive Report Title"
 }}
-Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOKEN.
+Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOKEN
 """
                
                 analysis_response = get_ai_response(
@@ -1737,6 +1781,7 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                     conversation_history=conversation_history_for_ai,
                     expect_json=True
                 )
+                logging.info(f"AI response is:{analysis_response}")
                
                 try:
                     analysis_data = json.loads(analysis_response)
@@ -1775,7 +1820,13 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                 results_data = search_results.get("results", [])
                
                 if not results_data:
-                    raise ValueError("No data found matching the search criteria")
+                    error_msg = search_results.get("error", "No data found")
+                    logging.warning(f"⚠️ No results found. HubSpot error: {error_msg}")
+                    raise ValueError(f"No data found matching the search criteria. HubSpot API error: {error_msg}")
+                
+                logging.info(f"✅ Retrieved {len(results_data)} {entity_type} from HubSpot")
+                
+                # Continue with report generation...
                 report_log = build_report_log(
                     entity_type=entity_type,
                     filters=filters,
@@ -1937,7 +1988,7 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                 tz = pytz.timezone(timezone_str)
                 current_time = datetime.now(tz)
                 # Format date as dd-Mon-yyyy (e.g., 03-Dec-2025)
-                data_as_of_formatted = current_time.strftime("%d-%b-%Y")
+                data_as_of_formatted = current_time.strftime("%b %d, %Y")
                
                 # Build filter summary
                 filter_summary = get_filter_summary(filters, entity_type)
@@ -1959,27 +2010,28 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
             padding: 20px;
         }}
         .greeting {{
-            margin-bottom: 20px;
+            margin-bottom: 8px;
         }}
         .report-title {{
-            font-size: 18px;
+            font-size: 15px;
             font-weight: bold;
             color: #000000;
-            margin: 20px 0 10px 0;
+            margin: 8px 0 10px 0;
             padding-bottom: 8px;
         }}
         .metadata {{
             font-size: 13px;
             color: #333333;
-            margin: 10px 0 25px 0;
+            margin: 8px 0 20px 0;
         }}
         .stats-section {{
-            margin: 25px 0;
+            margin: 8px;
         }}
         .stat-row {{
             display: flex;
             justify-content: space-between;
-            padding: 12px 0;
+            padding: 0;       /* remove extra height */
+            margin: 13px 0;
         }}
         .stat-label {{
             font-weight: 600;
@@ -1991,11 +2043,11 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
             margin-left: 8px
         }}
         .message {{
-            margin: 20px 0;
+            margin: 8px 0;
             color: #000000;
         }}
         .closing {{
-            margin-top: 25px;
+            margin-top: 8px;
             color: #000000;
         }}
         .signature {{
@@ -2032,12 +2084,12 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
    
     <div class="stats-section">
         <div class="stat-row">
-            <span class="stat-label">TOTAL {entity_type.upper()}</span>
+            <span class="stat-label">Total {entity_type.lower()}</span>
             <span class="stat-value">{record_count}</span>
         </div>
         {"" if entity_type != "deals" else f'''
         <div class="stat-row">
-            <span class="stat-label">TOTAL VALUE</span>
+            <span class="stat-label">Total Value</span>
             <span class="stat-value">{format_currency(total_value)}</span>
         </div>
         '''}
@@ -2170,15 +2222,21 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                     logging.info(f"✓ Attached report file: {report_filename}")
                
                 raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
-                service.users().messages().send(userId="me", body={"raw": raw}).execute()
-                mark_message_as_read(service, email_id)
-               
+                service.users().messages().send(userId="me", body={"raw": raw}).execute()                
+                # Try to mark as read, but don't fail if it doesn't work
+                try:
+                    mark_message_as_read(service, email_id)
+                except Exception as mark_error:
+                    logging.warning(f"Could not mark email {email_id} as read: {mark_error}")             
                 logging.info(f"✓ {log_prefix} email sent to {sender_email}")
            
             except Exception as send_error:
                 logging.error(f"Failed to send email for {email_id}: {send_error}", exc_info=True)
-                mark_message_as_read(service, email_id)
-       
+                try:
+                    mark_message_as_read(service, email_id)
+                except:
+                    pass
+      
         except Exception as outer_error:
             logging.error(f"Unexpected error processing report email {email.get('id', 'unknown')}: {outer_error}", exc_info=True)
             try:
