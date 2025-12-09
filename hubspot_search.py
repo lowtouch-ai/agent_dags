@@ -644,16 +644,11 @@ def summarize_engagement_details_360(ti, **context):
                 - no_activity_14_days: true if latest activity >14 days ago
                 - stage_unchanged_21_days: true if stage hasn't moved in 21+ days
                 **Output format** :
-                    - **Contact**: {{contact_name}}, Email: {{email}}, Company: {{company_name}} in tabular format.
-                    - **Deal**: [{{Deal_name}}, Stage: {{Deal_stage}}, Amount: {{Deal_Amount}}, Close Date: {{Deal_close_date}}] in tabular format.
-                    - **Company**: {{Company_name}}, Domain: {{email}} in tabular format
-                    - **Engagements**:Generate a engagement summary based on the notes retrieved, including the discussed things. Ensure the summary is structured, concise yet thorough, and includes at least 5-7 sentences to cover all critical aspects.
-                    - Display the latest meeting held, if available.
-                    - Do not show the retrieved noted as it is. Analyze the notes and make a summary then display the generated summary.
-                    - Never show tasks.
+                    - **contact_summary**: {{contact_name}}, Email: {{email}}, Company: {{company_name}} in tabular format.
+                    - **deal_summary**: [{{Deal_name}}, Stage: {{Deal_stage}}, Amount: {{Deal_Amount}}, Close Date: {{Deal_close_date}}] in tabular format.
+                    - **company_summary**: {{Company_name}}, Domain: {{email}} in tabular format
                     - Never show Note ID.      
-                    - **Detailed Deal Summary**: Generate a comprehensive deal summary for each engagement, including the company name, deal stage, deal amount, key stakeholders, timeline, and any relevant risks or opportunities. Ensure the summary is structured, concise yet thorough, and includes at least 3-5 sentences to cover all critical aspects of the deal.
-                                    - **recent_5_activities**: ["...", "..."],  
+                    - **recent_5_activities**: ["...", "..."],  
                     - **risk_flags**: {{"past_close_date": false, "no_activity_14_days": false, "stage_unchanged_21_days": false}}
                 Important Instructions:
                 - use the first name and lastname both to search for contacts, if given.
@@ -675,8 +670,7 @@ def summarize_engagement_details_360(ti, **context):
                         "domain": "inferred_domain"
                     }},
                     "recent_5_activities": ["...", "..."],  
-                    "risk_flags": {{"past_close_date": false, "no_activity_14_days": false, "stage_unchanged_21_days": false}},
-                    "engagement_summary": "5-7 sentence summary of engagements, including discussed topics and latest meeting if available"
+                    "risk_flags": {{"past_close_date": false, "no_activity_14_days": false, "stage_unchanged_21_days": false}}, 
                 }}
                 Guidelines:
                 - Parse contact name, deal ID (if any), company name, and other details directly from thread content or email subject.
@@ -695,7 +689,7 @@ def summarize_engagement_details_360(ti, **context):
 
         # Now: Perplexity-powered external research
         company_name = parsed_json.get("company_summary", {}).get("company_name", "").strip()
-        if company_name and company_name.lower() not in ["lowtouch.ai", "", "n/a"]:
+        if company_name and company_name.lower() not in [ "", "n/a"]:
             perplexity_prompt = f"""You are an elite B2B sales intelligence researcher using live web search (Perplexity). Your job is to deliver a sharp, actionable 360° external view of the company to help close the deal faster.
 
                                 Company Name: {company_name}
@@ -738,14 +732,14 @@ def summarize_engagement_details_360(ti, **context):
             perp_json = json.loads(perp_response.strip())
             parsed_json["deal_360"] = perp_json.get("deal_360", "No external insights available at this time.")
         else:
-            parsed_json["deal_360"] = "Company not identified for external research."
+            parsed_json["deal_360"] = ["Company not identified for external research."]
 
         ti.xcom_push(key="engagement_summary", value=parsed_json)
         logging.info("360 engagement summary with Perplexity research generated successfully")
 
     except Exception as e:
         logging.error(f"Error in 360 summary: {e}")
-        ti.xcom_push(key="engagement_summary", value={"error": str(e)})
+        ti.xcom_push(key="engagement_summary", value={"error": f"Error processing engagement summary: {str(e)}"})
 
 def determine_owner(ti, **context):
     """Determine deal owner and task owners from conversation"""
@@ -2642,9 +2636,6 @@ def compose_engagement_summary_email(ti, **context):
 </head>
 <body>
     <h2>Engagement Summary Request</h2>
-    <div class="error">
-        <strong>Error:</strong> {engagement_summary.get('error')}
-    </div>
     <p>I apologize, but I encountered an issue retrieving the engagement summary. Please check if the contact/deal information is correct and try again.</p>
     <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">Lowtouch.ai</a></p>
 </body>
@@ -2828,7 +2819,7 @@ def compose_engagement_summary_email(ti, **context):
     <div>
         <h3>Deal Information</h3>
         <table border="1">
-            <tr><th>Deal ID</th><th>Deal Name</th><th>Stage</th><th>Amount</th><th>Owner</th><th>Create Date</th><th>Close Date</th></tr>"""
+            <tr><th>Deal Name</th><th>Stage</th><th>Amount</th><th>Close Date</th></tr>"""
         for deal in meaningful_deals:
             email_content += f"""\
             <tr>
