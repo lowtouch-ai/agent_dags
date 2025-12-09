@@ -228,7 +228,7 @@ Analyze the content and determine:
 1. Is the user requesting a summary of a client or deal before their next meeting? Look for phrases like "summarize details for contact name", "summary for deal name", or explicit mentions of preparing for an upcoming meeting.
 2. If a summary is requested, set ALL other flags (search_deals, search_contacts, search_companies, parse_notes, parse_tasks, parse_meetings) to false.
 3. Determine if the user is requesting a 360° enhanced summary with external research. Look for phrases like:
-"360 view", "full 360", "deal 360", "research the company", "background on", "web search", "perplexity", "company intel", "who are they", "what do we know about this company", etc.
+"360 view", "full 360", "deal 360", "research the company", "background on", "web search", "perplexity", "company intel", "who are they", "what do we know about this company", "detailed analysis" etc.
 → If detected → set "request_summary_360": true. set ALL other flags (search_deals, search_contacts, search_companies, parse_notes, parse_tasks, parse_meetings) to false.
 4. If no summary is requested, determine the following:
    - CONTACTS (search_contacts):
@@ -676,8 +676,7 @@ def summarize_engagement_details_360(ti, **context):
                     }},
                     "recent_5_activities": ["...", "..."],  
                     "risk_flags": {{"past_close_date": false, "no_activity_14_days": false, "stage_unchanged_21_days": false}},
-                    "engagement_summary": "5-7 sentence summary of engagements, including discussed topics and latest meeting if available",
-                    "detailed_deal_summary": "3-5 sentence detailed summary of the deal",
+                    "engagement_summary": "5-7 sentence summary of engagements, including discussed topics and latest meeting if available"
                 }}
                 Guidelines:
                 - Parse contact name, deal ID (if any), company name, and other details directly from thread content or email subject.
@@ -740,9 +739,6 @@ def summarize_engagement_details_360(ti, **context):
             parsed_json["deal_360"] = perp_json.get("deal_360", "No external insights available at this time.")
         else:
             parsed_json["deal_360"] = "Company not identified for external research."
-
-        # Optional: Add call strategy tailored to 360 insights
-        parsed_json["call_strategy"] = "Tailored call strategy will be enhanced in next iteration using 360 insights."
 
         ti.xcom_push(key="engagement_summary", value=parsed_json)
         logging.info("360 engagement summary with Perplexity research generated successfully")
@@ -2836,12 +2832,9 @@ def compose_engagement_summary_email(ti, **context):
         for deal in meaningful_deals:
             email_content += f"""\
             <tr>
-                <td>{deal.get("deal_id", "N/A")}</td>
                 <td>{deal.get("deal_name", "N/A")}</td>
                 <td>{deal.get("stage", "N/A")}</td>
                 <td>{deal.get("amount", "N/A")}</td>
-                <td>{deal.get("owner", "N/A")}</td>
-                <td>{deal.get("create_date", "N/A")}</td>
                 <td>{deal.get("close_date", "N/A")}</td>
             </tr>"""
         email_content += "</table></div>"
