@@ -67,13 +67,13 @@ def decode_email_payload(msg):
         logging.error(f"Error decoding email payload: {e}")
         return ""
 
-def get_ai_response(prompt, conversation_history=None, expect_json=False):
+def get_ai_response(prompt, conversation_history=None, expect_json=False, model='hubspot:v6af'):
     try:
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
         messages = []
         
 
-        if expect_json:
+        if expect_json and model!="hubspot:v7-perplexity":
             messages.append({
                 "role": "system",
                 "content": "You are a JSON-only API. Always respond with valid JSON objects. Never include explanatory text, HTML, or markdown formatting. Only return the requested JSON structure."
@@ -88,7 +88,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
                     messages.append({"role": "assistant", "content": item.get("response", "")})
         
         messages.append({"role": "user", "content": prompt})
-        response = client.chat(model='hubspot:v6af', messages=messages, stream=False)
+        response = client.chat(model=model, messages=messages, stream=False)
         ai_content = response.message.content
 
         ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
@@ -227,7 +227,10 @@ IMPORTANT:
 Analyze the content and determine:
 1. Is the user requesting a summary of a client or deal before their next meeting? Look for phrases like "summarize details for contact name", "summary for deal name", or explicit mentions of preparing for an upcoming meeting.
 2. If a summary is requested, set ALL other flags (search_deals, search_contacts, search_companies, parse_notes, parse_tasks, parse_meetings) to false.
-3. If no summary is requested, determine the following:
+3. Determine if the user is requesting a 360° enhanced summary with external research. Look for phrases like:
+"360 view", "full 360", "deal 360", "research the company", "background on", "web search", "perplexity", "company intel", "who are they", "what do we know about this company", "detailed analysis" etc.
+→ If detected → set "request_summary_360": true. set ALL other flags (search_deals, search_contacts, search_companies, parse_notes, parse_tasks, parse_meetings) to false.
+4. If no summary is requested, determine the following:
    - CONTACTS (search_contacts):
         - Set to TRUE if ANY person's name is mentioned (first name, last name, or full name) — even multiple people.
         - This includes ALL mentioned individuals regardless of role (e.g., "spoke with Neha", "cc'd Riya", "John from finance", "met Sarah and Priya").
@@ -306,6 +309,7 @@ Return this exact JSON structure:
     "parse_tasks": true/false,
     "parse_meetings": true/false,
     "request_summary": true/false,
+    "request_summary_360": true/false,
     "deals_reason": "explanation why deals need processing or not",
     "contacts_reason": "explanation why contacts need processing or not",
     "companies_reason": "explanation why companies need processing or not",
@@ -550,6 +554,7 @@ Steps:
       - Ensure the strategy is actionable, spans at least 3-5 paragraphs, and incorporates specific examples or data where applicable.
 Important Instructions:
 - use the first name and lastname both to search for contacts, if given.
+- use the date format as MMM-DD-YYYY for close_date.
 Return this exact JSON structure:
 {{
     "contact_summary": {{
@@ -590,6 +595,150 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         logging.info(f"Engagement summary generated successfully")
     except Exception as e:
         logging.error(f"Error processing engagement summary AI response: {e}")
+        ti.xcom_push(key="engagement_summary", value={"error": f"Error processing engagement summary: {str(e)}"})
+
+def summarize_engagement_details_360(ti, **context):
+    """Generate enhanced Deal 360 view using Perplexity-powered web research"""
+    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    if not entity_flags.get("request_summary_360", False):
+        logging.info("No 360 summary requested, skipping")
+        ti.xcom_push(key="engagement_summary", value={})
+        return
+
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", default="")
+    email_data = ti.xcom_pull(key="email_data", default={})
+
+    conversation_context = ""
+    for msg in chat_history:
+        conversation_context += f"[{msg.get('role', 'unknown').upper()}]: {msg.get('content', '')}\n\n"
+    conversation_context += f"[USER - LATEST]: {latest_message}\n"
+
+    # First: Get structured HubSpot data (same as before, but minimal + 360 fields)
+    prompt = f"""You are a HubSpot expert assistant. Extract and summarize key CRM data from this email thread for a Deal 360 view.
+
+                FULL CONVERSATION:
+                {conversation_context}
+
+                EMAIL SUBJECT: {email_data.get("headers", {}).get("Subject", "")}
+
+                IMPORTANT: Respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
+
+                Steps:
+                - **When the user requests "Summarize details for {{contact name to search}}", retrieve the `contactId` for the specified contact**.
+                - Check if the user has provided a specific `dealId` or deal identifier in the request.
+                - Invoke `get_engagements_by_object_id` tool to get engagement of a perticular `dealId`. 
+                - List all the Associated Deals If no `dealId` is provided and , retrieve the engagements for the top 3 `dealId`s and summarize the details in the specified format.
+                - If there are multiple deal invoke `get_engagements_by_object_id` for all the `dealIds` and summarize the details in the specified format.
+                - Ensure the agent does not retrieve or process engagements for any deals other than the user-specified `dealId` or the single deal when applicable.
+                - Summarize the details in the bellow format, ensuring clarity and relevance for the selected deal only.
+                - **Extract**:
+                - Primary contact name and email
+                - Company name
+                - Deal name(s), ID(s), stage, amount, owner, create/close dates
+                - Top 3 associated contacts
+                - Last 5 activities (emails, calls, meetings, notes)
+
+                - **Compute risk flags as of current date**:
+                - past_close_date: true if close date is before today
+                - no_activity_14_days: true if latest activity >14 days ago
+                - stage_unchanged_21_days: true if stage hasn't moved in 21+ days
+                **Output format** :
+                    - **contact_summary**: {{contact_name}}, Email: {{email}}, Company: {{company_name}} in tabular format.
+                    - **deal_summary**: [{{Deal_name}}, Stage: {{Deal_stage}}, Amount: {{Deal_Amount}}, Close Date: {{Deal_close_date}}] in tabular format.
+                    - **company_summary**: {{Company_name}}, Domain: {{email}} in tabular format
+                    - Never show Note ID.      
+                    - **recent_5_activities**: ["...", "..."],  
+                    - **risk_flags**: {{"past_close_date": false, "no_activity_14_days": false, "stage_unchanged_21_days": false}}
+                Important Instructions:
+                - use the first name and lastname both to search for contacts, if given.
+                Return this exact JSON structure:
+                {{
+                    "contact_summary": {{
+                        "contact_name": "parsed_contact_name",
+                        "email": "inferred_email_from_thread",
+                        "company_name": "inferred_company_name"
+                    }},
+                    "deal_summary": [{{
+                        "deal_name": "inferred_deal_name",
+                        "stage": "inferred_deal_stage",
+                        "amount": "inferred_amount",
+                        "close_date": "inferred_close_date"
+                    }}],
+                    "company_summary": {{
+                        "company_name": "inferred_company_name",
+                        "domain": "inferred_domain"
+                    }},
+                    "recent_5_activities": ["...", "..."],  
+                    "risk_flags": {{"past_close_date": false, "no_activity_14_days": false, "stage_unchanged_21_days": false}}, 
+                }}
+                Guidelines:
+                - Parse contact name, deal ID (if any), company name, and other details directly from thread content or email subject.
+                - Infer all fields from thread content and email data; use empty string "" for missing values.
+                - Do not use contact, company, or deal info from XCom; rely solely on thread content and email data.
+                - If no contact name is found, return {{"error": "No contact name found in thread content"}}.
+                - Ensure summaries and call strategy are tailored to the context in the thread.
+                - use the date format as MMM-DD-YYYY for close_date.
+
+                RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
+
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"360 - Raw HubSpot AI response: {response[:1000]}...")
+        parsed_json = json.loads(response.strip())
+
+        # Now: Perplexity-powered external research
+        company_name = parsed_json.get("company_summary", {}).get("company_name", "").strip()
+        if company_name and company_name.lower() not in [ "", "n/a"]:
+            perplexity_prompt = f"""You are an elite B2B sales intelligence researcher using live web search (Perplexity). Your job is to deliver a sharp, actionable 360° external view of the company to help close the deal faster.
+
+                                Company Name: {company_name}
+                                Domain (if known): {parsed_json.get("company_summary", {}).get("domain", "not available")}
+
+                                Deal Context (use this to tailor your research depth and focus):
+                                - Deal Stage: {', '.join([d.get("stage", "unknown") for d in parsed_json.get("deal_summary", [])[:3]]) or "unknown"}
+                                - Deal Amount: {', '.join([d.get("amount", "unknown") for d in parsed_json.get("deal_summary", [])[:3]]) or "unknown"}
+                                - Expected Close Date: {', '.join([d.get("close_date", "unknown") for d in parsed_json.get("deal_summary", [])[:3]]) or "unknown"}
+                                - Last Activity: {parsed_json.get("recent_5_activities", [None])[0] or "unknown"}
+
+                                Prioritize and include only the most decision-relevant insights:
+                                • Recent funding rounds, revenue estimates, or growth metrics
+                                • Key executives / decision-makers (especially if different from known contacts)
+                                • Major product launches, partnerships, or tech stack signals
+                                • Expansion, hiring surge, new office, or M&A activity
+                                • Current challenges, layoffs, leadership changes, or competitive threats
+                                • Any public intent signals around the problems our Pro plan solves (automation, workflows, CRM, etc.)
+
+                                Formatting rules (strict):
+                                - Use short, clear lines separated by a single newline
+                                - No bullets required; each insight can be its own line
+                                - No markdown, no headings, no emojis
+                                - No blank lines between items
+                                - No paragraphs; only single-line insights
+                                - Keep to 5–8 lines
+                                - Return ONLY valid JSON exactly in the structure below
+
+                                Return ONLY this JSON (no extra text, no markdown):
+                                `{{"deal_360": ["Insight 1", "Insight 2", "Insight 3"]}}`
+                                """
+
+            perp_response = get_ai_response(
+                perplexity_prompt,
+                conversation_history=[],
+                expect_json=True,
+                model="hubspot:v7-perplexity"
+            )
+            logging.info(f"360 - Raw Perplexity AI response: {perp_response[:1000]}...")
+            perp_json = json.loads(perp_response.strip())
+            parsed_json["deal_360"] = perp_json.get("deal_360", "No external insights available at this time.")
+        else:
+            parsed_json["deal_360"] = ["Company not identified for external research."]
+
+        ti.xcom_push(key="engagement_summary", value=parsed_json)
+        logging.info("360 engagement summary with Perplexity research generated successfully")
+
+    except Exception as e:
+        logging.error(f"Error in 360 summary: {e}")
         ti.xcom_push(key="engagement_summary", value={"error": f"Error processing engagement summary: {str(e)}"})
 
 def determine_owner(ti, **context):
@@ -2469,7 +2618,7 @@ def compose_engagement_summary_email(ti, **context):
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
     
     # Check if summary was requested
-    if not entity_flags.get("request_summary", False):
+    if not entity_flags.get("request_summary",False) and not entity_flags.get("request_summary_360", False):
         logging.info("No engagement summary requested, skipping email composition")
         ti.xcom_push(key="summary_email_needed", value=False)
         return "No summary email needed"
@@ -2487,9 +2636,6 @@ def compose_engagement_summary_email(ti, **context):
 </head>
 <body>
     <h2>Engagement Summary Request</h2>
-    <div class="error">
-        <strong>Error:</strong> {engagement_summary.get('error')}
-    </div>
     <p>I apologize, but I encountered an issue retrieving the engagement summary. Please check if the contact/deal information is correct and try again.</p>
     <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">Lowtouch.ai</a></p>
 </body>
@@ -2506,7 +2652,11 @@ def compose_engagement_summary_email(ti, **context):
     engagement_details = engagement_summary.get('engagement_summary', '')
     detailed_deal = engagement_summary.get('detailed_deal_summary', '')
     call_strategy = engagement_summary.get('call_strategy', '')
-
+    top_3_contacts_raw = engagement_summary.get('top_3_contacts', [])
+    recent_5_activities = engagement_summary.get('recent_5_activities', [])
+    risk_flags = engagement_summary.get('risk_flags', {})
+    deal_360 = engagement_summary.get('deal_360', [])
+    logging.info(f"deal_360 found: {deal_360}")
     # Helper: Check if a dict has meaningful data for given fields
     def has_meaningful_data(entity, required_fields):
         if not entity or not isinstance(entity, dict):
@@ -2525,6 +2675,11 @@ def compose_engagement_summary_email(ti, **context):
         ["deal_name", "stage", "amount", "close_date"]
     )
 
+    meaningful_top_3_contacts = filter_meaningful_entities(
+        top_3_contacts_raw if isinstance(top_3_contacts_raw, list) else [],
+        ["name", "email"]
+    )
+
     # Determine which sections have content
     has_contact = has_meaningful_data(contact_summary, ["contact_name", "email", "company_name"])
     has_company = has_meaningful_data(company_summary, ["company_name", "domain"])
@@ -2532,6 +2687,11 @@ def compose_engagement_summary_email(ti, **context):
     has_engagement = bool(engagement_details and engagement_details.strip())
     has_detailed_deal = bool(detailed_deal and detailed_deal.strip())
     has_call_strategy = bool(call_strategy and call_strategy.strip())
+    has_top_3_contacts = len(meaningful_top_3_contacts) > 0
+    has_recent_activities = len(recent_5_activities) > 0
+    has_risk_flags = any(risk_flags.values())
+    has_deal_360 = len(deal_360) > 0
+
 
     # If no meaningful sections at all, send a minimal email
     if not (has_contact or has_company or has_deals or has_engagement or has_detailed_deal or has_call_strategy):
@@ -2569,12 +2729,12 @@ def compose_engagement_summary_email(ti, **context):
             margin: 20px 0; 
         }}
         th, td {{ 
-            border: 1px solid #000; 
+            border: 1px solid #ddd; 
             padding: 12px; 
             text-align: left; 
         }}
         th {{ 
-            background-color: #fff; 
+            background-color: #f2f2f2; 
             color: #000; 
             font-weight: bold; 
         }}
@@ -2601,7 +2761,7 @@ def compose_engagement_summary_email(ti, **context):
 <body>
     <div class="greeting">
         <p>Hello {from_email},</p>
-        <p>Here is the comprehensive engagement summary you requested:</p>
+        <p>Here is the detailed engagement summary you requested:</p>
     </div>
 """
 
@@ -2655,40 +2815,56 @@ def compose_engagement_summary_email(ti, **context):
         )
 
     if has_deals:
-        email_content += """
+        email_content += """\
+    <div>
         <h3>Deal Information</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>Deal Name</th>
-                    <th>Stage</th>
-                    <th>Amount</th>
-                    <th>Close Date</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
+        <table border="1">
+            <tr><th>Deal Name</th><th>Stage</th><th>Amount</th><th>Close Date</th></tr>"""
         for deal in meaningful_deals:
-            email_content += f"""
-                <tr>
-                    <td>{deal.get("deal_name", "N/A")}</td>
-                    <td>{deal.get("stage", "N/A")}</td>
-                    <td>{deal.get("amount", "N/A")}</td>
-                    <td>{deal.get("close_date", "N/A")}</td>
-                </tr>
-            """
-        email_content += """
-            </tbody>
-        </table>
-        """
+            email_content += f"""\
+            <tr>
+                <td>{deal.get("deal_name", "N/A")}</td>
+                <td>{deal.get("stage", "N/A")}</td>
+                <td>{deal.get("amount", "N/A")}</td>
+                <td>{deal.get("close_date", "N/A")}</td>
+            </tr>"""
+        email_content += "</table></div>"
+    
+    if has_top_3_contacts:
+        email_content += """\
+    <div>
+        <h3>Top 3 Associated Contacts</h3>
+        <table border="1">
+            <tr><th>Name</th><th>Email</th></tr>"""
+        for contact in meaningful_top_3_contacts:
+            email_content += f"""\
+            <tr>
+                <td>{contact.get("name", "N/A")}</td>
+                <td>{contact.get("email", "N/A")}</td>
+            </tr>"""
+        email_content += "</table></div>"
 
-    if has_engagement:
-        email_content += f"""
-        <h3>Engagement Overview</h3>
-        <div class="section">
-            <p>{engagement_details}</p>
-        </div>
-        """
+    if has_recent_activities:
+        email_content += f"""\
+    <div>
+        <h3>Recent 5 Activities</h3>
+        <ul>"""
+        for activity in recent_5_activities:
+            email_content += f"<li>{activity}</li>"
+        email_content += "</ul></div>"
+
+    if has_risk_flags:
+        email_content += f"""\
+    <div>
+        <h3>Risk/Opportunity Flags</h3>
+        <ul>"""
+        if risk_flags.get("past_close_date"):
+            email_content += "<li>Deal is past the expected close date.</li>"
+        if risk_flags.get("no_activity_14_days"):
+            email_content += "<li>No activity in the last 14 days.</li>"
+        if risk_flags.get("stage_unchanged_21_days"):
+            email_content += "<li>Stage hasn’t changed in the previous 21 days.</li>"
+        email_content += "</ul></div>"
 
     if has_detailed_deal:
         email_content += f"""
@@ -2705,12 +2881,20 @@ def compose_engagement_summary_email(ti, **context):
             <p>{call_strategy}</p>
         </div>
         """
+    if has_deal_360:
+        email_content += f"""\
+    <div>
+        <h3>Deal 360° Intelligence – External Insights</h3>
+        <ul>"""
+        for activity in deal_360:
+            email_content += f"<li>{activity}</li>"
+        email_content += "</ul></div>"
 
     # Closing
     email_content += """
     <div class="closing">
         <p>This summary provides a comprehensive overview to help you prepare for your upcoming engagement.</p>
-        <p>If you need any clarifications or additional information, please don't hesitate to ask.</p>
+        <p>If you need any clarifications or additional information, please let me know.</p>
         <br>
         <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">Lowtouch.ai</a></p>
     </div>
@@ -2806,8 +2990,7 @@ def send_engagement_summary_email(ti, **context):
 def decide_workflow_path(ti, **context):
     """Decide whether to proceed with summary email or confirmation workflow"""
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
-    
-    if entity_flags.get("request_summary", False):
+    if entity_flags.get("request_summary",False) or entity_flags.get("request_summary_360", False):
         logging.info("Taking summary path - will compose and send engagement summary")
         return "compose_engagement_summary_email"
     else:
@@ -2850,6 +3033,12 @@ with DAG(
         task_id="summarize_engagement_details",
         python_callable=summarize_engagement_details,
         provide_context=True
+    )
+
+    summarize_engagement_360_task = PythonOperator(
+    task_id="summarize_engagement_details_360",
+    python_callable=summarize_engagement_details_360,
+    provide_context=True,
     )
 
     branch_task = BranchPythonOperator(
@@ -2931,7 +3120,7 @@ with DAG(
         task_id="end_workflow"
     )
 
-    load_context_task >> analyze_entities_task >> summarize_engagement_task >> branch_task
+    load_context_task >> analyze_entities_task >> summarize_engagement_task >> summarize_engagement_360_task >> branch_task
     
     # Summary workflow path (when request_summary is True)
     branch_task >> compose_summary_email_task >> send_summary_email_task >> end_task

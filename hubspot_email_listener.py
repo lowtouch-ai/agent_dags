@@ -809,6 +809,7 @@ SEARCH_DAG CAPABILITIES:
 - In context if the user has already created some entities and want to add more entities like additional contact or new deal then a search is needed to check if the entity exists before creating new ones.
 - Search for all contacts mentioned by user in the prompt even if there are multiple contacts.If the contact doesnt exist return the response as objects to be created and if there is an existing contact return the existing contact details in the response.
 - Parse the email context and check wether the user is selecting entities based on the confirmation email sent, if yes then ignore those, you dont have the capability in such scenario.
+- Request **Deal 360° Intelligence** — enhanced external research on the company using live web search (Perplexity); 
 CONTINUATION_DAG CAPABILITIES:
 - Creates new contacts, companies, deals in HubSpot
 - Updates existing entities based on user modifications. for example, if the deal exists and we need to change the deal amount, or we need to change the task due date to a different date. These are taken as modification.
@@ -863,9 +864,11 @@ ROUTING DECISION TREE:
    - Log meeting minutes or notes from discussions
    - Request summaries of clients/deals before meetings
    - Any FIRST message in a new conversation thread other than greetings or general chats.
+   - Generates **Deal 360° Intelligence** — real-time external company research using Perplexity (funding, leadership, growth, risks, opportunities, market context)
    
    Keywords: "create", "add", "new", "log meeting", "find", "search", "summarize", "what do we know about"
    → Response: {{"task_type": "search_dag", "reasoning": "..."}}
+   → Deal 360° Intelligence: "360 view", "deal 360", "company 360", "research the company", "background on", "web search", "perplexity", "external intel", "who are they", "company research", "market context"
 
 4. **CONFIRM & EXECUTE** (Route to: continuation_dag)
    When user is:
