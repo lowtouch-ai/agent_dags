@@ -189,43 +189,47 @@ def calculate_candidate_score(analysis_json):
     must_have_scores = []
     nice_to_have_scores = []
     other_scores = []
+    # Track ineligibility reasons
+    reasons = []
     # Score Must-Have Skills
-    ineligible = False
     for skill in must_have_skills:
         match = skill.get('match', False)
         if match:
             must_have_scores.append(100)
         else:
             must_have_scores.append(0)
-            ineligible = True  # Any missing makes ineligible
+            reasons.append("missing Must-Have skills")
     # Score Nice-to-Have Skills
     for skill in nice_to_have_skills:
         match = skill.get('match', False)
         nice_to_have_scores.append(100 if match else 0)
     # Score Other Criteria (Experience and Education)
-    # Assuming full match if 'match': true, partial if false (but adjust as needed)
-    # For simplicity, true=100, false=50 (partial, as per rules for other criteria)
-    experience_score = 100 if experience_match.get('match', False) else 50
-    education_score = 100 if education_match.get('match', False) else 50
+    # Now: full match=100, no match=0 (ineligible if no match)
+    exp_match = experience_match.get('match', False)
+    experience_score = 100 if exp_match else 0
+    if not exp_match:
+        reasons.append("experience mismatch")
+    edu_match = education_match.get('match', False)
+    education_score = 100 if edu_match else 0
+    if not edu_match:
+        reasons.append("education mismatch")
     other_scores.extend([experience_score, education_score])
     # Aggregate Scores
     must_have_avg = round(statistics.mean(must_have_scores)) if must_have_scores else 0
     nice_to_have_avg = round(statistics.mean(nice_to_have_scores)) if nice_to_have_scores else 0
     other_avg = round(statistics.mean(other_scores)) if other_scores else 0
     # Eligibility Check
+    ineligible = bool(reasons)
     if ineligible:
         total_score = 0
-        remarks = "Ineligible due to missing Must-Have criteria."
+        remarks = "Ineligible due to: " + ", ".join(reasons) + "."
     else:
         remarks = "Eligible."
-    # If eligible, calculate weighted total
-    if not ineligible:
+        # If eligible, calculate weighted total
         must_have_weighted = (must_have_avg / 100) * 60
         nice_to_have_weighted = (nice_to_have_avg / 100) * 30
         other_weighted = (other_avg / 100) * 10
         total_score = round(must_have_weighted + nice_to_have_weighted + other_weighted)
-    else:
-        total_score = 0
     return {
         'must_have_score': must_have_avg,
         'nice_to_have_score': nice_to_have_avg,
@@ -234,7 +238,6 @@ def calculate_candidate_score(analysis_json):
         'eligible': not ineligible,
         'remarks': remarks
     }
-
 def get_the_score_for_cv_analysis(**kwargs):
     """
     Get the match score for the CV against the Job Description (JD).
@@ -362,11 +365,8 @@ def send_response_email(**kwargs):
 
 - Greeting: Use a professional greeting with the candidate's name if available from the CV data: {cv_data}. If no name is available, use 'Dear Candidate'.
 
-- Introduction: Briefly thank them for their application and express enthusiasm about their potential fit for the role.
+- Next Steps: Present initial assessment questions:
 
-- Next Steps: Present initial assessment questions divided into two sections:
-  - General Screening Questions:
-    - Give a brief introduction about yourself to help us assess your communication skills.
     - Are you comfortable with a [full-time / part-time / contract / hybrid / remote / on-site] work arrangement?
     - What is your notice period with your current employer (or how soon can you start if not employed)?
     - What are your base salary expectations for this role? (Provide a range if possible.)
@@ -374,9 +374,9 @@ def send_response_email(**kwargs):
     - Why are you interested in this role and our company?
   - Role-Specific Questions: Tailor these to the job role (e.g., for Data Scientist/ML Engineer):
     - How many years of experience do you have building and deploying machine learning models in production?
-    - Are you proficient in Python and libraries such as TensorFlow, PyTorch, scikit-learn, or Pandas?
+    - Are you proficient in Python and libraries such as TensorFlow, PyTorch, scikit-learn, or Pandas?(You can ask different qustion for different role)
     - Do you have experience with [specific domain/tools, e.g., NLP, computer vision, big data tools like Spark]? (Customize based on job)
-    - Education/Certification (if required): Do you hold a [Bachelor’s/Master’s/PhD] degree in [specific field] or a related discipline? (Specify degree/field)
+    - Education/Certification (if required): Do you hold a [Bachelor's/Master's/PhD] degree in [specific field] or a related discipline? (Specify degree/field)
     - Do you hold any relevant certifications (e.g., PMP, AWS Certified, Scrum Master, etc.)? (List relevant ones)
 
 - Call to Action: Encourage them to reply with their answers to these questions at their earliest convenience. Mention that responses will help advance them to the next stage, such as an interview.
