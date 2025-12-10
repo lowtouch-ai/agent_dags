@@ -699,7 +699,7 @@ def summarize_engagement_details_360(ti, **context):
                                 - Deal Stage: {', '.join([d.get("stage", "unknown") for d in parsed_json.get("deal_summary", [])[:3]]) or "unknown"}
                                 - Deal Amount: {', '.join([d.get("amount", "unknown") for d in parsed_json.get("deal_summary", [])[:3]]) or "unknown"}
                                 - Expected Close Date: {', '.join([d.get("close_date", "unknown") for d in parsed_json.get("deal_summary", [])[:3]]) or "unknown"}
-                                - Last Activity: {parsed_json.get("recent_5_activities", [None])[0] or "unknown"}
+                                - Last Activity: {parsed_json.get("recent_5_activities", "unknown")}
 
                                 Prioritize and include only the most decision-relevant insights:
                                 • Recent funding rounds, revenue estimates, or growth metrics
