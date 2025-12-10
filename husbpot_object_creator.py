@@ -252,6 +252,21 @@ CRITICAL INSTRUCTIONS:
 - Parse these tables to extract existing entities and proposed new entities
 - The user's latest message indicates their intent (confirm, modify, select specific, etc.)
 
+CRITICAL PRESERVATION RULES - NON-NEGOTIABLE:
+1. The "Previously Confirmed Plan" above contains EXACTLY what was shown and agreed upon in the last confirmation email.
+2. You MUST preserve 100% of entities from this plan (contacts, companies, deals, notes, tasks, meetings) UNLESS the user explicitly says to remove or skip something.
+3. If the user asks to modify or add a field (e.g. phone, job title, due date), you MUST:
+   - Apply the change to the correct existing/proposed entity
+   - Keep ALL other entities and fields exactly as they were
+   - Never remove notes, tasks, or meetings just because the user didn't mention them
+4. Default behavior = INCLUDE EVERYTHING from the previous plan + apply modifications
+
+EXAMPLES:
+* If User says "Please update Vivek's phone to 9898767654",then Keep both companies, keep all notes/tasks, only update phone field on Vivek's contact.
+* If User says "Looks good, proceed",then Return the entire previous plan unchanged.
+* If User says "Skip the task about follow-up call",then Remove ONLY that one task, keep everything else.
+* If User says "This is great feedback!",then Treat as casual comment → create note, BUT still include ALL selected_entities from previous plan.
+
 YOUR TASK:
 Based on the conversation, and Latest User message identify:
 1. **User Intent**: What does the user want to do?
@@ -1492,9 +1507,35 @@ NOTES TO CREATE:
 **STRICT EXECUTION RULES:**
 
 1. **For each note in `to_create_notes`:**
-   - Format `note_content` as:  
-     "[name] mentioned [note_content]" 
-     (Use `name` from the note object if present; otherwise use `"User"`)
+
+    - For each note's `note_content`, apply the following logic in strict order:
+
+        1. **Check if the note ALREADY properly identifies the speaker in third person**
+        Look for these strong signals (case-insensitive, flexible matching):
+        - Starts with a real name followed by a verb: e.g., "John", "Sarah mentioned".
+        - Contains clear third-person reference like: "John Doe had a call", "Sarah mentioned".
+
+        → If YES → **Use the note_content EXACTLY as-is. Do NOTHING. Do not prepend anything.**
+
+        2. **Only if the note is ambiguous, in first person, or lacks speaker context**:
+        Examples:
+        - "had a call".
+
+        → Then and ONLY then: Prepend the speaker name:
+            "expected_speaker_name mentioned " 
+            or even better → "expected_speaker_name mentioned "
+
+        3. **How to determine expected_speaker_name (in order of priority):**
+        - Use `speaker_name` if provided in the note object
+        - Else use `sender_name` (from email/thread context)
+        - Final fallback: "User"
+
+        4. **Extra Safety - Never prepend if these names appear early in the note** (regex-like check):
+        If note_content.strip() starts with or contains within first ~25 chars:
+            - Any proper name from your known contacts/team
+            - Common verbs like "mentioned".
+        → Assume it's already formatted → skip prepending
+        
 
 2. **Invoke HubSpot `create_notes` API** with:
    - `hs_timestamp`: Current UTC time in `YYYY-MM-DDTHH:MM:SSZ` format
@@ -1519,7 +1560,7 @@ NOTES TO CREATE:
         {{
             "id": "123",
             "details": {{
-                "note_content": "[User] mentioned Follow up on Q4 budget approval",
+                "note_content": "User mentioned Follow up on Q4 budget approval",
                 "timestamp": "YYYY-MM-DD"
             }}
         }}

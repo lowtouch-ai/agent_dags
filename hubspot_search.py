@@ -1537,6 +1537,38 @@ PARSING INSTRUCTIONS (only parse these):
 For notes (only if note parsing is enabled):
 - Extract the whole email content except branding and signatures and capture it in the same format as the email came as notes. The should be captured in the email format, if there are new lines gaps headings , the same should be captured.
 
+**SENDER CONTEXT**  
+This email was sent by: {sender_name} ({sender_email})  
+The latest message is written in first person from their perspective.
+
+**NOTES PARSING RULE (MUST FOLLOW)**  
+When extracting notes, you **MUST replace all first-person pronouns** referring to the sender with their actual name: "{sender_name}"
+* Default Speaker will always be Sender  
+   - If no speaker is mentioned in a sentence, automatically assume it is {sender_name}  
+   - Example: "Had a good discussion with Nikhil about pricing" then "{sender_name} had a good discussion with Nikhil about pricing"
+* Common Implicit Patterns (automatically attribute to sender):
+   - If "Met with X" means "{sender_name} met with X"
+   - If "Spoke to X" means "{sender_name} spoke to X"
+   - If "Call with X" means "{sender_name} had a call with X"
+   - If sentence starts with connected,mentioned and similar words, then it means "{sender_name} connected with X", "{sender_name} mentioned ..."
+* Valid replacements:
+- I means {sender_name}
+- me means {sender_name} 
+- my means {sender_name}'s
+- I'll means {sender_name} will
+- I've means {sender_name} has
+- I'm means {sender_name} is
+- This is mandatory. The final note stored in HubSpot must be in third person with the real name — never leave "I" in notes.
+- Always check for the context of the sentence to identify if the pronoun is referring to the sender or someone else.If the pronoun is referring to someone else, do not replace it with the sender name.Instead keep the pronoun and add pronoun mention {sender_name} in the note.
+- Before generating notes, check the Search DAG result.
+A. If an existing note already contains any speaker name (speaker context exists):
+    * DO NOT apply pronoun replacement
+    * DO NOT rewrite or re-introduce speaker attribution
+    * DO NOT prepend text like:
+    “{sender_name} mentioned …”
+- Store the new extracted text exactly as it appears in the email, maintaining original formatting
+- The new note must NOT add speaker details again.
+
 For meetings (only if meeting parsing is enabled):
 - Extract meeting title, start time, end time, location, outcome, timestamp, attendees, meeting type, and meeting status.
 - If "I" is mentioned for attendees that refers to the email sender name.

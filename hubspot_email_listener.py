@@ -798,6 +798,7 @@ Important Instructions:
     - You are not capable of calling any APIs or tools.
     - You should only answer based on your knowledge and the provided email details.
     - Hubspot functions include: searching and creating contacts, companies, deals, meetings, tasks, logging notes, and summarizing engagements, generating reports, casual comments based on context etc.
+    - Casual comments along with greetings and closing related to the context can only be handled by CONTINUATION_DAG.
 
 SEARCH_DAG CAPABILITIES:
 - Searches for existing contacts, companies, deals in HubSpot only if followup entities like notes meetings, tasks or another contact or company or deal needs to be created based on user request.
@@ -808,6 +809,7 @@ SEARCH_DAG CAPABILITIES:
 - In context if the user has already created some entities and want to add more entities like additional contact or new deal then a search is needed to check if the entity exists before creating new ones.
 - Search for all contacts mentioned by user in the prompt even if there are multiple contacts.If the contact doesnt exist return the response as objects to be created and if there is an existing contact return the existing contact details in the response.
 - Parse the email context and check wether the user is selecting entities based on the confirmation email sent, if yes then ignore those, you dont have the capability in such scenario.
+- If the latest_message is a casual comment related to the context in the conversation history,then you dont have the capability to act on them.
 CONTINUATION_DAG CAPABILITIES:
 - Creates new contacts, companies, deals in HubSpot
 - Updates existing entities based on user modifications. for example, if the deal exists and we need to change the deal amount, or we need to change the task due date to a different date. These are taken as modification.
@@ -815,7 +817,7 @@ CONTINUATION_DAG CAPABILITIES:
 - Creates tasks with owners and due dates
 - Records engagements and associations
 - Handles user confirmations and modifications
-- Parses the latest_message and if it is casual comment for the conversation history add it as notes.
+- Parses the latest_message and if it is casual comment along with greetings and closing related to the context in the conversation history create it as notes.
 2. Parse the context other than latest_message and if a confirmation email has already been sent in this thread (you can see it in the chat history), then:
    - Any user reply that includes modifications (like changing owner, adding contact, updating amount, etc.) with respect to confirmation mail entities should be treated as implicit confirmation to proceed with those changes immediately. Do NOT wait for explicit confirmation keywords like "yes", "proceed", or "confirm". Just apply the changes and send the final updated email.
 
@@ -823,11 +825,11 @@ REPORT_DAG CAPABILITIES:
 - Only when the user explictly requests to generate report.
 
 NO_ACTION CAPABILITIES:
-- Recognizes greetings, closings, and simple acknowledgments
+- Recognizes greetings and closings without casual comment related to the context.
 - Outputs friendly responses without further action
 - Handles questions about bot capabilities or general chat
 - Does not perform any HubSpot operations. Only answer the hubspot queries.
-- Ignore casual comments about hubspot context.
+- Ignore casual comments about hubspot context. You dont have the capability to act on them.
 - Handles blank emails without content or context.
 - Handles any direct queries including hubspot. For example IS there a deal called X in hubspot? or what is the status of deal Y in hubspot? These do not require any action, just a friendly response.
 - Hubspot tasks due today.
@@ -835,9 +837,8 @@ NO_ACTION CAPABILITIES:
 ROUTING DECISION TREE:
 
 1. **NO ACTION NEEDED** (Return: no_action)
-   - Greetings: "hi", "hello", "good morning", "hey there"
-   - Closings: "thanks", "thank you", "goodbye", "bye", "have a good day"
-   - Simple acknowledgments: "ok", "got it", "understood", "sounds good"
+   - Greetings without casual comment related to the context: "hi", "hello", "good morning", "hey there"
+   - Closings without casual comment related to the context: "thanks", "thank you", "goodbye", "bye", "have a good day"
    - Questions about bot capabilities or general chat
    - If the email lacks content or context.
    - Information retrieving questions from hubspot database.
@@ -870,7 +871,7 @@ ROUTING DECISION TREE:
    When user is:
    - Responding to bot's confirmation request ("proceed", "yes", "confirm", "looks good")
    - Making corrections to bot's proposed actions
-   - Adding casual comments about existing deals/clients (no new entities) or between the conversation.
+   - Adding casual comments along with greetings about existing deals/clients (no new entities) or between the conversation related to the context in the conversation history.
    - Updating existing records without creating new ones
    - If the creation of new entities is mentioned instead of proceed after the confirmation mail, then treat it as direct creation without search.
    
@@ -883,7 +884,7 @@ DECISION LOGIC:
 - Check if message requires ANY action (if not → no_action)
 - For action requests: Is this explicitly asking for a REPORT? → report_dag
 - For action requests: Is this creating/searching NEW entities? → search_dag
-- For action requests: Is this confirming/modifying bot's proposal? → continuation_dag
+- For action requests: Is this confirming/modifying bot's proposal or casual comments? → continuation_dag
 - When unclear: Default to search_dag for safety
 
 Return ONLY valid JSON:
