@@ -1130,7 +1130,6 @@ Reply in 1-2 short, polite, professional sentences.
       * Ensure that the output strictly returns all of the following fields: Deal ID, Deal Name, Deal Stage(Dont take the deal stage id,take the deal stage name(for example if deal stage id is appoinmentschedule,then the deal stage will be APPOINTMENT SCHEDULE)), Deal Owner, Deal Amount, Expected Close Date, Associated Company, and Associated Contacts in table format.
       * Do not merge, or concatenate the stage name — preserve all spaces, casing, and formatting.
       * Treat current system date as **NOW**.
-      * Exclude all deals whose Expected Close Date is prior to NOW.
       * The result set must be sorted on Expected Close Date in ascending order, prioritizing deals with the earliest closing dates
       * If the user does not specify a time period → return all deals with close date today or later.
       * If a date range or timeframe is mentioned in the query:
@@ -1140,9 +1139,7 @@ Reply in 1-2 short, polite, professional sentences.
       * When the user asks for deals expiring by this month end, ALWAYS apply the date filter as follows:
         - gte must be strictly set to today's date (current system date)
         - lte must be strictly set to the last date of the current month
-        - You must NEVER include or return any deals with dates earlier than today.
         - Even if the user does not explicitly mention 'from today', you must assume that the date range ALWAYS starts from today.
-        - Do NOT include any past dates under any circumstances.(Example: If today is 03-Dec-2025, then the filter MUST be:gte = 03-Dec-2025,lte = 31-Dec-2025 and the response MUST only include deals whose expiry date lies within this range)
       * Do not follow the pagination rule in email response.If there are 100 matches for deals,return all 100 in the email itself. 
     - If user asking a entity detail along with a timeperiod use LTE, GTE or both based on user request. The output should be in HTML - table Format.
     - If the user asks about their tasks parse the senders name and invoke `get_all_owners` to get the hubspot owner id and then invoke `search_tasks` to get the tasks assigned to the owner on the sepcified date. The output should be in HTML - table Format.
