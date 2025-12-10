@@ -14,19 +14,28 @@ default_args = {
 def verify_and_process_image(**context):
     conf = context['dag_run'].conf or {}
     
-    # 1. defined path or default
+    # 1. Get path
     image_path = conf.get("image_path")
     
     logging.info(f"Checking path: {image_path}")
 
-    # 2. Verify file existence (Standard checks)
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Still cannot find file at: {image_path}")
+    # 2. Verify file existence
+    if not image_path or not os.path.exists(image_path):
+        return {
+            "status": "error", 
+            "message": f"File not found or no path provided: {image_path}"
+        }
     
     file_size = os.path.getsize(image_path)
     logging.info(f"SUCCESS: Image found! Size: {file_size} bytes.")
     
-    return f"Verified image at {image_path}"
+    # 3. Return Final Response
+    return {
+        "status": "success",
+        "message": "Image verified successfully",
+        "image_path": image_path,
+        "file_size": file_size
+    }
 
 with DAG(
     dag_id="image_processor_v1",
