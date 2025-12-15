@@ -43,7 +43,7 @@ OVERDUE_THRESHOLD_DAYS = 3
 DEFAULT_FOLLOWUP_WEEKS = 2
 
 # Timezone for delivery window (11:00 AM owner timezone)
-DELIVERY_START_HOUR = 12
+DELIVERY_START_HOUR = 9
 
 # ============================================================================
 # HELPER FUNCTIONS
