@@ -602,7 +602,6 @@ def summarize_engagement_details_360(ti, **context):
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
     if not entity_flags.get("request_summary_360", False):
         logging.info("No 360 summary requested, skipping")
-        ti.xcom_push(key="engagement_summary", value={})
         return
 
     chat_history = ti.xcom_pull(key="chat_history", default=[])
