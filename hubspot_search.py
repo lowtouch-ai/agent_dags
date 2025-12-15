@@ -602,7 +602,6 @@ def summarize_engagement_details_360(ti, **context):
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
     if not entity_flags.get("request_summary_360", False):
         logging.info("No 360 summary requested, skipping")
-        ti.xcom_push(key="engagement_summary", value={})
         return
 
     chat_history = ti.xcom_pull(key="chat_history", default=[])
@@ -2726,7 +2725,7 @@ def compose_engagement_summary_email(ti, **context):
 
 
     # If no meaningful sections at all, send a minimal email
-    if not (has_contact or has_company or has_deals or has_engagement or has_detailed_deal or has_call_strategy):
+    if not (has_contact or has_company or has_deals or has_engagement or has_detailed_deal or has_call_strategy or has_top_3_contacts or has_recent_activities or has_risk_flags or has_deal_360):
         minimal_email = f"""<!DOCTYPE html>
 <html>
 <head>
