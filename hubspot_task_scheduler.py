@@ -43,7 +43,7 @@ OVERDUE_THRESHOLD_DAYS = 3
 DEFAULT_FOLLOWUP_WEEKS = 2
 
 # Timezone for delivery window (11:00 AM owner timezone)
-DELIVERY_START_HOUR = 12
+DELIVERY_START_HOUR = 9
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -483,7 +483,7 @@ def check_delivery_window(ti, **context):
         # Check each owner's timezone
         for owner in owners:
             owner_id = owner.get("id")
-            tz_str = owner.get("timezone", "America/New_York")
+            tz_str = owner.get("timezone", "America/New_York")  
             
             # Skip if already initiated today
             if owner_id in initiated_owners:
@@ -494,6 +494,9 @@ def check_delivery_window(ti, **context):
                 owner_tz = pytz.timezone(tz_str)
                 owner_time = current_utc.astimezone(owner_tz)
                 owner_hour = owner_time.hour
+                logging.info(f"owner timezone is:{owner_tz}, {tz_str}")
+                logging.info(f"current owner time:{owner_time}")
+                logging.info(f"current hour:{owner_hour}")
                 
                 if DELIVERY_START_HOUR <= owner_hour:
                     in_window_count += 1
