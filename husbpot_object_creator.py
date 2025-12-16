@@ -240,12 +240,26 @@ def analyze_user_response(ti, **context):
     # === Prompt (unchanged) ===
     from datetime import datetime
     prompt = f"""You are a HubSpot assistant analyzing an email conversation to understand what actions to take.
+CONVERSATION HISTORY:
+{chat_history}
+
 LATEST USER MESSAGE:
 {latest_user_message}
 
 SENDER INFO:
 Name: {sender_name}
 Email: {sender_email}
+
+=== GOLDEN RULES - NON-NEGOTIABLE ===
+1. You MUST preserve EVERY entity (contacts, companies, deals, notes, tasks, meetings) from that confirmation email EXACTLY — including content, timestamps, speaker_name, speaker_email, task_index, etc.
+2. When the user asks for a modification:
+   - Apply ONLY the requested change
+   - Keep ALL notes, tasks, meetings unchanged unless explicitly told to remove/modify them
+   - Never regenerate or rephrase note content — copy it verbatim from the confirmed plan
+   - Keep everything in the notes as it is without changing the speaker name unless explicitly asked to change it
+   - All the entities in the confirmation email should be there at the final email without fail and without any modification unless user explicitly asks for a change 
+3. If user says "proceed", "yes", "go ahead", "looks good" → return the entire confirmed plan unchanged
+4. Casual comments (e.g. "Great meeting!", "This is exciting") → create ONE new note with that text, BUT still return full confirmed plan
 
 CRITICAL INSTRUCTIONS:
 - You MUST extract entities ONLY from the conversation history above
@@ -259,7 +273,7 @@ CRITICAL PRESERVATION RULES - NON-NEGOTIABLE:
 2. You MUST preserve 100% of entities from this plan (contacts, companies, deals, notes, tasks, meetings) UNLESS the user explicitly says to remove or skip something.
 3. If the user asks to modify or add a field (e.g. phone, job title, due date), you MUST:
    - Apply the change to the correct existing/proposed entity
-   - Keep ALL other entities and fields exactly as they were
+   - Keep ALL other entities and fields exactly as they were from the chat_history.
    - Never remove notes, tasks, or meetings just because the user didn't mention them
 4. Default behavior = INCLUDE EVERYTHING from the previous plan + apply modifications
 

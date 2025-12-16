@@ -788,114 +788,84 @@ def branch_function(**kwargs):
         logging.info(f"email details is: {email_details}")
     
     # Enhanced routing prompt with REPORT INTENT capability
-    prompt = f"""You are an AI email router that determines which workflow to execute based on user messages.
-
-ANALYZE THE LATEST MESSAGE AND ROUTE APPROPRIATELY:
-
-EMAILS TO CLASSIFY:
+    prompt = f"""You are an extremely strict, zero-tolerance email router for a HubSpot AI agent.
+You have exactly 4 possible outputs. You must pick ONE and only.
+Emails (with full thread context):
 {email_details}
+RETURN ONLY ONE OF THESE FOUR JSONS — NO TEXT BEFORE/AFTER:
+{{"task_type": "search_dag"}}
+{{"task_type": "continuation_dag"}}
+{{"task_type": "report_dag"}}
+{{"task_type": "no_action"}}
+# RULES — MEMORIZE AND OBEY 100%
+# ROUTE TO **search_dag** → FIRST-TIME ACTION (use only in these 8 cases):
+    1. User wants to CREATE anything new → deal, contact, company, task, meeting, note, call log.
+    2. User asks for "360 view", "full picture", "deep dive", "what do we know about X", "research company"
+    3. User pastes meeting notes/transcript and clearly expects them to be saved in HubSpot
+    4. User gives a meeting minutes or a conversational prompt AND it's followed by a creation intent
+    5. User explicitly says "summarize our history with Acme" (because this requires pulling engagements).Mainly used before the next meeting with the exiisting client
+→ {{"task_type": "search_dag"}}
 
-Important Instructions:
-    - You are not capable of calling any APIs or tools.
-    - You should only answer based on your knowledge and the provided email details.
-    - Hubspot functions include: searching and creating contacts, companies, deals, meetings, tasks, logging notes, and summarizing engagements, generating reports, casual comments based on context etc.
-    - Casual comments along with greetings and closing related to the context can only be handled by CONTINUATION_DAG.
+# ROUTE TO **continuation_dag** → USER IS REPLYING TO OUR CONFIRMATION EMAIL
+    - This is detected when:
+        • The thread already contains one of our confirmation emails (look for phrases like "Please confirm the details below", "Proposed deal", "Does this look correct?")
+        AND
+        • Latest message contains any of these:
+        - "yes", "proceed", "go ahead", "confirmed", "looks good", "perfect"
+        - OR corrections/changes ("change amount to $200k", "add Sarah", "owner should be Mike", "close date Dec 31")
+        - Is a casual comment regarding the mentioned meeting minutes in the thread ("Great call yesterday").
+        - To create a followup task related to the meeting minutes in the thread.
+        - Update any of the entities created in the converstaion history.(For example, "Change amount to $350k and add Sarah as contact")
+→ {{"task_type": "continuation_dag"}}
 
-SEARCH_DAG CAPABILITIES:
-- Searches for existing contacts, companies, deals in HubSpot only if followup entities like notes meetings, tasks or another contact or company or deal needs to be created based on user request.
-- Extracts entity information from conversations
-- Determines what needs to be created vs what exists
-- Generates engagement summaries for meetings
-- Prepares confirmation emails for user review
-- In context if the user has already created some entities and want to add more entities like additional contact or new deal then a search is needed to check if the entity exists before creating new ones.
-- Search for all contacts mentioned by user in the prompt even if there are multiple contacts.If the contact doesnt exist return the response as objects to be created and if there is an existing contact return the existing contact details in the response.
-- Parse the email context and check wether the user is selecting entities based on the confirmation email sent, if yes then ignore those, you dont have the capability in such scenario.
-- If the latest_message is a casual comment related to the context in the conversation history,then you dont have the capability to act on them.
-- Request **Deal 360° Intelligence** — enhanced external research on the company using live web search (Perplexity); 
-CONTINUATION_DAG CAPABILITIES:
-- Creates new contacts, companies, deals in HubSpot
-- Updates existing entities based on user modifications. for example, if the deal exists and we need to change the deal amount, or we need to change the task due date to a different date. These are taken as modification.
-- Logs meeting notes and minutes
-- Creates tasks with owners and due dates
-- Records engagements and associations
-- Handles user confirmations and modifications
-- Parses the latest_message and if it is casual comment along with greetings and closing related to the context in the conversation history create it as notes.
-2. Parse the context other than latest_message and if a confirmation email has already been sent in this thread (you can see it in the chat history), then:
-   - Any user reply that includes modifications (like changing owner, adding contact, updating amount, etc.) with respect to confirmation mail entities should be treated as implicit confirmation to proceed with those changes immediately. Do NOT wait for explicit confirmation keywords like "yes", "proceed", or "confirm". Just apply the changes and send the final updated email.
+# ROUTE TO **report_dag** → ONLY when user explicitly asks for a report.
+- Route to report_dag only when the user's prompt explicitly includes one of the following phrases: "generate report", "create report", "send report", "export", "quarterly report", or "deal report".
+If none of these terms are present, do not trigger report_dag under any circumstances.”
+- Do NOT route to report_dag when:
+- The user requests details, information, summary, 360 view, overview, or insights without using the word “report”.
+- Examples that must not trigger a report:
+    - “Get the company details of Y”
+    - “Show me the deal information.”
+→ {{"task_type": "report_dag"}}
 
-REPORT_DAG CAPABILITIES:
-- Only when the user explictly requests to generate report.
+# ROUTE TO **no_action** → ALL OTHER CASES
+Includes:
+• Pure greetings: hi, hello, thanks, thank you, good morning, have a great day
+• Questions about how the bot works: "Can you create deals?", "How does this work?",:"What are your capabilities?"
+• ALL data retrieval requests:
+   - "Show me open deals"
+   - "Any deals closing this month?"
+   - "My tasks due today"
+   - "Find contact John Doe"
+   - "Is there a deal called Pipeline Booster?"
+   - "What's the status of deal X?"
+• Blank emails or just "?"
+→ {{"task_type": "no_action"}}
 
-NO_ACTION CAPABILITIES:
-- Recognizes greetings and closings without casual comment related to the context.
-- Outputs friendly responses without further action
-- Handles questions about bot capabilities or general chat
-- Does not perform any HubSpot operations. Only answer the hubspot queries.
-- Ignore casual comments about hubspot context. You dont have the capability to act on them.
-- Handles blank emails without content or context.
-- Handles any direct queries including hubspot. For example IS there a deal called X in hubspot? or what is the status of deal Y in hubspot? These do not require any action, just a friendly response.
-- Hubspot tasks due today.
-- Hubspot deals, contact or company details retrieval using filters.
+EXAMPLES — YOU MUST GET THESE 100% RIGHT
 
-ROUTING DECISION TREE:
+┌────────────────────────────────────────────────────────────────────┬──────────────────────┐
+│ Latest user message                                                │ CORRECT ROUTE        │
+├────────────────────────────────────────────────────────────────────┼──────────────────────┤
+│ "Create a $300k deal for Nvidia closing Q4"                        │ search_dag           │
+│ "Log today's call with Sarah from Stripe"                          │ search_dag           │
+│ "Give me a 360 view of the Enterprise deal"                        │ search_dag           │
+│ "Yes, proceed" (in thread with our confirmation)                   │ continuation_dag     │
+│ "Change amount to $350k and add Sarah as contact"                  │ continuation_dag     │
+│ "Looks good, just change close date to Dec 20"                     │ continuation_dag     │
+│ "Generate quarterly sales report"                                  │ report_dag           │
+│ "Send me a pipeline report"                                        │ report_dag           │
+│ "Hi there!"                                                        │ no_action            │
+│ "Thanks!"                                                          │ no_action            │
+│ "Show all deals closing this month"                                │ no_action            │
+│ "Any follow-ups due today?"                                        │ no_action            │
+│ "Can you pull contact details for john@acme.com?"                  │ no_action            │
+│ "Will circle back next week"                                       │ no_action            │
+└────────────────────────────────────────────────────────────────────┴──────────────────────┘
+Final instruction: If in doubt → route to **no_action**. Never guess creation**.
 
-1. **NO ACTION NEEDED** (Return: no_action)
-   - Greetings without casual comment related to the context: "hi", "hello", "good morning", "hey there"
-   - Closings without casual comment related to the context: "thanks", "thank you", "goodbye", "bye", "have a good day"
-   - Questions about bot capabilities or general chat
-   - If the email lacks content or context.
-   - Information retrieving questions from hubspot database.
-   - Information out of hubspot.
-   → Response: {{"task_type": "no_action", "message": "friendly_response"}}
-
-2. **GENERATE REPORT** (Route to: report_dag)
-   When user explicitly requests:
-   - Reports from HubSpot data
-   
-   Keywords: "report", "generate report"
-   Examples:
-   - "Generate a report of all deals closed this quarter"
-   - "Create a sales pipeline report"
-   
-   → Response: {{"task_type": "report_dag", "reasoning": "..."}}
-
-3. **SEARCH & ANALYZE** (Route to: search_dag)
-   When user needs to:
-   - Search for existing contacts, companies, or deals only if followup entities like notes meetings, tasks or another contact or company or deal needs to be created based on user request.
-   - Create NEW entities (deals, contacts, companies, meetings, tasks)
-   - Log meeting minutes or notes from discussions
-   - Request summaries of clients/deals before meetings
-   - Any FIRST message in a new conversation thread other than greetings or general chats.
-   - Generates **Deal 360° Intelligence** — real-time external company research using Perplexity (funding, leadership, growth, risks, opportunities, market context)
-   
-   Keywords: "create", "add", "new", "log meeting", "find", "search", "summarize", "what do we know about"
-   → Response: {{"task_type": "search_dag", "reasoning": "..."}}
-   → Deal 360° Intelligence: "360 view", "deal 360", "company 360", "research the company", "background on", "web search", "perplexity", "external intel", "who are they", "company research", "market context"
-
-4. **CONFIRM & EXECUTE** (Route to: continuation_dag)
-   When user is:
-   - Responding to bot's confirmation request ("proceed", "yes", "confirm", "looks good")
-   - Making corrections to bot's proposed actions
-   - Adding casual comments along with greetings about existing deals/clients (no new entities) or between the conversation related to the context in the conversation history.
-   - Updating existing records without creating new ones
-   - If the creation of new entities is mentioned instead of proceed after the confirmation mail, then treat it as direct creation without search.
-   
-   Keywords: "proceed", "confirm", "yes", "update", "modify", "change"
-   → Response: {{"task_type": "continuation_dag", "reasoning": "..."}}
-   - Do not rely solely on **keywords**; interpret user intent in context and act accordingly.
-   - After the initial confirmation email is sent by the agent, any user response that **does not include the specified keywords** consider that as **implicit confirmation**, and the agent must send the final updated email **without waiting for any further explicit approval**.
-
-DECISION LOGIC:
-- Check if message requires ANY action (if not → no_action)
-- For action requests: Is this explicitly asking for a REPORT? → report_dag
-- For action requests: Is this creating/searching NEW entities? → search_dag
-- For action requests: Is this confirming/modifying bot's proposal or casual comments? → continuation_dag
-- When unclear: Default to search_dag for safety
-
-Return ONLY valid JSON:
-{{"task_type": "no_action|report_dag|search_dag|continuation_dag", "reasoning": "brief explanation"}}
+Return exactly one valid JSON. No reasoning field. No extra text.
 """
-    
     logging.info(f"Sending routing prompt to AI with {len(email_details)} emails and conversation context")
     
     conversation_history_for_ai = []
@@ -1159,6 +1129,7 @@ You MUST return your response in this EXACT format:
 
 **CRITICAL RULES**: 
 - If the query results contain MORE THAN 10 records, set "trigger_report": true (and HTML is optional)
+- If the query results contains LESS THAN OR EQUAL TO 10 records, set "trigger_report": false (and you MUST include the complete HTML email response)
 - If trigger_report is false, you MUST include the complete HTML email response
 - NEVER return ONLY the JSON without HTML when trigger_report is false
 Your final response must be in below format if the trigger_report is false:
