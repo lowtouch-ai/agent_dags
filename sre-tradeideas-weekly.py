@@ -1880,7 +1880,7 @@ def compile_sre_report(ti, **context):
 
     # 3. Building Report
     report = f"""
-# SRE Daily Report – TradeIdeas Platform
+# SRE Weekly Report – TradeIdeas Platform
 **Generated**: **11:00 AM IST**
 
 ---
@@ -2053,7 +2053,7 @@ def convert_to_html(ti, **context):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SRE Daily Report</title>
+<title>SRE Weekly Report</title>
 <style>
 body {{
     font-family: Arial, sans-serif;
@@ -2174,7 +2174,7 @@ def send_sre_email(ti, **context):
     # Clean up any code block wrappers
     html_body = re.sub(r'```html\s*|```', '', html_report).strip()
 
-    subject = f"SRE Daily Report – {datetime.utcnow().strftime('%Y-%m-%d')}"
+    subject = f"SRE Weekly Report – {datetime.utcnow().strftime('%Y-%m-%d')}"
     recipient = RECEIVER_EMAIL
     try:
         # Initialize SMTP server
