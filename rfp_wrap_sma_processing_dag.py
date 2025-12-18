@@ -354,7 +354,7 @@ At the end, list any sources from the RFP document you referenced and your confi
 IMPORTANT: Respond with ONLY a valid JSON object in this exact format:
 {{
   "answer": "your detailed answer text here (do not include sources or confidence in this field)",
-  "sources_referenced": ["RFP Response.pdf, Section 3.1", "another source if any"],
+  "sources_referenced": ["<insert actual section/page found in text>", "<insert another actual source if applicable>"],
   "confidence": "High" or "Medium" or "Low",
   "is_sensitive": true or false
 }}
