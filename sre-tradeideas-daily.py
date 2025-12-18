@@ -2,7 +2,7 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.decorators import task, task_group
 from typing import List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 from ollama import Client
 from airflow.models import Variable
@@ -14,6 +14,7 @@ import json
 import re
 import html
 import smtplib
+import requests
 from email.mime.image import MIMEImage
 import os
 import pandas as pd
