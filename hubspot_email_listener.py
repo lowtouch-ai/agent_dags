@@ -799,22 +799,23 @@ RETURN ONLY ONE OF THESE FOUR JSONS — NO TEXT BEFORE/AFTER:
 {{"task_type": "no_action"}}
 # RULES — MEMORIZE AND OBEY 100%
 # ROUTE TO **search_dag** → FIRST-TIME ACTION (use only in these 8 cases):
-    1. User wants to CREATE anything new → deal, contact, company, task, meeting, note, call log.
+    1. User wants to CREATE anything new → deal, contact, company, task, meeting, note, call log. Exclude the situation when the user is replying to a confirmation template.
     2. User asks for "360 view", "full picture", "deep dive", "what do we know about X", "research company"
     3. User pastes meeting notes/transcript and clearly expects them to be saved in HubSpot
-    4. User gives a meeting minutes or a conversational prompt AND it's followed by a creation intent
+    4. User gives a meeting minutes or a conversational prompt AND it's followed by a creation intent. exclude the situation when the user is confirming and adding changes to the confirmation mail.
     5. User explicitly says "summarize our history with Acme" (because this requires pulling engagements).Mainly used before the next meeting with the exiisting client
 → {{"task_type": "search_dag"}}
 
 # ROUTE TO **continuation_dag** → USER IS REPLYING TO OUR CONFIRMATION EMAIL
     - This is detected when:
-        • The thread already contains one of our confirmation emails (look for phrases like "Please confirm the details below", "Proposed deal", "Does this look correct?")
+        • The thread already contains one of our confirmation emails and user is replying to that confirmation mail
         AND
         • Latest message contains any of these:
         - "yes", "proceed", "go ahead", "confirmed", "looks good", "perfect"
-        - OR corrections/changes ("change amount to $200k", "add Sarah", "owner should be Mike", "close date Dec 31")
+        - OR moving forward along with corrections/changes ("change amount to $200k", "add Sarah", "owner should be Mike", "close date Dec 31")
         - Is a casual comment regarding the mentioned meeting minutes in the thread ("Great call yesterday").
         - To create a followup task related to the meeting minutes in the thread.
+        - Is a reply to the daily task remainder("this task is already completed,change the task status to **COMPLETED**")
         - Update any of the entities created in the converstaion history.(For example, "Change amount to $350k and add Sarah as contact")
 → {{"task_type": "continuation_dag"}}
 

@@ -2943,7 +2943,7 @@ def check_if_action_needed(ti, **context):
     if confirmation_needed:
         # Normal flow - confirmation email will be sent
         logging.info("✓ Action needed - proceeding to send confirmation email")
-        return "send_confirmation_email"
+        return "compose_confirmation_email"
     else:
         # No entities found or created - send acknowledgment
         logging.info("✗ No action needed - will send acknowledgment email")
