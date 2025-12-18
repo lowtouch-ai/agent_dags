@@ -44,8 +44,8 @@ OLLAMA_HOST = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_OLLAMA_HOST", "http
 
 # Prometheus Configuration
 PROMETHEUS_URL = Variable.get("TRADEIDEAS_PROMETHEUS_URL", "https://ti-pre-prod-prometheus.lowtouchcloud.io")
-PROMETHEUS_USER = Variable.get("AGENT_PROMETHEUS_USER_TRADEIDEAS")
-PROMETHEUS_PASSWORD = Variable.get("AGENT_PROMETHEUS_PASSWORD_TRADEIDEAS")
+PROMETHEUS_USER = Variable.get("ltai.v1.unityfi.AGENT_PROMETHEUS_USER_TRADEIDEAS")
+PROMETHEUS_PASSWORD = Variable.get("ltai.v1.unityfi.AGENT_PROMETHEUS_PASSWORD_TRADEIDEAS")
 logging.info(f"Using Prometheus user: {PROMETHEUS_USER}, password: {PROMETHEUS_PASSWORD}")
 auth = HTTPBasicAuth(PROMETHEUS_USER, PROMETHEUS_PASSWORD)
 
