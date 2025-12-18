@@ -55,6 +55,7 @@ def extract_cv_content(**kwargs):
     sender = headers.get('From', 'Unknown')
     subject = headers.get('Subject', 'No Subject')
     attachments = email_data.get('attachments', [])
+    email_content = email_data.get('content','')
     
     logging.info(f"Processing email {email_id} from {sender}")
     logging.info(f"Subject: {subject}")
@@ -108,6 +109,7 @@ def extract_cv_content(**kwargs):
     
     # Push CV data to XCom for downstream tasks
     kwargs['ti'].xcom_push(key='cv_data', value=cv_data)
+    kwargs['ti'].xcom_push(key='email_content', value=email_content)
     
     return cv_data
 def retrive_jd_from_web(**kwargs):
@@ -116,23 +118,29 @@ def retrive_jd_from_web(**kwargs):
     This is a placeholder function and should be implemented to fetch actual JD data.
     """
     cv_data = kwargs['ti'].xcom_pull(task_ids='extract_cv_content', key='cv_data')
+    email_data = kwargs['ti'].xcom_pull(task_ids='email_data', key='cv_data')
     logging.info("Retrieving Job Description from web source...")
-    prompt = f"""Identify the jobs matching for this candidate using VectorSearchByUUID tool; give the output in the bellow json format
+    prompt = f"""
+    # Task
+    Identify the jobs matching for this candidate using VectorSearchByUUID tool; give the output in the bellow json format
     ## Candidate Info
     {cv_data}
+    ## Email data
+    {email_data}
     ## Output format
     ```json
     {{
     [{{
         "job_name": "<job_title from vector database>",
-        "summary": "<short job summary>"
+        "summary": "<short job summary>",
+        "experience": "<experience requiered for the job>"
     }}, {{...}}, {{...}}]
     }}
     ```
     """
     MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
     jd_response = get_ai_response(prompt, stream=False, model=MODEL_NAME)
-    logging.info(f"Retrieved Job Description: {jd_response[:500]}...")
+    logging.info(f"Retrieved Job Description: {jd_response}...")
     jd_data = extract_json_from_text(jd_response)
     logging.debug(f"Extracted JD Data: {jd_data}")
     # Push JD data to XCom for downstream tasks
@@ -141,36 +149,98 @@ def retrive_jd_from_web(**kwargs):
 
 def get_the_jd_for_cv_analysis(**kwargs):
     """
-    Get the Job Description (JD) for CV analysis.
-    This function retrieves the JD data from XCom or fetches it if not available.
+    Identify the best matching job for a CV and enrich it with full JD details.
     """
     ti = kwargs['ti']
-    jd_data = ti.xcom_pull(task_ids='retrive_jd_from_web', key='jd_data')
+
+    # Pull data from XCom
+    jd_list = ti.xcom_pull(task_ids='retrive_jd_from_web', key='jd_data')
     cv_data = ti.xcom_pull(task_ids='extract_cv_content', key='cv_data')
-    prompt = f""" Step 1: Idenify the one best job profile matches for this candidate form the list of job descriptions (Do not call the vector search tool)
-    list of job descriptions : {jd_data}
-    Candidate CV: {cv_data}
-    
-    Step 2: Once you have identified the best job profile, Search using VectorSearchByUUID tool with job summary as the query to get the full job description and give the output in the following JSON format.
-    
-    ## Output format:
-    {{  
-        "job_title": "Title of the job",
+    email_content = ti.xcom_pull(task_ids='email_content', key='cv_data')
+
+    MODEL_NAME = Variable.get(
+        "ltai.v3.lowtouch.recruitment.model_name",
+        default_var="recruitment:0.3af"
+    )
+
+    # ------------------------------------------------------------------
+    # AI CALL 1: Identify best matching job profile
+    # ------------------------------------------------------------------
+    match_prompt = f"""
+    # Task:
+    - Analyze the candidate CV.
+    - From the provided list of job descriptions, identify the SINGLE best matching job. based on the skills and experience.
+    - Priotrize the candidate email over the resume.
+    - Do NOT use any external tools or vector search.
+
+    ## Job Descriptions:
+    {jd_list}
+
+    ## Candidate CV:
+    {cv_data}
+    ## Email content
+    {email_content}
+    ##
+
+    Output STRICTLY in JSON:
+    {{
+        "job_title": "Best matching job title",
+        "job_summary": "Concise summary of the matching job (5–6 lines)"
+    }}
+    """
+
+    match_response = get_ai_response(
+        match_prompt,
+        stream=False,
+        model=MODEL_NAME
+    )
+
+    logging.info(f"Job match response: {match_response[:300]}...")
+    matched_job = extract_json_from_text(match_response)
+
+    job_title = matched_job["job_title"]
+    job_summary = matched_job["job_summary"]
+
+    # ------------------------------------------------------------------
+    # AI CALL 2: Enrich job using VectorSearchByUUID
+    # ------------------------------------------------------------------
+    enrich_prompt = f"""
+    Use the VectorSearchByUUID tool.
+
+    Query:
+    "{job_summary}"
+
+    Task:
+    - Retrieve the full job description.
+    - Extract structured job information.
+
+    Output STRICTLY in JSON:
+    {{
+        "job_title": "{job_title}",
         "job_description": "Full job description text",
         "Must have skills": ["list", "of", "skills"],
         "Nice to have skills": ["list", "of", "skills"],
-        "experience_level": "e.g., 1 YEAR, 2 Year, 4 year",
+        "experience_level": "e.g., 2 Years, 4 Years",
         "location": "Job location",
-        "Remote": "Yes or No or Flexible"
+        "Remote": "Yes | No | Flexible"
     }}
     """
-    MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
-    jd_response = get_ai_response(prompt, stream=False, model=MODEL_NAME)
-    logging.info(f"Refined Job Description for CV Analysis: {jd_response[:500]}...")
-    jd_data = extract_json_from_text(jd_response)
-    ti.xcom_push(key='jd_data', value=jd_data)
-    logging.debug(f"JD Data for CV Analysis: {jd_data}")
-    return jd_data
+
+    enriched_response = get_ai_response(
+        enrich_prompt,
+        stream=False,
+        model=MODEL_NAME
+    )
+
+    logging.info(f"Enriched JD response: {enriched_response[:300]}...")
+    final_jd = extract_json_from_text(enriched_response)
+
+    # Push final JD to XCom
+    ti.xcom_push(key='jd_data', value=final_jd)
+    logging.debug(f"Final JD Data: {final_jd}")
+
+    return final_jd
+
 
 def calculate_candidate_score(analysis_json):
     """
@@ -197,7 +267,7 @@ def calculate_candidate_score(analysis_json):
         if match:
             must_have_scores.append(100)
         else:
-            must_have_scores.append(0)
+            must_have_scores.append(50)
             reasons.append("missing Must-Have skills")
     # Score Nice-to-Have Skills
     for skill in nice_to_have_skills:
@@ -219,7 +289,7 @@ def calculate_candidate_score(analysis_json):
     nice_to_have_avg = round(statistics.mean(nice_to_have_scores)) if nice_to_have_scores else 0
     other_avg = round(statistics.mean(other_scores)) if other_scores else 0
     # Eligibility Check
-    ineligible = bool(reasons)
+    ineligible = False
     if ineligible:
         total_score = 0
         remarks = "Ineligible due to: " + ", ".join(reasons) + "."
@@ -238,6 +308,10 @@ def calculate_candidate_score(analysis_json):
         'eligible': not ineligible,
         'remarks': remarks
     }
+import os
+import json
+from pathlib import Path
+
 def get_the_score_for_cv_analysis(**kwargs):
     """
     Get the match score for the CV against the Job Description (JD).
@@ -245,14 +319,16 @@ def get_the_score_for_cv_analysis(**kwargs):
     ti = kwargs['ti']
     cv_data = ti.xcom_pull(task_ids='extract_cv_content', key='cv_data')
     jd_data = ti.xcom_pull(task_ids='get_the_jd_for_cv_analysis', key='jd_data')
+    
     if not cv_data or not jd_data:
         logging.warning("Missing CV or JD data for scoring")
         return None
+    
     prompt = f"""Match the CV with the Job Description (JD)
     CV: {cv_data}
     JD: {jd_data}
     ## Output format
-    ```json
+```json
     {{
         "job_title": "<job title>",
         "selected": <true or false>,
@@ -285,15 +361,44 @@ def get_the_score_for_cv_analysis(**kwargs):
         "reason": <reason for selection or rejection>,
         "candidate_email": "<candidate email>",
     }}
-    ```
+```
     """
+    
     MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
     score_response = get_ai_response(prompt, stream=False, model=MODEL_NAME)
     logging.info(f"Match Score Response: {score_response}")
+    
     score_data = extract_json_from_text(score_response)
     calculated_scores = calculate_candidate_score(score_data)
+    logging.info(f"Calculated Score:: {calculated_scores}")
+    
+    # Store the data to file
+    try:
+        # Create directory if it doesn't exist
+        output_dir = Path("/appz/data/recruitment")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Get candidate email from the score data
+        candidate_email = calculated_scores.get('candidate_email', 'unknown')
+        # Sanitize email for filename (replace @ and other invalid characters)
+        safe_email = candidate_email.replace('@', '_at_').replace('/', '_').replace('\\', '_')
+        
+        # Create the file path
+        output_file = output_dir / f"{safe_email}.json"
+        
+        # Write the data to file
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(calculated_scores, f, indent=2, ensure_ascii=False)
+        
+        logging.info(f"Score data saved to: {output_file}")
+        
+    except Exception as e:
+        logging.error(f"Failed to save score data to file: {str(e)}")
+        # Continue execution even if file save fails
+    
     ti.xcom_push(key='score_data', value=calculated_scores)
     logging.debug(f"Score Data: {calculated_scores}")
+    
     return score_data
 
 def send_response_email(**kwargs):
@@ -333,8 +438,8 @@ def send_response_email(**kwargs):
             <title>Application Update</title>
             <style>
                 body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f4f4f4; }}
-                .email-container {{ background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1); }}
-                .greeting {{ font-size: 18px; margin-bottom: 20px; }}
+                .email-container {{ background-color: #ffffff; padding: 15px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1); }}
+                .greeting {{ font-size: 12px; margin-bottom: 15px; }}
                 .content {{ margin-bottom: 20px; }}
                 .closing {{ margin-top: 30px; font-style: italic; }}
                 .signature {{ margin-top: 20px; text-align: center; font-weight: bold; }}
@@ -414,9 +519,6 @@ Use a professional, encouraging tone throughout. Output only clean, valid HTML f
     else:
         logging.error("Failed to send email")
         return "Failed to send email"
-
-
-
 
 # Define the DAG
 with DAG(
