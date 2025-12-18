@@ -264,7 +264,7 @@ def fetch_node_cpu_detailed(ti, key, start, end, date_str):
     # 4. Generate Table
     sorted_stats = sorted(node_stats.values(), key=lambda x: x['node_name'])
 
-    markdown = f"### CPU Utilization per Node (Date: {date_str})\n"
+    markdown = f"### CPU Utilization per Node (This Week)\n"
     markdown += "| Node Name | Total CPU (Cores) | Available CPU (Cores) | Avg CPU Utilization (%) | Max CPU Usage (%) | Current CPU Usage (%) | Disk Read (B/s) | Disk Write (B/s) |\n"
     markdown += "|-----------|-------------------|-----------------------|-------------------------|-------------------|-----------------------|-----------------|------------------|\n"
 
@@ -449,7 +449,7 @@ def fetch_node_memory_detailed(ti, key, start, end, date_str):
     # 4. Generate Table
     sorted_stats = sorted(node_stats.values(), key=lambda x: x['max_usage_pct'], reverse=True)
 
-    markdown = f"### Memory Utilization per Node (Date: {date_str})\n"
+    markdown = f"### Memory Utilization per Node (This Week)\n"
     markdown += "| Node Name | Instance IP | Total Memory (GB) | Avg Available (GB) | Current Available (GB) | Max Usage (%) |\n"
     markdown += "|-----------|-------------|-------------------|--------------------|------------------------|---------------|\n"
 
@@ -653,7 +653,7 @@ def fetch_node_disk_detailed(ti, key, start, end, date_str):
     # Sort: engine-master first, then others
     sorted_stats = sorted(disk_stats.values(), key=lambda x: (0 if 'engine-master' in x['node_name'] else 1, x['node_name'], x['mountpoint']))
 
-    markdown = f"### Disk Utilization per Node (Date: {date_str})\n"
+    markdown = f"### Disk Utilization per Node (This Week)\n"
     markdown += "| Node Name | Instance IP | Mountpoint | Total Size (GB) | Free Space (GB) | Used (%) |\n"
     markdown += "|-----------|-------------|------------|-----------------|-----------------|----------|\n"
 
@@ -2146,11 +2146,14 @@ a:hover {{
 
 # === t12: Send SRE Report via Gmail ===
 def send_sre_email(ti, **context):
+    """Send SRE HTML report via SMTP with PDF attachment"""
     html_report = ti.xcom_pull(key="sre_html_report")
+
     if not html_report or "<html" not in html_report.lower():
         logging.error("No valid HTML report found in XCom.")
         raise ValueError("HTML report missing or invalid.")
-    
+
+    # === PDF Attachment (same logic as Gmail version) ===
     pdf_path = ti.xcom_pull(key="sre_pdf_path")
     pdf_attachment = None
     if pdf_path and os.path.exists(pdf_path):
@@ -2159,7 +2162,7 @@ def send_sre_email(ti, **context):
             pdf_attachment.add_header(
                 "Content-Disposition",
                 "attachment",
-                filename=f"TradeIdeas_SRE_Report.pdf"
+                filename="TradeIdeas_SRE_Report.pdf"
             )
         logging.info(f"Attaching PDF: {pdf_path}")
     else:
@@ -2170,13 +2173,15 @@ def send_sre_email(ti, **context):
 
     subject = f"SRE Weekly Report – {datetime.utcnow().strftime('%Y-%m-%d')}"
     recipient = RECEIVER_EMAIL
+
     try:
-        # Initialize SMTP server
+        # Initialize SMTP connection
+        logging.info(f"Connecting to SMTP server {SMTP_HOST}:{SMTP_PORT} as {SMTP_USER}")
         server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=50)
         server.starttls()
         server.login(SMTP_USER, SMTP_PASSWORD)
-        # Create MIME message
-        logging.debug(f"Preparing email to {recipient} with subject: {subject}")
+
+        # Prepare email - use "mixed" to support both HTML + attachments (including inline images + file attachments)
         msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
         msg["From"] = f"TradeIdeas SRE Agent {SMTP_SUFFIX}"
@@ -2210,13 +2215,15 @@ def send_sre_email(ti, **context):
             logging.info("No PDF attachment added")
 
         # Send the email
-        server.sendmail("webmaster@ecloudcontrol.com", recipient, msg.as_string())
-        logging.info(f"Email sent successfully: {recipient}")
+        server.sendmail(SENDER_EMAIL, recipient, msg.as_string())
         server.quit()
-        return True
+
+        logging.info(f"Email sent successfully to {recipient}")
+        return f"Email sent successfully to {recipient}"
+
     except Exception as e:
-        logging.error(f"Failed to send email: {str(e)}")
-        return None
+        logging.error(f"Failed to send email via SMTP: {str(e)}")
+        raise
 
 def generate_pdf_report_callable(ti=None, **context):
     """
