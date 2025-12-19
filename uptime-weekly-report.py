@@ -176,7 +176,7 @@ def get_ai_response(prompt, conversation_history=None):
         logging.error(f"Error in get_ai_response: {str(e)}")
         return f"An error occurred while processing your request: {str(e)}"
 
-def send_email(recipient, subject, body, in_reply_to="", references="", img_b64=None):
+def send_email(recipient, subject, body, cc_emails=None, in_reply_to="", references="", img_b64=None):
     try:
         # Initialize SMTP server
         server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
@@ -189,6 +189,8 @@ def send_email(recipient, subject, body, in_reply_to="", references="", img_b64=
         msg['Subject'] = subject
         msg['From'] = f"Uptime Reports {SMTP_SUFFIX}"
         msg['To'] = recipient
+        if cc_emails:
+            msg['Cc'] = cc_emails
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to
         if references:
@@ -215,9 +217,13 @@ def send_email(recipient, subject, body, in_reply_to="", references="", img_b64=
                 
             except Exception as e:
                 logging.error(f"Failed to attach image to email: {str(e)}")
-                
+        recipients_list = [recipient]
+        if cc_emails:
+            # Assuming cc_emails is a string like "a@b.com, c@d.com", we split it
+            cc_list = [email.strip() for email in cc_emails.split(',') if email.strip()]
+            recipients_list.extend(cc_list)        
         # Send the email
-        server.sendmail("webmaster@ecloudcontrol.com", recipient, msg.as_string())
+        server.sendmail("webmaster@ecloudcontrol.com", recipients_list, msg.as_string())
         logging.info(f"Email sent successfully: {recipient}")
         server.quit()
         return True
@@ -561,7 +567,7 @@ Previous week data: {prev_data_str}
 
 Logic for analysis (follow steps in order):
 1. Edge cases (Check first): If the 'current week data' (specifically 'structured' data or 'response_times') is empty or missing, stop analysis and return 'No current data available for comparative analysis.'.
-2. Extract metrics: (Only if current data exists) Uptime = structured['uptime_status']['uptime_last_7days']; Median response = structured['response_time']['median'] or mean(response_times['value']); errors = len([log for log in logs if log['type']==1]).
+2. Extract metrics: (Only if current data exists) Uptime = structured['uptime_status']['uptime_last_7days']; Median response = structured['response_time']['median'] or median(response_times['value']); errors = len([log for log in logs if log['type']==1]).
 3. Calculate changes: For each metric, calculate the change. Uptime % = ((current - prev) / prev * 100) if prev >0; Median response delta = current - prev (ms); Errors delta = current - prev.
 4. Highlight direction: Uptime >0 = 'improvement'; <0 = 'degradation'; =0 = 'no change'. For response/errors: <0 = 'improvement'; >0 = 'degradation'; =0 = 'no change'.
 5. Handle Missing Baselines: If 'previous week data' is missing for a specific metric, output: '- [Metric] week-over-week: N/A - no baseline.' Round % to 2 decimals, deltas to 1 decimal.
@@ -645,7 +651,7 @@ def step_3_generate_plot(ti, **context):
             df_prev['datetime'] = pd.to_datetime(df_prev['datetime'])
         
         # Compute previous week median safely
-        prev_median = df_prev['value'].mean() if 'value' in df_prev.columns and not df_prev.empty else 0
+        prev_median = df_prev['value'].median() if 'value' in df_prev.columns and not df_prev.empty else 0
         
         fig, ax = plt.subplots(figsize=(15, 6), dpi=120)
         ax.set_facecolor('white')
@@ -1111,7 +1117,7 @@ def step_5_send_report_email(ti, **context):
         structured = json.loads(structured_str)
         monitor_name = structured.get("monitor_information", {}).get("monitor_name", "Default Monitor")
         dynamic_config = ti.xcom_pull(key="dynamic_config")
-        recipient_email = dynamic_config.get("RECIPIENT_EMAIL")
+        raw_recipients = dynamic_config.get("RECIPIENT_EMAIL")
         final_html_content = ti.xcom_pull(key="final_html_content")
         if not final_html_content:
             logging.error("No final HTML content found from previous steps")
@@ -1123,13 +1129,43 @@ def step_5_send_report_email(ti, **context):
                 
         subject = f"Weekly Uptime Report with Insights for {monitor_name}"
         
-        result = send_email(
-            recipient_email, subject, final_html_content, img_b64=chart_b64
-        )
+        final_email_list = []
         
+        if isinstance(raw_recipients, str):
+            # If it comes as "a@b.com, c@d.com" -> Split it
+            final_email_list = raw_recipients.split(',')
+        elif isinstance(raw_recipients, list):
+            # If it comes as ["a@b.com", "c@d.com"] -> Use it
+            # If it comes as ['"a@b.com", "c@d.com"'] -> Handle the mess
+            for item in raw_recipients:
+                # Split by comma just in case multiple emails are in one list item
+                final_email_list.extend(item.split(','))
+
+        # Remove whitespace and quotes (fixing the error you saw)
+        final_email_list = [
+            e.strip().replace('"', '').replace("'", "") 
+            for e in final_email_list 
+            if e.strip()
+        ]
+
+        if not final_email_list:
+            return "Error: No recipients found"
+
+        # 2. YOUR LOGIC: First = TO, Rest = CC
+        to_email = final_email_list[0]
+        
+        # Join the rest with commas for the email header
+        cc_emails_header = ", ".join(final_email_list[1:]) if len(final_email_list) > 1 else None
+        result = send_email(
+            recipient=to_email, 
+            subject=subject, 
+            body=final_html_content, 
+            cc_emails=cc_emails_header, 
+            img_b64=chart_b64
+        )
         if result:
-            logging.info(f"Report email sent successfully to {recipient_email}")
-            return f"Email sent successfully to {recipient_email}"
+            logging.info(f"Report email sent successfully to {to_email} with cc: {cc_emails_header}")
+            return f"Email sent successfully to {to_email} with cc: {cc_emails_header}"
         else:
             logging.error("Failed to send report email")
             return "Failed to send email"
