@@ -42,7 +42,7 @@ RECEIVER_EMAIL = Variable.get("ltai.v1.sreunityfi.UNITYFI_TO_ADDRESS", default_v
 
 OLLAMA_HOST = Variable.get("ltai.v1.sreunityfi.UNITYFI_OLLAMA_HOST", "http://agentomatic:8000/")
 
-PROMETHEUS_URL = Variable.get("UNITYFI_PROMETHEUS_URL","https://unityfi-prod-promethues.lowtouchcloud.io") 
+PROMETHEUS_URL = Variable.get("ltai.v1.sreunityfi.UNITYFI_PROMETHEUS_URL","https://unityfi-prod-promethues.lowtouchcloud.io") 
 
 # === Precise Date & Time Helpers (computed once per DAG run) ===
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -124,6 +124,10 @@ def fetch_all_metrics_this_week(ti):
         "windows_ddisk_avg": f'avg_over_time(((1 - (windows_logical_disk_free_bytes{{volume="D:"}} / windows_logical_disk_size_bytes{{volume="D:"}})) * 100)[7d:])',
         "windows_edisk_avg": f'avg_over_time(((1 - (windows_logical_disk_free_bytes{{volume="E:"}} / windows_logical_disk_size_bytes{{volume="E:"}})) * 100)[7d:])',
         "windows_fdisk_avg": f'avg_over_time(((1 - (windows_logical_disk_free_bytes{{volume="F:"}} / windows_logical_disk_size_bytes{{volume="F:"}})) * 100)[7d:])',
+        "windows_cdisk_peak": f'max_over_time(((1 - (windows_logical_disk_free_bytes{{volume="C:"}} / windows_logical_disk_size_bytes{{volume="C:"}})) * 100)[7d:])',
+        "windows_ddisk_peak": f'max_over_time(((1 - (windows_logical_disk_free_bytes{{volume="D:"}} / windows_logical_disk_size_bytes{{volume="D:"}})) * 100)[7d:])',
+        "windows_edisk_peak": f'max_over_time(((1 - (windows_logical_disk_free_bytes{{volume="E:"}} / windows_logical_disk_size_bytes{{volume="E:"}})) * 100)[7d:])',
+        "windows_fdisk_peak": f'max_over_time(((1 - (windows_logical_disk_free_bytes{{volume="F:"}} / windows_logical_disk_size_bytes{{volume="F:"}})) * 100)[7d:])',
     }
 
     results = {}
@@ -156,9 +160,7 @@ def fetch_all_metrics_previous_week(ti):
         "engine_disk_avg": f'avg_over_time((1 - (node_filesystem_free_bytes{{device="/dev/sdb1",fstype!~"tmpfs|overlay",mountpoint="/var/lib/docker"}} / node_filesystem_size_bytes{{device="/dev/sdb1",fstype!~"tmpfs|overlay",mountpoint="/var/lib/docker"}}))[7d:]) * 100',
 
         "windows_cpu_avg": f'avg_over_time((100 - (avg by(instance) (rate(windows_cpu_time_total{{mode="idle"}}[30s])) * 100))[7d:])',
-        "windows_cpu_peak": f'max_over_time((100 - (avg by(instance) (rate(windows_cpu_time_total{{mode="idle"}}[30s])) * 100))[7d:])',
         "windows_mem_avg": f'avg_over_time(((1 - (windows_os_physical_memory_free_bytes / windows_cs_physical_memory_bytes)) * 100)[7d:])',
-        "windows_mem_peak": f'max_over_time(((1 - (windows_os_physical_memory_free_bytes / windows_cs_physical_memory_bytes)) * 100)[7d:])',
     }
 
     results = {}
@@ -399,7 +401,64 @@ def generate_high_memory_peaks(ti, **context):
     ti.xcom_push(key="section_high_memory_peaks", value=markdown.strip())
     return markdown
 
+def generate_high_disk_peaks(ti, **context):
+    """
+    Section: High Disk Peaks (≥90%) for C, D, E, F
+    Output:
+    ### High Disk C Peaks (≥90%)
+    | VM Name       | Peak Disk C (%) |
+    |---------------|-----------------|
+    | 10.10.1.101   |        92.4     |
+    
+    ### High Disk D Peaks (≥90%)
+    No Windows VMs recorded Disk D peak ≥90% this week.
+    ...
+    """
+    this_week = json.loads(ti.xcom_pull(key="metrics_this_week"))
+    
+    # Configuration map: Display Name -> Metric Key
+    disk_map = [
+        ("C", "windows_cdisk_peak"),
+        ("D", "windows_ddisk_peak"),
+        ("E", "windows_edisk_peak"),
+        ("F", "windows_fdisk_peak"),
+    ]
 
+    final_markdown = ""
+
+    for drive_letter, metric_key in disk_map:
+        # Fetch data for specific disk, default to empty dict if missing
+        disk_data = this_week.get(metric_key, {})
+        
+        high_peaks = []
+        
+        # Filter for >= 90%
+        for instance, peak_val in disk_data.items():
+            if peak_val >= 90:
+                # Extract IP/Host from instance string (e.g. "10.10.1.101:9100" -> "10.10.1.101")
+                vm_name = instance.split(":")[0] 
+                high_peaks.append((vm_name, peak_val))
+
+        # Sort by peak value descending
+        high_peaks.sort(key=lambda x: x[1], reverse=True)
+
+        # Build Markdown for this specific Drive
+        final_markdown += f"### High Disk {drive_letter} Peaks (≥90%)\n\n"
+        
+        if not high_peaks:
+            final_markdown += f"No Windows VMs recorded Disk {drive_letter} peak ≥90% this week.\n\n"
+        else:
+            final_markdown += f"| VM Name       | Peak Disk {drive_letter} (%) |\n"
+            final_markdown +=  "|---------------|------------------|\n"
+            for name, val in high_peaks:
+                final_markdown += f"| {name:<13} | {val:>9.1f}        |\n"
+            final_markdown += "\n" # Add spacing between tables
+
+    # Remove trailing newlines for clean output
+    final_markdown = final_markdown.strip()
+
+    ti.xcom_push(key="section_high_disk_peaks", value=final_markdown)
+    return final_markdown
 
 def get_ai_response(prompt, conversation_history=None):
     try:
@@ -408,7 +467,7 @@ def get_ai_response(prompt, conversation_history=None):
             raise ValueError("Invalid prompt provided.")
 
         client = Client(host=OLLAMA_HOST)
-        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'SRE/AILAB:0.4'")
+        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'SRE/unityfi:0.3'")
 
         messages = []
         if conversation_history:
@@ -445,18 +504,18 @@ def overall_summary(ti, **context):
     windows_wow         = ti.xcom_pull(key="section_windows_wow") or "No data"
     high_cpu_peaks      = ti.xcom_pull(key="section_high_cpu_peaks") or "No data"
     high_memory_peaks   = ti.xcom_pull(key="section_high_memory_peaks") or "No data"
+    high_disk_peaks     = ti.xcom_pull(key="section_high_disk_peaks") or "No data"
 
     prompt = f"""
-You are the SRE Unityfi Agent — professional, concise, and proactive.
+You are the SRE Unityfi Agent.
 
-Generate a **high-quality Weekly SRE Summary & Recommendations** for the period: **{period}** (Thursday 11:00 AM IST to next Thursday 11:00 AM IST).
+Generate a **Weekly SRE Summary (Current Status)** for: **{period}**.
 
-### Raw Data for Context (do NOT copy tables verbatim — summarize intelligently):
+### Context Data:
 
-#### 1. Appz-Engine-Master (Week-over-Week)
+#### 1. Appz-Engine-Master
 {engine_master}
-
-#### 2. Windows VMs — Average Utilization (This vs Previous Week)
+#### 2. Windows VMs
 {windows_wow}
 
 #### 3. High CPU Peaks (≥90%)
@@ -465,24 +524,63 @@ Generate a **high-quality Weekly SRE Summary & Recommendations** for the period:
 #### 4. High Memory Peaks (≥90%)
 {high_memory_peaks}
 
+#### 5. High Disk Peaks (≥90%)
+{high_disk_peaks}
+
 ### Instructions:
-Write in clear, executive-friendly Markdown with two main sections:
+Write a **Summary of Operations for THIS WEEK only**. 
+**Do NOT discuss week-over-week comparisons or trends yet.**
 
-1. **Weekly SRE Summary (This Week)**  
-   → Highlight overall stability of engine-master and Windows fleet  
-   → Call out any concerning averages or peaks  
-   → Mention number of VMs with high CPU/memory/disk
+1. **System Stability**: Is the system currently stable based on the "This Week" columns?
+2. **Resource Hotspots**: Briefly mention how many VMs hit critical peaks (≥90%) this week.
+3. **Utilization Overview**: General statement on whether CPU/Memory usage is within safe limits for the engine and Windows fleet.
 
-2. **Week-over-Week Insights & Recommendations**  
-   → Highlight biggest regressions/improvements  
-   → Flag any node or VM showing sustained increase in resource usage  
-   → Suggest actions if needed (e.g. investigate, scale, cleanup)
-
-Tone: Professional, calm, proactive. Use bullet points. No fluff.
+Tone: Professional, direct. Use bullet points.
 """
 
     response = get_ai_response(prompt)
     ti.xcom_push(key="ai_weekly_summary", value=response)
+    return response
+
+def generate_conclusion_section(ti, **context):
+    """
+    Generates a conclusion section with:
+    1. A single comparison paragraph (with bolded VM names).
+    2. A brief recommendations section.
+    """
+    period = ti.xcom_pull(key="period_this_week")
+
+    # Pull the comparison tables
+    engine_master = ti.xcom_pull(key="section_engine_master") or "No data"
+    windows_wow   = ti.xcom_pull(key="section_windows_wow") or "No data"
+
+    prompt = f"""
+You are the SRE Unityfi Agent. 
+Review the comparison metrics below for the week of **{period}**.
+
+### Comparison Data:
+#### 1. Appz-Engine-Master Metrics
+{engine_master}
+
+#### 2. Windows VM Metrics
+{windows_wow}
+
+### Instructions:
+Please generate two specific sections:
+
+1. **Trend Analysis**: 
+   - Write a **single, cohesive paragraph** comparing this week's performance to the previous week.
+   - Focus on the "Difference" columns to determine the trend.
+   - **Bold** any VM names or instance identifiers (e.g., **10.10.1.101**) that you mention.
+   - Mention specific entities only if they show a significant change.
+
+2. **Recommendations**: 
+   - Provide 1-3 brief, actionable bullet points based on the trends above (e.g., "Investigate high memory on **10.10.1.105**" or "No action needed as usage is stable").
+
+"""
+
+    response = get_ai_response(prompt)
+    ti.xcom_push(key="ai_conclusion_summary", value=response)
     return response
 
 
@@ -513,9 +611,13 @@ def compile_sre_report(ti, **context):
 
 {ti.xcom_pull(key="section_high_memory_peaks") or "No data"}
 
+{ti.xcom_pull(key="section_high_disk_peaks") or "No data"}
+
 ---
 
-**End of Report**  
+## Conclusion and Recommendations
+{ti.xcom_pull(key="ai_conclusion_summary") or "Conclusion generation in progress..."}  
+
 """
 
     # Clean up extra blank lines
@@ -749,7 +851,7 @@ def send_sre_email(ti, **context):
     recipient = RECEIVER_EMAIL
     try:
         # Initialize SMTP server
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=50)
         server.starttls()
         server.login(SMTP_USER, SMTP_PASSWORD)
         # Create MIME message
@@ -950,7 +1052,7 @@ def generate_pdf_report_callable(ti=None, **context):
 
 
 with DAG(
-    dag_id="sre_weekly_report_unityfi",
+    dag_id="sre-unityfi_weekly",
     schedule_interval="0 11 * * 4",  # Every Thursday at 11:00 AM IST
     start_date=datetime(2025, 1, 1),
     catchup=False,
@@ -965,16 +1067,18 @@ with DAG(
     gen_windows    = PythonOperator(task_id="gen_windows_wow", python_callable=generate_windows_vm_wow_comparison)
     gen_cpu_peaks  = PythonOperator(task_id="gen_cpu_peaks", python_callable=generate_high_cpu_peaks)
     gen_mem_peaks  = PythonOperator(task_id="gen_mem_peaks", python_callable=generate_high_memory_peaks)
+    gen_disk_peaks = PythonOperator(task_id="gen_disk_peaks", python_callable=generate_high_disk_peaks)
 
     ai_summary     = PythonOperator(task_id="ai_summary", python_callable=overall_summary)
+    ai_conclusion  = PythonOperator(task_id="ai_conclusion", python_callable=generate_conclusion_section)
     compile_report = PythonOperator(task_id="compile_report", python_callable=compile_sre_report)
     generate_pdf = PythonOperator(task_id="generate_pdf", python_callable=generate_pdf_report_callable, provide_context=True)
     convert_to_html = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html, provide_context=True)
     send_sre_email = PythonOperator(task_id="send_sre_email", python_callable=send_sre_email, provide_context=True)
     
     # Execution order
-    [fetch_this, fetch_prev] >> gen_engine >> gen_windows >> gen_cpu_peaks >> gen_mem_peaks
-    [gen_engine, gen_windows, gen_cpu_peaks, gen_mem_peaks] >> ai_summary
+    [fetch_this, fetch_prev] >> gen_engine >> gen_windows >> gen_cpu_peaks >> gen_mem_peaks >> gen_disk_peaks
+    [gen_engine, gen_windows, gen_cpu_peaks, gen_mem_peaks, gen_disk_peaks] >> ai_summary
     ai_summary >> compile_report >> generate_pdf >> convert_to_html >> send_sre_email
 
 
