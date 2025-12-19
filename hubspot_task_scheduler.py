@@ -168,186 +168,223 @@ def get_ai_response(prompt):
         return ""
 
 def send_task_reminder_email(service, task, owner_info):
-    """Send individual task reminder email"""
+    """Send clean HubSpot task reminder with unified recent activity"""
     try:
-        owner_email = owner_info.get("email", "")
-        owner_name = owner_info.get("name", "Unknown")
-        
-        props = task.get("properties", {})
-        task_subject = props.get("hs_task_subject") or task.get("hs_task_subject", "Task Reminder")
-        task_body = props.get("hs_task_body") or task.get("hs_task_body", "")
-        task_id = task.get("id", "")
-        due_date = props.get("hs_timestamp") or task.get("hs_timestamp", "")
-        priority = props.get("hs_task_priority") or task.get("hs_task_priority", "MEDIUM")
-        status = props.get("hs_task_status") or task.get("hs_task_status", "NOT_STARTED")
-        associations = task.get("associations", {})
-        activities = task.get("activities", [])
-        summary_html = task.get("summary_html", "")
+        owner_email = owner_info.get("email", "").strip()
+        owner_first_name = owner_info.get("name", "User").split()[0].strip() or "there"
+        owner_full_name = owner_info.get("name", "The HubSpot Assistant Team")
 
-        # Determine if overdue
-        is_overdue = False
-        days_overdue = 0
-        now_utc = datetime.now(timezone.utc)
-        today_date = now_utc.date()
+        if not owner_email:
+            raise ValueError("Owner email missing")
+
+        props = task.get("properties", {})
+        task_id = task.get("id", "N/A")
+
+        # Task Name
+        task_name = props.get("hs_task_subject", "").strip() or props.get("hs_task_body", "").strip().split('\n')[0][:100] or "Unnamed Task"
+
+        # Due Date - full date for display
+        due_date_ms = props.get("hs_timestamp")
         formatted_due = "Not specified"
-        try:
-            if due_date:
-                if isinstance(due_date, str):
-                    due_dt = datetime.fromisoformat(due_date.replace('Z', '+00:00'))
+        is_overdue = False
+        today_date = datetime.now(timezone.utc).date()
+
+        if due_date_ms:
+            try:
+                if isinstance(due_date_ms, str):
+                    due_dt = datetime.fromisoformat(due_date_ms.replace('Z', '+00:00'))
                 else:
-                    due_dt = datetime.fromtimestamp(int(due_date) / 1000, tz=timezone.utc)
+                    due_dt = datetime.fromtimestamp(int(due_date_ms) / 1000, tz=timezone.utc)
                 formatted_due = due_dt.strftime("%B %d, %Y")
                 if due_dt.date() < today_date:
                     is_overdue = True
-                    days_overdue = (today_date - due_dt.date()).days
-        except Exception as e:
-            logging.warning(f"Error parsing due date {due_date}: {e}")
+            except Exception as e:
+                logging.warning(f"Failed to parse due date: {e}")
 
-        # Subject line
-        if is_overdue:
-            if days_overdue == 1:
-                subject = f"⚠️ Overdue (1 day): {task_subject}"
-            elif days_overdue <= 7:
-                subject = f"⚠️ Overdue ({days_overdue} days): {task_subject}"
+        priority = props.get("hs_task_priority", "Not set").title()
+
+        # Associations
+        associations = task.get("associations", {})
+
+        # Contacts
+        contact_lines = []
+        for contact in associations.get("contacts", []):
+            cp = contact.get("properties", {})
+            name = f"{cp.get('firstname', '')} {cp.get('lastname', '')}".strip() or "Unknown"
+            email = cp.get("email", "")
+            if email:
+                contact_lines.append(f'<li>{name} – <a href="mailto:{email}">{email}</a></li>')
             else:
-                subject = f"⚠️ Overdue ({days_overdue}+ days): {task_subject}"
-        else:
-            subject = f"📅 Due Today ({formatted_due}): {task_subject}"
+                contact_lines.append(f'<li>{name}</li>')
 
-        # Opening paragraph
-        if is_overdue:
-            if days_overdue == 1:
-                opening_para = f"<p>I wanted to follow up on a task that became overdue yesterday. The task was due on {formatted_due}.</p><p><strong>Task:</strong> {task_subject}</p>"
-            else:
-                opening_para = f"<p>I wanted to follow up on a task that is now {days_overdue} days overdue. The task was due on {formatted_due}.</p><p><strong>Task:</strong> {task_subject}</p>"
-        else:
-            opening_para = f"<p>This is a reminder that you have a task due today ({formatted_due}).</p>"
-
-        # Task details
-        task_details_para = f"<p><strong>Task:</strong> {task_subject}</p><p><strong>Task ID:</strong> {task_id}<br><strong>Priority:</strong> {priority}<br><strong>Current Status:</strong> {status.replace('_', ' ').title()}</p>"
-        if task_body:
-            task_details_para += f"<p><strong>Task Description:</strong> {task_body}</p>"
-
-        # Associations paragraph
-        associations_para = ""
-        contacts = associations.get("contacts", [])
+        # Company
+        company_name = "No company associated"
         companies = associations.get("companies", [])
-        deals = associations.get("deals", [])
+        if companies:
+            company_name = companies[0].get("properties", {}).get("name", "Unknown Company").strip()
 
-        if contacts or companies or deals:
-            associations_para = "<h4>Task Associations</h4><p>This task is associated with "
+        # Deal - only if exists
+        deal_section = ""
+        deals = associations.get("deals", [])
+        if deals:
+            deal = deals[0].get("properties", {})
+            deal_name = deal.get("dealname", "Unknown Deal")
+            amount = deal.get("amount", "")
+            if amount:
+                try:
+                    amount = f"${float(amount):,.0f}"
+                except:
+                    pass
+            close_date_raw = deal.get("closedate")
+            close_date = ""
+            if close_date_raw:
+                try:
+                    if isinstance(close_date_raw, str):
+                        cd_dt = datetime.fromisoformat(close_date_raw.replace('Z', '+00:00'))
+                    else:
+                        cd_dt = datetime.fromtimestamp(int(close_date_raw) / 1000, tz=timezone.utc)
+                    close_date = cd_dt.strftime("%B %d, %Y")
+                except:
+                    close_date = ""
+
+            deal_lines = []
+            deal_lines.append(f"<li><strong>Deal Name:</strong> {deal_name}</li>")
+            if amount:
+                deal_lines.append(f"<li><strong>Amount:</strong> {amount}</li>")
+            if close_date:
+                deal_lines.append(f"<li><strong>Close Date:</strong> {close_date}</li>")
+
+            deal_section = f"""
+            <li><strong>Deal:</strong>
+                <ul>{''.join(deal_lines)}</ul>
+            </li>
+            """
+
+        # Recent Activity (Last 1 Month) - unified bullets for notes AND tasks
+                # Recent Activity (Last 1 Month) - clean text, no HTML wrappers
+        activity_lines = []
+        activities = sorted(
+            task.get("activities", []),
+            key=lambda x: x.get("properties", {}).get("hs_timestamp", 0) or 0,
+            reverse=True
+        )
+
+        for act in activities:
+            props = act.get("properties", {})
+            timestamp = props.get("hs_timestamp")
+            act_date = ""
+            if timestamp:
+                try:
+                    act_date = datetime.fromtimestamp(int(timestamp) / 1000).strftime("%B %d, %Y")
+                except:
+                    pass
+            prefix = f"{act_date} - " if act_date else ""
+
             parts = []
 
-            if contacts:
-                contact_names = []
-                for contact in contacts:
-                    cp = contact.get("properties", {})
-                    name = f"{cp.get('firstname', '')} {cp.get('lastname', '')}".strip()
-                    email = cp.get('email', '')
-                    if name:
-                        contact_names.append(f"{name} ({email})" if email else name)
-                if contact_names:
-                    if len(contact_names) == 1:
-                        parts.append(f"the contact {contact_names[0]}")
+            # Get and clean note body if present
+            if "hs_note_body" in props:
+                raw_body = props["hs_note_body"].strip()
+                if raw_body:
+                    # Remove full <html><head>...</head><body>...</body></html> wrapper if present
+                    if raw_body.lower().startswith("<html"):
+                        # Simple extraction: find content between <body> and </body>
+                        import re
+                        body_match = re.search(r'<body[^>]*>(.*?)</body>', raw_body, re.DOTALL | re.IGNORECASE)
+                        if body_match:
+                            cleaned = body_match.group(1).strip()
+                        else:
+                            # Fallback: strip all tags
+                            cleaned = re.sub(r'<[^>]+>', '', raw_body).strip()
                     else:
-                        parts.append(f"the contacts {', '.join(contact_names)}")
+                        cleaned = raw_body
 
-            if companies:
-                company_names = []
-                for company in companies:
-                    cp = company.get("properties", {})
-                    name = cp.get('name', '')
-                    domain = cp.get('domain', '')
-                    if name:
-                        company_names.append(f"{name} ({domain})" if domain else name)
-                if company_names:
-                    parts.append(f"the company {', '.join(company_names)}")
+                    # Final cleanup: unescape common entities and remove extra whitespace
+                    cleaned = cleaned.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+                    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
 
-            if deals:
-                deal_details = []
-                for deal in deals:
-                    dp = deal.get("properties", {})
-                    name = dp.get('dealname', '')
-                    stage = dp.get('dealstage', '')
-                    amount = dp.get('amount', '')
-                    text = f'"{name}"'
-                    if stage:
-                        text += f" in {stage.replace('_', ' ').title()} stage"
-                    if amount and amount != "0":
-                        text += f" (${amount})"
-                    deal_details.append(text)
-                if deal_details:
-                    parts.append(f"the deal {', '.join(deal_details)}")
+                    if cleaned:
+                        parts.append(cleaned)
 
+            # Add task subject if present
+            if "hs_task_subject" in props:
+                subject = props["hs_task_subject"].strip()
+                if subject:
+                    status = props.get("hs_task_status", "").title()
+                    if status and status.lower() not in ["not started", ""]:
+                        subject += f" ({status})"
+                    parts.append(subject)
+
+            # Fallback: task body first line
+            elif "hs_task_body" in props:
+                body_line = props["hs_task_body"].strip().split('\n')[0].strip()
+                if body_line:
+                    status = props.get("hs_task_status", "").title()
+                    if status and status.lower() not in ["not started", ""]:
+                        body_line += f" ({status})"
+                    parts.append(body_line)
+
+            # Combine all parts
             if parts:
-                associations_para += ", ".join(parts[:-1]) + f" and {parts[-1]}" if len(parts) > 1 else parts[0]
-                associations_para += ".</p>"
-            else:
-                associations_para = "<p>This task is not currently associated with any contacts, companies, or deals.</p>"
+                content = " • ".join(parts)
+                # Final safe HTML escaping for email
+                content = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                activity_lines.append(f"<li>{prefix}{content}</li>")
+
+
+        # AI Summary
+        summary_html = task.get("summary_html", "").strip()
+        if not summary_html:
+            summary_html = "No additional summary available."
+
+        # Subject: due today or overdue
+        status_text = "overdue" if is_overdue else "due today"
+
+        # === ADD THIS ===
+        subject = f"Task Reminder: \"{task_name}\" is {status_text}"
+        if is_overdue:
+            subject = f" OVERDUE: {subject}"
         else:
-            associations_para = "<p>This task is not currently associated with any contacts, companies, or deals.</p>"
+            subject = f" DUE TODAY: {subject}"
 
-        # Activities
-        activities_para = "<p>There has been no recent activity recorded in the last month.</p>"
-        if activities:
-            activities_para = "<h4>Recent Activity</h4><p>Here is the activity from the last month:</p><ul>"
-            sorted_activities = sorted(
-                activities,
-                key=lambda x: x.get('properties', {}).get('hs_timestamp', 0),
-                reverse=True
-            )
-            for activity in sorted_activities[:10]:
-                ap = activity.get('properties', {})
-                timestamp = ap.get('hs_timestamp')
-                activity_date = ""
-                if timestamp:
-                    try:
-                        act_dt = datetime.fromtimestamp(int(timestamp) / 1000, tz=timezone.utc)
-                        activity_date = act_dt.strftime("%B %d, %Y")
-                    except:
-                        pass
-                if 'hs_note_body' in ap:
-                    note = ap.get('hs_note_body', '')[:200]
-                    activities_para += f"<li><strong>{activity_date}</strong> - Note: {note}...</li>"
-                elif 'hs_task_subject' in ap:
-                    subj = ap.get('hs_task_subject', '')
-                    stat = ap.get('hs_task_status', '')
-                    activities_para += f"<li><strong>{activity_date}</strong> - Task: {subj}"
-                    if stat:
-                        activities_para += f" (Status: {stat.replace('_', ' ').title()})"
-                    activities_para += "</li>"
-            activities_para += "</ul>"
-
-        # Summary
-        summary_para = ""
-        if summary_html and len(summary_html.strip()) > 50:
-            clean_summary = re.sub(r'Associations?.*', '', summary_html, flags=re.DOTALL)
-            summary_para = f"<h4>Summary</h4><p>{clean_summary.strip()}</p>"
-
+        # Final HTML
         email_html = f"""
 <html>
-<head>
-    <style>
-        body {{ font-family: Arial, Helvetica, sans-serif; line-height: 1.6; color: #333333; max-width: 650px; margin: 0 auto; padding: 20px; background-color: #ffffff; }}
-        h4 {{ color: #333333; margin-top: 25px; margin-bottom: 10px; font-size: 16px; font-weight: bold; }}
-        p {{ margin: 12px 0; }}
-        ul {{ margin: 10px 0; padding-left: 25px; }}
-        li {{ margin-bottom: 8px; }}
-        a {{ color: #0066cc; text-decoration: none; }}
-        a:hover {{ text-decoration: underline; }}
-        hr {{ border: none; border-top: 1px solid #cccccc; margin: 30px 0; }}
-    </style>
-</head>
-<body>
-    <p>Dear {owner_name},</p>
-    {opening_para}
-    {task_details_para}
-    {associations_para}
-    {activities_para}
-    {summary_para}
-    <hr>
-    <p>If you have any questions or require assistance, please do not hesitate to reply to this email.</p>
-    <p>Best regards,<br>HubSpot Task Assistant<br><a href="http://lowtouch.ai">lowtouch.ai</a></p>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 700px;">
+    <p>Hi {owner_full_name},</p>
+    <p>This is a reminder that the following task is <strong>{status_text}</strong>. Please find the details below.</p>
+
+    <p><strong>Task Details</strong></p>
+    <ul>
+        <li><strong>Task Name:</strong> {task_name}</li>
+        <li><strong>Task ID:</strong> {task_id}</li>
+        <li><strong>Due Date:</strong> {formatted_due}</li>
+        <li><strong>Priority:</strong> {priority}</li>
+        <li><strong>Owner:</strong> {owner_full_name}</li>
+    </ul>
+
+    <p><strong>Associated Records</strong></p>
+    <ul>
+        <li><strong>Contacts:</strong>
+            <ul>{''.join(contact_lines) or '<li>None</li>'}</ul>
+        </li>
+        <li><strong>Company:</strong> {company_name}</li>
+        {deal_section}
+    </ul>
+
+    <p><strong>Recent Activity (Last 1 Month)</strong></p>
+    <ul>
+        {''.join(activity_lines) or '<li>No recent activity</li>'}
+    </ul>
+
+    <p><strong>Summary</strong></p>
+    <p>{summary_html}</p>
+
+    <p>Please let me know if you need any additional details or support.</p>
+
+    <p>Best regards,<br>
+    The HubSpot Assistant Team<br>
+    <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
 </body>
 </html>
 """
@@ -363,11 +400,11 @@ def send_task_reminder_email(service, task, owner_info):
         raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
         result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
 
-        logging.info(f"Sent reminder for task {task_id} to {owner_email}")
+        logging.info(f"Sent reminder: Task {status_text} - {task_name} to {owner_email}")
         return {"success": True, "task_id": task_id}
 
     except Exception as e:
-        logging.error(f"Failed to send task reminder: {e}")
+        logging.error(f"Send failed for task {task.get('id', 'unknown')}: {str(e)}")
         return {"success": False, "error": str(e)}
 
 def search_hubspot_tasks(owner_id, filters):
@@ -478,7 +515,7 @@ def check_delivery_window(ti, **context):
         try:
             local_time = current_utc.astimezone(pytz.timezone(owner["timezone"]))
             hour = local_time.hour
-            if DELIVERY_START_HOUR <= hour < 20:
+            if DELIVERY_START_HOUR <= hour:
                 owners_to_process.append(owner)
                 logging.info(f"Owner {owner['name']} in delivery window ({local_time.strftime('%H:%M')})")
         except Exception as e:
@@ -556,8 +593,13 @@ def collect_due_tasks(ti, **context):
 Task: {json.dumps(task)}
 Associations: {json.dumps(task['associations'])}
 Recent activities: {json.dumps(activities)}
+Important Instructions:
+    - Based on the task details, associations, and recent activities, generate a concise HTML summary that says what the task is about and associated deal and what has been done in the last month. Keep it brief and to the point.
+    - Do not include the full details again - just a high-level summary.
+    - Do not include any Task, Associated Records, or Recent Activity sections - only the summary.
+    - the summary should be 2-3 lines max in one paragraph.
+    - Do not include any sub heading like task summary, association summary, notes summary, etc.
 
-Provide sections: Association Details, Last One Month Activity, and Summary.
 Use <h4> for headings and concise paragraphs/lists."""
             task["summary_html"] = get_ai_response(prompt)
 

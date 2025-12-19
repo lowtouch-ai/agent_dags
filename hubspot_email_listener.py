@@ -179,7 +179,7 @@ def get_email_thread(service, email_data):
                     userId="me",
                     id=gmail_msg_id,
                     format="metadata",
-                    metadataHeaders=["From", "Subject", "Date", "Message-ID", "In-Reply-To", "References"]
+                    metadataHeaders=["From", "Subject", "Date", "Message-ID", "In-Reply-To", "References", "X-Task-ID", "X-Task-Type"]
                 ).execute()
                 
                 msg_headers = {}
@@ -278,6 +278,63 @@ def extract_all_recipients(email_data):
         "bcc": bcc_recipients
     }
 
+def check_if_task_completion_reply(email_data):
+    # Check direct headers (for non-replies)
+    headers = email_data.get("headers", {})
+    task_id = headers.get("X-Task-ID")
+    task_type = headers.get("X-Task-Type")
+    if task_id and task_type == "daily-reminder":
+        logging.info(f"✓ Detected task completion reply (direct headers) for task {task_id}")
+        return task_id
+
+    # If reply, check thread for bot's message
+    if email_data.get("is_reply", False):
+        thread_history = email_data.get("thread_history", [])
+        for msg in reversed(thread_history):  # Newest to oldest
+            if msg.get("from_bot", False):
+                msg_headers = msg.get("headers", {})
+                task_id = msg_headers.get("X-Task-ID")
+                task_type = msg_headers.get("X-Task-Type")
+                if task_id and task_type == "daily-reminder":
+                    logging.info(f"✓ Detected task completion reply via thread for task {task_id}")
+                    return task_id
+                break  # Assume latest bot message is the relevant one
+
+    return None
+
+def trigger_task_completion_dag(**kwargs):
+    """Trigger the task completion handler DAG"""
+    ti = kwargs['ti']
+    task_completion_emails = ti.xcom_pull(task_ids="branch_task", key="task_completion_emails") or []
+    
+    if not task_completion_emails:
+        logging.info("No task completion emails to process")
+        return
+    
+    for email in task_completion_emails:
+        task_id = email.get("task_id")
+        
+        trigger_conf = {
+            "email_data": email,
+            "task_id": task_id,
+            "chat_history": email.get("chat_history", []),
+            "thread_history": email.get("thread_history", []),
+            "thread_id": email.get("threadId", ""),
+            "message_id": email.get("id", "")
+        }
+        
+        task_id_safe = task_id.replace('-', '_')
+        trigger_task = TriggerDagRunOperator(
+            task_id=f"trigger_task_completion_{task_id_safe}",
+            trigger_dag_id="hubspot_task_completion_handler",
+            conf=trigger_conf,
+        )
+        trigger_task.execute(context=kwargs)
+        
+        logging.info(f"✓ Triggered task completion DAG for task {task_id}")
+    
+    logging.info(f"Triggered task completion handler for {len(task_completion_emails)} emails")
+
 def fetch_unread_emails(**kwargs):
     """Fetch unread emails and extract full thread history for each."""
     service = authenticate_gmail()
@@ -320,7 +377,7 @@ def fetch_unread_emails(**kwargs):
                 id=msg_id, 
                 format="metadata",
                 metadataHeaders=["From", "To", "Cc", "Bcc", "Subject", "Date", 
-                               "Message-ID", "References", "In-Reply-To"]
+                               "Message-ID", "References", "In-Reply-To", "X-Task-ID", "X-Task-Type"]
             ).execute()
         except Exception as e:
             logging.error(f"Error fetching message {msg_id}: {e}")
@@ -770,6 +827,32 @@ def branch_function(**kwargs):
 
     if not unread_emails:
         logging.info("No unread emails found, proceeding to no_email_found_task.")
+        return "no_email_found_task"
+
+    task_completion_emails = []
+    other_emails = []
+    logging.info(f"task completion email is :{task_completion_emails}")
+    logging.info(f"other emails is :{other_emails}")
+    
+    for email in unread_emails:
+        task_id = check_if_task_completion_reply(email)
+        if task_id:
+            # This is a task completion reply
+            email["task_id"] = task_id
+            task_completion_emails.append(email)
+            logging.info(f"Identified task completion reply for task {task_id}")
+        else:
+            other_emails.append(email)
+    
+    # If we have task completion emails, route them separately
+    if task_completion_emails:
+        ti.xcom_push(key="task_completion_emails", value=task_completion_emails)
+        logging.info(f"Routing {len(task_completion_emails)} task completion emails")
+        return "trigger_task_completion"
+    
+    # For other emails, continue with existing routing logic
+    if not other_emails:
+        logging.info("No other emails to route after task completion separation")
         return "no_email_found_task"
 
     # Build email details for AI analysis with FULL chat history context
@@ -2423,10 +2506,16 @@ with DAG(
         provide_context=True
     )
 
+    trigger_task_completion_task = PythonOperator(
+        task_id="trigger_task_completion",
+        python_callable=trigger_task_completion_dag,
+        provide_context=True
+    )
+
     no_email_found_task = PythonOperator(
         task_id="no_email_found_task",
         python_callable=no_email_found,
         provide_context=True
     )
 
-    fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_general_queries_task, trigger_report_task, no_email_found_task]
+    fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_general_queries_task, trigger_report_task, trigger_task_completion_task, no_email_found_task]
