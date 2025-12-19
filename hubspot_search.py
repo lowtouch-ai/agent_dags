@@ -1802,6 +1802,295 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         }
         ti.xcom_push(key="notes_tasks_meeting", value=default)
 
+def validate_entity_creation_rules(ti, **context):
+    """
+    Validate that entity creation follows HubSpot association rules.
+    Returns validation result and detailed error messages.
+    """
+    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    contact_info = ti.xcom_pull(key="contact_info", default={})
+    company_info = ti.xcom_pull(key="company_info", default={})
+    deal_info = ti.xcom_pull(key="deal_info", default={})
+    notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", default={})
+    email_data = ti.xcom_pull(key="email_data", default={})
+    
+    # Extract sender info
+    headers = email_data.get("headers", {})
+    sender_raw = headers.get("From", "")
+    import email.utils
+    sender_tuple = email.utils.parseaddr(sender_raw)
+    sender_name = sender_tuple[0].strip() or "there"
+    
+    validation_errors = []
+    
+    # Get all existing and new entities
+    existing_contacts = contact_info.get("contact_results", {}).get("total", 0)
+    new_contacts = len(contact_info.get("new_contacts", []))
+    
+    existing_companies = company_info.get("company_results", {}).get("total", 0)
+    new_companies = len(company_info.get("new_companies", []))
+    
+    existing_deals = deal_info.get("deal_results", {}).get("total", 0)
+    new_deals = len(deal_info.get("new_deals", []))
+    
+    # Get engagement entities
+    notes = notes_tasks_meeting.get("notes", [])
+    tasks = notes_tasks_meeting.get("tasks", [])
+    meeting_details = notes_tasks_meeting.get("meeting_details", {})
+    has_meeting = bool(meeting_details and any(str(v).strip() for v in meeting_details.values() if v is not None))
+    
+    total_contacts = existing_contacts + new_contacts
+    total_companies = existing_companies + new_companies
+    total_deals = existing_deals + new_deals
+    
+    # RULE 1: Meetings/Notes/Tasks must have at least one association
+    has_base_entity = total_contacts > 0 or total_deals > 0 or total_companies > 0
+    
+    if notes and not has_base_entity:
+        validation_errors.append({
+            "entity_type": "Notes",
+            "count": len(notes),
+            "issue": "Notes cannot be created without at least one associated contact, deal, or company.",
+            "suggestion": "Please specify a contact, company, or deal to associate with these notes."
+        })
+    
+    if tasks and not has_base_entity:
+        validation_errors.append({
+            "entity_type": "Tasks",
+            "count": len(tasks),
+            "issue": "Tasks cannot be created without at least one associated contact, deal, or company.",
+            "suggestion": "Please specify a contact, company, or deal to associate with these tasks."
+        })
+    
+    if meeting_details and not has_base_entity:
+        validation_errors.append({
+            "entity_type": "Meeting",
+            "count": len(meeting_details),
+            "issue": "Meetings cannot be created without at least one associated contact, deal, or company.",
+            "suggestion": "Please specify a contact, company, or deal to associate with this meeting."
+        })
+    
+    # RULE 2: Deals should have contact association
+    if new_deals > 0 and total_contacts == 0:
+        validation_errors.append({
+            "entity_type": "Deals",
+            "count": new_deals,
+            "issue": "Deals should be associated with a contact for proper follow-up and ownership.",
+            "suggestion": "Please specify a contact to associate with the deal(s). You can provide the contact's name, email, or other identifying information."
+        })
+    
+    # RULE 3: Contacts with company info should be linked
+    # This is a soft rule - we check if company context exists but contact isn't linked
+    if new_contacts > 0 and (existing_companies > 0 or new_companies > 0):
+        # This is actually good - they'll be auto-associated
+        logging.info(f"✓ {new_contacts} contact(s) will be associated with {existing_companies + new_companies} company/companies")
+    
+    # Build validation result
+    validation_result = {
+        "is_valid": len(validation_errors) == 0,
+        "errors": validation_errors,
+        "entity_summary": {
+            "contacts": {"existing": existing_contacts, "new": new_contacts, "total": total_contacts},
+            "companies": {"existing": existing_companies, "new": new_companies, "total": total_companies},
+            "deals": {"existing": existing_deals, "new": new_deals, "total": total_deals},
+            "notes": len(notes),
+            "tasks": len(tasks),
+            "meetings": len(meeting_details)
+        },
+        "sender_name": sender_name
+    }
+    
+    ti.xcom_push(key="validation_result", value=validation_result)
+    logging.info(f"Validation complete: {'PASSED' if validation_result['is_valid'] else 'FAILED with ' + str(len(validation_errors)) + ' error(s)'}")
+    
+    return validation_result
+    
+def compose_validation_error_email(ti, **context):
+    """
+    Compose a polite email explaining why entities cannot be created.
+    """
+    validation_result = ti.xcom_pull(key="validation_result", default={})
+    email_data = ti.xcom_pull(key="email_data", default={})
+    
+    errors = validation_result.get("errors", [])
+    entity_summary = validation_result.get("entity_summary", {})
+    sender_name = validation_result.get("sender_name", "there")
+    
+    # Build error details HTML
+    error_details_html = ""
+    for idx, error in enumerate(errors, 1):
+        entity_type = error.get("entity_type", "Entity")
+        count = error.get("count", 0)
+        issue = error.get("issue", "")
+        suggestion = error.get("suggestion", "")
+        
+        error_details_html += f"""
+        <div>
+            <h4 style="margin-top: 0; color: #856404;">Issue {idx}: {entity_type} ({count} item{'s' if count > 1 else ''})</h4>
+            <p style="margin: 10px 0;"><strong>Problem:</strong> {issue}</p>
+            <p style="margin: 10px 0;"><strong>Solution:</strong> {suggestion}</p>
+        </div>
+        """
+
+    # Compose full email
+    email_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 700px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{ margin-bottom: 20px; }}
+        .section-title {{
+            color: #000;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            font-size: 18px;
+        }}
+        .closing {{margin-top: 30px; }}
+        .signature {{
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid #ddd;
+        }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+        <p>Thank you for your request to log information in HubSpot. I've reviewed your request and found that some entities cannot be created due to HubSpot's association requirements.</p>
+    </div>
+    
+    <h3 class="section-title"> Issues Found</h3>
+    {error_details_html}
+    
+    <h4 class="section-title"> How to fix this</h4>
+        <p><strong>HubSpot Association Rules:</strong></p>
+            <li><strong>Meetings, Notes, and Tasks</strong> must be linked to at least one: Contact, Deal, or Company</li>
+            <li><strong>Deals</strong> should be associated with a Contact for proper follow-up</li>
+            <li><strong>Contacts</strong> can be standalone, but work best when linked to a Company</li>
+        <p style="margin-top: 15px;"><strong>To proceed, please reply with:</strong></p>
+        <ul style="margin: 10px 0; padding-left: 20px;">
+            <li>The missing contact/company/deal information, OR</li>
+            <li>Confirmation to use an existing contact/company/deal (if applicable)</li>
+        </ul>
+    
+    <div class="closing">
+        <p>I'm ready to help once you provide the additional information. Simply reply to this email with the details, and I'll process your request right away.</p>
+        <p>If you have any questions about these requirements, feel free to ask!</p>
+    </div>
+    
+    <div class="signature">
+        <p><strong>Best regards,</strong><br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>"""
+    
+    ti.xcom_push(key="validation_error_email", value=email_html)
+    logging.info(f"Composed validation error email with {len(errors)} error(s)")
+    
+    return email_html
+
+
+def send_validation_error_email(ti, **context):
+    """
+    Send the validation error email to the user with proper threading.
+    """
+    email_data = ti.xcom_pull(key="email_data", default={})
+    validation_error_email = ti.xcom_pull(key="validation_error_email")
+    
+    service = authenticate_gmail()
+    if not service:
+        logging.error("Gmail authentication failed")
+        return None
+    
+    # Extract all recipients from original email
+    all_recipients = extract_all_recipients(email_data)
+    
+    headers = email_data.get("headers", {})
+    sender_email = headers.get("From", "")
+    original_message_id = headers.get("Message-ID", "")
+    references = headers.get("References", "")
+    
+    if original_message_id and original_message_id not in references:
+        references = f"{references} {original_message_id}".strip()
+    
+    subject = f"Re: {headers.get('Subject', 'HubSpot Request')}"
+    if not subject.lower().startswith("re:"):
+        subject = f"Re: {subject}"
+    
+    # Prepare recipients for reply-all
+    primary_recipient = sender_email
+    cc_recipients = []
+    
+    for to_addr in all_recipients["to"]:
+        if (to_addr.lower() != sender_email.lower() and 
+            HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower()):
+            cc_recipients.append(to_addr)
+    
+    for cc_addr in all_recipients["cc"]:
+        if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and 
+            cc_addr not in cc_recipients):
+            cc_recipients.append(cc_addr)
+    
+    bcc_recipients = [addr for addr in all_recipients["bcc"] 
+                      if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()]
+    
+    cc_string = ', '.join(cc_recipients) if cc_recipients else None
+    bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
+    
+    logging.info(f"Sending validation error email:")
+    logging.info(f"Primary recipient: {primary_recipient}")
+    logging.info(f"Cc recipients: {cc_string}")
+    logging.info(f"Bcc recipients: {bcc_string}")
+    
+    result = send_email(service, primary_recipient, subject, validation_error_email,
+                       original_message_id, references, cc=cc_string, bcc=bcc_string)
+    
+    if result:
+        logging.info(f"Validation error email sent successfully")
+        
+        # Mark original message as read
+        try:
+            original_msg_id = email_data.get("id")
+            if original_msg_id:
+                service.users().messages().modify(
+                    userId="me",
+                    id=original_msg_id,
+                    body={"removeLabelIds": ["UNREAD"]}
+                ).execute()
+                logging.info(f"Marked message {original_msg_id} as read")
+        except Exception as read_err:
+            logging.warning(f"Failed to mark message as read: {read_err}")
+        
+        ti.xcom_push(key="validation_error_email_sent", value=True)
+    else:
+        logging.error("Failed to send validation error email")
+    
+    return result
+
+def decide_validation_path(ti, **context):
+    """
+    Branch task to decide whether to proceed with entity creation or send validation error.
+    """
+    validation_result = ti.xcom_pull(key="validation_result", default={})
+    
+    is_valid = validation_result.get("is_valid", False)
+    
+    if is_valid:
+        logging.info(" Validation passed - proceeding with entity creation workflow")
+        return "compile_search_results"
+    else:
+        logging.warning(" Validation failed - sending error email to user")
+        return "compose_validation_error_email"
+
 def check_task_threshold(ti, **context):
     """Check if task volume exceeds threshold"""
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
@@ -2639,7 +2928,212 @@ def send_confirmation_email(ti, **context):
         ti.xcom_push(key="confirmation_message_id", value=result.get("id", ""))
     else:
         logging.error("Failed to send confirmation email")
+        return result
 
+def check_if_action_needed(ti, **context):
+    """
+    Check if any entities were found or proposed.
+    If nothing to do, send a polite acknowledgment email.
+    """
+    search_results = ti.xcom_pull(key="search_results", default={})
+    
+    # Check if confirmation is actually needed
+    confirmation_needed = search_results.get("confirmation_needed", False)
+    
+    if confirmation_needed:
+        # Normal flow - confirmation email will be sent
+        logging.info("✓ Action needed - proceeding to send confirmation email")
+        return "compose_confirmation_email"
+    else:
+        # No entities found or created - send acknowledgment
+        logging.info("✗ No action needed - will send acknowledgment email")
+        return "compose_no_action_email"
+
+
+def compose_no_action_email(ti, **context):
+    """
+    Compose a polite email when no entities were found or created.
+    """
+    email_data = ti.xcom_pull(key="email_data", default={})
+    latest_message = ti.xcom_pull(key="latest_message", default="")
+    search_results = ti.xcom_pull(key="search_results", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    
+    # Extract sender info
+    headers = email_data.get("headers", {})
+    sender_raw = headers.get("From", "")
+    import email.utils
+    sender_tuple = email.utils.parseaddr(sender_raw)
+    sender_name = sender_tuple[0].strip() or "there"
+    
+    # Get what was searched for
+    deal_results = search_results.get("deal_results", {})
+    contact_results = search_results.get("contact_results", {})
+    company_results = search_results.get("company_results", {})
+    
+    searched_deals = entity_flags.get("search_deals", False)
+    searched_contacts = entity_flags.get("search_contacts", False)
+    searched_companies = entity_flags.get("search_companies", False)
+    
+    # Determine what was attempted
+    search_summary = []
+    if searched_deals:
+        search_summary.append("deals")
+    if searched_contacts:
+        search_summary.append("contacts")
+    if searched_companies:
+        search_summary.append("companies")
+    
+    search_text = ", ".join(search_summary) if search_summary else "entities"
+    
+    # Build email content
+    email_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 700px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{
+            margin-bottom: 20px;
+        }}
+        .closing {{ margin-top: 30px; }}
+        .signature {{
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid #ddd;
+        }}
+        ul {{
+            margin: 10px 0;
+            padding-left: 20px;
+        }}
+        li {{
+            margin: 5px 0;
+        }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+        <p>Thank you for your message. I've reviewed your request and searched through HubSpot, but I didn't find anything matching your query, and there's nothing new to create based on the information provided.</p>
+    </div>
+    <div class="help-section">
+        <h4 style="margin-top: 0;">How I Can Help You:</h4>
+        <p>I can assist you with the following HubSpot operations:</p>
+        <ul>
+            <li><strong>Search & Retrieve:</strong> Find contacts, companies, or deals by name, email, or other details</li>
+            <li><strong>Create Entities:</strong> Add new contacts, companies, deals, notes, tasks, or meetings</li>
+            <li><strong>Update Records:</strong> Modify existing entity information</li>
+            <li><strong>Log Activities:</strong> Record meeting minutes, notes, and follow-up tasks</li>
+            <li><strong>Generate Reports:</strong> Create summaries and reports of your HubSpot data</li>
+        </ul>
+    </div>
+    
+    <div class="closing">
+        <p>If you believe there should be matching records in HubSpot, please provide more details such as:</p>
+        <ul>
+            <li>Full names or exact email addresses</li>
+            <li>Company names or domains</li>
+            <li>Deal names or IDs</li>
+            <li>Specific dates or time periods</li>
+        </ul>
+        <p style="margin-top: 15px;">I'm here to help! Simply reply with your request, and I'll assist you right away.</p>
+    </div>
+    
+    <div class="signature">
+        <p><strong>Best regards,</strong><br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>"""
+    
+    ti.xcom_push(key="no_action_email", value=email_html)
+    logging.info("Composed no-action acknowledgment email")
+    
+    return email_html
+
+def send_no_action_email(ti, **context):
+    """
+    Send the no-action acknowledgment email.
+    """
+    email_data = ti.xcom_pull(key="email_data", default={})
+    no_action_email = ti.xcom_pull(key="no_action_email")
+    
+    service = authenticate_gmail()
+    if not service:
+        logging.error("Gmail authentication failed")
+        return None
+    
+    # Extract all recipients
+    all_recipients = extract_all_recipients(email_data)
+    
+    headers = email_data.get("headers", {})
+    sender_email = headers.get("From", "")
+    original_message_id = headers.get("Message-ID", "")
+    references = headers.get("References", "")
+    
+    if original_message_id and original_message_id not in references:
+        references = f"{references} {original_message_id}".strip()
+    
+    subject = headers.get("Subject", "No Subject")
+    if not subject.lower().startswith("re:"):
+        subject = f"Re: {subject}"
+    
+    # Extract primary recipient
+    sender_match = re.search(r'<([^>]+)>', sender_email)
+    primary_recipient = sender_match.group(1) if sender_match else sender_email
+    
+    # Prepare CC recipients (reply-all)
+    cc_recipients = []
+    for to_addr in all_recipients["to"]:
+        if (to_addr.lower() != sender_email.lower() and 
+            HUBSPOT_FROM_ADDRESS.lower() not in to_addr.lower()):
+            cc_recipients.append(to_addr)
+    
+    for cc_addr in all_recipients["cc"]:
+        if (HUBSPOT_FROM_ADDRESS.lower() not in cc_addr.lower() and 
+            cc_addr not in cc_recipients):
+            cc_recipients.append(cc_addr)
+    
+    bcc_recipients = [addr for addr in all_recipients["bcc"] 
+                      if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()]
+    
+    cc_string = ', '.join(cc_recipients) if cc_recipients else None
+    bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
+    
+    logging.info(f"Sending no-action acknowledgment email:")
+    logging.info(f"Primary recipient: {primary_recipient}")
+    logging.info(f"Cc recipients: {cc_string}")
+    
+    result = send_email(service, primary_recipient, subject, no_action_email,
+                       original_message_id, references, cc=cc_string, bcc=bcc_string)
+    
+    if result:
+        logging.info("No-action acknowledgment email sent successfully")
+        
+        # Mark original message as read
+        try:
+            original_msg_id = email_data.get("id")
+            if original_msg_id:
+                service.users().messages().modify(
+                    userId="me",
+                    id=original_msg_id,
+                    body={"removeLabelIds": ["UNREAD"]}
+                ).execute()
+                logging.info(f"Marked message {original_msg_id} as read")
+        except Exception as read_err:
+            logging.warning(f"Failed to mark message as read: {read_err}")
+        
+        ti.xcom_push(key="no_action_email_sent", value=True)
+    else:
+        logging.error("Failed to send no-action acknowledgment email")
+    
     return result
 
 def compose_engagement_summary_email(ti, **context):
@@ -3117,9 +3611,28 @@ with DAG(
         provide_context=True
     )
 
+    validate_rules_task = PythonOperator(
+        task_id="validate_entity_creation_rules",
+        python_callable=validate_entity_creation_rules,
+        provide_context=True
+    )
+
+    validation_branch_task = BranchPythonOperator(
+        task_id="decide_validation_path",
+        python_callable=decide_validation_path,
+        provide_context=True
+    )
+
     compile_task = PythonOperator(
         task_id="compile_search_results",
         python_callable=compile_search_results,
+        provide_context=True
+    )
+
+    # NEW: Branch to check if any action is needed
+    check_action_branch_task = BranchPythonOperator(
+        task_id="check_if_action_needed",
+        python_callable=check_if_action_needed,
         provide_context=True
     )
 
@@ -3133,6 +3646,35 @@ with DAG(
         task_id="send_confirmation_email",
         python_callable=send_confirmation_email,
         provide_context=True
+    )
+
+    # NEW: No-action acknowledgment tasks
+    compose_no_action_task = PythonOperator(
+        task_id="compose_no_action_email",
+        python_callable=compose_no_action_email,
+        provide_context=True
+    )
+
+    send_no_action_task = PythonOperator(
+        task_id="send_no_action_email",
+        python_callable=send_no_action_email,
+        provide_context=True
+    )
+
+    compose_validation_error_task = PythonOperator(
+        task_id="compose_validation_error_email",
+        python_callable=compose_validation_error_email,
+        provide_context=True
+    )
+
+    send_validation_error_task = PythonOperator(
+        task_id="send_validation_error_email",
+        python_callable=send_validation_error_email,
+        provide_context=True
+    )
+
+    validation_end_task = DummyOperator(
+        task_id="validation_end"
     )
 
     compose_summary_email_task = PythonOperator(
@@ -3155,8 +3697,22 @@ with DAG(
     
     # Summary workflow path (when request_summary is True)
     branch_task >> compose_summary_email_task >> send_summary_email_task >> end_task
-    # Define task dependencies
-    load_context_task >> analyze_entities_task >> summarize_engagement_task >> determine_owner_task
+    
+    # Entity creation workflow path
+    branch_task >> determine_owner_task
     determine_owner_task >> [search_deals_task, search_contacts_task, search_companies_task]
     [search_deals_task, search_contacts_task, search_companies_task] >> parse_notes_tasks_task
-    parse_notes_tasks_task >> check_threshold_task >> compile_task >> compose_email_task >> send_email_task
+    parse_notes_tasks_task >> check_threshold_task >> validate_rules_task >> validation_branch_task
+    
+    # Validation passes → check if action needed
+    validation_branch_task >> compile_task >> check_action_branch_task
+    
+    # Action needed → send confirmation
+    check_action_branch_task >> compose_email_task >> send_email_task >> end_task
+    
+    # No action needed → send acknowledgment
+    check_action_branch_task >> compose_no_action_task >> send_no_action_task >> end_task
+    
+    # Validation fails → send error
+    validation_branch_task >> compose_validation_error_task >> send_validation_error_task >> validation_end_task
+    validation_end_task >> end_task
