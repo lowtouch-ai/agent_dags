@@ -2381,7 +2381,7 @@ with DAG(
     t6 = PythonOperator(task_id="mysql_health_today", python_callable=mysql_health_today, provide_context=True)
     t7 = PythonOperator(task_id="kubernetes_version_check", python_callable=kubernetes_version_check, provide_context=True)
     t7_1 = PythonOperator(task_id="kubernetes_eol_and_next_version", python_callable=kubernetes_eol_and_next_version, provide_context=True)
-    t8 = PythonOperator(task_id="microk8s_expiry_check", python_callable=microk8s_expiry_check, provide_context=True)
+    t8 = PythonOperator(task_id="microk8s_expiry_check", python_callable=fetch_microk8s_expiry, provide_context=True)
     t9 = PythonOperator(task_id="lke_pvc_storage_details", python_callable=lke_pvc_storage_details, provide_context=True)
     
     t10 = PythonOperator(task_id="node_cpu_yesterday", python_callable=node_cpu_yesterday, provide_context=True)
