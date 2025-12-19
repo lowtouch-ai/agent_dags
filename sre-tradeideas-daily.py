@@ -2376,7 +2376,7 @@ with DAG(
     t1 = PythonOperator(task_id="node_cpu_today", python_callable=node_cpu_today, provide_context=True)
     t2 = PythonOperator(task_id="node_memory_today", python_callable=node_memory_today, provide_context=True)
     t3 = PythonOperator(task_id="node_disk_today", python_callable=node_disk_today, provide_context=True)
-    t4 = PythonOperator(task_id="node_readiness_check", python_callable=node_readiness_check, provide_context=True)
+    t4 = PythonOperator(task_id="node_readiness_check", python_callable=fetch_node_readiness, provide_context=True)
     t5 = PythonOperator(task_id="pod_restart_today", python_callable=pod_restart_today, provide_context=True)
     t6 = PythonOperator(task_id="mysql_health_today", python_callable=mysql_health_today, provide_context=True)
     t7 = PythonOperator(task_id="kubernetes_version_check", python_callable=kubernetes_version_check, provide_context=True)
