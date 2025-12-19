@@ -240,6 +240,9 @@ def analyze_user_response(ti, **context):
     # === Prompt (unchanged) ===
     from datetime import datetime
     prompt = f"""You are a HubSpot assistant analyzing an email conversation to understand what actions to take.
+CONVERSATION HISTORY:
+{chat_history}
+
 LATEST USER MESSAGE:
 {latest_user_message}
 
@@ -247,12 +250,39 @@ SENDER INFO:
 Name: {sender_name}
 Email: {sender_email}
 
+=== GOLDEN RULES - NON-NEGOTIABLE ===
+1. You MUST preserve EVERY entity (contacts, companies, deals, notes, tasks, meetings) from that confirmation email EXACTLY — including content, timestamps, speaker_name, speaker_email, task_index, etc.
+2. When the user asks for a modification:
+   - Apply ONLY the requested change
+   - Keep ALL notes, tasks, meetings unchanged unless explicitly told to remove/modify them
+   - Never regenerate or rephrase note content — copy it verbatim from the confirmed plan
+   - Keep everything in the notes as it is without changing the speaker name unless explicitly asked to change it
+   - All the entities in the confirmation email should be there at the final email without fail and without any modification unless user explicitly asks for a change
+   - Do not change the **speaker_name** in the notes.Copy th exact note content in the confirmation email exactly as it is in the final mail without fail.
+3. If user says "proceed", "yes", "go ahead", "looks good" → return the entire confirmed plan unchanged
+4. Casual comments (e.g. "Great meeting!", "This is exciting") → create ONE new note with that text, BUT still return full confirmed plan
+
 CRITICAL INSTRUCTIONS:
 - You MUST extract entities ONLY from the conversation history above
 - You cannot call any APIs or tools. You should answer based on your knowledge.
 - The bot's previous messages contain tables with entity details (IDs, names, emails, etc.)
 - Parse these tables to extract existing entities and proposed new entities
 - The user's latest message indicates their intent (confirm, modify, select specific, etc.)
+
+CRITICAL PRESERVATION RULES - NON-NEGOTIABLE:
+1. The "Previously Confirmed Plan" above contains EXACTLY what was shown and agreed upon in the last confirmation email.
+2. You MUST preserve 100% of entities from this plan (contacts, companies, deals, notes, tasks, meetings) UNLESS the user explicitly says to remove or skip something.
+3. If the user asks to modify or add a field (e.g. phone, job title, due date), you MUST:
+   - Apply the change to the correct existing/proposed entity
+   - Keep ALL other entities and fields exactly as they were from the chat_history.
+   - Never remove notes, tasks, or meetings just because the user didn't mention them
+4. Default behavior = INCLUDE EVERYTHING from the previous plan + apply modifications
+
+EXAMPLES:
+* If User says "Please update Vivek's phone to 9898767654",then Keep both companies, keep all notes/tasks, only update phone field on Vivek's contact.
+* If User says "Looks good, proceed",then Return the entire previous plan unchanged.
+* If User says "Skip the task about follow-up call",then Remove ONLY that one task, keep everything else.
+* If User says "This is great feedback!",then Treat as casual comment → create note, BUT still include ALL selected_entities from previous plan.
 
 YOUR TASK:
 Based on the conversation, and Latest User message identify:
@@ -326,7 +356,7 @@ Return ONLY valid JSON (no markdown, no explanations):
         "companies": [{{"name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
         "deals": [{{"dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}],
         "meetings": [{{"meeting_title": "...", "start_time": "...", "end_time": "...", "location": "...", "outcome": "...", "timestamp": "...", "attendees": [], "meeting_type": "...", "meeting_status": "..."}}],
-        "notes": [{{"note_content": "...", "timestamp": "...", "note_type": "...", "speaker_name": "{sender_name}", "speaker_email": "{sender_email}"}}],
+        "notes": [{{"note_content": "...", "timestamp": "...", "note_type": "...", ""speaker_name":"PRESERVE_FROM_CONFIRMATION", "speaker_email": "PRESERVE_FROM_CONFIRMATION""}}],
         "tasks": [{{"task_details": "...", "task_owner_name": "...", "task_owner_id": "...", "due_date": "...", "priority": "...", "task_index": 1}}]
     }},
     "entities_to_update": {{
@@ -568,6 +598,185 @@ CRITICAL REMINDERS:
     logging.info(f"Analysis completed for thread {thread_id}")
     return results
 
+def validate_and_clean_analysis(ti, **context):
+    """
+    Validate and clean analysis results to ensure consistency and correctness.
+    This function verifies that the analysis from analyze_user_response is accurate and complete.
+    """
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    latest_user_message = ti.xcom_pull(key="latest_message", default="")
+    
+    logging.info("=== VALIDATING AND CLEANING ANALYSIS RESULTS ===")
+    
+    if not analysis_results or not isinstance(analysis_results, dict):
+        logging.error("Invalid analysis_results - skipping validation")
+        return analysis_results
+    
+    if analysis_results.get("fallback_email_sent", False):
+        logging.info("Fallback email was sent - skipping validation")
+        return analysis_results
+    
+    # Get entities from analysis
+    entities_to_create = analysis_results.get("entities_to_create", {})
+    entities_to_update = analysis_results.get("entities_to_update", {})
+    selected_entities = analysis_results.get("selected_entities", {})
+    user_intent = analysis_results.get("user_intent", "UNKNOWN")
+    
+    # Build validation prompt for AI agent
+    prompt = f"""You are a validation assistant for HubSpot operations. Your job is to verify and clean the analysis results.
+
+LATEST USER MESSAGE:
+{latest_user_message}
+
+CURRENT ANALYSIS RESULTS:
+User Intent: {user_intent}
+
+Entities to Create:
+{json.dumps(entities_to_create, indent=2)}
+
+Entities to Update:
+{json.dumps(entities_to_update, default=str, indent=2)}
+
+Selected Entities:
+{json.dumps(selected_entities, indent=2)}
+
+VALIDATION RULES:
+1. **Check for Duplicates**: 
+   - Remove duplicate notes with identical content
+   - Remove duplicate tasks with identical details and due dates
+   - Keep unique entities only
+
+2. **Verify Required Fields**:
+   - All notes must have: note_content, timestamp, note_type, speaker_name and the speaker name must be same as that in the confirmation email.
+   - All tasks must have: task_details, task_owner_name, task_owner_id, due_date, priority, task_index
+   - All contacts must have at minimum: email or (firstname + lastname)
+   - All companies must have: name
+
+3. **Check Data Integrity**:
+   - Timestamps must be in valid format (YYYY-MM-DD HH:MM:SS)
+   - Task priorities must be: HIGH, MEDIUM, or LOW
+   - Task indices must be sequential starting from 1
+
+4. **Verify Entity Relationships**:
+   - If creating tasks, ensure task_owner is assigned
+   - If updating entities, ensure the entity ID exists in selected_entities
+   - Check that modifications match the user's request
+
+5. **Intent Validation**:
+   - Confirm user_intent matches the actual request
+   - For CASUAL_COMMENT: should only create notes, no other entities
+   - For PROCEED: should include all previously confirmed entities
+   - For MODIFY: should apply only requested changes and proceed with all other previously confirmed entities without any change(like the speaker in notes in confirmation email should be the same in notes in the final email also)
+
+YOUR TASK:
+Review the analysis results above and return a cleaned, validated version. Remove any duplicates, fix invalid data, and ensure all required fields are present.
+
+Return ONLY this JSON structure:
+{{
+    "validation_status": "valid|needs_cleaning|invalid",
+    "validation_messages": ["List of issues found or 'All validations passed'"],
+    "cleaned_entities_to_create": {{
+        "contacts": [],
+        "companies": [],
+        "deals": [],
+        "meetings": [],
+        "notes": [],
+        "tasks": []
+    }},
+    "cleaned_entities_to_update": {{
+        "contacts": [],
+        "companies": [],
+        "deals": [],
+        "meetings": [],
+        "notes": [],
+        "tasks": []
+    }},
+    "cleaned_selected_entities": {{
+        "contacts": [],
+        "companies": [],
+        "deals": []
+    }},
+    "recommended_user_intent": "{user_intent}",
+    "changes_made": ["List of changes applied during cleaning"]
+}}
+
+CRITICAL: 
+- Preserve all valid data exactly as-is
+- Only remove true duplicates or fix clear errors
+- Do not modify entity content unless it's invalid
+- Return valid JSON only, no explanations outside the structure
+"""
+
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Validation AI response: {response[:500]}...")
+        
+        validation_result = json.loads(response.strip())
+        validation_status = validation_result.get("validation_status", "needs_cleaning")
+        validation_messages = validation_result.get("validation_messages", [])
+        changes_made = validation_result.get("changes_made", [])
+        
+        # Log validation results
+        logging.info(f"Validation status: {validation_status}")
+        for msg in validation_messages:
+            logging.info(f"Validation message: {msg}")
+        for change in changes_made:
+            logging.info(f"Change applied: {change}")
+        
+        # Use cleaned data if validation found issues
+        if validation_status in ["needs_cleaning", "valid"]:
+            cleaned_entities_to_create = validation_result.get("cleaned_entities_to_create", entities_to_create)
+            cleaned_entities_to_update = validation_result.get("cleaned_entities_to_update", entities_to_update)
+            cleaned_selected_entities = validation_result.get("cleaned_selected_entities", selected_entities)
+            
+            # Update analysis results with cleaned data
+            analysis_results["entities_to_create"] = cleaned_entities_to_create
+            analysis_results["entities_to_update"] = cleaned_entities_to_update
+            analysis_results["selected_entities"] = cleaned_selected_entities
+            
+            # Update user_intent if recommended
+            recommended_intent = validation_result.get("recommended_user_intent")
+            if recommended_intent and recommended_intent != user_intent:
+                logging.info(f"Updating user_intent from {user_intent} to {recommended_intent}")
+                analysis_results["user_intent"] = recommended_intent
+            
+            # Add validation metadata
+            analysis_results["validation_applied"] = True
+            analysis_results["validation_messages"] = validation_messages
+            analysis_results["validation_changes"] = changes_made
+            
+            logging.info(f"=== VALIDATION COMPLETE ===")
+            logging.info(f"Notes: {len(cleaned_entities_to_create.get('notes', []))}, "
+                        f"Tasks: {len(cleaned_entities_to_create.get('tasks', []))}")
+        
+        elif validation_status == "invalid":
+            logging.error("Validation failed - analysis results are invalid")
+            logging.error(f"Validation messages: {validation_messages}")
+            # Keep original results but flag as invalid
+            analysis_results["validation_applied"] = True
+            analysis_results["validation_status"] = "failed"
+            analysis_results["validation_messages"] = validation_messages
+        
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to parse validation response: {e}")
+        # Continue with original analysis if validation fails
+        analysis_results["validation_applied"] = False
+        analysis_results["validation_error"] = str(e)
+    
+    except Exception as e:
+        logging.error(f"Error during validation: {e}", exc_info=True)
+        # Continue with original analysis if validation fails
+        analysis_results["validation_applied"] = False
+        analysis_results["validation_error"] = str(e)
+    
+    # Push cleaned results back to XCom
+    ti.xcom_push(key="analysis_results", value=analysis_results)
+    
+    logging.info("=== VALIDATION AND CLEANING COMPLETE ===")
+    
+    return analysis_results
+    
 def determine_owner(ti, **context):
     """Determine deal and task owners from conversation"""
     chat_history = ti.xcom_pull(key="chat_history", default=[])
@@ -1490,13 +1699,45 @@ NOTES TO CREATE:
 {json.dumps(to_create_notes, indent=2)}
 
 ---
+PRESERVE SPEAKER FROM INPUT - CRITICAL:
+- Every note object in `to_create_notes` already has the CORRECT speaker_name and speaker_email from the confirmed plan.
+- DO NOT change, prepend, or override the speaker_name/speaker_email.
+- Use them EXACTLY as provided in the input.
+- Never apply first-person → third-person conversion unless speaker_name is missing or "Unknown".
+- If speaker_name is present → trust it and leave the note_content untouched regarding speaker.
 
 **STRICT EXECUTION RULES:**
 
 1. **For each note in `to_create_notes`:**
-   - Format `note_content` as:  
-     "[name] mentioned [note_content]" 
-     (Use `name` from the note object if present; otherwise use `"User"`)
+
+    - For each note's `note_content`, apply the following logic in strict order:
+
+        1. **Check if the note ALREADY properly identifies the speaker in third person**
+        Look for these strong signals (case-insensitive, flexible matching):
+        - Starts with a real name followed by a verb: e.g., "John", "Sarah mentioned".
+        - Contains clear third-person reference like: "John Doe had a call", "Sarah mentioned".
+
+        → If YES → **Use the note_content EXACTLY as-is. Do NOTHING. Do not prepend anything.**
+
+        2. **Only if the note is ambiguous, in first person, or lacks speaker context**:
+        Examples:
+        - "had a call".
+
+        → Then and ONLY then: Prepend the speaker name:
+            "expected_speaker_name mentioned " 
+            or even better → "expected_speaker_name mentioned "
+
+        3. **How to determine expected_speaker_name (in order of priority):**
+        - Use `speaker_name` if provided in the note object
+        - Else use `sender_name` (from email/thread context)
+        - Final fallback: "User"
+
+        4. **Extra Safety - Never prepend if these names appear early in the note** (regex-like check):
+        If note_content.strip() starts with or contains within first ~25 chars:
+            - Any proper name from your known contacts/team
+            - Common verbs like "mentioned".
+        → Assume it's already formatted → skip prepending
+        
 
 2. **Invoke HubSpot `create_notes` API** with:
    - `hs_timestamp`: Current UTC time in `YYYY-MM-DDTHH:MM:SSZ` format
@@ -1521,7 +1762,7 @@ NOTES TO CREATE:
         {{
             "id": "123",
             "details": {{
-                "note_content": "[User] mentioned Follow up on Q4 budget approval",
+                "note_content": "User mentioned Follow up on Q4 budget approval",
                 "timestamp": "YYYY-MM-DD"
             }}
         }}
@@ -3968,6 +4209,12 @@ with DAG(
         provide_context=True
     )
 
+    validate_and_clean_task = PythonOperator(
+        task_id="validate_and_clean_analysis",
+        python_callable=validate_and_clean_analysis,
+        provide_context=True
+    )
+
     branch_task = BranchPythonOperator(
         task_id="branch_to_creation_tasks",
         python_callable=branch_to_creation_tasks,
@@ -4116,7 +4363,7 @@ with DAG(
     )
 
     # Define task dependencies
-    start_task >> load_context_task >> analyze_task >> branch_task
+    start_task >> load_context_task >> analyze_task >> validate_and_clean_task >> branch_task
 
     creation_tasks = {
         "create_contacts": create_contacts_task,

@@ -18,6 +18,7 @@ import io
 import requests
 import smtplib
 import pendulum
+from airflow.models.param import Param
 
 # Configure detailed logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -44,6 +45,20 @@ REPORT_PERIOD = "last 30 days"
 def get_dynamic_config(**context):
     conf = context.get("dag_run").conf or {}
     logging.info(f"Trigger conf received: {conf}")
+    has_conf_data = conf.get("monitor_id") or conf.get("recipient_email")
+    logging.info(f"Config from DAG run conf:{conf}, has_conf_data: {has_conf_data}")
+    # Fallback to params if conf is empty (manual trigger via UI)
+    if not has_conf_data:
+        params = context.get("params", {})
+        logging.info(f"Falling back to DAG params:{params}")
+        # Map params to expected config structure
+        conf = {
+            "monitor_id": params.get("monitor_id", [None])[0] if isinstance(params.get("monitor_ids"), list) else params.get("monitor_ids"),
+            "recipient_email": params.get("recipient_email"),
+            "client_tz": params.get("timezone", "UTC"),
+            "client_name": params.get("client_name", "Unknown Client"),
+            "monitoring_team": params.get("monitoring_team", "Appz SRE Agent")
+        }
     monitor_id = conf.get("monitor_id") or Variable.get("UPTIME_MONITOR_ID", fallback=None)
     recipient_email = conf.get("recipient_email") or Variable.get("UPTIME_REPORT_RECIPIENT_EMAIL", fallback=None)
     client_tz = conf.get("client_tz", "UTC")  # e.g., "Asia/Kolkata", "America/New_York"
@@ -156,7 +171,7 @@ def get_ai_response(prompt, conversation_history=None):
         logging.error(f"Error in get_ai_response: {str(e)}")
         return f"An error occurred while processing your request: {str(e)}"
 
-def send_email(recipient, subject, body, in_reply_to="", references="", img_b64=None):
+def send_email(recipient, subject, body, cc_emails=None, in_reply_to="", references="", img_b64=None):
     try:
         # Initialize SMTP server
         server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
@@ -169,6 +184,8 @@ def send_email(recipient, subject, body, in_reply_to="", references="", img_b64=
         msg['Subject'] = subject
         msg['From'] = f"Uptime Reports {SMTP_SUFFIX}"
         msg['To'] = recipient
+        if cc_emails:
+            msg['Cc'] = cc_emails
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to
         if references:
@@ -195,9 +212,14 @@ def send_email(recipient, subject, body, in_reply_to="", references="", img_b64=
                 
             except Exception as e:
                 logging.error(f"Failed to attach image to email: {str(e)}")
-                
+        recipients_list = [recipient]
+        if cc_emails:
+            # Assuming cc_emails is a string like "a@b.com, c@d.com", we split it
+            cc_list = [email.strip() for email in cc_emails.split(',') if email.strip()]
+            recipients_list.extend(cc_list)
+                    
         # Send the email
-        server.sendmail("webmaster@ecloudcontrol.com", recipient, msg.as_string())
+        server.sendmail("webmaster@ecloudcontrol.com", recipients_list, msg.as_string())
         logging.info(f"Email sent successfully: {recipient}")
         server.quit()
         return True
@@ -291,7 +313,7 @@ def fetch_chunked_response_times(start_dt, end_dt, monitor_id):
             'api_key': UPTIME_API_KEY,
             'format': 'json',
             'response_times': '1',
-            'response_times_average': '30', # Use 30-min avg for granularity
+            'response_times_median': '30', # Use 30-min median for granularity
             'monitors': monitor_id,
             'response_times_start_date': str(start_ts),
             'response_times_end_date': str(end_ts),
@@ -342,9 +364,9 @@ def parse_monitor_data(monitor, rt_list):
         values = [r['value'] for r in rt_list if 'value' in r and r['value'] is not None]
         min_rt = min(values) if values else 0
         max_rt = max(values) if values else 0
-        avg_rt = sum(values) / len(values) if values else 0
+        median_rt = sum(values) / len(values) if values else 0
     else:
-        min_rt = max_rt = avg_rt = 0
+        min_rt = max_rt = median_rt = 0
         
     alert_contacts = [c.get('value', '') for c in monitor.get('alert_contacts', [])]
     to_be_notified = ', '.join(alert_contacts) if alert_contacts else 'N/A'
@@ -362,7 +384,7 @@ def parse_monitor_data(monitor, rt_list):
             "errors_last_30days": str(errors)
         },
         "ssl_information": {"brand": brand, "expiry_date": expiry_date},
-        "response_time": {"min": f"{min_rt:.2f}", "max": f"{max_rt:.2f}", "avg": f"{avg_rt:.2f}"},
+        "response_time": {"min": f"{min_rt:.2f}", "max": f"{max_rt:.2f}", "median": f"{median_rt:.2f}"},
         "notifications": {"to_be_notified": to_be_notified},
         "logs_summary": {"summary": f"Total logs: {len(logs)}. Errors: {errors}."}
     }
@@ -462,13 +484,13 @@ Previous 30-day period data: {prev_data_str}
 Logic for analysis (follow steps in order):
 1. Edge cases (Check first): If the 'current 30-day period data' (specifically 'response_times' or 'structured' data) is empty or missing, stop analysis and return 'No current data available for anomaly detection.'. If 'previous 30-day period data' is missing, note this (e.g., "No baseline for comparison.") but proceed with the current period's analysis.
 2. Identify spikes: (Only if current data exists) Scan current 30-day period's response_times for values >100ms; count them, describe top 3 by time (use datetime).
-3. Detect unusual patterns: (Only if current data exists) Compute distributions—min/max/avg from response_times['value'] (or structured['response_time']['avg'] if available). If previous period data is available, compare current vs previous: Flag if current avg > previous avg by 10%+; include exact % change.
+3. Detect unusual patterns: (Only if current data exists) Compute distributions—min/max/median from response_times['value'] (or structured['response_time']['median'] if available). If previous period data is available, compare current vs previous: Flag if current median > previous median by 10%+; include exact % change.
 4. Scan logs: (Only if current data exists) For down events (type=1), check frequency (e.g., >2 in 1 hour = cluster) and reasons (e.g., code 500=server error, 408=timeout, 0=unknown); note unusual if not in previous 30-day period.
-5. Overall: (Only if current data exists) If no spikes, <10% avg change, and no clusters/unusual logs, conclude 'No significant anomalies detected.'.
+5. Overall: (Only if current data exists) If no spikes, <10% median change, and no clusters/unusual logs, conclude 'No significant anomalies detected.'.
 
 Return ONLY a single JSON object with the key "anomaly_detection" and its value as a concise summary string (1-3 sentences). Do not include any additional text, explanations, or markdown.
-Example 1 (Normal): {{"anomaly_detection": "Detected 2 spikes >100ms and one down log cluster (2 events, code 408 timeout); however, the average response time improved, dropping 9.12% (from 82.2ms to 74.7ms) compared to the previous 30-day period."}}
-Example 2 (Spikes and Patterns): {{"anomaly_detection": "Detected multiple response-time spikes (>100 ms) on 10 November 2025: highest 844 ms at 11:00, others at 07:00 (244 ms) and 09:00 (198 ms). Average response time increased +112 % vs previous month. Significant anomaly detected."}}
+Example 1 (Normal): {{"anomaly_detection": "Detected 2 spikes >100ms and one down log cluster (2 events, code 408 timeout); however, the median response time improved, dropping 9.12% (from 82.2ms to 74.7ms) compared to the previous 30-day period."}}
+Example 2 (Spikes and Patterns): {{"anomaly_detection": "Detected multiple response-time spikes (>100 ms) on 10 November 2025: highest 844 ms at 11:00, others at 07:00 (244 ms) and 09:00 (198 ms). Median response time increased +112 % vs previous month. Significant anomaly detected."}}
 Example 3 (Edge Case): {{"anomaly_detection": "No current data available for anomaly detection."}}
 """
     
@@ -514,12 +536,12 @@ Previous 30-day period data: {prev_data_str}
 Logic for analysis (follow steps in order):
 1. Extract down logs: Filter current 30-day period's logs where type=1; sort by datetime descending. If none, output single bullet '- No errors requiring RCA.' and stop.
 2. For each: Analyze reason (code/detail: e.g., 500=server error → overload; 404=not found → config issue; 408=timeout → network; 0=unknown → investigate API).
-3. Infer root cause: Correlate with preceding response_times (e.g., if avg >200ms in 30min before down → overload; check if similar in previous 30-day period for recurrence (count matching reasons >1)).
+3. Infer root cause: Correlate with preceding response_times (e.g., if median >200ms in 30min before down → overload; check if similar in previous 30-day period for recurrence (count matching reasons >1)).
 4. Recommendations: Tailor per cause (e.g., overload: 'Scale resources'; timeout: 'Check network latency'; config: 'Verify endpoints'). Limit to 1-2 actionable steps.
 5. Edge cases: If logs empty, treat as no errors (single bullet); if previous missing, skip recurrence without noting.
 6. Overall: If multiple, add final bullet summarizing common causes.
 
-Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bulleted points). Do not include any additional text, explanations, or markdown. Example: {{"rca": "- 17 October 2025, 10:00: Code 500 server error (duration 120s) - Root cause: Overload inferred from preceding high response times (avg 250ms); recurred from previous 30-day period (2 similar). Recommendation: Add autoscaling and monitor CPU usage.\\n- Common cause: Server overload - Implement load balancing."}} or {{"rca": "- No errors requiring RCA."}}
+Return ONLY a single JSON object with the key "rca" and its value as a concise summary string (bulleted points). Do not include any additional text, explanations, or markdown. Example: {{"rca": "- 17 October 2025, 10:00: Code 500 server error (duration 120s) - Root cause: Overload inferred from preceding high response times (median 250ms); recurred from previous 30-day period (2 similar). Recommendation: Add autoscaling and monitor CPU usage.\\n- Common cause: Server overload - Implement load balancing."}} or {{"rca": "- No errors requiring RCA."}}
 """
     
     response = get_ai_response(prompt)
@@ -563,17 +585,17 @@ Previous 30-day period data: {prev_data_str}
 
 Logic for analysis (follow steps in order):
 1. Edge cases (Check first): If the 'current 30-day period data' (specifically 'structured' data or 'response_times') is empty or missing, stop analysis and return 'No current data available for comparative analysis.'.
-2. Extract metrics: (Only if current data exists) Uptime = structured['uptime_status']['uptime_last_30days']; Avg response = structured['response_time']['avg'] or mean(response_times['value']); Errors = structured['uptime_status']['errors_last_30days'].
-3. Calculate changes: For each metric, calculate the change. Uptime % = ((current - prev) / prev * 100) if prev >0; Avg response delta = current - prev (ms); Errors delta = current - prev.
+2. Extract metrics: (Only if current data exists) Uptime = structured['uptime_status']['uptime_last_30days']; median response = structured['response_time']['median'] or median(response_times['value']); Errors = structured['uptime_status']['errors_last_30days'].
+3. Calculate changes: For each metric, calculate the change. Uptime % = ((current - prev) / prev * 100) if prev >0; median response delta = current - prev (ms); Errors delta = current - prev.
 4. Highlight direction: Uptime >0 = 'improvement'; <0 = 'degradation'; =0 = 'no change'. For response/errors: <0 = 'improvement'; >0 = 'degradation'; =0 = 'no change'.
 5. Handle Missing Baselines: If 'previous 30-day period data' is missing for a specific metric, output: '- [Metric] month-over-month: N/A - no baseline.' Round % to 2 decimals, deltas to 1 decimal.
 6. Order bullets: Always return all 3 bullets in this order: 
 - Uptime month-over-month
-- Avg response month-over-month
+- median response month-over-month
 - Errors month-over-month
 
 Return ONLY a single JSON object with the key "comparative_analysis" and its value as a concise summary string (bullet points, one per metric, or the single edge case string). Do not include any additional text, explanations, or markdown.
-Example 1 (Normal): {{"comparative_analysis": "- Uptime month-over-month: +0.0% (no change from 100.0% to 100.0%).\\n- Avg response month-over-month: -7.5ms (improvement from 82.2ms to 74.7ms).\\n- Errors month-over-month: +0 (no change from 0 to 0)."}}
+Example 1 (Normal): {{"comparative_analysis": "- Uptime month-over-month: +0.0% (no change from 100.0% to 100.0%).\\n- median response month-over-month: -7.5ms (improvement from 82.2ms to 74.7ms).\\n- Errors month-over-month: +0 (no change from 0 to 0)."}}
 Example 2 (Edge Case): {{"comparative_analysis": "No current data available for comparative analysis."}}
 """
     
@@ -605,7 +627,7 @@ Analyze the following AI-generated analysis contents to determine boolean flags 
 Contents: {analysis_json}
 
 Logic for flags (follow strictly):
-- has_anomalies (for anomaly_detection): true if the content mentions spikes (>100ms), unusual patterns, >10% average response time increase, clusters, or unusual logs; false if 'No significant anomalies detected' or equivalent, or if no issues noted (e.g., minor/isolated changes <10%).
+- has_anomalies (for anomaly_detection): true if the content mentions spikes (>100ms), unusual patterns, >10% median response time increase, clusters, or unusual logs; false if 'No significant anomalies detected' or equivalent, or if no issues noted (e.g., minor/isolated changes <10%).
 - has_errors (for rca): true if the content describes any errors (e.g., down events, timeouts, errors) with root causes or recommendations; false if 'No errors requiring RCA' or equivalent.
 - has_degradation (for comparative_analysis): true if the content mentions any 'degradation' in metrics (e.g., lower uptime, higher response time, more errors) vs baselines; false if all 'improvement', 'no change', or 'N/A'.
 
@@ -646,8 +668,8 @@ def step_3_generate_plot(ti, **context):
         if 'datetime' in df_prev.columns:
             df_prev['datetime'] = pd.to_datetime(df_prev['datetime'])
         
-        # Compute previous month average safely
-        prev_avg = df_prev['value'].mean() if 'value' in df_prev.columns and not df_prev.empty else 0
+        # Compute previous month median safely
+        prev_median = df_prev['value'].median() if 'value' in df_prev.columns and not df_prev.empty else 0
         
         fig, ax = plt.subplots(figsize=(15, 6), dpi=120)
         ax.set_facecolor('white')
@@ -656,7 +678,7 @@ def step_3_generate_plot(ti, **context):
         if not df_current.empty and 'datetime' in df_current.columns and 'value' in df_current.columns:
             ax.plot(df_current['datetime'], df_current['value'], color='#1e275d', linewidth=1.5, label='This Month\'s Response Time')
         
-        ax.axhline(y=prev_avg, color='#ff52ff', linestyle='--', label=f'Previous Month Avg ({prev_avg:.2f}ms)')
+        ax.axhline(y=prev_median, color='#ff52ff', linestyle='--', label=f'Previous Month median ({prev_median:.2f}ms)')
         
         if 'value' in df_current.columns:
             high_current = df_current[df_current['value'] > 100] # Highlight threshold
@@ -964,8 +986,8 @@ def step_4_compose_email(ti, **context):
                     </div>
                     <table class="info-table" style="margin-top: 20px;">
                         <tr>
-                            <td>Average (Last 30d)</td>
-                            <td>{rt.get('avg', 'N/A')} ms</td>
+                            <td>Median (Last 30d)</td>
+                            <td>{rt.get('median', 'N/A')} ms</td>
                         </tr>
                         <tr>
                             <td>Min (Last 30d)</td>
@@ -1097,7 +1119,7 @@ def step_5_send_report_email(ti, **context):
         structured = json.loads(structured_str)
         monitor_name = structured.get("monitor_information", {}).get("monitor_name", "Default Monitor")
         dynamic_config = ti.xcom_pull(key="dynamic_config")
-        recipient_email = dynamic_config.get("RECIPIENT_EMAIL")
+        raw_recipients = dynamic_config.get("RECIPIENT_EMAIL")
         final_html_content = ti.xcom_pull(key="final_html_content")
         if not final_html_content:
             logging.error("No final HTML content found from previous steps")
@@ -1108,14 +1130,44 @@ def step_5_send_report_email(ti, **context):
             logging.warning("No chart data found, sending email without image.")
                 
         subject = f"Monthly Uptime Report with Insights for {monitor_name}"
+        final_email_list = []
         
+        if isinstance(raw_recipients, str):
+            # If it comes as "a@b.com, c@d.com" -> Split it
+            final_email_list = raw_recipients.split(',')
+        elif isinstance(raw_recipients, list):
+            # If it comes as ["a@b.com", "c@d.com"] -> Use it
+            # If it comes as ['"a@b.com", "c@d.com"'] -> Handle the mess
+            for item in raw_recipients:
+                # Split by comma just in case multiple emails are in one list item
+                final_email_list.extend(item.split(','))
+
+        # Remove whitespace and quotes (fixing the error you saw)
+        final_email_list = [
+            e.strip().replace('"', '').replace("'", "") 
+            for e in final_email_list 
+            if e.strip()
+        ]
+
+        if not final_email_list:
+            return "Error: No recipients found"
+
+        # 2. YOUR LOGIC: First = TO, Rest = CC
+        to_email = final_email_list[0]
+        
+        # Join the rest with commas for the email header
+        cc_emails_header = ", ".join(final_email_list[1:]) if len(final_email_list) > 1 else None
         result = send_email(
-            recipient_email, subject, final_html_content, img_b64=chart_b64
+            recipient=to_email, 
+            subject=subject, 
+            body=final_html_content, 
+            cc_emails=cc_emails_header, 
+            img_b64=chart_b64
         )
         
         if result:
-            logging.info(f"Report email sent successfully to {recipient_email}")
-            return f"Email sent successfully to {recipient_email}"
+            logging.info(f"Report email sent successfully to {to_email} with cc: {cc_emails_header}")
+            return f"Email sent successfully to {to_email} with cc: {cc_emails_header}"
         else:
             logging.error("Failed to send report email")
             return "Failed to send email"
@@ -1139,7 +1191,46 @@ with DAG(
     schedule_interval=None, 
     catchup=False, 
     doc_md=readme_content, 
-    tags=["uptime", "report", "monthly", "ai-insights"]
+    tags=["uptime", "report", "monthly", "ai-insights"],
+    params={
+        "client_id": Param(
+            default="",
+            type="string",
+            title="Client ID",
+            description="Unique identifier for the client"
+        ),
+        "client_name": Param(
+            default="",
+            type="string",
+            title="Client Name",
+            description="Display name for the client organization"
+        ),
+        "timezone": Param(
+            default="Asia/Kolkata",
+            type="string",
+            title="Timezone",
+            description="Client timezone (e.g., Asia/Kolkata, America/New_York, UTC)",
+            enum=["UTC", "Asia/Kolkata", "America/New_York", "Europe/London", "Asia/Tokyo"]  # Add more as needed
+        ),
+        "monitor_id": Param(
+            type="string",
+            title="Monitor IDs",
+            description="List of UptimeRobot monitor IDs (use first one for this report)"
+        ),
+        "recipient_email": Param(
+            default="",
+            type="string",
+            title="Recipient Email",
+            description="Email address to receive the report",
+            format="idn-email"  # Email validation
+        ),
+        "monitoring_team": Param(
+            default="Appz SRE Agent",
+            type="string",
+            title="Monitoring Team Name",
+            description="Name of the monitoring team (appears in email footer)"
+        )
+    }
 ) as dag:
     
     init_config = PythonOperator(

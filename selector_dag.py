@@ -297,7 +297,7 @@ def update_project_selector_run_id(**context):
 # =============================================================================
 
 with DAG(
-    dag_id="document_selector_dag",
+    dag_id="rfp_document_selector_dag",
     default_args=default_args,
     description="Fetches RFP PDF via API, classifies it using AI, then triggers correct processing DAG",
     schedule=None,
