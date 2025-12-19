@@ -114,29 +114,47 @@ def mark_owner_initiated(ti, owner_id):
         logging.error(f"Failed to mark owner {owner_id} as initiated: {e}")
 
 def get_sent_reminders_today(ti):
-    """Get set of task IDs already sent today"""
+    """Safely get set of task IDs sent today - NO SQL"""
     try:
         key = get_today_key("sent_reminders")
-        sent_list = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=True, dag_id=ti.dag_id)
+
+        # Try current run XCom first
+        sent_list = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=False)
         if sent_list is not None:
             sent_set = set(sent_list)
-            logging.info(f"Loaded {len(sent_set)} sent reminder(s) from XCom")
+            logging.info(f"📋 Loaded {len(sent_set)} sent reminder(s) from current run XCom")
             return sent_set
-        logging.info("No sent reminders found today (empty set)")
+
+        # Try from previous DAG runs today (cross-run persistence)
+        sent_list = ti.xcom_pull(
+            key=key,
+            task_ids=None,
+            include_prior_dates=True,
+            dag_id=ti.dag_id
+        )
+        if sent_list is not None:
+            sent_set = set(sent_list)
+            logging.info(f"📋 Loaded {len(sent_set)} sent reminder(s) from prior runs today")
+            return sent_set
+
+        logging.info("📋 No sent reminders found today (empty set)")
         return set()
+
     except Exception as e:
-        logging.warning(f"Failed to load sent reminders: {e}")
+        logging.warning(f"Failed to load sent reminders, treating as empty: {e}")
         return set()
 
 def mark_reminder_sent(ti, task_id):
-    """Mark task as sent today"""
+    """Atomically add task_id to today's sent list"""
     try:
         key = get_today_key("sent_reminders")
         current_sent = list(get_sent_reminders_today(ti))
         if task_id not in current_sent:
             current_sent.append(task_id)
             ti.xcom_push(key=key, value=current_sent)
-            logging.info(f"Marked task {task_id} as sent today (total: {len(current_sent)})")
+            logging.info(f"✓ Marked task {task_id} as sent today (total: {len(current_sent)})")
+        else:
+            logging.debug(f"Task {task_id} already marked as sent today")
     except Exception as e:
         logging.error(f"Failed to mark task {task_id} as sent: {e}")
 
@@ -155,17 +173,31 @@ def authenticate_gmail():
         logging.error(f"Failed to authenticate Gmail: {str(e)}")
         return None
 
-def get_ai_response(prompt):
+def get_ai_response(prompt, conversation_history=None, expect_json=False):
     """Get response from AI model"""
     try:
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
-        response = client.chat(model='hubspot:v6af', messages=[{"role": "user", "content": prompt}], stream=False)
+        messages = []
+
+        if expect_json:
+            messages.append({
+                "role": "system",
+                "content": "You are a JSON-only API. Always respond with valid JSON objects. Never include explanatory text, HTML, or markdown formatting."
+            })
+
+        if conversation_history:
+            for item in conversation_history:
+                if "role" in item and "content" in item:
+                    messages.append({"role": item["role"], "content": item["content"]})
+
+        messages.append({"role": "user", "content": prompt})
+        response = client.chat(model='hubspot:v6af', messages=messages, stream=False)
         ai_content = response.message.content
         ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
         return ai_content.strip()
     except Exception as e:
         logging.error(f"Error in get_ai_response: {e}")
-        return ""
+        raise
 
 def send_task_reminder_email(service, task, owner_info):
     """Send clean HubSpot task reminder with unified recent activity"""
@@ -493,39 +525,75 @@ def get_deal_activities(deal_id, start_date, end_date):
 # TASK FUNCTIONS
 # ============================================================================
 def get_all_task_owners(ti, **context):
-    owners = get_configured_owners()
-    ti.xcom_push(key="all_owners", value=owners)
-    return owners
+    """Load task owners from Airflow Variables (not HubSpot API)"""
+    try:
+        owners = get_configured_owners()
+        logging.info(f"✓ Loaded {len(owners)} configured task owner(s) from Airflow Variables")
+        ti.xcom_push(key="all_owners", value=owners)
+        return owners
+    except Exception as e:
+        logging.error(f"Failed to get task owners: {e}")
+        ti.xcom_push(key="all_owners", value=[])
+        return []
 
 def check_delivery_window(ti, **context):
-    owners = ti.xcom_pull(key="all_owners", default=[])
-    if not owners:
-        logging.info("No owners configured")
-        return "skip_task_collection"
+    """Check if we're in the delivery window (11 AM or later) for any timezone"""
+    try:
+        owners = ti.xcom_pull(key="all_owners", default=[])
 
-    initiated = get_initiated_owners_today(ti)
-    current_utc = datetime.now(timezone.utc)
-    owners_to_process = []
+        if not owners:
+            logging.info("No owners found, skipping delivery window check")
+            ti.xcom_push(key="in_delivery_window", value=False)
+            return "skip_task_collection"
 
-    for owner in owners:
-        owner_id = owner["id"]
-        if owner_id in initiated:
-            logging.info(f"Owner {owner['name']} already initiated today")
-            continue
-        try:
-            local_time = current_utc.astimezone(pytz.timezone(owner["timezone"]))
-            hour = local_time.hour
-            if DELIVERY_START_HOUR <= hour:
-                owners_to_process.append(owner)
-                logging.info(f"Owner {owner['name']} in delivery window ({local_time.strftime('%H:%M')})")
-        except Exception as e:
-            logging.warning(f"Timezone error for owner {owner['name']}: {e}")
+        # Get already initiated owners today
+        initiated_owners = get_initiated_owners_today(ti)
 
-    ti.xcom_push(key="owners_to_process", value=owners_to_process)
-    if owners_to_process:
-        return "collect_due_tasks"
-    else:
-        logging.info("No owners in delivery window")
+        current_utc = datetime.now(timezone.utc)
+        in_window_count = 0
+        owners_to_process = []
+
+        # Check each owner's timezone
+        for owner in owners:
+            owner_id = owner.get("id")
+            tz_str = owner.get("timezone", "America/New_York")  
+
+            # Skip if already initiated today
+            if owner_id in initiated_owners:
+                logging.info(f"⏭️  Owner {owner.get('name')} already initiated today - skipping")
+                continue
+
+            try:
+                owner_tz = pytz.timezone(tz_str)
+                owner_time = current_utc.astimezone(owner_tz)
+                owner_hour = owner_time.hour
+                logging.info(f"owner timezone is:{owner_tz}, {tz_str}")
+                logging.info(f"current owner time:{owner_time}")
+                logging.info(f"current hour:{owner_hour}")
+
+                if DELIVERY_START_HOUR <= owner_hour:
+                    in_window_count += 1
+                    owners_to_process.append(owner)
+                    logging.info(f"Owner {owner.get('name')} ({tz_str}) is in delivery window: {owner_time.strftime('%I:%M %p')}")
+            except Exception as e:
+                logging.warning(f"Invalid timezone {tz_str} for owner {owner.get('name')}: {e}")
+
+        # Store owners that need processing
+        ti.xcom_push(key="owners_to_process", value=owners_to_process)
+
+        in_window = in_window_count > 0
+        ti.xcom_push(key="in_delivery_window", value=in_window)
+
+        if in_window:
+            logging.info(f"✓ {in_window_count} owner(s) in delivery window and not yet initiated - proceeding")
+            return "collect_due_tasks"
+        else:
+            logging.info("✗ No owners need processing - all either outside window or already initiated")
+            return "skip_task_collection"
+
+    except Exception as e:
+        logging.error(f"Error checking delivery window: {e}")
+        ti.xcom_push(key="in_delivery_window", value=False)
         return "skip_task_collection"
 
 def collect_due_tasks(ti, **context):
@@ -614,41 +682,103 @@ Use <h4> for headings and concise paragraphs/lists."""
     return tasks_by_owner
 
 def send_spaced_reminders(ti, **context):
-    tasks_by_owner = ti.xcom_pull(key="tasks_by_owner", default={})
-    if not tasks_by_owner:
-        logging.info("No tasks to send")
+    """Send task reminder emails with 3-minute spacing - ONE EMAIL PER TASK"""
+    try:
+        tasks_by_owner = ti.xcom_pull(key="tasks_by_owner", default={})
+
+        if not tasks_by_owner:
+            logging.info("No tasks to send reminders for")
+            ti.xcom_push(key="sent_reminders", value=[])
+            return []
+
+        service = authenticate_gmail()
+        if not service:
+            raise ValueError("Gmail authentication failed")
+
+        sent_reminders = []
+
+        # Flatten all tasks with owner info
+        all_task_items = []
+        for owner_id, data in tasks_by_owner.items():
+            owner_info = data["owner_info"]
+            for task in data["tasks"]:
+                all_task_items.append({
+                    "task": task,
+                    "owner_info": owner_info
+                })
+
+        total_tasks = len(all_task_items)
+        logging.info(f"📧 Sending {total_tasks} SEPARATE email(s) with {EMAIL_SPACING_MINUTES}-minute spacing")
+
+        # Log multi-task owners
+        owner_task_counts = {}
+        for item in all_task_items:
+            owner_name = item["owner_info"]["name"]
+            owner_task_counts[owner_name] = owner_task_counts.get(owner_name, 0) + 1
+
+        for owner_name, count in owner_task_counts.items():
+            if count > 1:
+                logging.info(f"⚠️  {owner_name} has {count} tasks → will receive {count} SEPARATE emails")
+
+        # Send each task as a separate email
+        for idx, item in enumerate(all_task_items, 1):
+            task = item["task"]
+            owner_info = item["owner_info"]
+            task_id = task.get("id")
+
+            logging.info(f"📨 [{idx}/{total_tasks}] Sending email for task: {task.get('hs_task_subject', 'Untitled')} to {owner_info['name']}")
+
+            # Send email
+            result = send_task_reminder_email(
+                service=service,
+                task=task,
+                owner_info=owner_info
+            )
+
+            # Mark as sent if successful
+            if result.get("success"):
+                mark_reminder_sent(ti, task_id)
+
+            sent_reminders.append(result)
+
+            # Wait between emails (except for last one)
+            if idx < total_tasks:
+                import time
+                wait_seconds = EMAIL_SPACING_MINUTES * 60
+                logging.info(f"⏳ Waiting {EMAIL_SPACING_MINUTES} minutes before next email...")
+                time.sleep(wait_seconds)
+
+        # Track sent reminders for monitoring replies
+        ti.xcom_push(key="sent_reminders", value=sent_reminders)
+        logging.info(f"✅ Successfully sent {len(sent_reminders)} task reminder emails")
+
+        return sent_reminders
+
+    except Exception as e:
+        logging.error(f"Failed to send spaced reminders: {e}")
+        ti.xcom_push(key="sent_reminders", value=[])
         return []
 
-    service = authenticate_gmail()
-    if not service:
-        raise ValueError("Gmail authentication failed")
-
-    all_items = []
-    for data in tasks_by_owner.values():
-        owner_info = data["owner_info"]
-        for task in data["tasks"]:
-            all_items.append({"task": task, "owner_info": owner_info})
-
-    total = len(all_items)
-    logging.info(f"Sending {total} reminder email(s) with {EMAIL_SPACING_MINUTES}-minute spacing")
-
-    sent_results = []
-    for idx, item in enumerate(all_items, 1):
-        logging.info(f"[{idx}/{total}] Sending reminder for task {item['task']['id']}")
-        result = send_task_reminder_email(service, item["task"], item["owner_info"])
-        if result.get("success"):
-            mark_reminder_sent(ti, result["task_id"])
-        sent_results.append(result)
-        if idx < total:
-            logging.info(f"Waiting {EMAIL_SPACING_MINUTES} minutes...")
-            time.sleep(EMAIL_SPACING_MINUTES * 60)
-
-    logging.info(f"Finished sending {len([r for r in sent_results if r.get('success')])} reminders")
-    return sent_results
-
 def skip_task_collection(ti, **context):
-    logging.info("Skipped task collection - outside delivery window or already processed")
-    return "Skipped"
+    """Dummy task when outside delivery window"""
+    logging.info("Skipped task collection - outside delivery window or already initiated")
+    return "Outside delivery window or already initiated"
+
+def safe_json_loads(text, default=None):
+    if default is None:
+        default = {}
+    if not text:
+        return default
+    text = text.strip()
+    # Try to extract JSON block if wrapped in ```
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if match:
+        text = match.group(0)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        logging.warning(f"JSON decode failed: {e}\nRaw output: {text!r}")
+        return default
 
 # ============================================================================
 # DAG DEFINITION
