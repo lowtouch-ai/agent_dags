@@ -349,15 +349,26 @@ Question {q_num}: {question_text}
 
 Provide a complete, professional answer. Use bullet points if needed. Be concise yet thorough.
 
+At the end, list any sources from the RFP document you referenced and your confidence level.
+
 IMPORTANT: Respond with ONLY a valid JSON object in this exact format:
-{{"answer": "your detailed answer here", "is_sensitive": true}}
+{{
+  "answer": "your detailed answer text here (do not include sources or confidence in this field)",
+  "sources_referenced": ["<insert actual section/page found in text>", "<insert another actual source if applicable>"],
+  "confidence": "High" or "Medium" or "Low",
+  "is_sensitive": true or false
+}}
+
+Do not add any extra text, markdown, or explanations outside the JSON.
 """
         
         try:
             response_str = get_ai_response(prompt_answer, headers=headers).strip()
             response_data = extract_json_from_response(response_str)
             
-            answer = response_data.get("answer", "")
+            answer = response_data.get("answer", "").strip()
+            sources = response_data.get("sources_referenced", [])
+            confidence = response_data.get("confidence")
             is_sensitive = response_data.get("is_sensitive", False)
             
             if not answer:
@@ -366,10 +377,12 @@ IMPORTANT: Respond with ONLY a valid JSON object in this exact format:
             
             answers_dict[question_id] = {
                 "answer": answer,
+                "sources_referenced": sources if isinstance(sources, list) else [],
+                "confidence": confidence if confidence else None,
                 "is_sensitive": is_sensitive,
                 "question_num": q_num
             }
-            logging.info(f"Generated answer for Q{q_num} (ID: {question_id})")
+            logging.info(f"Generated answer for Q{q_num} (ID: {question_id}) with sources and confidence")
             
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse JSON response for Q{q_num}: {e}. Raw response: '{response_str}'")
@@ -403,6 +416,8 @@ def update_answers_to_database(**context):
         url = f"{RFP_API_BASE}/rfp/questions/{question_id}"
         payload = {
             "answertext": answer,
+            "sources_referenced": answer_data.get("sources_referenced", []),
+            "confidence": answer_data.get("confidence"),
             "is_sensitive": is_sensitive
         }
         headers = {"Content-Type": "application/json", "Accept": "application/json", "WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
