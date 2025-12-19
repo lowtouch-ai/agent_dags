@@ -864,6 +864,77 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         }
         ti.xcom_push(key="owner_info", value=default_owner)
 
+def validate_deal_stage(ti, **context):
+    """Validate deal stage from conversation and assign default if invalid"""
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", default="")
+    
+    # Valid deal stages
+    VALID_DEAL_STAGES = [
+        "Lead", "Qualified Lead", "Solution Discussion", "Proposal", 
+        "Negotiations", "Contracting", "Closed Won", "Closed Lost", "Inactive"
+    ]
+    
+    prompt = f"""You are a HubSpot Deal Stage Validation Assistant. Your role is to validate deal stages from the conversation.
+
+LATEST USER MESSAGE:
+{latest_message}
+
+VALID DEAL STAGES:
+{', '.join(VALID_DEAL_STAGES)}
+
+DEFAULT STAGE: Lead
+
+IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
+
+Steps:
+1. Parse any deal stage mentioned in the conversation for new deals being created.
+2. For each deal mentioned:
+   - If NO deal stage is specified:
+     - Default to: "Lead"
+     - Message: "No deal stage specified for deal '[deal_name]', so assigning to default stage 'Lead'."
+   
+   - If deal stage IS specified but NOT found in the valid stages list:
+     - Default to: "Lead"
+     - Message: "The specified deal stage '[specified_stage]' for deal '[deal_name]' is not valid. Valid stages are: {', '.join(VALID_DEAL_STAGES)}. Assigning to default stage 'Lead'."
+   
+   - If deal stage IS specified and IS found in the valid stages list:
+     - Use the matched stage (with correct casing from the valid stages list)
+     - Message: "Deal stage for deal '[deal_name]' specified as '[matched_stage]'."
+
+3. Return validation results for all deals.
+
+Return this exact JSON structure:
+{{
+    "deal_stages": [
+        {{
+            "deal_index": 1,
+            "deal_name": "parsed_deal_name",
+            "original_stage": "user_specified_stage_or_empty",
+            "validated_stage": "Lead",
+            "stage_message": "explanation_message"
+        }}
+    ]
+}}
+
+RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
+
+    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    logging.info(f"Raw AI response for deal stage validation: {response[:1000]}...")
+
+    try:
+        parsed_json = json.loads(response.strip())
+        ti.xcom_push(key="deal_stage_info", value=parsed_json)
+        logging.info(f"Deal stage validation completed for {len(parsed_json.get('deal_stages', []))} deal(s)")
+    except Exception as e:
+        logging.error(f"Error processing deal stage validation: {e}")
+        default_result = {
+            "deal_stages": []
+        }
+        ti.xcom_push(key="deal_stage_info", value=default_result)
+
+    return parsed_json
+
 def search_deals(ti, **context):
     """Search for deals based on conversation context with retry support"""
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
@@ -892,10 +963,22 @@ def search_deals(ti, **context):
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
     owner_info = ti.xcom_pull(key="owner_info", default={})
+    deal_stage_info = ti.xcom_pull(key="deal_stage_info", default={"deal_stages": []})  # ADD THIS
+    
     deal_owner_id = owner_info.get('deal_owner_id', '71346067')
     deal_owner_name = owner_info.get('deal_owner_name', 'Kishore')
     
-
+    # Create mapping of deal stages
+    deal_stage_mapping = {}
+    for stage_info in deal_stage_info.get('deal_stages', []):
+        deal_name = stage_info.get('deal_name', '')
+        if deal_name:
+            deal_stage_mapping[deal_name] = {
+                'validated_stage': stage_info.get('validated_stage', 'Lead'),
+                'original_stage': stage_info.get('original_stage', ''),
+                'stage_message': stage_info.get('stage_message', '')
+            }
+    
     base_prompt = f"""You are a HubSpot Deal Intelligence Assistant. Your role is to analyze the email conversation and:
 
 1. **Search** for existing deals by extracting and matching deal names.
@@ -910,9 +993,15 @@ LATEST USER MESSAGE:
 Validated Deal Owner ID: {deal_owner_id}
 Validated Deal Owner Name: {deal_owner_name}
 
+VALIDATED DEAL STAGES:
+{json.dumps(deal_stage_mapping, indent=2)}
+
 IMPORTANT: 
 - Respond with ONLY a valid JSON object. No explanations, no markdown, no other text.
 - Always validate `step 2` before proceeding to `step 3`.
+- For new deals, use the validated_stage from the VALIDATED DEAL STAGES mapping if the deal name matches.
+- If no match found in mapping, default to 'Lead'.
+
 Steps:
 1. Search for existing deals using the deal name extracted from the email content.
 2. Parsing and searching for deals:
@@ -940,12 +1029,15 @@ Steps:
    - Direct deal: <Client Name>-<Deal Name>
    - Partner deal: <Partner Name>-<Client Name>-<Deal Name>
    - Use the Deal Name from the email if specified; otherwise, create a concise one based on the description (e.g., product or service discussed).
-6. For new deals, use the validated deal owner name in dealOwnerName.
+
+6. For new deals:
+   - Use the validated deal owner name in dealOwnerName.
+   - **For dealLabelName**: Check VALIDATED DEAL STAGES mapping for the deal name. If found, use validated_stage. If not found, use 'Lead'.
+
 7. Propose an additional new deal if the email explicitly requests opening a second deal, even if one exists.
-8. Use dealLabelName for deal stages (e.g., 'Appointment Scheduled').
-9. Always use default closeDate 90 days from today, if not specified in YYYY-MM-DD format.
-10. Always use the default deal amount as 5000 if not specified.
-11. Fill all fields in the JSON. Use empty string "" for any missing values.
+8. Always use default closeDate 90 days from today, if not specified in YYYY-MM-DD format.
+9. Always use the default deal amount as 5000 if not specified.
+10. Fill all fields in the JSON. Use empty string "" for any missing values.
 
 Return exactly this JSON structure:
 {{
@@ -965,7 +1057,7 @@ Return exactly this JSON structure:
     "new_deals": [
         {{
             "dealName": "<Client Name>-<Deal Name>" OR "<Partner Name>-<Client Name>-<Deal Name>",
-            "dealLabelName": "proposed_stage",
+            "dealLabelName": "validated_stage_from_mapping_or_Lead",
             "dealAmount": "proposed_amount",
             "closeDate": "proposed_close_date",
             "dealOwnerName": "{deal_owner_name}"
@@ -2277,11 +2369,18 @@ def compose_confirmation_email(ti, **context):
     confirmation_needed = ti.xcom_pull(key="confirmation_needed", default=False)
     engagement_summary = ti.xcom_pull(key="engagement_summary", default={})
     notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", default={})
+    deal_stage_info = ti.xcom_pull(key="deal_stage_info", default={"deal_stages": []})  # ADD THIS
     corrected_tasks = notes_tasks_meeting.get("tasks", [])
     
     if not confirmation_needed:
         logging.info("No confirmation needed")
         return "No confirmation needed"
+
+    # Valid deal stages
+    VALID_DEAL_STAGES = [
+        "Lead", "Qualified Lead", "Solution Discussion", "Proposal", 
+        "Negotiations", "Contracting", "Closed Won", "Closed Lost", "Inactive"
+    ]
 
     def has_meaningful_data(entity, required_fields):
         if not entity or not isinstance(entity, dict):
@@ -2810,7 +2909,47 @@ def compose_confirmation_email(ti, **context):
                 </p>
                 """
             email_content += "</div>"
-        
+
+        # ADD THIS: Deal Stage Validation Section
+        if deal_stage_info.get('deal_stages'):
+            email_content += "<div style='margin-bottom: 15px;'>"
+            email_content += "<h3>Deal Stage Assignment Details</h3>"
+            
+            for stage_info in deal_stage_info.get('deal_stages', []):
+                deal_name = stage_info.get('deal_name', 'Unknown Deal')
+                original_stage = stage_info.get('original_stage', '')
+                validated_stage = stage_info.get('validated_stage', 'Lead')
+                stage_message = stage_info.get('stage_message', '')
+                
+                if not original_stage or original_stage.strip() == '':
+                    # No stage specified
+                    email_content += f"""
+                    <h4 style='color: #2c5aa0;'>Deal Stage for "{deal_name}":</h4>
+                    <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
+                        <strong>Reason:</strong> Deal stage not specified.
+                        <br><strong>Action:</strong> Assigning to default stage 'Lead'.
+                    </p>
+                    """
+                elif validated_stage == 'Lead' and original_stage.lower() != 'lead':
+                    # Invalid stage specified
+                    email_content += f"""
+                    <h4 style='color: #2c5aa0;'>Deal Stage for "{deal_name}":</h4>
+                    <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
+                        <strong>Reason:</strong> Invalid deal stage '{original_stage}' specified.
+                        <br><strong>Valid Stages:</strong> {', '.join(VALID_DEAL_STAGES)}
+                        <br><strong>Action:</strong> Assigning to default stage 'Lead'.
+                    </p>
+                    """
+                else:
+                    # Valid stage specified
+                    email_content += f"""
+                    <h4 style='color: #2c5aa0;'>Deal Stage for "{deal_name}":</h4>
+                    <p style='background-color: #d4edda; padding: 10px; border-left: 4px solid #28a745;'>
+                        <strong>Status:</strong> Deal stage '{validated_stage}' is valid and will be used.
+                    </p>
+                    """
+            
+            email_content += "</div>"
         # Task Owners
         if len(meaningful_tasks) > 0:
             email_content += "<div style='margin-bottom: 15px;'>"
@@ -3577,6 +3716,13 @@ with DAG(
         python_callable=determine_owner,
         provide_context=True
     )
+    
+    # ADD THIS NEW TASK
+    validate_deal_stage_task = PythonOperator(
+        task_id="validate_deal_stage",
+        python_callable=validate_deal_stage,
+        provide_context=True
+    )
 
     search_deals_task = PythonOperator(
         task_id="search_deals",
@@ -3697,9 +3843,10 @@ with DAG(
     
     # Summary workflow path (when request_summary is True)
     branch_task >> compose_summary_email_task >> send_summary_email_task >> end_task
+    validate_deal_stage_task >> [search_deals_task, search_contacts_task, search_companies_task]
     
     # Entity creation workflow path
-    branch_task >> determine_owner_task
+    branch_task >> determine_owner_task >> validate_deal_stage_task
     determine_owner_task >> [search_deals_task, search_contacts_task, search_companies_task]
     [search_deals_task, search_contacts_task, search_companies_task] >> parse_notes_tasks_task
     parse_notes_tasks_task >> check_threshold_task >> validate_rules_task >> validation_branch_task
