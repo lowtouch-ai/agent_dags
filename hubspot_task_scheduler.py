@@ -1,26 +1,24 @@
-
 import base64
 import logging
 import json
-import os
 import re
-from datetime import datetime, timedelta, timezone, time
+from datetime import datetime, timedelta, timezone
+import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import pytz
-
+import requests
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.dummy import DummyOperator
 from airflow.models import Variable
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
+import holidays
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 default_args = {
@@ -36,21 +34,60 @@ OLLAMA_HOST = Variable.get("ltai.v3.hubspot.ollama.host", "http://agentomatic:80
 DEFAULT_OWNER_ID = Variable.get("ltai.v3.hubspot.default.owner.id")
 DEFAULT_OWNER_NAME = Variable.get("ltai.v3.hubspot.default.owner.name")
 DEFAULT_OWNER_DETAILS = Variable.get("ltai.v3.hubspot.task.owners")
-
+HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")  # Note: original variable name had typo
+HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
 # Email spacing configuration
 EMAIL_SPACING_MINUTES = 3
-OVERDUE_THRESHOLD_DAYS = 3
-DEFAULT_FOLLOWUP_WEEKS = 2
-
-# Timezone for delivery window (11:00 AM owner timezone)
-DELIVERY_START_HOUR = 9
+DELIVERY_START_HOUR = 9  # Start sending at 9 AM local time
 
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
+def is_business_day(owner_country, check_date):
+    """Check if the given date is a business day (not weekend or public holiday) for the owner's country"""
+    if not owner_country:
+        logging.info("No country specified for owner - assuming business day")
+        return check_date.weekday() < 5  # Only exclude weekends
+
+    try:
+        # Parse country code: support "US" or "US_NY"
+        parts = owner_country.split("_", 1)
+        country = parts[0]
+        subdiv = parts[1] if len(parts) > 1 else None
+
+        # Create holidays object (years: current + next for safety)
+        year = check_date.year
+        hol = holidays.country_holidays(country, subdiv=subdiv, years=[year, year + 1])
+
+        is_holiday = check_date in hol
+        is_weekend = check_date.weekday() >= 5
+
+        if is_holiday:
+            logging.info(f"{check_date} is a public holiday in {owner_country}: {hol.get(check_date)}")
+        if is_weekend:
+            logging.info(f"{check_date} is a weekend")
+
+        return not (is_weekend or is_holiday)
+
+    except Exception as e:
+        logging.warning(f"Failed to check holidays for country {owner_country}: {e}. Falling back to weekend-only check.")
+        return check_date.weekday() < 5
+
+def get_holiday_countries():
+    """Load holiday country config from Airflow Variable (optional override)"""
+    try:
+        config_json = Variable.get("ltai.v3.hubspot.task.holiday_countries", default_var="{}")
+        config = json.loads(config_json)
+        logging.info(f"Loaded holiday config for countries: {list(config.keys())}")
+        return config
+    except Exception as e:
+        logging.warning(f"Failed to load holiday countries config: {e}. No custom holidays.")
+        return {}
+
+
 def get_configured_owners():
-    """Load task owners from Airflow Variables instead of HubSpot API"""
+    """Load task owners from Airflow Variables"""
     try:
         owners_json = DEFAULT_OWNER_DETAILS
         owners = json.loads(owners_json)
@@ -59,10 +96,10 @@ def get_configured_owners():
             logging.warning("No task owners configured in ltai.v3.hubspot.task.owners variable")
             logging.warning("Using default owner as fallback")
             owners = [{
-                "id": DEFAULT_OWNER_DETAILS,
-                "name": DEFAULT_OWNER_DETAILS,
-                "email": DEFAULT_OWNER_DETAILS,
-                "timezone": DEFAULT_OWNER_DETAILS
+                "id": DEFAULT_OWNER_ID,
+                "name": DEFAULT_OWNER_NAME,
+                "email": HUBSPOT_FROM_ADDRESS,
+                "timezone": "America/New_York"
             }]
         
         # Validate owner structure
@@ -74,7 +111,7 @@ def get_configured_owners():
         
         logging.info(f"Loaded {len(owners)} configured task owner(s)")
         for owner in owners:
-            logging.info(f"  - {owner['name']} ({owner['email']}) in {owner['timezone']}")
+            logging.info(f" - {owner['name']} ({owner['email']}) in {owner['timezone']}")
         
         return owners
         
@@ -93,34 +130,18 @@ def get_today_key(suffix=""):
     return today
 
 def get_initiated_owners_today(ti):
-    """Get set of owner IDs who already had reminders initiated today - NO SQL"""
+    """Get set of owner IDs who already had reminders initiated today"""
     try:
         key = get_today_key("initiated_owners")
-        
-        # Try current run XCom first (from any task in this DAG run)
-        initiated_list = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=False)
+        initiated_list = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=True, dag_id=ti.dag_id)
         if initiated_list is not None:
             initiated_set = set(initiated_list)
-            logging.info(f"📋 Loaded {len(initiated_set)} initiated owner(s) from current run XCom")
+            logging.info(f"Loaded {len(initiated_set)} initiated owner(s) from XCom")
             return initiated_set
-
-        # Try from previous DAG runs today (cross-run persistence)
-        initiated_list = ti.xcom_pull(
-            key=key,
-            task_ids=None,
-            include_prior_dates=True,
-            dag_id=ti.dag_id
-        )
-        if initiated_list is not None:
-            initiated_set = set(initiated_list)
-            logging.info(f"📋 Loaded {len(initiated_set)} initiated owner(s) from prior runs today")
-            return initiated_set
-
-        logging.info("📋 No initiated owners found today (empty set)")
+        logging.info("No initiated owners found today (empty set)")
         return set()
-
     except Exception as e:
-        logging.warning(f"Failed to load initiated owners, treating as empty: {e}")
+        logging.warning(f"Failed to load initiated owners: {e}")
         return set()
 
 def mark_owner_initiated(ti, owner_id):
@@ -131,9 +152,7 @@ def mark_owner_initiated(ti, owner_id):
         if owner_id not in current_initiated:
             current_initiated.append(owner_id)
             ti.xcom_push(key=key, value=current_initiated)
-            logging.info(f"✓ Marked owner {owner_id} as initiated today (total: {len(current_initiated)})")
-        else:
-            logging.debug(f"Owner {owner_id} already marked as initiated today")
+            logging.info(f"Marked owner {owner_id} as initiated today (total: {len(current_initiated)})")
     except Exception as e:
         logging.error(f"Failed to mark owner {owner_id} as initiated: {e}")
 
@@ -141,7 +160,7 @@ def get_sent_reminders_today(ti):
     """Safely get set of task IDs sent today - NO SQL"""
     try:
         key = get_today_key("sent_reminders")
-        
+
         # Try current run XCom first
         sent_list = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=False)
         if sent_list is not None:
@@ -223,234 +242,331 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
         logging.error(f"Error in get_ai_response: {e}")
         raise
 
-def send_task_reminder_email(service, task, owner_info, thread_id=None, in_reply_to=None):
-    """Send individual task reminder email"""
+def send_task_reminder_email(service, task, owner_info):
+    """Send clean HubSpot task reminder with unified recent activity"""
     try:
-        owner_email = owner_info.get("email", "")
-        owner_name = owner_info.get("name", "Unknown")
-        
-        task_subject = task.get("hs_task_subject", "Task Reminder")
-        task_body = task.get("hs_task_body", "")
-        task_id = task.get("id", "")
-        due_date = task.get("hs_timestamp", "")
-        priority = task.get("hs_task_priority", "MEDIUM")
-        status = task.get("hs_task_status", "NOT_STARTED")
-        
-        # Format due date
-        try:
-            due_dt = datetime.fromisoformat(due_date.replace('Z', '+00:00'))
-            formatted_due = due_dt.strftime("%B %d, %Y")
-        except:
-            formatted_due = due_date
-        
-        # Determine if overdue
+        owner_email = owner_info.get("email", "").strip()
+        owner_first_name = owner_info.get("name", "User").split()[0].strip() or "there"
+        owner_full_name = owner_info.get("name", "The HubSpot Assistant Team")
+
+        if not owner_email:
+            raise ValueError("Owner email missing")
+
+        props = task.get("properties", {})
+        task_id = task.get("id", "N/A")
+
+        # Task Name
+        task_name = props.get("hs_task_subject", "").strip() or props.get("hs_task_body", "").strip().split('\n')[0][:100] or "Unnamed Task"
+
+        # Due Date - full date for display
+        due_date_ms = props.get("hs_timestamp")
+        formatted_due = "Not specified"
         is_overdue = False
-        days_overdue = 0
-        if due_date:
+        today_date = datetime.now(timezone.utc).date()
+
+        if due_date_ms:
             try:
-                due_dt = datetime.fromisoformat(due_date.replace('Z', '+00:00'))
-                now = datetime.now(timezone.utc)
-                if due_dt < now:
+                if isinstance(due_date_ms, str):
+                    due_dt = datetime.fromisoformat(due_date_ms.replace('Z', '+00:00'))
+                else:
+                    due_dt = datetime.fromtimestamp(int(due_date_ms) / 1000, tz=timezone.utc)
+                formatted_due = due_dt.strftime("%B %d, %Y")
+                if due_dt.date() < today_date:
                     is_overdue = True
-                    days_overdue = (now - due_dt).days
-            except:
-                pass
-        
-        # Build email subject
-        if thread_id and in_reply_to:
-            subject = f"Re: Task Reminder - {task_subject}"
-        else:
-            subject = f"Task Reminder - {task_subject}"
-        
-        # Build email body
-        priority_color = {
-            "HIGH": "#dc3545",
-            "MEDIUM": "#ffc107",
-            "LOW": "#28a745"
-        }.get(priority, "#6c757d")
-        
-        overdue_notice = ""
-        if is_overdue:
-            overdue_notice = f"""
-            <div style="background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 12px; margin-bottom: 20px;">
-                <strong>⚠️ This task is {days_overdue} day(s) overdue</strong>
-            </div>
+            except Exception as e:
+                logging.warning(f"Failed to parse due date: {e}")
+
+        priority = props.get("hs_task_priority", "Not set").title()
+
+        # Associations
+        associations = task.get("associations", {})
+
+        # Contacts
+        contact_lines = []
+        for contact in associations.get("contacts", []):
+            cp = contact.get("properties", {})
+            name = f"{cp.get('firstname', '')} {cp.get('lastname', '')}".strip() or "Unknown"
+            email = cp.get("email", "")
+            if email:
+                contact_lines.append(f'<li>{name} – <a href="mailto:{email}">{email}</a></li>')
+            else:
+                contact_lines.append(f'<li>{name}</li>')
+
+        # Company
+        company_name = "No company associated"
+        companies = associations.get("companies", [])
+        if companies:
+            company_name = companies[0].get("properties", {}).get("name", "Unknown Company").strip()
+
+        # Deal - only if exists
+        deal_section = ""
+        deals = associations.get("deals", [])
+        if deals:
+            deal = deals[0].get("properties", {})
+            deal_name = deal.get("dealname", "Unknown Deal")
+            amount = deal.get("amount", "")
+            if amount:
+                try:
+                    amount = f"${float(amount):,.0f}"
+                except:
+                    pass
+            close_date_raw = deal.get("closedate")
+            close_date = ""
+            if close_date_raw:
+                try:
+                    if isinstance(close_date_raw, str):
+                        cd_dt = datetime.fromisoformat(close_date_raw.replace('Z', '+00:00'))
+                    else:
+                        cd_dt = datetime.fromtimestamp(int(close_date_raw) / 1000, tz=timezone.utc)
+                    close_date = cd_dt.strftime("%B %d, %Y")
+                except:
+                    close_date = ""
+
+            deal_lines = []
+            deal_lines.append(f"<li><strong>Deal Name:</strong> {deal_name}</li>")
+            if amount:
+                deal_lines.append(f"<li><strong>Amount:</strong> {amount}</li>")
+            if close_date:
+                deal_lines.append(f"<li><strong>Close Date:</strong> {close_date}</li>")
+
+            deal_section = f"""
+            <li><strong>Deal:</strong>
+                <ul>{''.join(deal_lines)}</ul>
+            </li>
             """
-        
+
+        # Recent Activity (Last 1 Month) - unified bullets for notes AND tasks
+                # Recent Activity (Last 1 Month) - clean text, no HTML wrappers
+        activity_lines = []
+        activities = sorted(
+            task.get("activities", []),
+            key=lambda x: x.get("properties", {}).get("hs_timestamp", 0) or 0,
+            reverse=True
+        )
+
+        for act in activities:
+            props = act.get("properties", {})
+            timestamp = props.get("hs_timestamp")
+            act_date = ""
+            if timestamp:
+                try:
+                    act_date = datetime.fromtimestamp(int(timestamp) / 1000).strftime("%B %d, %Y")
+                except:
+                    pass
+            prefix = f"{act_date} - " if act_date else ""
+
+            parts = []
+
+            # Get and clean note body if present
+            if "hs_note_body" in props:
+                raw_body = props["hs_note_body"].strip()
+                if raw_body:
+                    # Remove full <html><head>...</head><body>...</body></html> wrapper if present
+                    if raw_body.lower().startswith("<html"):
+                        # Simple extraction: find content between <body> and </body>
+                        import re
+                        body_match = re.search(r'<body[^>]*>(.*?)</body>', raw_body, re.DOTALL | re.IGNORECASE)
+                        if body_match:
+                            cleaned = body_match.group(1).strip()
+                        else:
+                            # Fallback: strip all tags
+                            cleaned = re.sub(r'<[^>]+>', '', raw_body).strip()
+                    else:
+                        cleaned = raw_body
+
+                    # Final cleanup: unescape common entities and remove extra whitespace
+                    cleaned = cleaned.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+                    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+                    if cleaned:
+                        parts.append(cleaned)
+
+            # Add task subject if present
+            if "hs_task_subject" in props:
+                subject = props["hs_task_subject"].strip()
+                if subject:
+                    status = props.get("hs_task_status", "").title()
+                    if status and status.lower() not in ["not started", ""]:
+                        subject += f" ({status})"
+                    parts.append(subject)
+
+            # Fallback: task body first line
+            elif "hs_task_body" in props:
+                body_line = props["hs_task_body"].strip().split('\n')[0].strip()
+                if body_line:
+                    status = props.get("hs_task_status", "").title()
+                    if status and status.lower() not in ["not started", ""]:
+                        body_line += f" ({status})"
+                    parts.append(body_line)
+
+            # Combine all parts
+            if parts:
+                content = " • ".join(parts)
+                # Final safe HTML escaping for email
+                content = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                activity_lines.append(f"<li>{prefix}{content}</li>")
+
+
+        # AI Summary
+        summary_html = task.get("summary_html", "").strip()
+        if not summary_html:
+            summary_html = "No additional summary available."
+
+        # Subject: due today or overdue
+        status_text = "overdue" if is_overdue else "due today"
+
+        # === ADD THIS ===
+        subject = f"Task Reminder: \"{task_name}\" is {status_text}"
+        if is_overdue:
+            subject = f" OVERDUE: {subject}"
+        else:
+            subject = f" DUE TODAY: {subject}"
+
+        # Final HTML
         email_html = f"""
 <html>
-<head>
-    <style>
-        body {{
-            font-family: Arial, Helvetica, sans-serif;
-            line-height: 1.6;
-            color: #333333;
-            max-width: 600px;
-            margin: 0 auto;
-            padding: 20px;
-            background-color: #ffffff;
-        }}
-        h2 {{
-            color: #333333;
-            margin-bottom: 20px;
-            font-size: 20px;
-        }}
-        h3 {{
-            color: #333333;
-            margin-bottom: 15px;
-            font-size: 16px;
-        }}
-        .task-section {{
-            border: 1px solid #dddddd;
-            border-radius: 4px;
-            padding: 20px;
-            margin: 25px 0;
-            background-color: #f9f9f9;
-        }}
-        table {{
-            width: 100%;
-            margin: 15px 0;
-            border-collapse: collapse;
-        }}
-        td {{
-            padding: 8px 0;
-            vertical-align: top;
-        }}
-        td.label {{
-            width: 30%;
-            font-weight: bold;
-            color: #333333;
-        }}
-        .instructions {{
-            border-left: 4px solid #dddddd;
-            padding-left: 15px;
-            margin: 25px 0;
-            color: #444444;
-        }}
-        .signature {{
-            margin-top: 40px;
-            padding-top: 20px;
-            border-top: 1px solid #dddddd;
-            font-size: 14px;
-            color: #666666;
-        }}
-        a {{
-            color: #2c5aa0;
-            text-decoration: none;
-        }}
-        a:hover {{
-            text-decoration: underline;
-        }}
-        ol {{
-            padding-left: 20px;
-        }}
-        li {{
-            margin-bottom: 8px;
-        }}
-        .followup {{
-            margin: 20px 0;
-            font-style: italic;
-        }}
-    </style>
-</head>
-<body>
-    <h2>Daily Task Reminder</h2>
-    
-    <p>Dear {owner_name},</p>
-    
-    {overdue_notice}
-    
-    <div class="task-section">
-        <h3>{task_subject}</h3>
-        
-        <table>
-            <tr>
-                <td class="label">Task ID:</td>
-                <td>{task_id}</td>
-            </tr>
-            <tr>
-                <td class="label">Due Date:</td>
-                <td>{formatted_due}</td>
-            </tr>
-            <tr>
-                <td class="label">Priority:</td>
-                <td>{priority}</td>
-            </tr>
-            <tr>
-                <td class="label">Current Status:</td>
-                <td>{status}</td>
-            </tr>
-        </table>
-        
-        <p><strong>Description:</strong><br>
-        {task_body}</p>
-    </div>
-    
-    <div class="instructions">
-        <h4>How to Update This Task</h4>
-        <p>Please reply to this email with the following information:</p>
-        <ol>
-            <li><strong>Current Status:</strong> Indicate the progress (e.g., Completed, In Progress, Blocked).</li>
-            <li><strong>Follow-up Actions:</strong> Any required next steps (optional).</li>
-        </ol>
-        
-        <p><strong>Note:</strong> If no reply is received by the end of the day and no follow-up actions are specified, a follow-up task will be automatically scheduled for two weeks from today.</p>
-    </div>
-    
-    <p>If you have any questions or require assistance, please do not hesitate to reply to this email.</p>
-    
-    <div class="signature">
-        <p>Best regards,<br>
-        <strong>HubSpot Task Assistant</strong><br>
-        <a href="http://lowtouch.ai">Lowtouch.ai</a></p>
-    </div>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 700px;">
+    <p>Hi {owner_full_name},</p>
+    <p>This is a reminder that the following task is <strong>{status_text}</strong>. Please find the details below.</p>
+
+    <p><strong>Task Details</strong></p>
+    <ul>
+        <li><strong>Task Name:</strong> {task_name}</li>
+        <li><strong>Task ID:</strong> {task_id}</li>
+        <li><strong>Due Date:</strong> {formatted_due}</li>
+        <li><strong>Priority:</strong> {priority}</li>
+        <li><strong>Owner:</strong> {owner_full_name}</li>
+    </ul>
+
+    <p><strong>Associated Records</strong></p>
+    <ul>
+        <li><strong>Contacts:</strong>
+            <ul>{''.join(contact_lines) or '<li>None</li>'}</ul>
+        </li>
+        <li><strong>Company:</strong> {company_name}</li>
+        {deal_section}
+    </ul>
+
+    <p><strong>Recent Activity (Last 1 Month)</strong></p>
+    <ul>
+        {''.join(activity_lines) or '<li>No recent activity</li>'}
+    </ul>
+
+    <p><strong>Summary</strong></p>
+    <p>{summary_html}</p>
+
+    <p>Please let me know if you need any additional details or support.</p>
+
+    <p>Best regards,<br>
+    The HubSpot Assistant Team<br>
+    <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
 </body>
 </html>
 """
-        
-        # Create message
+
         msg = MIMEMultipart()
-        msg["From"] = f"HubSpot Task Reminder <{HUBSPOT_FROM_ADDRESS}>"
+        msg["From"] = f"HubSpot Task Reminder via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
         msg["To"] = owner_email
         msg["Subject"] = subject
-        
-        # Add threading headers if this is part of existing thread
-        if thread_id and in_reply_to:
-            msg["In-Reply-To"] = in_reply_to
-            msg["References"] = in_reply_to
-        
-        # Add custom headers for task tracking
         msg["X-Task-ID"] = task_id
         msg["X-Task-Type"] = "daily-reminder"
-        
         msg.attach(MIMEText(email_html, "html"))
-        
-        # Send email
+
         raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
         result = service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
-        
-        logging.info(f"✓ Sent task reminder for task {task_id} to {owner_email}")
-        return {
-            "success": True,
-            "message_id": result.get("id"),
-            "task_id": task_id,
-            "owner_email": owner_email,
-            "thread_id": result.get("threadId")
-        }
-        
+
+        logging.info(f"Sent reminder: Task {status_text} - {task_name} to {owner_email}")
+        return {"success": True, "task_id": task_id}
+
     except Exception as e:
-        logging.error(f"Failed to send task reminder: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "task_id": task.get("id"),
-            "owner_email": owner_info.get("email")
+        logging.error(f"Send failed for task {task.get('id', 'unknown')}: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+def search_hubspot_tasks(owner_id, filters):
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/tasks/search"
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "filterGroups": [{"filters": filters}],
+            "properties": ["hs_task_subject", "hs_task_body", "hs_timestamp", "hs_task_priority", "hs_task_status", "hubspot_owner_id"],
+            "limit": 100
         }
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logging.error(f"Failed to search tasks for owner {owner_id}: {e}")
+        return {"results": []}
+
+def get_task_associations(task_id):
+    associations = {"contacts": [], "companies": [], "deals": []}
+    headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}", "Content-Type": "application/json"}
+    for assoc_type in ["contacts", "companies", "deals"]:
+        try:
+            endpoint = f"{HUBSPOT_BASE_URL}/crm/v4/objects/tasks/{task_id}/associations/{assoc_type}"
+            response = requests.get(endpoint, headers=headers, timeout=30)
+            if response.status_code == 200:
+                results = response.json().get("results", [])
+                for result in results:
+                    assoc_id = result.get("toObjectId")
+                    if assoc_id:
+                        details = get_object_details(assoc_type, assoc_id)
+                        if details:
+                            associations[assoc_type].append(details)
+        except Exception as e:
+            logging.warning(f"Failed to get {assoc_type} associations: {e}")
+    return associations
+
+def get_object_details(object_type, object_id):
+    try:
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+        properties = {"contacts": ["firstname", "lastname", "email"], "companies": ["name", "domain"], "deals": ["dealname", "dealstage", "amount"]}
+        props = properties.get(object_type, [])
+        props_param = "&".join([f"properties={p}" for p in props])
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/{object_type}/{object_id}?{props_param}"
+        response = requests.get(endpoint, headers=headers, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            return {"id": object_id, "properties": data.get("properties", {})}
+        return None
+    except Exception as e:
+        logging.warning(f"Failed to get details for {object_type} {object_id}: {e}")
+        return None
+
+def get_deal_activities(deal_id, start_date, end_date):
+    try:
+        activities = {"notes": [], "tasks": []}
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}", "Content-Type": "application/json"}
+        # Notes
+        notes_payload = {
+            "filterGroups": [{"filters": [
+                {"propertyName": "associations.deal", "operator": "CONTAINS_TOKEN", "value": str(deal_id)},
+                {"propertyName": "hs_timestamp", "operator": "GTE", "value": start_date},
+                {"propertyName": "hs_timestamp", "operator": "LTE", "value": end_date}
+            ]}],
+            "properties": ["hs_note_body", "hs_timestamp"],
+            "sorts": [{"propertyName": "hs_timestamp", "direction": "DESCENDING"}],
+            "limit": 100
+        }
+        notes_resp = requests.post(f"{HUBSPOT_BASE_URL}/crm/v3/objects/notes/search", headers=headers, json=notes_payload, timeout=30)
+        if notes_resp.status_code == 200:
+            activities["notes"] = notes_resp.json().get("results", [])
+
+        # Tasks
+        tasks_payload = notes_payload.copy()
+        tasks_payload["properties"] = ["hs_task_subject", "hs_task_body", "hs_timestamp", "hs_task_status"]
+        tasks_resp = requests.post(f"{HUBSPOT_BASE_URL}/crm/v3/objects/tasks/search", headers=headers, json=tasks_payload, timeout=30)
+        if tasks_resp.status_code == 200:
+            activities["tasks"] = tasks_resp.json().get("results", [])
+
+        return activities
+    except Exception as e:
+        logging.error(f"Failed to get activities for deal {deal_id}: {e}")
+        return {"notes": [], "tasks": []}
 
 # ============================================================================
-# DAG TASK FUNCTIONS
+# TASK FUNCTIONS
 # ============================================================================
-
 def get_all_task_owners(ti, **context):
     """Load task owners from Airflow Variables (not HubSpot API)"""
     try:
@@ -464,221 +580,172 @@ def get_all_task_owners(ti, **context):
         return []
 
 def check_delivery_window(ti, **context):
-    """Check if we're in the delivery window (11 AM or later) for any timezone"""
+    """Check if we're in the delivery window AND it's a business day for any owner"""
     try:
         owners = ti.xcom_pull(key="all_owners", default=[])
-        
+
         if not owners:
             logging.info("No owners found, skipping delivery window check")
             ti.xcom_push(key="in_delivery_window", value=False)
             return "skip_task_collection"
-        
-        # Get already initiated owners today
+
         initiated_owners = get_initiated_owners_today(ti)
-        
+        holiday_config = get_holiday_countries()  # Load once
+
         current_utc = datetime.now(timezone.utc)
+        today_utc_date = current_utc.date()
+
         in_window_count = 0
         owners_to_process = []
-        
-        # Check each owner's timezone
+
         for owner in owners:
             owner_id = owner.get("id")
-            tz_str = owner.get("timezone", "America/New_York")  
-            
-            # Skip if already initiated today
             if owner_id in initiated_owners:
                 logging.info(f"⏭️  Owner {owner.get('name')} already initiated today - skipping")
                 continue
-            
+
+            tz_str = owner.get("timezone", "America/New_York")
+            owner_country = owner.get("country", "US")  # New field
+
             try:
                 owner_tz = pytz.timezone(tz_str)
-                owner_time = current_utc.astimezone(owner_tz)
-                owner_hour = owner_time.hour
-                logging.info(f"owner timezone is:{owner_tz}, {tz_str}")
-                logging.info(f"current owner time:{owner_time}")
-                logging.info(f"current hour:{owner_hour}")
-                
+                owner_local_time = current_utc.astimezone(owner_tz)
+                owner_local_date = owner_local_time.date()
+                owner_hour = owner_local_time.hour
+
+                # Check if it's a business day in owner's local date
+                if not is_business_day(owner_country, owner_local_date):
+                    logging.info(f"Owner {owner.get('name')} ({owner_country}) - today {owner_local_date} is not a business day - skipping reminders")
+                    continue
+
+                # Check delivery hour window
                 if DELIVERY_START_HOUR <= owner_hour:
                     in_window_count += 1
                     owners_to_process.append(owner)
-                    logging.info(f"Owner {owner.get('name')} ({tz_str}) is in delivery window: {owner_time.strftime('%I:%M %p')}")
+                    logging.info(f"Owner {owner.get('name')} ({tz_str}, {owner_country}) is in delivery window on business day: {owner_local_time.strftime('%I:%M %p %Z on %Y-%m-%d')}")
+                else:
+                    logging.info(f"Owner {owner.get('name')} - too early ({owner_hour}:00, need >= {DELIVERY_START_HOUR})")
+
             except Exception as e:
-                logging.warning(f"Invalid timezone {tz_str} for owner {owner.get('name')}: {e}")
-        
-        # Store owners that need processing
+                logging.warning(f"Error processing owner {owner.get('name')}: {e}")
+
         ti.xcom_push(key="owners_to_process", value=owners_to_process)
-        
         in_window = in_window_count > 0
         ti.xcom_push(key="in_delivery_window", value=in_window)
-        
+
         if in_window:
-            logging.info(f"✓ {in_window_count} owner(s) in delivery window and not yet initiated - proceeding")
+            logging.info(f"✓ {in_window_count} owner(s) eligible (business day + in window) - proceeding")
             return "collect_due_tasks"
         else:
-            logging.info("✗ No owners need processing - all either outside window or already initiated")
+            logging.info("✗ No owners eligible today (holiday/weekend or outside window or already initiated)")
             return "skip_task_collection"
-            
+
     except Exception as e:
         logging.error(f"Error checking delivery window: {e}")
         ti.xcom_push(key="in_delivery_window", value=False)
         return "skip_task_collection"
 
 def collect_due_tasks(ti, **context):
-    """Collect tasks due today OR overdue by MORE than 72 hours (excludes already sent today)"""
-    try:
-        # Get only owners that need processing (not already initiated)
-        owners = ti.xcom_pull(key="owners_to_process", default=[])
-        
-        if not owners:
-            logging.info("No owners to process")
-            ti.xcom_push(key="tasks_by_owner", value={})
-            return {}
-        
-        # Mark all these owners as initiated IMMEDIATELY to prevent duplicate runs
-        for owner in owners:
-            mark_owner_initiated(ti, owner.get("id"))
-        
-        logging.info(f"✓ Marked {len(owners)} owner(s) as initiated for today")
-        
-        # Get tasks already sent today
-        sent_today = get_sent_reminders_today(ti)
-        
-        # Get current date/time in UTC
-        now_utc = datetime.now(timezone.utc)
-        today_utc = now_utc.date()
-        
-        # Calculate date boundaries
-        today_start = datetime.combine(today_utc, time.min).replace(tzinfo=timezone.utc)
-        today_end = datetime.combine(today_utc, time.max).replace(tzinfo=timezone.utc)
-        
-        # Tasks overdue by MORE than 72 hours (3 days)
-        overdue_cutoff = today_start - timedelta(days=3)
-        
-        logging.info(f"📅 Today: {today_utc.isoformat()}")
-        logging.info(f"📅 Collecting tasks:")
-        logging.info(f"   1. Due TODAY: {today_utc.isoformat()}")
-        logging.info(f"   2. Overdue by >72 hours: Before {overdue_cutoff.date().isoformat()}")
-        logging.info(f"   ❌ EXCLUDING: Tasks already sent today ({len(sent_today)} tasks)")
-        
-        tasks_by_owner = {}
-        
-        for owner in owners:
-            owner_id = owner.get("id")
-            owner_name = owner.get("name")
-            owner_email = owner.get("email")
-            tz_str = owner.get("timezone", "America/New_York")
-            
-            try:
-                logging.info(f"✓ Processing {owner_name}...")
-                
-                # Query 1: Tasks due TODAY
-                prompt_today = f"""You are a HubSpot API assistant. Find tasks for owner {owner_id} that are due TODAY ONLY.
-
-Owner ID: {owner_id}
-Owner Name: {owner_name}
-Today's Date: {today_utc.isoformat()}
-
-Steps:
-1. Invoke search_tasks with filters:
-   - hubspot_owner_id = {owner_id}
-   - hs_task_status = "COMPLETED" with Operator = NOT_CONTAINS_TOKEN
-   - hs_timestamp (due date) GTE {today_start.isoformat()} AND LTE {today_end.isoformat()}
-2. Return all matching tasks with these properties:
-   - id, hs_task_subject, hs_task_body, hs_timestamp, hs_task_priority, hs_task_status, hubspot_owner_id
-
-Important: Always include the filter `hs_task_status` as `COMPLETED` with operator "NOT_CONTAINS_TOKEN".
-Return ONLY valid JSON:
-{{
-    "tasks": [],
-    "total": 0,
-    "query_type": "due_today"
-}}"""
-
-                # Query 2: Tasks overdue by MORE than 72 hours
-                prompt_overdue = f"""You are a HubSpot API assistant. Find tasks for owner {owner_id} that are overdue by MORE than 72 hours.
-
-Owner ID: {owner_id}
-Owner Name: {owner_name}
-Overdue Cutoff: {overdue_cutoff.date().isoformat()} (tasks due BEFORE this date)
-
-Steps:
-1. Invoke search_tasks with filters:
-   - hubspot_owner_id = {owner_id}
-   - hs_task_status = "COMPLETED" with Operator = NOT_CONTAINS_TOKEN
-   - hs_timestamp (due date) LT {overdue_cutoff.isoformat()}
-2. Return all matching tasks with these properties:
-   - id, hs_task_subject, hs_task_body, hs_timestamp, hs_task_priority, hs_task_status, hubspot_owner_id
-Important: Always include the filter `hs_task_status` as `COMPLETED` with operator "NOT_CONTAINS_TOKEN".
-Return ONLY valid JSON:
-{{
-    "tasks": [],
-    "total": 0,
-    "query_type": "overdue_72h"
-}}"""
-
-                # Execute both queries
-                response_today = get_ai_response(prompt_today, expect_json=True)
-                response_overdue = get_ai_response(prompt_overdue, expect_json=True)
-                
-                parsed_today = json.loads(response_today.strip())
-                parsed_overdue = json.loads(response_overdue.strip())
-                
-                tasks_today = parsed_today.get("tasks", [])
-                tasks_overdue = parsed_overdue.get("tasks", [])
-                
-                # Combine both lists (remove duplicates if any)
-                all_tasks = tasks_today + tasks_overdue
-                unique_tasks = {task["id"]: task for task in all_tasks}.values()
-                
-                # Filter out tasks already sent today
-                tasks = [task for task in unique_tasks if task["id"] not in sent_today]
-                
-                if tasks:
-                    tasks_by_owner[owner_id] = {
-                        "owner_info": {
-                            "id": owner_id,
-                            "name": owner_name,
-                            "email": owner_email,
-                            "timezone": tz_str
-                        },
-                        "tasks": tasks
-                    }
-                    filtered_count = len(all_tasks) - len(tasks)
-                    logging.info(f"Found {len(tasks)} NEW task(s) for {owner_name}:")
-                    logging.info(f"  - {len(tasks_today)} due today")
-                    logging.info(f"  - {len(tasks_overdue)} overdue >72 hours")
-                    if filtered_count > 0:
-                        logging.info(f"  - Filtered out {filtered_count} already sent today")
-                
-            except Exception as e:
-                logging.error(f"Error collecting tasks for owner {owner_name}: {e}")
-                continue
-        
-        ti.xcom_push(key="tasks_by_owner", value=tasks_by_owner)
-        logging.info(f"✓ Collected tasks for {len(tasks_by_owner)} owner(s)")
-        return tasks_by_owner
-        
-    except Exception as e:
-        logging.error(f"Failed to collect due tasks: {e}")
+    owners = ti.xcom_pull(key="owners_to_process", default=[])
+    if not owners:
         ti.xcom_push(key="tasks_by_owner", value={})
         return {}
+
+    for owner in owners:
+        mark_owner_initiated(ti, owner["id"])
+
+    sent_today = get_sent_reminders_today(ti)
+    now_utc = datetime.now(timezone.utc)
+    today_date = now_utc.date()
+    today_start = datetime(today_date.year, today_date.month, today_date.day, tzinfo=timezone.utc)
+    today_end = today_start + timedelta(days=1) - timedelta(seconds=1)
+    overdue_cutoff = today_start - timedelta(days=3)
+    one_month_ago = now_utc - timedelta(days=30)
+
+    tasks_by_owner = {}
+
+    for owner in owners:
+        owner_id = owner["id"]
+        owner_name = owner["name"]
+        owner_email = owner["email"]
+        tz = owner["timezone"]
+
+        logging.info(f"Collecting tasks for {owner_name}")
+
+        # Due today
+        filters_today = [
+            {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": owner_id},
+            {"propertyName": "hs_task_status", "operator": "NOT_CONTAINS_TOKEN", "value": "COMPLETED"},
+            {"propertyName": "hs_timestamp", "operator": "GTE", "value": int(today_start.timestamp() * 1000)},
+            {"propertyName": "hs_timestamp", "operator": "LTE", "value": int(today_end.timestamp() * 1000)}
+        ]
+        today_resp = search_hubspot_tasks(owner_id, filters_today)
+
+        # Overdue >3 days
+        filters_overdue = [
+            {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": owner_id},
+            {"propertyName": "hs_task_status", "operator": "NOT_CONTAINS_TOKEN", "value": "COMPLETED"},
+            {"propertyName": "hs_timestamp", "operator": "LT", "value": int(overdue_cutoff.timestamp() * 1000)}
+        ]
+        overdue_resp = search_hubspot_tasks(owner_id, filters_overdue)
+
+        all_tasks = today_resp.get("results", []) + overdue_resp.get("results", [])
+        unique_tasks = {t["id"]: t for t in all_tasks}.values()
+        tasks = [t for t in unique_tasks if t["id"] not in sent_today]
+
+        for task in tasks:
+            task_id = task["id"]
+            logging.info(f"Processing task {task_id}")
+            task["associations"] = get_task_associations(task_id)
+            activities = []
+            for deal in task["associations"].get("deals", []):
+                deal_id = deal["id"]
+                deal_acts = get_deal_activities(deal_id, int(one_month_ago.timestamp() * 1000), int(now_utc.timestamp() * 1000))
+                activities.extend(deal_acts.get("notes", []))
+                activities.extend(deal_acts.get("tasks", []))
+            task["activities"] = activities
+
+            prompt = f"""Summarize the following task and its context for a reminder email in clean HTML:
+
+Task: {json.dumps(task)}
+Associations: {json.dumps(task['associations'])}
+Recent activities: {json.dumps(activities)}
+Important Instructions:
+    - Based on the task details, associations, and recent activities, generate a concise HTML summary that says what the task is about and associated deal and what has been done in the last month. Keep it brief and to the point.
+    - Do not include the full details again - just a high-level summary.
+    - Do not include any Task, Associated Records, or Recent Activity sections - only the summary.
+    - the summary should be 2-3 lines max in one paragraph.
+    - Do not include any sub heading like task summary, association summary, notes summary, etc.
+
+Use <h4> for headings and concise paragraphs/lists."""
+            task["summary_html"] = get_ai_response(prompt)
+
+        if tasks:
+            tasks_by_owner[owner_id] = {
+                "owner_info": {"id": owner_id, "name": owner_name, "email": owner_email, "timezone": tz},
+                "tasks": tasks
+            }
+
+    ti.xcom_push(key="tasks_by_owner", value=tasks_by_owner)
+    logging.info(f"Collected tasks for {len(tasks_by_owner)} owner(s)")
+    return tasks_by_owner
 
 def send_spaced_reminders(ti, **context):
     """Send task reminder emails with 3-minute spacing - ONE EMAIL PER TASK"""
     try:
         tasks_by_owner = ti.xcom_pull(key="tasks_by_owner", default={})
-        
+
         if not tasks_by_owner:
             logging.info("No tasks to send reminders for")
             ti.xcom_push(key="sent_reminders", value=[])
             return []
-        
+
         service = authenticate_gmail()
         if not service:
             raise ValueError("Gmail authentication failed")
-        
+
         sent_reminders = []
-        
+
         # Flatten all tasks with owner info
         all_task_items = []
         for owner_id, data in tasks_by_owner.items():
@@ -688,54 +755,54 @@ def send_spaced_reminders(ti, **context):
                     "task": task,
                     "owner_info": owner_info
                 })
-        
+
         total_tasks = len(all_task_items)
         logging.info(f"📧 Sending {total_tasks} SEPARATE email(s) with {EMAIL_SPACING_MINUTES}-minute spacing")
-        
+
         # Log multi-task owners
         owner_task_counts = {}
         for item in all_task_items:
             owner_name = item["owner_info"]["name"]
             owner_task_counts[owner_name] = owner_task_counts.get(owner_name, 0) + 1
-        
+
         for owner_name, count in owner_task_counts.items():
             if count > 1:
                 logging.info(f"⚠️  {owner_name} has {count} tasks → will receive {count} SEPARATE emails")
-        
+
         # Send each task as a separate email
         for idx, item in enumerate(all_task_items, 1):
             task = item["task"]
             owner_info = item["owner_info"]
             task_id = task.get("id")
-            
+
             logging.info(f"📨 [{idx}/{total_tasks}] Sending email for task: {task.get('hs_task_subject', 'Untitled')} to {owner_info['name']}")
-            
+
             # Send email
             result = send_task_reminder_email(
                 service=service,
                 task=task,
                 owner_info=owner_info
             )
-            
+
             # Mark as sent if successful
             if result.get("success"):
                 mark_reminder_sent(ti, task_id)
-            
+
             sent_reminders.append(result)
-            
+
             # Wait between emails (except for last one)
             if idx < total_tasks:
                 import time
                 wait_seconds = EMAIL_SPACING_MINUTES * 60
                 logging.info(f"⏳ Waiting {EMAIL_SPACING_MINUTES} minutes before next email...")
                 time.sleep(wait_seconds)
-        
+
         # Track sent reminders for monitoring replies
         ti.xcom_push(key="sent_reminders", value=sent_reminders)
         logging.info(f"✅ Successfully sent {len(sent_reminders)} task reminder emails")
-        
+
         return sent_reminders
-        
+
     except Exception as e:
         logging.error(f"Failed to send spaced reminders: {e}")
         ti.xcom_push(key="sent_reminders", value=[])
@@ -762,105 +829,18 @@ def safe_json_loads(text, default=None):
         logging.warning(f"JSON decode failed: {e}\nRaw output: {text!r}")
         return default
 
-def create_default_followups(ti, **context):
-    """Create default follow-up tasks for reminders without same-day replies"""
-    try:
-        # This task runs at end of day to check which reminders didn't get replies
-        sent_reminders = ti.xcom_pull(key="sent_reminders", default=[])
-        
-        if not sent_reminders:
-            logging.info("No sent reminders to check")
-            return []
-        
-        # Get current date
-        today = datetime.now(timezone.utc).date()
-        
-        created_followups = []
-        
-        for reminder in sent_reminders:
-            if not reminder.get("success"):
-                continue
-                
-            task_id = reminder.get("task_id")
-            message_id = reminder.get("message_id")
-            thread_id = reminder.get("thread_id")
-            
-            # Check if this task got a reply today
-            check_prompt = f"""Check if task {task_id} received an email reply today.
-
-Task ID: {task_id}
-Email thread ID: {thread_id}
-Date to check: {today.isoformat()}
-
-Steps:
-1. Search for emails in thread {thread_id} received today
-2. Check if any email references task ID {task_id}
-3. Return whether reply was received
-
-Return ONLY valid JSON:
-{{
-    "reply_received": true|false,
-    "reply_time": "ISO timestamp or null"
-}}"""
-
-            response = get_ai_response(check_prompt, expect_json=True)
-            parsed = safe_json_loads(response, default={})
-            
-            # If no reply, create follow-up task
-            if not parsed.get("reply_received", False):
-                followup_due = datetime.now() + timedelta(weeks=DEFAULT_FOLLOWUP_WEEKS)
-                
-                create_prompt = f"""Create default follow-up task for task {task_id}.
-
-Original task ID: {task_id}
-Due date: {followup_due.isoformat()}
-Reason: No reply received to daily reminder
-
-Steps:
-1. Get original task details from task {task_id}
-2. Create new task with:
-   - hs_task_subject: "Follow-up: [original task subject]"
-   - hs_task_body: "Follow-up task - no response to daily reminder for task {task_id}"
-   - hs_timestamp: {followup_due.isoformat()}
-   - hubspot_owner_id: [same as original]
-   - hs_task_priority: [same as original]
-3. Add note: "Auto-created: No response to daily task reminder by end of day"
-4. Associate with same contacts/deals as original task
-
-Return new task ID."""
-
-                create_response = get_ai_response(create_prompt, expect_json=True)
-                create_parsed = json.loads(create_response.strip())
-                
-                created_followups.append({
-                    "original_task_id": task_id,
-                    "followup_task_id": create_parsed.get("task_id"),
-                    "reason": "no_reply"
-                })
-                
-                logging.info(f"✓ Created default follow-up for task {task_id}")
-        
-        ti.xcom_push(key="created_followups", value=created_followups)
-        logging.info(f"✓ Created {len(created_followups)} default follow-up tasks")
-        return created_followups
-        
-    except Exception as e:
-        logging.error(f"Failed to create default followups: {e}")
-        return []
-
 # ============================================================================
 # DAG DEFINITION
 # ============================================================================
-
 with DAG(
     "hubspot_daily_task_reminders",
     default_args=default_args,
-    schedule_interval="*/15 * * * *",  # Run every 15 minutes to catch delivery windows
+    schedule_interval="*/15 * * * *",
     catchup=False,
-    tags=["hubspot", "tasks", "reminders", "daily"]
+    tags=["hubspot", "tasks", "reminders", "daily"],
+    description="Send daily HubSpot task reminders (one email per task) during business hours"
 ) as dag:
 
-    # Task definitions
     get_owners = PythonOperator(
         task_id="get_all_task_owners",
         python_callable=get_all_task_owners,
@@ -891,13 +871,6 @@ with DAG(
         provide_context=True,
     )
 
-    create_followups = PythonOperator(
-        task_id="create_default_followups",
-        python_callable=create_default_followups,
-        provide_context=True,
-    )
-
-    # Dependencies
     get_owners >> check_window
-    check_window >> collect_tasks >> send_reminders >> create_followups
-    check_window >> skip_collection
+    check_window >> [collect_tasks, skip_collection]
+    collect_tasks >> send_reminders
