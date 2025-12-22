@@ -14,6 +14,7 @@ from airflow.models import Variable
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
+import holidays
 
 # ============================================================================
 # CONFIGURATION
@@ -35,7 +36,6 @@ DEFAULT_OWNER_NAME = Variable.get("ltai.v3.hubspot.default.owner.name")
 DEFAULT_OWNER_DETAILS = Variable.get("ltai.v3.hubspot.task.owners")
 HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")  # Note: original variable name had typo
 HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
-
 # Email spacing configuration
 EMAIL_SPACING_MINUTES = 3
 DELIVERY_START_HOUR = 9  # Start sending at 9 AM local time
@@ -43,6 +43,49 @@ DELIVERY_START_HOUR = 9  # Start sending at 9 AM local time
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
+
+def is_business_day(owner_country, check_date):
+    """Check if the given date is a business day (not weekend or public holiday) for the owner's country"""
+    if not owner_country:
+        logging.info("No country specified for owner - assuming business day")
+        return check_date.weekday() < 5  # Only exclude weekends
+
+    try:
+        # Parse country code: support "US" or "US_NY"
+        parts = owner_country.split("_", 1)
+        country = parts[0]
+        subdiv = parts[1] if len(parts) > 1 else None
+
+        # Create holidays object (years: current + next for safety)
+        year = check_date.year
+        hol = holidays.country_holidays(country, subdiv=subdiv, years=[year, year + 1])
+
+        is_holiday = check_date in hol
+        is_weekend = check_date.weekday() >= 5
+
+        if is_holiday:
+            logging.info(f"{check_date} is a public holiday in {owner_country}: {hol.get(check_date)}")
+        if is_weekend:
+            logging.info(f"{check_date} is a weekend")
+
+        return not (is_weekend or is_holiday)
+
+    except Exception as e:
+        logging.warning(f"Failed to check holidays for country {owner_country}: {e}. Falling back to weekend-only check.")
+        return check_date.weekday() < 5
+
+def get_holiday_countries():
+    """Load holiday country config from Airflow Variable (optional override)"""
+    try:
+        config_json = Variable.get("ltai.v3.hubspot.task.holiday_countries", default_var="{}")
+        config = json.loads(config_json)
+        logging.info(f"Loaded holiday config for countries: {list(config.keys())}")
+        return config
+    except Exception as e:
+        logging.warning(f"Failed to load holiday countries config: {e}. No custom holidays.")
+        return {}
+
+
 def get_configured_owners():
     """Load task owners from Airflow Variables"""
     try:
@@ -537,7 +580,7 @@ def get_all_task_owners(ti, **context):
         return []
 
 def check_delivery_window(ti, **context):
-    """Check if we're in the delivery window (11 AM or later) for any timezone"""
+    """Check if we're in the delivery window AND it's a business day for any owner"""
     try:
         owners = ti.xcom_pull(key="all_owners", default=[])
 
@@ -546,49 +589,55 @@ def check_delivery_window(ti, **context):
             ti.xcom_push(key="in_delivery_window", value=False)
             return "skip_task_collection"
 
-        # Get already initiated owners today
         initiated_owners = get_initiated_owners_today(ti)
+        holiday_config = get_holiday_countries()  # Load once
 
         current_utc = datetime.now(timezone.utc)
+        today_utc_date = current_utc.date()
+
         in_window_count = 0
         owners_to_process = []
 
-        # Check each owner's timezone
         for owner in owners:
             owner_id = owner.get("id")
-            tz_str = owner.get("timezone", "America/New_York")  
-
-            # Skip if already initiated today
             if owner_id in initiated_owners:
                 logging.info(f"⏭️  Owner {owner.get('name')} already initiated today - skipping")
                 continue
 
+            tz_str = owner.get("timezone", "America/New_York")
+            owner_country = owner.get("country", "US")  # New field
+
             try:
                 owner_tz = pytz.timezone(tz_str)
-                owner_time = current_utc.astimezone(owner_tz)
-                owner_hour = owner_time.hour
-                logging.info(f"owner timezone is:{owner_tz}, {tz_str}")
-                logging.info(f"current owner time:{owner_time}")
-                logging.info(f"current hour:{owner_hour}")
+                owner_local_time = current_utc.astimezone(owner_tz)
+                owner_local_date = owner_local_time.date()
+                owner_hour = owner_local_time.hour
 
+                # Check if it's a business day in owner's local date
+                if not is_business_day(owner_country, owner_local_date):
+                    logging.info(f"Owner {owner.get('name')} ({owner_country}) - today {owner_local_date} is not a business day - skipping reminders")
+                    continue
+
+                # Check delivery hour window
                 if DELIVERY_START_HOUR <= owner_hour:
                     in_window_count += 1
                     owners_to_process.append(owner)
-                    logging.info(f"Owner {owner.get('name')} ({tz_str}) is in delivery window: {owner_time.strftime('%I:%M %p')}")
+                    logging.info(f"Owner {owner.get('name')} ({tz_str}, {owner_country}) is in delivery window on business day: {owner_local_time.strftime('%I:%M %p %Z on %Y-%m-%d')}")
+                else:
+                    logging.info(f"Owner {owner.get('name')} - too early ({owner_hour}:00, need >= {DELIVERY_START_HOUR})")
+
             except Exception as e:
-                logging.warning(f"Invalid timezone {tz_str} for owner {owner.get('name')}: {e}")
+                logging.warning(f"Error processing owner {owner.get('name')}: {e}")
 
-        # Store owners that need processing
         ti.xcom_push(key="owners_to_process", value=owners_to_process)
-
         in_window = in_window_count > 0
         ti.xcom_push(key="in_delivery_window", value=in_window)
 
         if in_window:
-            logging.info(f"✓ {in_window_count} owner(s) in delivery window and not yet initiated - proceeding")
+            logging.info(f"✓ {in_window_count} owner(s) eligible (business day + in window) - proceeding")
             return "collect_due_tasks"
         else:
-            logging.info("✗ No owners need processing - all either outside window or already initiated")
+            logging.info("✗ No owners eligible today (holiday/weekend or outside window or already initiated)")
             return "skip_task_collection"
 
     except Exception as e:
