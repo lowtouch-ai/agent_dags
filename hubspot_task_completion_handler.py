@@ -138,6 +138,40 @@ def extract_all_recipients(email_data):
 # ============================================================================
 # HUBSPOT API FUNCTIONS
 # ============================================================================
+def get_owner_id_by_name(query):
+    """Get HubSpot owner ID by name or email"""
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/owners"
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+        params = {}
+        if '@' in query:
+            params["email"] = query
+        
+        response = requests.get(endpoint, headers=headers, params=params, timeout=30)
+        response.raise_for_status()
+        
+        owners = response.json().get("results", [])
+        
+        query_lower = query.lower()
+        
+        if '@' in query:
+            for owner in owners:
+                if owner.get("email", "").lower() == query_lower:
+                    logging.info(f"Found owner by email: {owner.get('id')} ({query})")
+                    return owner.get("id")
+        else:
+            for owner in owners:
+                full_name = f"{owner.get('firstName', '')} {owner.get('lastName', '')}".strip().lower()
+                if query_lower == full_name or query_lower in full_name.split():
+                    logging.info(f"Found owner by name: {owner.get('id')} ({full_name})")
+                    return owner.get("id")
+        
+        logging.warning(f"No owner found for query: {query}")
+        return None
+        
+    except Exception as e:
+        logging.error(f"Failed to get owner: {e}")
+        return None
 def get_task_details(task_id):
     """Get full details of a HubSpot task"""
     try:
@@ -187,7 +221,7 @@ def update_task_status(task_id, status="COMPLETED"):
         logging.error(f"Failed to update task {task_id}: {e}")
         return False
 
-def create_followup_task(original_task, due_date=None):
+def create_followup_task(original_task, due_date=None, owner_name=None):
     """Create a follow-up task based on original task"""
     try:
         original_props = original_task.get("properties", {})
@@ -201,8 +235,17 @@ def create_followup_task(original_task, due_date=None):
         
         # Prepare new task properties
         task_subject = f"Follow-up: {original_props.get('hs_task_subject', 'Task')}"
-        task_body = f"Follow-up task created from completed task.\n\nOriginal task: {original_props.get('hs_task_subject', '')}\nOriginal notes: {original_props.get('hs_task_body', '')}"
-        
+        task_body = f"Follow-up task created from completed task.\n\nOriginal task: {original_props.get('hs_task_subject', '')}\nOriginal notes: {original_props.get('hs_task_body', '')}"       
+        # Determine owner ID
+        owner_id = original_props.get("hubspot_owner_id")
+        if owner_name:
+            new_owner_id = get_owner_id_by_name(owner_name)
+            if new_owner_id:
+                owner_id = new_owner_id
+                logging.info(f"Using specified owner ID {owner_id} for {owner_name}")
+            else:
+                logging.warning(f"Specified owner '{owner_name}' not found, defaulting to original owner {owner_id}")
+       
         endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/tasks"
         headers = {
             "Authorization": f"Bearer {HUBSPOT_API_KEY}",
@@ -216,7 +259,7 @@ def create_followup_task(original_task, due_date=None):
                 "hs_timestamp": due_timestamp,
                 "hs_task_priority": original_props.get("hs_task_priority", "MEDIUM"),
                 "hs_task_status": "NOT_STARTED",
-                "hubspot_owner_id": original_props.get("hubspot_owner_id")
+                "hubspot_owner_id": owner_id
             }
         }
         
@@ -325,7 +368,7 @@ Extract the following information:
 2. Does the user want to create a follow-up task? (yes/no)
 3. If follow-up requested, what is the due date? Calculate the actual date in YYYY-MM-DD format.
 4. Any additional notes or context for the follow-up task?
-
+5. If follow-up requested, is a specific owner mentioned for the follow-up task? Extract the full name or email if provided, otherwise empty string.
 Important:
  - If user only asks to mark as completed, ALWAYS create a follow-up task with due date 2 weeks from today: {(datetime.now(timezone.utc) + timedelta(weeks=2)).strftime("%Y-%m-%d")}
  - If the user explicitly says "no follow-up", then do not create a follow-up task.
@@ -337,7 +380,8 @@ Return ONLY valid JSON with NO additional text:
     "mark_completed": true/false,
     "create_followup": true/false,
     "followup_due_date": "YYYY-MM-DD",
-    "followup_notes": "any additional notes"
+    "followup_notes": "any additional notes",
+    "followup_owner_name": "name or email or ''"
 }}
 """
     
@@ -364,7 +408,8 @@ Return ONLY valid JSON with NO additional text:
         "mark_completed": analysis.get("mark_completed", False),
         "create_followup": analysis.get("create_followup", False),
         "followup_due_date": followup_due,
-        "followup_notes": analysis.get("followup_notes", "")
+        "followup_notes": analysis.get("followup_notes", ""),
+        "followup_owner_name": analysis.get("followup_owner_name", "")
     }
     
     kwargs['ti'].xcom_push(key="task_completion_analysis", value=result)
@@ -410,15 +455,19 @@ def process_task_completion(**kwargs):
         
         # Parse due date
         if due_date_str == "default":
-            due_date = None  # Will use default 2 weeks
+            due_date = None # Will use default 2 weeks
         else:
             try:
                 due_date = datetime.strptime(due_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
             except:
                 due_date = None
-        
-        followup_task = create_followup_task(original_task, due_date)
-        
+       
+        followup_task = create_followup_task(
+            original_task, 
+            due_date,
+            owner_name=analysis.get("followup_owner_name") if analysis.get("followup_owner_name") else None
+        )
+       
         if followup_task:
             results["followup_created"] = True
             results["followup_task_id"] = followup_task.get("id")
