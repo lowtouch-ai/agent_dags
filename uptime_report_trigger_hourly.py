@@ -1,13 +1,13 @@
 """
 uptime_report_trigger_hourly.py
-100% WORKING — NO MORE branch_task_ids ERROR
-Uses: Single PythonOperator → Triggers via Airflow API (official pattern)
+Updated version using trigger_dag_func for reliable concurrent triggers
+Uses: Single PythonOperator → Triggers via Airflow API with unique run_ids
 """
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.models import Variable
-from airflow.api.client.local_client import Client
+from airflow.api.common.trigger_dag import trigger_dag as trigger_dag_func
 from datetime import datetime
 import pendulum
 import json
@@ -40,9 +40,11 @@ def trigger_uptime_reports(**context):
         return
     logging.info(f"Loaded {len(clients)} clients for uptime report triggering")
     now_utc = pendulum.now("UTC")
-    client = Client(None, None)  # Local client (official)
+    parent_run_id = context['dag_run'].run_id  # Get parent run_id for uniqueness
 
     triggered = 0
+    trigger_index = 0  # Counter for unique run_ids
+    
     for c in clients:
         client_id = c.get("client_id", "unknown")
         tz = c.get("timezone", "UTC")
@@ -81,31 +83,40 @@ def trigger_uptime_reports(**context):
             monitor_id = str(monitor_id).strip()
             conf = {**base_conf, "monitor_id": monitor_id}
             if should_trigger_daily:
-                client.trigger_dag(
+                child_run_id = f"triggered__{parent_run_id}_daily_{trigger_index}"
+                trigger_dag_func(
                     dag_id="uptime_daily_data_report",
+                    run_id=child_run_id,
                     conf=conf,
-                    run_id=f"daily_{safe_name(client_id)}_{now_utc.format('YYYYMMDD_HHmmss')}"
+                    replace_microseconds=False,
                 )
-                logging.info(f"Triggered DAILY report to {name} for the monitor ({monitor_id})")
+                logging.info(f"Triggered DAILY report to {name} for monitor ({monitor_id}) with run_id: {child_run_id}")
                 triggered += 1
+                trigger_index += 1
 
             if should_trigger_weekly:
-                client.trigger_dag(
+                child_run_id = f"triggered__{parent_run_id}_weekly_{trigger_index}"
+                trigger_dag_func(
                     dag_id="uptime_weekly_data_report",
+                    run_id=child_run_id,
                     conf=conf,
-                    run_id=f"weekly_{safe_name(client_id)}_{now_utc.format('YYYYMMDD_HHmmss')}"
+                    replace_microseconds=False,
                 )
-                logging.info(f"Triggered WEEKLY report to {name} for the monitor ({monitor_id})")
+                logging.info(f"Triggered WEEKLY report to {name} for monitor ({monitor_id}) with run_id: {child_run_id}")
                 triggered += 1
+                trigger_index += 1
 
             if should_trigger_monthly:
-                client.trigger_dag(
+                child_run_id = f"triggered__{parent_run_id}_monthly_{trigger_index}"
+                trigger_dag_func(
                     dag_id="uptime_monthly_data_report",
+                    run_id=child_run_id,
                     conf=conf,
-                    run_id=f"monthly_{safe_name(client_id)}_{now_utc.format('YYYYMMDD_HHmmss')}"
+                    replace_microseconds=False,
                 )
-                logging.info(f"Triggered MONTHLY report to {name} for the monitor ({monitor_id})")
+                logging.info(f"Triggered MONTHLY report to {name} for monitor ({monitor_id}) with run_id: {child_run_id}")
                 triggered += 1
+                trigger_index += 1
 
     logging.info(f"Total reports triggered: {triggered}")
 
