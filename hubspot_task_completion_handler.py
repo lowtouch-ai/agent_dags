@@ -567,8 +567,9 @@ def send_confirmation_email(**kwargs):
                     font-size: 0.9em;
                 }}
                 ul {{
-                    list-style-type: none;
-                    padding-left: 0;
+                    list-style-type: disc;
+                    padding-left: 20px;
+                    margin: 10px 0;
                 }}
                 ul li {{
                     margin: 8px 0;
