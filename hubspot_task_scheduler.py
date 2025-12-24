@@ -129,43 +129,47 @@ def get_today_key(suffix=""):
         return f"{suffix}_{today}"
     return today
 
-def get_initiated_owners_today(ti):
-    """Get set of owner IDs who already had reminders initiated today"""
+def get_initiated_owners_today(ti, owner_id, owner_timezone):
+    """Check if this specific owner was initiated today in THEIR timezone"""
     try:
-        key = get_today_key("initiated_owners")
-        initiated_list = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=True, dag_id=ti.dag_id)
-        if initiated_list is not None:
-            initiated_set = set(initiated_list)
-            logging.info(f"Loaded {len(initiated_set)} initiated owner(s) from XCom")
-            return initiated_set
-        logging.info("No initiated owners found today (empty set)")
-        return set()
+        owner_tz = pytz.timezone(owner_timezone)
+        owner_local_date = datetime.now(timezone.utc).astimezone(owner_tz).strftime("%Y-%m-%d")
+        
+        key = f"initiated_owners_{owner_local_date}_{owner_id}"
+        
+        initiated = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=True, dag_id=ti.dag_id)
+        return initiated is not None
     except Exception as e:
-        logging.warning(f"Failed to load initiated owners: {e}")
-        return set()
+        logging.warning(f"Failed to check initiated status: {e}")
+        return False
 
-def mark_owner_initiated(ti, owner_id):
-    """Mark that daily reminders have been initiated for this owner today"""
+def mark_owner_initiated(ti, owner_id, owner_timezone):
+    """Mark that daily reminders have been initiated for this owner today (in their timezone)"""
     try:
-        key = get_today_key("initiated_owners")
-        current_initiated = list(get_initiated_owners_today(ti))
-        if owner_id not in current_initiated:
-            current_initiated.append(owner_id)
-            ti.xcom_push(key=key, value=current_initiated)
-            logging.info(f"Marked owner {owner_id} as initiated today (total: {len(current_initiated)})")
+        # Use owner's local date, not UTC
+        owner_tz = pytz.timezone(owner_timezone)
+        owner_local_date = datetime.now(timezone.utc).astimezone(owner_tz).strftime("%Y-%m-%d")
+        
+        key = f"initiated_owners_{owner_local_date}_{owner_id}"  # Include owner_id in key
+        
+        ti.xcom_push(key=key, value=True)
+        logging.info(f"Marked owner {owner_id} as initiated on {owner_local_date}")
     except Exception as e:
         logging.error(f"Failed to mark owner {owner_id} as initiated: {e}")
 
-def get_sent_reminders_today(ti):
-    """Safely get set of task IDs sent today - NO SQL"""
+def get_sent_reminders_today(ti, owner_id, owner_timezone):
+    """Get set of task IDs sent today for this owner in THEIR timezone"""
     try:
-        key = get_today_key("sent_reminders")
+        owner_tz = pytz.timezone(owner_timezone)
+        owner_local_date = datetime.now(timezone.utc).astimezone(owner_tz).strftime("%Y-%m-%d")
+        
+        key = f"sent_reminders_{owner_local_date}_{owner_id}"
 
         # Try current run XCom first
         sent_list = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=False)
         if sent_list is not None:
             sent_set = set(sent_list)
-            logging.info(f"📋 Loaded {len(sent_set)} sent reminder(s) from current run XCom")
+            logging.info(f" Loaded {len(sent_set)} sent reminder(s) for owner {owner_id} from current run")
             return sent_set
 
         # Try from previous DAG runs today (cross-run persistence)
@@ -177,29 +181,37 @@ def get_sent_reminders_today(ti):
         )
         if sent_list is not None:
             sent_set = set(sent_list)
-            logging.info(f"📋 Loaded {len(sent_set)} sent reminder(s) from prior runs today")
+            logging.info(f" Loaded {len(sent_set)} sent reminder(s) for owner {owner_id} from prior runs")
             return sent_set
 
-        logging.info("📋 No sent reminders found today (empty set)")
+        logging.info(f" No sent reminders found for owner {owner_id} today")
+        return set()
+
+    except Exception as e:
+        logging.warning(f"Failed to load sent reminders for owner {owner_id}: {e}")
         return set()
 
     except Exception as e:
         logging.warning(f"Failed to load sent reminders, treating as empty: {e}")
         return set()
 
-def mark_reminder_sent(ti, task_id):
-    """Atomically add task_id to today's sent list"""
+def mark_reminder_sent(ti, task_id, owner_id, owner_timezone):
+    """Mark that this task was sent today for this owner in THEIR timezone"""
     try:
-        key = get_today_key("sent_reminders")
-        current_sent = list(get_sent_reminders_today(ti))
+        owner_tz = pytz.timezone(owner_timezone)
+        owner_local_date = datetime.now(timezone.utc).astimezone(owner_tz).strftime("%Y-%m-%d")
+        
+        key = f"sent_reminders_{owner_local_date}_{owner_id}"
+        
+        current_sent = list(get_sent_reminders_today(ti, owner_id, owner_timezone))
         if task_id not in current_sent:
             current_sent.append(task_id)
             ti.xcom_push(key=key, value=current_sent)
-            logging.info(f"✓ Marked task {task_id} as sent today (total: {len(current_sent)})")
+            logging.info(f"✓ Marked task {task_id} as sent for owner {owner_id} on {owner_local_date} (total: {len(current_sent)})")
         else:
-            logging.debug(f"Task {task_id} already marked as sent today")
+            logging.debug(f"Task {task_id} already marked as sent for owner {owner_id}")
     except Exception as e:
-        logging.error(f"Failed to mark task {task_id} as sent: {e}")
+        logging.error(f"Failed to mark task {task_id} as sent for owner {owner_id}: {e}")
 
 def authenticate_gmail():
     """Authenticate Gmail API"""
@@ -248,6 +260,7 @@ def send_task_reminder_email(service, task, owner_info):
         owner_email = owner_info.get("email", "").strip()
         owner_first_name = owner_info.get("name", "User").split()[0].strip() or "there"
         owner_full_name = owner_info.get("name", "The HubSpot Assistant Team")
+        owner_timezone = owner_info.get("timezone", "America/New_York")
 
         if not owner_email:
             raise ValueError("Owner email missing")
@@ -258,11 +271,14 @@ def send_task_reminder_email(service, task, owner_info):
         # Task Name
         task_name = props.get("hs_task_subject", "").strip() or props.get("hs_task_body", "").strip().split('\n')[0][:100] or "Unnamed Task"
 
-        # Due Date - full date for display
+        # Due Date - full date for display - CHECK AGAINST OWNER'S LOCAL DATE
         due_date_ms = props.get("hs_timestamp")
         formatted_due = "Not specified"
         is_overdue = False
-        today_date = datetime.now(timezone.utc).date()
+        
+        # Use owner's local date for overdue check
+        owner_tz = pytz.timezone(owner_timezone)
+        owner_local_date = datetime.now(timezone.utc).astimezone(owner_tz).date()
 
         if due_date_ms:
             try:
@@ -270,8 +286,13 @@ def send_task_reminder_email(service, task, owner_info):
                     due_dt = datetime.fromisoformat(due_date_ms.replace('Z', '+00:00'))
                 else:
                     due_dt = datetime.fromtimestamp(int(due_date_ms) / 1000, tz=timezone.utc)
-                formatted_due = due_dt.strftime("%B %d, %Y")
-                if due_dt.date() < today_date:
+                
+                # Convert due date to owner's timezone for comparison
+                due_dt_owner_tz = due_dt.astimezone(owner_tz)
+                formatted_due = due_dt_owner_tz.strftime("%B %d, %Y")
+                
+                # Check if overdue based on owner's local date
+                if due_dt_owner_tz.date() < owner_local_date:
                     is_overdue = True
             except Exception as e:
                 logging.warning(f"Failed to parse due date: {e}")
@@ -318,7 +339,9 @@ def send_task_reminder_email(service, task, owner_info):
                         cd_dt = datetime.fromisoformat(close_date_raw.replace('Z', '+00:00'))
                     else:
                         cd_dt = datetime.fromtimestamp(int(close_date_raw) / 1000, tz=timezone.utc)
-                    close_date = cd_dt.strftime("%B %d, %Y")
+                    # Convert to owner's timezone
+                    cd_dt_owner_tz = cd_dt.astimezone(owner_tz)
+                    close_date = cd_dt_owner_tz.strftime("%B %d, %Y")
                 except:
                     close_date = ""
 
@@ -335,8 +358,7 @@ def send_task_reminder_email(service, task, owner_info):
             </li>
             """
 
-        # Recent Activity (Last 1 Month) - unified bullets for notes AND tasks
-                # Recent Activity (Last 1 Month) - clean text, no HTML wrappers
+        # Recent Activity (Last 1 Month) - clean text, no HTML wrappers
         activity_lines = []
         activities = sorted(
             task.get("activities", []),
@@ -350,7 +372,10 @@ def send_task_reminder_email(service, task, owner_info):
             act_date = ""
             if timestamp:
                 try:
-                    act_date = datetime.fromtimestamp(int(timestamp) / 1000).strftime("%B %d, %Y")
+                    act_dt = datetime.fromtimestamp(int(timestamp) / 1000, tz=timezone.utc)
+                    # Convert to owner's timezone
+                    act_dt_owner_tz = act_dt.astimezone(owner_tz)
+                    act_date = act_dt_owner_tz.strftime("%B %d, %Y")
                 except:
                     pass
             prefix = f"{act_date} - " if act_date else ""
@@ -364,7 +389,6 @@ def send_task_reminder_email(service, task, owner_info):
                     # Remove full <html><head>...</head><body>...</body></html> wrapper if present
                     if raw_body.lower().startswith("<html"):
                         # Simple extraction: find content between <body> and </body>
-                        import re
                         body_match = re.search(r'<body[^>]*>(.*?)</body>', raw_body, re.DOTALL | re.IGNORECASE)
                         if body_match:
                             cleaned = body_match.group(1).strip()
@@ -406,7 +430,6 @@ def send_task_reminder_email(service, task, owner_info):
                 content = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 activity_lines.append(f"<li>{prefix}{content}</li>")
 
-
         # AI Summary
         summary_html = task.get("summary_html", "").strip()
         if not summary_html:
@@ -415,7 +438,6 @@ def send_task_reminder_email(service, task, owner_info):
         # Subject: due today or overdue
         status_text = "overdue" if is_overdue else "due today"
 
-        # === ADD THIS ===
         subject = f"Task Reminder: \"{task_name}\" is {status_text}"
         if is_overdue:
             subject = f" OVERDUE: {subject}"
@@ -588,8 +610,6 @@ def check_delivery_window(ti, **context):
             logging.info("No owners found, skipping delivery window check")
             ti.xcom_push(key="in_delivery_window", value=False)
             return "skip_task_collection"
-
-        initiated_owners = get_initiated_owners_today(ti)
         holiday_config = get_holiday_countries()  # Load once
 
         current_utc = datetime.now(timezone.utc)
@@ -600,11 +620,13 @@ def check_delivery_window(ti, **context):
 
         for owner in owners:
             owner_id = owner.get("id")
-            if owner_id in initiated_owners:
+            tz_str = owner.get("timezone", "America/New_York")
+            
+            # CHANGE THIS - check per owner with their timezone
+            if get_initiated_owners_today(ti, owner_id, tz_str):
                 logging.info(f"⏭️  Owner {owner.get('name')} already initiated today - skipping")
                 continue
 
-            tz_str = owner.get("timezone", "America/New_York")
             owner_country = owner.get("country", "US")  # New field
 
             try:
@@ -646,20 +668,18 @@ def check_delivery_window(ti, **context):
         return "skip_task_collection"
 
 def collect_due_tasks(ti, **context):
+    """Collect tasks due today or overdue for each owner, using their local timezone"""
     owners = ti.xcom_pull(key="owners_to_process", default=[])
     if not owners:
         ti.xcom_push(key="tasks_by_owner", value={})
         return {}
 
+    # Mark all owners as initiated for today (in their timezone)
     for owner in owners:
-        mark_owner_initiated(ti, owner["id"])
+        mark_owner_initiated(ti, owner["id"], owner["timezone"])
 
-    sent_today = get_sent_reminders_today(ti)
+    sent_today = get_sent_reminders_today(ti, owner_id=None, owner_timezone=None)  # Get all sent today across owners
     now_utc = datetime.now(timezone.utc)
-    today_date = now_utc.date()
-    today_start = datetime(today_date.year, today_date.month, today_date.day, tzinfo=timezone.utc)
-    today_end = today_start + timedelta(days=1) - timedelta(seconds=1)
-    overdue_cutoff = today_start - timedelta(days=3)
     one_month_ago = now_utc - timedelta(days=30)
 
     tasks_by_owner = {}
@@ -672,20 +692,38 @@ def collect_due_tasks(ti, **context):
 
         logging.info(f"Collecting tasks for {owner_name}")
 
-        # Due today
+        # Calculate date boundaries in OWNER'S timezone
+        owner_tz = pytz.timezone(tz)
+        owner_local_now = now_utc.astimezone(owner_tz)
+        owner_local_date = owner_local_now.date()
+        
+        # Start of owner's local day (converted to UTC for API query)
+        owner_day_start = owner_tz.localize(
+            datetime(owner_local_date.year, owner_local_date.month, owner_local_date.day)
+        ).astimezone(timezone.utc)
+        
+        # End of owner's local day (converted to UTC for API query)
+        owner_day_end = owner_day_start + timedelta(days=1) - timedelta(seconds=1)
+        
+        # Overdue cutoff: 3 days before owner's local day start
+        owner_overdue_cutoff = owner_day_start - timedelta(days=3)
+
+        logging.info(f"Owner {owner_name} local date: {owner_local_date}, UTC range: {owner_day_start} to {owner_day_end}")
+
+        # Due today (in owner's timezone)
         filters_today = [
             {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": owner_id},
             {"propertyName": "hs_task_status", "operator": "NOT_CONTAINS_TOKEN", "value": "COMPLETED"},
-            {"propertyName": "hs_timestamp", "operator": "GTE", "value": int(today_start.timestamp() * 1000)},
-            {"propertyName": "hs_timestamp", "operator": "LTE", "value": int(today_end.timestamp() * 1000)}
+            {"propertyName": "hs_timestamp", "operator": "GTE", "value": int(owner_day_start.timestamp() * 1000)},
+            {"propertyName": "hs_timestamp", "operator": "LTE", "value": int(owner_day_end.timestamp() * 1000)}
         ]
         today_resp = search_hubspot_tasks(owner_id, filters_today)
 
-        # Overdue >3 days
+        # Overdue >3 days (before owner's local day)
         filters_overdue = [
             {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": owner_id},
             {"propertyName": "hs_task_status", "operator": "NOT_CONTAINS_TOKEN", "value": "COMPLETED"},
-            {"propertyName": "hs_timestamp", "operator": "LT", "value": int(overdue_cutoff.timestamp() * 1000)}
+            {"propertyName": "hs_timestamp", "operator": "LT", "value": int(owner_overdue_cutoff.timestamp() * 1000)}
         ]
         overdue_resp = search_hubspot_tasks(owner_id, filters_overdue)
 
@@ -786,7 +824,7 @@ def send_spaced_reminders(ti, **context):
 
             # Mark as sent if successful
             if result.get("success"):
-                mark_reminder_sent(ti, task_id)
+                mark_reminder_sent(ti, task_id, owner_info["id"], owner_info["timezone"])
 
             sent_reminders.append(result)
 
