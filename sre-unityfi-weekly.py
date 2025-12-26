@@ -180,7 +180,7 @@ def fetch_all_metrics_previous_week(ti):
 def generate_engine_master_comparison(ti, **context):
     """
     Pulls this_week and previous_week metrics and generates:
-    Appz-Engine-Master Metrics
+    Cloud Orbit Metrics
     Metric         | This week | Previous Week | Difference |
     ---------------|-----------|---------------|------------|
     CPU Usage      | 12.45%    | 10.81%        | +1.64%     |
@@ -221,7 +221,7 @@ def generate_engine_master_comparison(ti, **context):
         sign = "+" if d > 0 else ""
         return f"{sign}{d:.2f}%"
 
-    markdown = "### Appz-Engine-Master Metrics\n\n"
+    markdown = "### Cloud Orbit Metrics\n\n"
     markdown += "| Metric         | This Week     | Previous Week | Difference   |\n"
     markdown += "|----------------|---------------|---------------|--------------|\n"
     markdown += f"| CPU Usage      | {fmt(cpu_this)} | {fmt(cpu_prev)} | {diff(cpu_this, cpu_prev)} |\n"
@@ -311,7 +311,7 @@ def generate_windows_vm_wow_comparison(ti, **context):
     markdown += "\n"
 
     # === Disk Table ===
-    markdown += "#### Disk Utilization – This Week\n"
+    markdown += "#### Disk Utilization\n"
     markdown += "| VM Name       | C Disk (%) | D Disk (%) | E Disk (%) | F Disk (%) |\n"
     markdown += "|---------------|------------|------------|------------|------------|\n"
 
@@ -513,10 +513,10 @@ Generate a **Weekly SRE Summary (Current Status)** for: **{period}**.
 
 ### Context Data:
 
-#### 1. Appz-Engine-Master
-{engine_master}
-#### 2. Windows VMs
+#### 1. Windows VMs
 {windows_wow}
+#### 2. Cloud Orbit
+{engine_master}
 
 #### 3. High CPU Peaks (≥90%)
 {high_cpu_peaks}
@@ -559,7 +559,7 @@ You are the SRE Unityfi Agent.
 Review the comparison metrics below for the week of **{period}**.
 
 ### Comparison Data:
-#### 1. Appz-Engine-Master Metrics
+#### 1. Cloud Orbit Metrics
 {engine_master}
 
 #### 2. Windows VM Metrics
@@ -588,7 +588,7 @@ def compile_sre_report(ti, **context):
     period = ti.xcom_pull(key="period_this_week")
 
     report = f"""# Weekly SRE Report – Unityfi Platform
-**Period**: {period} (Thursday 11:00 AM → Thursday 11:00 AM IST)  
+**Period**: {period}  
 
 ---
 
@@ -596,7 +596,7 @@ def compile_sre_report(ti, **context):
 
 ---
 
-## 1. Appz-Engine-Master Metrics (This Week vs Previous Week)
+## 1. Cloud Orbit Metrics (This Week vs Previous Week)
 {ti.xcom_pull(key="section_engine_master") or "No data"}
 
 ---
@@ -606,7 +606,7 @@ def compile_sre_report(ti, **context):
 
 ---
 
-## 3. Alerting: High Resource Peaks This Week
+## 3. Alerting: High Resource Peaks
 {ti.xcom_pull(key="section_high_cpu_peaks") or "No data"}
 
 {ti.xcom_pull(key="section_high_memory_peaks") or "No data"}
@@ -1053,7 +1053,7 @@ def generate_pdf_report_callable(ti=None, **context):
 
 with DAG(
     dag_id="sre-unityfi_weekly",
-    schedule_interval="0 11 * * 4",  # Every Thursday at 11:00 AM IST
+    schedule_interval="30 05 * * 4",  # Every Thursday at 11:00 AM IST
     start_date=datetime(2025, 1, 1),
     catchup=False,
     default_args=default_args,
@@ -1079,6 +1079,6 @@ with DAG(
     # Execution order
     [fetch_this, fetch_prev] >> gen_engine >> gen_windows >> gen_cpu_peaks >> gen_mem_peaks >> gen_disk_peaks
     [gen_engine, gen_windows, gen_cpu_peaks, gen_mem_peaks, gen_disk_peaks] >> ai_summary
-    ai_summary >> compile_report >> generate_pdf >> convert_to_html >> send_sre_email
+    ai_summary >> ai_conclusion >> compile_report >> generate_pdf >> convert_to_html >> send_sre_email
 
 
