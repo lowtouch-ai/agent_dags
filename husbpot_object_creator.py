@@ -995,7 +995,9 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
 
 def create_contacts(ti, **context):
-    """Create new contacts in HubSpot with full retry logic and clean error handling"""
+    """Create new contacts in HubSpot with full retry logic.
+    Now safely skips contacts that already exist (detected by email from search results)."""
+    
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_contacts = analysis_results.get("entities_to_create", {}).get("contacts", [])
     chat_history = ti.xcom_pull(key="chat_history", default=[])
@@ -1008,27 +1010,56 @@ def create_contacts(ti, **context):
 
     logging.info(f"=== CREATE CONTACTS - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="contact_creation_status")
-    previous_response = ti.xcom_pull(key="contact_creation_response")
-    is_retry = current_try > 1
+    # === Load search results to know which contacts already exist ===
+    # search_results comes from the search DAG and is passed in dag_run.conf
+    dag_run_conf = context['dag_run'].conf or {}
+    search_results = dag_run_conf.get("search_results", {})
 
-    if not to_create_contacts:
-        logging.info("No contacts to create")
-        result = {
+    # Build a set of existing contact emails (case-insensitive)
+    existing_contact_emails = set()
+    for contact in search_results.get("contact_results", {}).get("results", []):
+        email = contact.get("email", "").strip().lower()
+        if email:
+            existing_contact_emails.add(email)
+
+    # === FILTER: Remove contacts whose email already exists ===
+    filtered_contacts = []
+    skipped_contacts = []
+    for contact in to_create_contacts:
+        email = contact.get("email", "").strip().lower()
+        if email and email in existing_contact_emails:
+            skipped_contacts.append(contact)
+            logging.info(f"Skipping contact creation - already exists: {email}")
+        else:
+            filtered_contacts.append(contact)
+
+    logging.info(
+        f"Contact creation filter: {len(to_create_contacts)} requested → "
+        f"{len(filtered_contacts)} to create → {len(skipped_contacts)} skipped (duplicates)"
+    )
+
+    # If nothing left to create → success (no error)
+    if not filtered_contacts:
+        logging.info("All requested contacts already exist → nothing to create")
+        success_result = {
             "created_contacts": [],
-            "contacts_errors": [],
+            "contacts_errors": [f"Skipped {len(skipped_contacts)} duplicate contacts"],
             "contact_creation_status": {"status": "success"},
-            "contact_creation_response": {"status": "success", "created_contacts": [], "errors": []},
+            "contact_creation_response": {
+                "status": "success",
+                "created_contacts": [],
+                "errors": [f"Skipped {len(skipped_contacts)} duplicates"]
+            },
             "contact_creation_final_status": "success"
         }
-        for k, v in result.items():
+        for k, v in success_result.items():
             ti.xcom_push(key=k, value=v)
         return []
 
     # Inject owner info
     contact_owner_id = owner_info.get("contact_owner_id", DEFAULT_OWNER_ID)
     contact_owner_name = owner_info.get("contact_owner_name", DEFAULT_OWNER_NAME)
-    for contact in to_create_contacts:
+    for contact in filtered_contacts:
         contact.setdefault("contactOwnerName", contact_owner_name)
         contact.setdefault("contactOwnerId", contact_owner_id)
 
@@ -1036,7 +1067,8 @@ def create_contacts(ti, **context):
     base_prompt = f"""Create contacts in HubSpot.
 
 Contact Details to Create:
-{json.dumps(to_create_contacts, indent=2)}
+{json.dumps(filtered_contacts, indent=2)}
+
 Contact Owner: {contact_owner_name} (ID: {contact_owner_id})
 
 Steps:
@@ -1064,7 +1096,11 @@ Return ONLY this JSON structure (no other text):
     "reason": "error description if status is failure"
 }}"""
 
-    # === Retry Prompt (enhanced with previous failure) ===
+    # === Retry Prompt (with previous failure context) ===
+    previous_status = ti.xcom_pull(key="contact_creation_status")
+    previous_response = ti.xcom_pull(key="contact_creation_response")
+    is_retry = current_try > 1
+
     if is_retry:
         logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try}/{max_tries})")
 
@@ -1083,7 +1119,7 @@ This is retry attempt {current_try} of {max_tries}.
 Please fix the issue and correctly create the contacts.
 
 Contacts to Create:
-{json.dumps(to_create_contacts, indent=2)}
+{json.dumps(filtered_contacts, indent=2)}
 
 {base_prompt}
 
@@ -1116,7 +1152,7 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         # === SUCCESS ===
         result = {
             "created_contacts": created_contacts,
-            "contacts_errors": errors,
+            "contacts_errors": errors + [f"Skipped {len(skipped_contacts)} duplicates"],
             "contact_creation_status": {"status": "success"},
             "contact_creation_response": parsed,
             "contact_creation_final_status": "success"
@@ -1125,7 +1161,7 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         for k, v in result.items():
             ti.xcom_push(key=k, value=v)
 
-        logging.info(f"SUCCESS: Created {len(created_contacts)} contacts on attempt {current_try}")
+        logging.info(f"SUCCESS: Created {len(created_contacts)} contacts (skipped {len(skipped_contacts)} duplicates) on attempt {current_try}")
         return created_contacts
 
     except json.JSONDecodeError as e:
@@ -1140,7 +1176,7 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         status_type = "final_failure" if is_final else "failure"
         fallback = {
             "created_contacts": [],
-            "contacts_errors": [error_msg],
+            "contacts_errors": [error_msg] + [f"Skipped {len(skipped_contacts)} duplicates"],
             "contact_creation_status": {"status": status_type, "reason": error_msg},
             "contact_creation_response": {"raw_response": response} if response else None,
             "contact_creation_final_status": "failed" if is_final else "retrying"
