@@ -468,7 +468,7 @@ def categorize_prompt(ti, **context):
 
         1. Ask for Details - The user is requesting a detailed explanation, clarification, or deeper insight into a specific piece of information, metric, query, or finding from the report or context. Examples: "Explain why this query has high slot usage?", "What does the peak memory usage mean in this context?", "Provide more details on the recommended partitioning for the order table."
 
-        2. Resource Focus - The user is inquiring about resource-related metrics, such as execution counts, slot usage, memory usage, data scanned, or related performance indicators. This includes questions on trends, peaks, averages, or comparisons of these metrics. Examples: "What was the average slot usage last hour?", "How many queries exceeded 10 seconds execution time?", "Compare memory usage across queries."
+        2. Cost Analysis - The user is inquiring about cost-related metrics such as bytes processed, bytes billed, estimated cost, on-demand vs flat-rate pricing impact, or cost trends over time. This includes requests for cost breakdowns, savings opportunities, or optimization recommendations. Examples: "How much did this query cost?", "Can you estimate the $$ savings when I apply the recommendations assuming that these calls are each executed 3000 times a day", .. etc
 
         3. Non-Relevant Questions - The query does not fit into the above categories, is unrelated to BigQuery SRE metrics/analysis/optimization, or is invalid/incomplete in the BigQuery context (e.g., off-topic, vague without context, or not actionable). Examples: "What's the weather today?", "Tell me a joke", "How to install Airflow? ".
 
@@ -479,7 +479,10 @@ def categorize_prompt(ti, **context):
     # Pass history without the current message
     response = get_ai_response(cat_prompt, history[:-1] if len(history) > 1 else [])
     logging.info(f"AI response that we got is : {response}")
-    category = response.strip()
+    # Extract the category as a digit from the response
+    match = re.search(r'\b[1-3]\b', response)
+    logging.info(f"matching text is : {match}")
+    category = match.group(0) if match else '1'  # Default to '1' if no valid category is found
     if category not in ['1', '2', '3']:
         logging.info("random category provided")
         category = '1'  # Fallback
@@ -580,15 +583,74 @@ def usage_analyzer(ti, **context):
     prompt = ti.xcom_pull(key="current_prompt")
     sender_name = ti.xcom_pull(key="sender_name")
     usage_prompt = f"""
-    The user asked: {prompt}
-    Provide a detailed analysis of the requested BigQuery SRE metrics, focusing on execution count and slot usage based on the report.
-    Structure the response as a reply email starting with a greeting (eg : Hi {sender_name} ), followed by a detailed explanation, and include a list of findings formatted as bullet points.
-    Ensure the response is clear, concise, and formatted appropriately for an email body.
-    ends the email body with 
-    Thanks,
-    
-    BigQuery SRE agent @lowtouch.ai
-    """
+        You are a **BigQuery Cost Analyst AI** at **lowtouch.ai**.
+
+        The user asked: {prompt}
+
+        Goal: Send a concise, **mathematically correct cost-savings email** that shows:
+        (1) Savings for the **current small workload**, and
+        (2) A **concrete assumed larger-scale example** (not multipliers), using explicit per-query bytes and slot usage.
+
+        ----------------
+        Billing Logic
+        ----------------
+        - If billing model is unknown, default to **on-demand** ($6 per **TiB** scanned; 1 TiB = 1024 GiB; 1 GiB = 1024 MiB).  
+        If a different rate is given (e.g., regional discount or $5/TB legacy), use that.
+        - If the SRE context indicates **capacity/editions (slot-based)** billing and slot/runtime metrics exist, also show a **slot-hours** view using these edition prices **if exact price is not provided**:
+        • Standard: $0.04/slot-hour • Enterprise: $0.06/slot-hour • Enterprise Plus: $0.10/slot-hour
+        - Bytes-scanned drives on-demand cost; **slot-hours** (concurrency × runtime) drive capacity cost.
+
+        ----------------
+        What to Calculate
+        ----------------
+        A) **Current Workload (Small-Scale)**
+        - Inputs (use actuals if given): queries/day, bytes/query, efficiency gain (% reduction from optimizations).
+        - On-demand: show **before vs after** daily & annual costs and savings with explicit unit conversions (MB→GB→TiB).
+        - If slot/runtime metrics AND capacity billing context exist, also show slot-based before vs after (daily & annual).
+            • If only bytes-reduction% is known, assume slot-ms (or slot-hours) reduce by the same % unless better signals are present.
+
+        B) **Assumed Larger-Scale Example (Concrete, not multipliers)**
+        - Write a clearly labeled example block with **explicit assumptions**, e.g.:
+            **Estimated Cost Savings (Assumed Larger-Scale Example):**
+            - **Assumptions**: Provide all assumptions as a single paragraph, including (change if better org defaults exist):
+            • Per-query bytes (e.g., assume 10 GB/query if not specified, to reflect a larger enterprise workload).  
+            • Query frequency (e.g., mentioned query or a high volume query count for a high-volume BigQuery user).  
+            • Efficiency gain after optimizations (e.g., 40% or use % from SRE report).  
+            • On-demand rate (e.g., $6/TiB; override if org rate differs).  
+            • Capacity (if applicable): assume avg runtime (e.g., 60s/query) at concurrent slots (e.g., 200; edit if real slot/run data exists).
+            - Provide calculations as bullet points showing transparent steps (no hidden steps) and round sensibly:
+            • For **on-demand math**: Calculate current daily bytes, current daily cost, after reduction bytes and cost, then daily and annual savings.
+            • For **capacity (slot-based) math** (if applicable): Calculate slot-seconds/query, slot-hours/query, current slot-hours/day, cost/day (show range for edition prices if unknown), after reduction slot-hours/day (reduce by efficiency gain % or use measured runtime deltas if available), then daily and annual savings for each edition price.
+        ----------------
+        What to Write (Email format)
+        ----------------
+        Start:
+        Hi {sender_name},
+
+        Sections:
+        1) **Executive Summary** — one paragraph with the headline daily & annual savings for the current workload (small) and the **assumed larger-scale example**.
+        2) **Current Scenario** — inputs and before/after costs (on-demand; add slot-based if applicable).
+        3) **After Optimization** — list key actions (partitioning, clustering, selective filters, query refactor/materialized views if relevant) and efficiency%.
+        4) **Cost Savings** — bullet/table with formulas and results (daily & annual).
+        5) **Assumed Larger-Scale Example** — the concrete example block above (on-demand and, if applicable, capacity).
+        6) **Notes**
+        - If current total < $1/day or < $100/year, add:
+            *Note: The current dataset is small, so visible savings are modest. In production, the same optimizations yield materially larger savings.*
+        - Clarify pricing drivers (bytes for on-demand; slot-hours for capacity).
+
+        End with:
+        Thanks,
+
+        BigQuery SRE Agent @lowtouch.ai
+
+        ----------------
+        Quality Bar
+        ----------------
+        - All numbers must be **internally consistent** with explicit unit conversions. 
+        - If any input is missing, **state the assumption** clearly and proceed.
+        - Prefer simple, readable math for the assumed section so non-SRE readers can follow.
+        - Use American English spelling and grammar.
+        """
     response = get_ai_response(usage_prompt,history)
     ti.xcom_push(key="analysis_report", value=response)
     return response
