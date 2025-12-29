@@ -17,6 +17,7 @@ from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 from airflow.models import Variable
 from airflow.api.common.trigger_dag import trigger_dag
+import requests
 
 
 # Configure logging
@@ -32,6 +33,8 @@ default_args = {
 HUBSPOT_FROM_ADDRESS = Variable.get("ltai.v3.hubspot.from.address")
 GMAIL_CREDENTIALS = Variable.get("ltai.v3.hubspot.gmail.credentials")
 OLLAMA_HOST = Variable.get("ltai.v3.hubspot.ollama.host","http://agentomatic:8000")
+HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")
+HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
 TASK_THRESHOLD = 15
 def authenticate_gmail():
     try:
@@ -935,782 +938,621 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
     return parsed_json
 
-def search_deals(ti, **context):
-    """Search for deals based on conversation context with retry support"""
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
-    if not entity_flags.get("search_deals", True):
-        logging.info(f"Skipping deals search: {entity_flags.get('deals_reason', 'Not mentioned')}")
-        default_result = {
-            "deal_results": {"total": 0, "results": []},
-            "new_deals": []
-        }
-        ti.xcom_push(key="deal_info", value=default_result)
-        return
-
-    # Get retry context
-    task_instance = context['task_instance']
-    current_try = task_instance.try_number
-    max_tries = task_instance.max_tries  # Usually set via retries= in DAG
-
-    logging.info(f"=== SEARCH DEALS - Attempt {current_try}/{max_tries} ===")
-
-    # Fetch previous failure info for retry prompt
-    previous_status = ti.xcom_pull(key="deal_search_status")
-    previous_response = ti.xcom_pull(key="deal_search_response")
-
-    is_retry = current_try > 1
-
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
-    owner_info = ti.xcom_pull(key="owner_info", default={})
-    deal_stage_info = ti.xcom_pull(key="deal_stage_info", default={"deal_stages": []})  # ADD THIS
+def search_contacts_api(firstname=None, lastname=None, email=None):
+    """Search contacts in HubSpot using API
     
-    deal_owner_id = owner_info.get('deal_owner_id', '71346067')
-    deal_owner_name = owner_info.get('deal_owner_name', 'Kishore')
-    
-    # Create mapping of deal stages
-    deal_stage_mapping = {}
-    for stage_info in deal_stage_info.get('deal_stages', []):
-        deal_name = stage_info.get('deal_name', '')
-        if deal_name:
-            deal_stage_mapping[deal_name] = {
-                'validated_stage': stage_info.get('validated_stage', 'Lead'),
-                'original_stage': stage_info.get('original_stage', ''),
-                'stage_message': stage_info.get('stage_message', '')
-            }
-    
-    base_prompt = f"""You are a HubSpot Deal Intelligence Assistant. Your role is to analyze the email conversation and:
-
-1. **Search** for existing deals by extracting and matching deal names.
-2. **Suggest** new deal drafts **only when the email clearly expresses intent to move forward** (e.g., pricing, timeline, commitment).
-3. **You cannot create deals in HubSpot** — you only return structured suggestions for human review.
-
----
-
-LATEST USER MESSAGE:
-{latest_message}
-
-Validated Deal Owner ID: {deal_owner_id}
-Validated Deal Owner Name: {deal_owner_name}
-
-VALIDATED DEAL STAGES:
-{json.dumps(deal_stage_mapping, indent=2)}
-
-IMPORTANT: 
-- Respond with ONLY a valid JSON object. No explanations, no markdown, no other text.
-- Always validate `step 2` before proceeding to `step 3`.
-- For new deals, use the validated_stage from the VALIDATED DEAL STAGES mapping if the deal name matches.
-- If no match found in mapping, default to 'Lead'.
-
-Steps:
-1. Search for existing deals using the deal name extracted from the email content.
-2. Parsing and searching for deals:
-   - If the user explicitly provides a **deal name**, use that exact deal name (or a close match) as the search query with the `search_deals` tool.
-   - If no deal name is directly provided, extract relevant identifiers and search as follows:
-        1. If a **contact name** (person) is mentioned → call `search_deals` using that contact's ID.
-        2. If a **company name** is mentioned → call `search_deals` using that company ID.
-        3. If both contact and company are mentioned:
-            - Perform two separate `search_deals` calls (one with the contact, one with the company).
-            - Identify deals that appear in **both** result sets (intersection).
-            - If multiple common deals exist, include in deal_results.
-   - Always prefer an exact or direct deal name when available over inferred searches via contact or company.
-3. If deals are found, include them in 'deal_results' with: dealId, dealName, dealLabelName (e.g., 'Appointment Scheduled' for stage 'appointmentscheduled'), dealAmount, closeDate, dealOwnerName.
-4. If no deals are found, then new_deals may only be proposed if below 5 points are validated:
-            a) User explicitly mentions creating a deal, opportunity, or sale
-            b) User states the client/contact is interested in moving forward with a purchase, contract, or agreement
-            c) User mentions pricing discussions, proposals sent, quotes provided, or contract negotiations
-            d) User indicates a clear buying intent from the client (e.g., "they want to proceed", "ready to sign", "committed to purchase")
-            e) User is not creating any followup enitites for existing deals.
-    otherwise, new_deals must be an empty list.
-
-5. Strictly follow these rules, for new deal names, :
-   - Extract the Client Name (company or individual being sold to) from the email.
-   - Check if it's a direct deal (no partner) or partner deal (partner or intermediary mentioned).
-   - Direct deal: <Client Name>-<Deal Name>
-   - Partner deal: <Partner Name>-<Client Name>-<Deal Name>
-   - Use the Deal Name from the email if specified; otherwise, create a concise one based on the description (e.g., product or service discussed).
-
-6. For new deals:
-   - Use the validated deal owner name in dealOwnerName.
-   - **For dealLabelName**: Check VALIDATED DEAL STAGES mapping for the deal name. If found, use validated_stage. If not found, use 'Lead'.
-
-7. Propose an additional new deal if the email explicitly requests opening a second deal, even if one exists.
-8. Always use default closeDate 90 days from today, if not specified in YYYY-MM-DD format.
-9. Always use the default deal amount as 5000 if not specified.
-10. Fill all fields in the JSON. Use empty string "" for any missing values.
-
-Return exactly this JSON structure:
-{{
-    "deal_results": {{
-        "total": 0,
-        "results": [
-            {{
-                "dealId": "deal_id",
-                "dealName": "deal_name",
-                "dealLabelName": "deal_stage",
-                "dealAmount": "amount",
-                "closeDate": "close_date",
-                "dealOwnerName": "owner_name"
-            }}
-        ]
-    }},
-    "new_deals": [
-        {{
-            "dealName": "<Client Name>-<Deal Name>" OR "<Partner Name>-<Client Name>-<Deal Name>",
-            "dealLabelName": "validated_stage_from_mapping_or_Lead",
-            "dealAmount": "proposed_amount",
-            "closeDate": "proposed_close_date",
-            "dealOwnerName": "{deal_owner_name}"
-        }}
-    ]
-}}
-
-RESPOND WITH ONLY THE JSON OBJECT."""
-
-
-    if is_retry:
-        logging.info(f"RETRY ATTEMPT {current_try}/{max_tries} - Using retry prompt")
-
-        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
-        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
-
-        prompt = f"""PREVIOUS ATTEMPT TO SEARCH DEALS FAILED.
-
-Previous AI Response:
-{prev_resp_str}
-
-Failure Reason: {prev_reason}
-
-This is retry attempt {current_try} of {max_tries}.
-
-Please carefully re-analyze the latest message and correctly return the deal search results.
-
-Latest Message:
-{latest_message}
-
-{base_prompt}
-
-CRITICAL: You MUST return a valid JSON object matching the exact schema above.
-Fix any parsing errors, missing fields, or incorrect logic from the previous attempt."""
-    else:
-        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
-        prompt = base_prompt
-
-    response = None
+    Search priority:
+    - If email is provided → exact match on email
+    - If both firstname and lastname → exact match on both (AND)
+    - If only firstname → search by firstname using CONTAINS_TOKEN (fuzzy match)
+    - If only lastname → not supported (to avoid irrelevant results)
+    - EXCLUDE deal owners mentioned with "assign to", "owner", or similar assignment language
+    - EXCLUDE internal team members, senders, or system users (e.g., skip "From: John Doe <john@company.com>")
+    - EXCLUDE names that are clearly role/department indicators in parentheses like "(Ops)", "(Finance)", "(IT)"
+ 
+    """
     try:
-        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-        logging.info(f"Raw AI response for deals: {response[:1000]}...")
-
-        # Parse JSON
-        parsed_json = json.loads(response.strip())
-
-        # Validate basic structure
-        if not isinstance(parsed_json, dict) or "deal_results" not in parsed_json:
-            raise ValueError("Response missing 'deal_results' key")
-
-        # Success — push results
-        result = {
-            "deal_info": parsed_json,
-            "deal_search_status": {"status": "success"},
-            "deal_search_response": parsed_json
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/contacts/search"
+        headers = {
+            "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+            "Content-Type": "application/json"
         }
-
-        for key, value in result.items():
-            ti.xcom_push(key=key, value=value)
-
-        logging.info(f"Deals search SUCCEEDED on attempt {current_try}: "
-                     f"{parsed_json['deal_results']['total']} existing, "
-                     f"{len(parsed_json.get('new_deals', []))} new suggested")
-        return parsed_json
-
-    except json.JSONDecodeError as e:
-        error_msg = f"Invalid JSON from AI: {e}\nRaw: {response}"
-        logging.error(error_msg)
-        raise Exception(error_msg)
-    except Exception as e:
-        error_msg = str(e) or "Unknown error in deal search"
-        is_final_attempt = current_try >= max_tries
-
-        status_type = "final_failure" if is_final_attempt else "failure"
-        result = {
-            "deal_info": {
-                "deal_results": {"total": 0, "results": []},
-                "new_deals": []
-            },
-            "deal_search_status": {"status": status_type, "reason": error_msg},
-            "deal_search_response": {"raw_response": response} if response else None
-        }
-
-        for key, value in result.items():
-            ti.xcom_push(key=key, value=value)
-
-        if is_final_attempt:
-            logging.error(f"FINAL FAILURE in search_deals after {max_tries} attempts: {error_msg}")
-            raise  # Mark task as failed
+        
+        filters = []
+        
+        # Priority 1: Email exact match (if provided)
+        if email:
+            filters.append({
+                "propertyName": "email",
+                "operator": "CONTAINS_TOKEN",
+                "value": email.strip().lower()  # HubSpot emails are case-insensitive
+            })
         else:
-            logging.warning(f"search_deals failed (attempt {current_try}/{max_tries}) → will retry")
-            raise
+            # Priority 2: Both first and last name → require both (AND)
+            if firstname and lastname:
+                filters.extend([
+                    {
+                        "propertyName": "firstname",
+                        "operator": "CONTAINS_TOKEN",
+                        "value": firstname.strip()
+                    },
+                    {
+                        "propertyName": "lastname",
+                        "operator": "CONTAINS_TOKEN",
+                        "value": lastname.strip()
+                    }
+                ])
+            # Priority 3: Only firstname → use CONTAINS_TOKEN for broader match
+            elif firstname:
+                filters.append({
+                    "propertyName": "firstname",
+                    "operator": "CONTAINS_TOKEN",
+                    "value": firstname.strip()
+                })
+            # If only lastname is provided → do nothing (avoid poor results)
+            elif lastname:
+                logging.info("Search by lastname only is not supported. Requires firstname or email.")
+                return {"total": 0, "results": []}
+            else:
+                return {"total": 0, "results": []}
+        
+        payload = {
+            "filterGroups": [{"filters": filters}],
+            "properties": [
+                "hs_object_id", "firstname", "lastname", "email", 
+                "phone", "address", "jobtitle", "hubspot_owner_id"
+            ],
+            "sorts": [{"propertyName": "lastmodifieddate", "direction": "DESCENDING"}],
+            "limit": 10
+        }
+        
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        
+        data = response.json()
+        results = data.get("results", [])
+        
+        formatted_results = []
+        for contact in results:
+            props = contact.get("properties", {})
+            formatted_results.append({
+                "contactId": contact.get("id"),
+                "firstname": props.get("firstname", ""),
+                "lastname": props.get("lastname", ""),
+                "email": props.get("email", ""),
+                "phone": props.get("phone", ""),
+                "address": props.get("address", ""),
+                "jobtitle": props.get("jobtitle", ""),
+                "contactOwnerId": props.get("hubspot_owner_id", "")
+            })
+        
+        search_desc = email or f"{firstname or ''} {lastname or ''}".strip()
+        logging.info(f"Found {len(formatted_results)} contacts for search: {search_desc}")
+        return {"total": len(formatted_results), "results": formatted_results}
+        
+    except requests.exceptions.HTTPError as http_err:
+        logging.error(f"HTTP error during contact search: {http_err} - {response.text}")
+        return {"total": 0, "results": []}
+    except Exception as e:
+        logging.error(f"Failed to search contacts: {e}")
+        return {"total": 0, "results": []}
 
-def search_contacts(ti, **context):
-    """Search for contacts based on conversation context with retry support"""
+
+def get_contact_associations(contact_id, association_type="companies"):
+    """Get associated companies or deals for a contact"""
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v4/objects/contacts/{contact_id}/associations/{association_type}"
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+        
+        response = requests.get(endpoint, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        results = response.json().get("results", [])
+        associated_ids = [result.get("toObjectId") for result in results if result.get("toObjectId")]
+        
+        logging.info(f"Contact {contact_id} has {len(associated_ids)} associated {association_type}")
+        return associated_ids
+        
+    except Exception as e:
+        logging.error(f"Failed to get associations for contact {contact_id}: {e}")
+        return []
+
+
+def get_company_details(company_id):
+    """Get company details by ID"""
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/companies/{company_id}"
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+        
+        properties = [
+            "hs_object_id", "name", "domain", "address", "city", 
+            "state", "zip", "country", "phone", "description", "type"
+        ]
+        props_param = "&".join([f"properties={p}" for p in properties])
+        
+        response = requests.get(f"{endpoint}?{props_param}", headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        company = response.json()
+        props = company.get("properties", {})
+        
+        return {
+            "companyId": company.get("id"),
+            "name": props.get("name", ""),
+            "domain": props.get("domain", ""),
+            "address": props.get("address", ""),
+            "city": props.get("city", ""),
+            "state": props.get("state", ""),
+            "zip": props.get("zip", ""),
+            "country": props.get("country", ""),
+            "phone": props.get("phone", ""),
+            "description": props.get("description", ""),
+            "type": props.get("type", "")
+        }
+        
+    except Exception as e:
+        logging.error(f"Failed to get company {company_id}: {e}")
+        return None
+
+
+def get_deal_details(deal_id):
+    """Get deal details by ID"""
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/deals/{deal_id}"
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+        
+        properties = [
+            "hs_object_id", "dealname", "dealstage", "amount", 
+            "closedate", "hubspot_owner_id"
+        ]
+        props_param = "&".join([f"properties={p}" for p in properties])
+        
+        response = requests.get(f"{endpoint}?{props_param}", headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        deal = response.json()
+        props = deal.get("properties", {})
+        
+        # Get stage label
+        stage_id = props.get("dealstage", "")
+        stage_label = get_deal_stage_label(stage_id)
+        
+        return {
+            "dealId": deal.get("id"),
+            "dealName": props.get("dealname", ""),
+            "dealLabelName": stage_label,
+            "dealAmount": props.get("amount", ""),
+            "closeDate": props.get("closedate", ""),
+            "dealOwnerId": props.get("hubspot_owner_id", "")
+        }
+        
+    except Exception as e:
+        logging.error(f"Failed to get deal {deal_id}: {e}")
+        return None
+
+
+def get_deal_stage_label(stage_id):
+    """Convert deal stage ID to label"""
+    stage_mapping = {
+        "appointmentscheduled": "Appointment Scheduled",
+        "qualifiedtobuy": "Qualified to Buy",
+        "presentationscheduled": "Presentation Scheduled",
+        "decisionmakerboughtin": "Decision Maker Bought-In",
+        "contractsent": "Contract Sent",
+        "closedwon": "Closed Won",
+        "closedlost": "Closed Lost"
+    }
+    return stage_mapping.get(stage_id.lower(), stage_id)
+
+
+# ============================================================================
+# UPDATED SEARCH FUNCTIONS WITH ASSOCIATION LOGIC
+# ============================================================================
+
+def search_contacts_with_associations(ti, **context):
+    """
+    Step 1: Search contacts from email
+    Step 2: Get their associated companies and deals
+    """
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
     if not entity_flags.get("search_contacts", True):
         logging.info(f"Skipping contacts search: {entity_flags.get('contacts_reason', 'Not mentioned')}")
         default_result = {
-            "reasoning_summary": {
-                "extracted_names": [],
-                "excluded_names": [],
-                "total_extracted": 0,
-                "search_notes": "Skipped due to entity flags"
-            },
             "contact_results": {"total": 0, "results": []},
-            "new_contacts": []
+            "new_contacts": [],
+            "associated_companies": [],
+            "associated_deals": []
         }
-        ti.xcom_push(key="contact_info", value=default_result)
+        ti.xcom_push(key="contact_info_with_associations", value=default_result)
         return
 
-    # === Retry Context ===
-    task_instance = context['task_instance']
-    current_try = task_instance.try_number
-    max_tries = task_instance.max_tries
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", default="")
+    
+    # AI extracts contact names from email
+    prompt = f"""Extract ALL contact names mentioned in this email. For each contact, provide:
+- firstname
+- lastname (empty string if not provided)
+- email (if mentioned)
 
-    logging.info(f"=== SEARCH CONTACTS - Attempt {current_try}/{max_tries} ===")
+LATEST MESSAGE:
+{latest_message}
 
-    previous_status = ti.xcom_pull(key="contact_search_status")
-    previous_response = ti.xcom_pull(key="contact_search_response")
-    is_retry = current_try > 1
+RULES:
+- Extract EVERY person mentioned
+- Exclude internal team members and deal owners
+- Handle single names (e.g., "Neha") as firstname only
+- Parse "Neha (Ops)" as firstname="Neha", ignore role
 
-    # === Data ===
+Return ONLY valid JSON:
+{{
+    "contacts": [
+        {{"firstname": "...", "lastname": "...", "email": "..."}}
+    ]
+}}
+"""
+
+    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    
+    try:
+        parsed = json.loads(response.strip())
+        extracted_contacts = parsed.get("contacts", [])
+        
+        if not extracted_contacts:
+            logging.info("No contacts extracted from email")
+            ti.xcom_push(key="contact_info_with_associations", value={
+                "contact_results": {"total": 0, "results": []},
+                "new_contacts": [],
+                "associated_companies": [],
+                "associated_deals": []
+            })
+            return
+        
+        # Search each contact in HubSpot
+        found_contacts = []
+        not_found_contacts = []
+        all_associated_companies = []
+        all_associated_deals = []
+        
+        for contact in extracted_contacts:
+            firstname = contact.get("firstname", "").strip()
+            lastname = contact.get("lastname", "").strip()
+            email = contact.get("email", "").strip()
+            
+            # Search contact
+            search_result = search_contacts_api(
+                firstname=firstname if firstname else None,
+                lastname=lastname if lastname else None,
+                email=email if email else None
+            )
+            
+            if search_result["total"] > 0:
+                # Contact found - get their associations
+                for found_contact in search_result["results"]:
+                    found_contacts.append(found_contact)
+                    contact_id = found_contact["contactId"]
+                    
+                    # Get associated companies
+                    company_ids = get_contact_associations(contact_id, "companies")
+                    for company_id in company_ids:
+                        company_details = get_company_details(company_id)
+                        if company_details and company_details not in all_associated_companies:
+                            all_associated_companies.append(company_details)
+                    
+                    # Get associated deals
+                    deal_ids = get_contact_associations(contact_id, "deals")
+                    for deal_id in deal_ids:
+                        deal_details = get_deal_details(deal_id)
+                        if deal_details and deal_details not in all_associated_deals:
+                            all_associated_deals.append(deal_details)
+            else:
+                # Contact not found - propose for creation
+                not_found_contacts.append({
+                    "firstname": firstname,
+                    "lastname": lastname,
+                    "email": email,
+                    "phone": "",
+                    "address": "",
+                    "jobtitle": "",
+                    "contactOwnerName": "Kishore"  # Default
+                })
+        
+        result = {
+            "contact_results": {
+                "total": len(found_contacts),
+                "results": found_contacts
+            },
+            "new_contacts": not_found_contacts,
+            "associated_companies": all_associated_companies,
+            "associated_deals": all_associated_deals
+        }
+        
+        ti.xcom_push(key="contact_info_with_associations", value=result)
+        logging.info(f"Contacts: {len(found_contacts)} found, {len(not_found_contacts)} new | "
+                    f"Associated: {len(all_associated_companies)} companies, {len(all_associated_deals)} deals")
+        
+    except Exception as e:
+        logging.error(f"Error in contact search with associations: {e}")
+        ti.xcom_push(key="contact_info_with_associations", value={
+            "contact_results": {"total": 0, "results": []},
+            "new_contacts": [],
+            "associated_companies": [],
+            "associated_deals": []
+        })
+
+
+def validate_companies_against_associations(ti, **context):
+    """
+    Compare companies mentioned in prompt vs associated companies.
+    Always include ALL associated companies as existing, and add unmatched mentioned as new.
+    """
+    contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
+    associated_companies = contact_data.get("associated_companies", [])
+    
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", default="")
+    
+    # AI extracts companies mentioned in email
+    prompt = f"""Extract ALL company names explicitly mentioned in this email.
+
+LATEST MESSAGE:
+{latest_message}
+
+RULES:
+- Only extract formal company/organization names
+- Exclude "lowtouch.ai and ecloudcontrol" (internal)
+- Return empty list if no companies mentioned
+
+Return ONLY valid JSON:
+{{
+    "companies": [
+        {{"name": "...", "domain": "..."}}
+    ]
+}}
+"""
+
+    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    
+    try:
+        parsed = json.loads(response.strip())
+        mentioned_companies = parsed.get("companies", [])
+        
+        # Log for debugging
+        logging.info(f"Associated companies from contacts: {[c.get('name') for c in associated_companies]}")
+        logging.info(f"Mentioned companies from email: {[c.get('name') for c in mentioned_companies]}")
+        
+        # Start with ALL associated as existing
+        existing_companies = associated_companies.copy()
+        
+        # Now add unmatched mentioned as new
+        new_companies = []
+        
+        for mentioned in mentioned_companies:
+            mentioned_name_lower = mentioned.get("name", "").strip().lower()
+            if not mentioned_name_lower:
+                continue
+            
+            matched = False
+            for assoc in associated_companies:
+                assoc_name_lower = assoc.get("name", "").strip().lower()
+                if assoc_name_lower and (
+                    mentioned_name_lower == assoc_name_lower or
+                    mentioned_name_lower in assoc_name_lower or
+                    assoc_name_lower in mentioned_name_lower
+                ):
+                    matched = True
+                    break
+            
+            if not matched:
+                new_companies.append({
+                    "name": mentioned.get("name", ""),
+                    "domain": mentioned.get("domain", ""),
+                    "address": "",
+                    "city": "",
+                    "state": "",
+                    "zip": "",
+                    "country": "",
+                    "phone": "",
+                    "description": "",
+                    "type": "PROSPECT"
+                })
+        
+        result = {
+            "company_results": {
+                "total": len(existing_companies),
+                "results": existing_companies
+            },
+            "new_companies": new_companies,
+            "partner_status": None
+        }
+        
+        ti.xcom_push(key="company_info", value=result)
+        logging.info(f"Companies: {len(existing_companies)} existing (all associated), {len(new_companies)} new (unmatched mentioned)")
+        
+    except Exception as e:
+        logging.error(f"Error validating companies: {e}")
+        ti.xcom_push(key="company_info", value={
+            "company_results": {"total": 0, "results": []},
+            "new_companies": [],
+            "partner_status": None
+        })
+
+
+def validate_deals_against_associations(ti, **context):
+    """
+    Compare deals mentioned in prompt vs associated deals.
+    Always include ALL associated deals as existing, and add unmatched mentioned as new.
+    """
+    contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
+    associated_deals = contact_data.get("associated_deals", [])
+    
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
     owner_info = ti.xcom_pull(key="owner_info", default={})
+    
+    deal_owner_name = owner_info.get('deal_owner_name', 'Kishore')
+    
+    # AI extracts deals mentioned in email
+    prompt = f"""Extract deals mentioned in this email. Only include if there's CLEAR buying intent.
 
-    contact_owner_id = owner_info.get('contact_owner_id', '71346067')
-    contact_owner_name = owner_info.get('contact_owner_name', 'Kishore')
-
-    base_prompt = f"""You are a HubSpot Contact Search Assistant. Your role is to **search** for existing contacts based on the email conversation.  
-**You CANNOT create contacts in HubSpot.**  
-You may only **suggest** new contact details **when no match is found and the email clearly identifies a new external person**.
-
----
-
-LATEST USER MESSAGE:
+LATEST MESSAGE:
 {latest_message}
-Validated Contact Owner ID: {contact_owner_id}
-Validated Contact Owner Name: {contact_owner_name}
----
 
-CRITICAL RULES — FOLLOW EXACTLY:
-1. Extract and search for EVERY person mentioned — even 5+ names. Never skip anyone.
-2. ALWAYS SHOW EXISTING CONTACTS FIRST:
-   - If a person is found in **contact_search**,show them as **existing contacts** (even if multiple matches)
-   - If no match found,show them as **objects to be created**.
-   - NEVER hide or skip existing contacts — user must always see who already exists.
+Deal Owner: {deal_owner_name}
 
-**STRICT INSTRUCTIONS (execute in order):**
+RULES:
+- Only extract if explicit deal creation requested OR clear buying signals
+- NOT exploratory conversations
+- Return deal name, stage (default: Lead), amount, close date
 
-1. Extract potential contact names from the thread. Apply these exclusion rules:
-   - EXCLUDE deal owners mentioned with "assign to", "owner", or similar assignment language
-   - EXCLUDE internal team members, senders, or system users (e.g., skip "From: John Doe <john@company.com>")
-   - EXCLUDE names that are clearly role/department indicators in parentheses like "(Ops)", "(Finance)", "(IT)"
-   - INCLUDE actual contact names that appear to be external stakeholders or clients
-   - SEARCH EVERY SINGLE PERSON mentioned in the email — no matter how many, even if they are employees, internal, or mentioned casually. Never skip anyone. Always set search_contacts = true if any name appears.
-   - IF A CONFIRMATION EMAIL HAS ALREADY BEEN SENT IN THE THREAD: Any reply from the user (even "change owner", "add contact", "wrong amount", "remove task", etc.) means "apply my changes now". NEVER ask for confirmation again. Immediately apply changes and send final updated email. Do NOT wait for "yes", "proceed", "confirmed", or any keyword.
-   
-   For valid contacts:
-   - Parse contact names and handle role indicators properly:
-     * "Neha (Ops)" → firstname="Neha", lastname="" (ignore the role indicator)
-     * "Riya (Finance)" → firstname="Riya", lastname="" (ignore the role indicator)
-     * "John Smith" → firstname="John", lastname="Smith"
-   - Split names into firstname/lastname:
-     * Single word (e.g., "Neha"): firstname="Neha", lastname="" (empty string)
-     * Two+ words (e.g., "Neha Khan" or "Riya Priya Sharma"): firstname=first word ("Neha" or "Riya"), lastname=rest joined ("Khan" or "Priya Sharma")
-     * Multiple contacts: List separately, e.g., [{{"firstname": "Neha", "lastname": "Khan"}}, {{"firstname": "Riya", "lastname": ""}}]
-   - If no valid contact names found after exclusions, skip to step 6.
-
-2. For each extracted name, decide search criteria:
-   - If lastname is non-empty: Use 'both' template (exact match on both fields)
-   - If lastname is empty: Use 'firstname_only' template (search on firstname only)
-   - Output one decision per contact in reasoning_summary.
-
-3. Always invoke HubSpot search_contacts API for each contact using the chosen template. Use EQ operator for exact matches (better precision than CONTAINS_TOKEN). Assume API returns matching contacts or empty if none.
-   - Both template example (replace {{{{extracted_firstname}}}} and {{{{extracted_lastname}}}}):
-     {{{{
-         "filterGroups": [
-             {{{{
-                 "filters": [
-                     {{{{
-                         "propertyName": "firstname",
-                         "operator": "EQ",
-                         "value": "{{{{extracted_firstname}}}}"
-                     }}}},
-                     {{{{
-                         "propertyName": "lastname", 
-                         "operator": "EQ",
-                         "value": "{{{{extracted_lastname}}}}"
-                     }}}}
-                 ]
-             }}}}
-         ],
-         "properties": [
-             "hs_object_id",
-             "firstname", 
-             "lastname",
-             "email",
-             "phone",
-             "jobtitle",
-             "createdate",
-             "lastmodifieddate"
-         ],
-         "sorts": [
-             {{{{
-                 "propertyName": "lastmodifieddate",
-                 "direction": "DESCENDING"
-             }}}}
-         ],
-         "limit": 10,
-         "after": null
-     }}}}
-   - Firstname_only template example (replace {{{{extracted_firstname}}}}):
-     {{{{
-         "filterGroups": [
-             {{{{
-                 "filters": [
-                     {{{{
-                         "propertyName": "firstname",
-                         "operator": "CONTAINS_TOKEN",
-                         "value": "{{{{extracted_firstname}}}}"
-                     }}}}
-                 ]
-             }}}}
-         ],
-         "properties": [
-             "hs_object_id",
-             "firstname", 
-             "lastname",
-             "email",
-             "phone",
-             "jobtitle",
-             "createdate",
-             "lastmodifieddate"
-         ],
-         "sorts": [
-             {{{{
-                 "propertyName": "lastmodifieddate",
-                 "direction": "DESCENDING"
-             }}}}
-         ],
-         "limit": 10,
-         "after": null
-     }}}}
-
-4. For each simulated search:
-   - If matches found (up to 10): Populate contact_results with details from the "API response". Use exact fields; set missing to "".
-   - Total = number of unique results across all searches.
-   - Deduplicate by hs_object_id.
-
-5. If no matches for any contact: Move those to new_contacts, extracting proposed details (firstname/lastname from step 1, email/phone/jobtitle/address from thread context like signatures). For contacts with role indicators, populate jobtitle appropriately (e.g., if "(Ops)" was mentioned, set jobtitle to operations-related role). Fill ALL fields; use "" for missing.
-
-6. If no contacts extracted: Set contact_results total=0, results=[], new_contacts=[].
-7. For new contacts, use the validated contact owner name in contactOwnerName.
-
-Return this exact JSON structure:
+Return ONLY valid JSON:
 {{
-    "reasoning_summary": {{
-        "extracted_names": [
-            {{"firstname": "example", "lastname": "example", "template_used": "both|firstname_only", "num_results": 1}}
-        ],
-        "excluded_names": [
-            {{"name": "Amy Thomas", "reason": "deal_owner"}}
-        ],
-        "total_extracted": 2,
-        "search_notes": "Brief notes on decisions"
-    }},
-    "contact_results": {{
-        "total": 0,
-        "results": [
-            {{
-                "contactId": "hs_object_id",
-                "firstname": "first_name",
-                "lastname": "last_name",
-                "email": "email_address",
-                "phone": "phone_number",
-                "address": "full_address",
-                "jobtitle": "job_title"
-            }}
-        ]
-    }},
-    "new_contacts": [
+    "deals": [
         {{
-            "firstname": "proposed_first",
-            "lastname": "proposed_last",
-            "email": "proposed_email",
-            "phone": "proposed_phone",
-            "address": "proposed_address",
-            "jobtitle": "proposed_job_title",
-            "contactOwnerName": "{contact_owner_name}"
+            "dealName": "...",
+            "dealLabelName": "Lead",
+            "dealAmount": "5000",
+            "closeDate": "YYYY-MM-DD",
+            "dealOwnerName": "{deal_owner_name}"
         }}
     ]
 }}
-
-Fill ALL fields, use "" for missing values.
-
-RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
-
-    if is_retry:
-        logging.info(f"RETRY ATTEMPT {current_try}/{max_tries} - Using retry prompt")
-
-        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
-        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
-
-        prompt = f"""PREVIOUS CONTACT SEARCH ATTEMPT FAILED
-
-Previous AI Response:
-{prev_resp_str}
-
-Failure Reason: {prev_reason}
-
-This is retry attempt {current_try} of {max_tries}.
-
-Please carefully re-analyze the message and return a **perfectly valid JSON** matching the exact schema above.
-
-Latest Message:
-{latest_message}
-
-{base_prompt}
-
-FIX ANY OF THE FOLLOWING FROM LAST ATTEMPT:
-- Invalid/malformed JSON
-- Missing commas, quotes, or brackets
-- Wrong field names
-- Missing reasoning_summary or contact_results
-- Incorrect name splitting or exclusion logic
-- Duplicate contacts
-- Wrong template_used value
-
-YOU MUST RETURN ONLY A CLEAN, VALID JSON OBJECT."""
-    else:
-        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
-        prompt = base_prompt
-
-    response = None
-    try:
-        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-        logging.info(f"Raw AI response for contacts: {response[:1000]}...")
-
-        parsed_json = json.loads(response.strip())
-
-        # Basic structure validation
-        required_keys = ["contact_results", "new_contacts"]
-        if not all(k in parsed_json for k in required_keys):
-            raise ValueError(f"Missing required keys. Found: {list(parsed_json.keys())}")
-
-        # === SUCCESS ===
-        result = {
-            "contact_info": parsed_json,
-            "contact_search_status": {"status": "success"},
-            "contact_search_response": parsed_json
-        }
-
-        for key, value in result.items():
-            ti.xcom_push(key=key, value=value)
-
-        total_existing = parsed_json['contact_results']['total']
-        new_count = len(parsed_json.get('new_contacts', []))
-        logging.info(f"Contacts search SUCCEEDED on attempt {current_try}: {total_existing} existing, {new_count} new suggested")
-
-        return parsed_json
-
-    except json.JSONDecodeError as e:
-        error_msg = f"Invalid JSON from AI: {e}\nRaw response: {response}"
-        logging.error(error_msg)
-        raise Exception(error_msg)
-
-    except Exception as e:
-        error_msg = str(e) or "Unknown error during contact search"
-        is_final_attempt = current_try >= max_tries
-
-        status_type = "final_failure" if is_final_attempt else "failure"
-        fallback_result = {
-            "reasoning_summary": {
-                "extracted_names": [],
-                "excluded_names": [],
-                "total_extracted": 0,
-                "search_notes": f"Failed after {current_try} attempts: {error_msg}"
-            },
-            "contact_results": {"total": 0, "results": []},
-            "new_contacts": []
-        }
-
-        push_data = {
-            "contact_info": fallback_result,
-            "contact_search_status": {"status": status_type, "reason": error_msg},
-            "contact_search_response": {"raw_response": response} if response else None
-        }
-
-        for key, value in push_data.items():
-            ti.xcom_push(key=key, value=value)
-
-        if is_final_attempt:
-            logging.error(f"FINAL FAILURE in search_contacts after {max_tries} attempts: {error_msg}")
-            raise  # Task fails in Airflow
-        else:
-            logging.warning(f"search_contacts failed (attempt {current_try}/{max_tries}) → retrying...")
-            raise
-
-def search_companies(ti, **context):
-    """Search for companies based on conversation context with retry support"""
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
-    if not entity_flags.get("search_companies", True):
-        logging.info(f"Skipping companies search: {entity_flags.get('companies_reason', 'Not mentioned')}")
-        default_result = {
-            "company_results": {"total": 0, "results": []},
-            "new_companies": [],
-            "partner_status": None
-        }
-        ti.xcom_push(key="company_info", value=default_result)
-        return
-
-    # === Retry Context ===
-    task_instance = context['task_instance']
-    current_try = task_instance.try_number
-    max_tries = task_instance.max_tries
-
-    logging.info(f"=== SEARCH COMPANIES - Attempt {current_try}/{max_tries} ===")
-
-    previous_status = ti.xcom_pull(key="company_search_status")
-    previous_response = ti.xcom_pull(key="company_search_response")
-    is_retry = current_try > 1
-
-    # === Data ===
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
-
-
-    base_prompt = f"""You are a HubSpot Company Search Assistant. Your role is to **search** for existing companies based on the email conversation.  
-**You CANNOT create companies in HubSpot.**  
-You may only **suggest** new company details **when no match is found and the email clearly identifies a new external organization**.
-
----
-
-LATEST USER MESSAGE:
-{latest_message}
-
----
-
-**STRICT INSTRUCTIONS (execute in order):**
-
-1. **Extract company name(s) and email** from the conversation:
-   - Look for formal company names (e.g., "Acme Corp", "TechFlow Inc.", "Neha's Startup").
-   - **Exclude**:
-     - Internal references to your own company.
-     - Generic terms: "the client", "vendor", "partner" (unless part of a proper name).
-     - Email domains alone (e.g., `@gmail.com`) unless tied to a clear company.
-   - Extract **one company per distinct entity**.
-   - Never consider a company name which the contact has already left or the previous company of the contact.
-   - Never consider `lowtouch.ai` as a client company.
-
-2. **For each extracted company name**:
-   - **Simulate a HubSpot `search_companies` API call** using 90 percent match on `name`.
-   - Use **CONTAINS_TOKEN operator** on `name` property for precision. 
-   - Assume API returns matching records or empty list. Display only the most matching results in the matching records 
-   **Search payload template**:
-   {{{{
-       "filterGroups": [
-           {{{{
-               "filters": [
-                   {{{{
-                       "propertyName": "name",
-                       "operator": "CONTAINS_TOKEN",
-                       "value": "{{{{extracted_company_name}}}}",
-
-                       "propertyName": "email",
-                       "operator": "CONTAINS_TOKEN",
-                       "value": "{{{{extracted_company_email}}}}"
-
-                   }}}}
-               ]
-           }}}}
-       ],
-       "properties": [
-           "hs_object_id", "name", "domain", "address", "city", "state", "zip", 
-           "country", "phone", "description", "type"
-       ],
-       "sorts": [{{{{ "propertyName": "hs_lastmodifieddate", "direction": "DESCENDING" }}}}],
-       "limit": 5
-   }}}}
-   
-   - If company name is not given, use contact or deal to search for associated company using :
-        1. If a **contact name** is mentioned → call `search_companies` using the Id of the contact:
-        2. If a **deal name** is mentioned → call `search_companies` using the Id of the deal.
-        3. If both contact and deal are mentioned:
-            - Perform two separate `search_companies` calls (one with the contact, one with the deal).
-            - Identify companies that appear in **both** result sets (intersection).
-
-3. **Process search results**:
-   - Deduplicate by `hs_object_id`.
-   - Populate `company_results.results` with **exact API-returned values**.
-   - Set `type` to `"PARTNER"` or `"PROSPECT"` if present; otherwise `"PROSPECT"`.
-   - `total` = number of unique matches.
-
-4. **Suggest new companies ONLY if**:
-   - **No match found** for a clearly mentioned company, **AND**
-   - Email provides **at least one identifying detail** (domain, address, phone, description, signature).
-   - **Do NOT suggest** duplicates already in `company_results`.
-
-5. **Determine `type` for new companies**:
-   - `"PARTNER"` if words like "partner", "reseller", "agency", "referral", "integrator" appear in context.
-   - Otherwise → `"PROSPECT"`.
-
-6. **Extract additional fields from email**:
-   - `domain`: From email signature, website, or mention (e.g., `acme.com`).
-   - `address`, `city`, etc.: From signature, footer, or context.
-   - `description`: Summarize business in 1 sentence if possible.
-   - Use `""` if not found.
-
-7. **Set `partner_status`**:
-   - `true` → if **any** company (existing or new) is marked `"PARTNER"`.
-   - `false` → if **all** are `"PROSPECT"` and no partner language.
-   - `null` → if no companies extracted.
-
----
-
-**RETURN EXACTLY THIS JSON STRUCTURE (NO CHANGES TO BRACKETS):**
-{{
-    "company_results": {{
-        "total": 0,
-        "results": [
-            {{
-                "companyId": "company_id",
-                "name": "company_name",
-                "domain": "company_domain",
-                "address": "full_address",
-                "city": "city_name",
-                "state": "state_name",
-                "zip": "zip_code",
-                "country": "country_name",
-                "phone": "phone_number",
-                "description": "company_description",
-                "type": "company_type"
-            }}
-        ]
-    }},
-    "new_companies": [
-        {{
-            "name": "proposed_name",
-            "domain": "proposed_domain",
-            "address": "proposed_address",
-            "city": "proposed_city",
-            "state": "proposed_state",
-            "zip": "proposed_zip",
-            "country": "proposed_country",
-            "phone": "proposed_phone",
-            "description": "proposed_description",
-            "type": "company_type"
-        }}
-    ],
-    "partner_status": null
-}}
-
-**RULES**:
-- Fill **ALL fields**; use `""` for missing values.
-- `new_companies` = `[]` unless **no match + clear external company identity**.
-- Never suggest a company already in `company_results`.
-- **RESPOND WITH ONLY THE JSON OBJECT — NO OTHER TEXT.**
 """
 
-    if is_retry:
-        logging.info(f"RETRY ATTEMPT {current_try}/{max_tries} - Using enhanced retry prompt")
-
-        prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
-        prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
-
-        prompt = f"""PREVIOUS COMPANY SEARCH ATTEMPT FAILED
-
-Previous AI Response:
-{prev_resp_str}
-
-Failure Reason: {prev_reason}
-
-This is retry attempt {current_try} of {max_tries}.
-
-Please re-analyze the message carefully and return a CORRECT, VALID JSON matching the exact schema.
-
-Latest Message:
-{latest_message}
-
-{base_prompt}
-
-FIX ANY:
-- Invalid JSON (missing commas, quotes, brackets)
-- Wrong field names
-- Missing required keys
-- Incorrect partner_status logic
-- Duplicate suggestions
-
-YOU MUST RETURN ONLY A CLEAN, VALID JSON OBJECT."""
-    else:
-        logging.info(f"INITIAL ATTEMPT {current_try}/{max_tries}")
-        prompt = base_prompt
-
-    response = None
+    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    
     try:
-        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-        logging.info(f"Raw AI response for companies: {response[:1000]}...")
-
-        parsed_json = json.loads(response.strip())
-
-        # Basic validation
-        if not isinstance(parsed_json, dict) or "company_results" not in parsed_json:
-            raise ValueError("Missing 'company_results' in response")
-
-        # === SUCCESS ===
+        parsed = json.loads(response.strip())
+        mentioned_deals = parsed.get("deals", [])
+        
+        # Log for debugging
+        logging.info(f"Associated deals from contacts: {[d.get('dealName') for d in associated_deals]}")
+        logging.info(f"Mentioned deals from email: {[d.get('dealName') for d in mentioned_deals]}")
+        
+        # Start with ALL associated as existing
+        existing_deals = associated_deals.copy()
+        
+        # Now add unmatched mentioned as new
+        new_deals = []
+        
+        for mentioned in mentioned_deals:
+            mentioned_name_lower = mentioned.get("dealName", "").strip().lower()
+            if not mentioned_name_lower:
+                continue
+            
+            matched = False
+            for assoc in associated_deals:
+                assoc_name_lower = assoc.get("dealName", "").strip().lower()
+                if assoc_name_lower and (
+                    mentioned_name_lower == assoc_name_lower or
+                    mentioned_name_lower in assoc_name_lower or
+                    assoc_name_lower in mentioned_name_lower
+                ):
+                    matched = True
+                    break
+            
+            if not matched:
+                new_deals.append(mentioned)
+        
         result = {
-            "company_info": parsed_json,
-            "company_search_status": {"status": "success"},
-            "company_search_response": parsed_json
+            "deal_results": {
+                "total": len(existing_deals),
+                "results": existing_deals
+            },
+            "new_deals": new_deals
         }
-
-        for key, value in result.items():
-            ti.xcom_push(key=key, value=value)
-
-        total_existing = parsed_json['company_results']['total']
-        new_count = len(parsed_json.get('new_companies', []))
-        logging.info(f"Companies search SUCCEEDED on attempt {current_try}: {total_existing} existing, {new_count} new suggested")
-
-        return parsed_json
-
-    except json.JSONDecodeError as e:
-        error_msg = f"Invalid JSON from AI: {e}\nRaw response: {response}"
-        logging.error(error_msg)
-        raise Exception(error_msg)
-
+        
+        ti.xcom_push(key="deal_info", value=result)
+        logging.info(f"Deals: {len(existing_deals)} existing (all associated), {len(new_deals)} new (unmatched mentioned)")
+        
     except Exception as e:
-        error_msg = str(e) or "Unknown error during company search"
-        is_final_attempt = current_try >= max_tries
+        logging.error(f"Error validating deals: {e}")
+        ti.xcom_push(key="deal_info", value={
+            "deal_results": {"total": 0, "results": []},
+            "new_deals": []
+        })
 
-        status_type = "final_failure" if is_final_attempt else "failure"
-        fallback_result = {
-            "company_results": {"total": 0, "results": []},
-            "new_companies": [],
-            "partner_status": None
+def refine_contacts_by_associations(ti, **context):
+    """
+    Refine the list of found contacts to ONLY those associated with
+    the validated (relevant) companies and/or deals from the email context.
+    
+    CRITICAL RULE:
+    - If there are NO relevant companies AND NO relevant deals → discard ALL existing contacts.
+      Only new_contacts should proceed downstream.
+    - Otherwise, prioritize contacts linked to relevant companies/deals.
+    """
+    contact_info = ti.xcom_pull(key="contact_info_with_associations", default={})
+    company_info = ti.xcom_pull(key="company_info", default={})
+    deal_info = ti.xcom_pull(key="deal_info", default={})
+
+    original_contacts = contact_info.get("contact_results", {}).get("results", [])
+    if not original_contacts:
+        logging.info("No contacts to refine")
+        # Preserve new_contacts, refined = []
+        refined_contact_info = {
+            "contact_results": {"total": 0, "results": []},
+            "new_contacts": contact_info.get("new_contacts", []),
+            "associated_companies": contact_info.get("associated_companies", []),
+            "associated_deals": contact_info.get("associated_deals", [])
         }
+        ti.xcom_push(key="contact_info_with_associations", value=refined_contact_info)
+        return
 
-        push_data = {
-            "company_info": fallback_result,
-            "company_search_status": {"status": status_type, "reason": error_msg},
-            "company_search_response": {"raw_response": response} if response else None
-        }
+    # Extract relevant (validated) company and deal IDs
+    relevant_company_ids = {c.get("companyId") for c in company_info.get("company_results", {}).get("results", []) if c.get("companyId")}
+    relevant_deal_ids = {d.get("dealId") for d in deal_info.get("deal_results", {}).get("results", []) if d.get("dealId")}
 
-        for key, value in push_data.items():
-            ti.xcom_push(key=key, value=value)
+    logging.info(f"Refining contacts using {len(relevant_company_ids)} relevant companies and {len(relevant_deal_ids)} relevant deals")
 
-        if is_final_attempt:
-            logging.error(f"FINAL FAILURE in search_companies after {max_tries} attempts: {error_msg}")
-            raise  # Mark task failed in Airflow
-        else:
-            logging.warning(f"search_companies failed (attempt {current_try}/{max_tries}) → retrying...")
-            raise
+    new_contacts = contact_info.get("new_contacts", [])
+    associated_companies = contact_info.get("associated_companies", [])
+    associated_deals = contact_info.get("associated_deals", [])
+
+    if not relevant_company_ids and not relevant_deal_ids:
+        logging.info("No relevant companies or deals found → discarding all existing contacts (refined = 0)")
+        refined_contacts = []
+    else:
+        high_priority_contacts = []
+        fallback_contacts = []  # Only used if we have relevant entities
+
+        for contact in original_contacts:
+            contact_id = contact.get("contactId")
+            if not contact_id:
+                fallback_contacts.append(contact)
+                continue
+
+            # Get this specific contact's associations (from earlier pull)
+            # Note: associated_companies/deals are per-contact in the original search
+            contact_comp_ids = {c.get("companyId") for c in associated_companies if c.get("companyId")}
+            contact_deal_ids = {d.get("dealId") for d in associated_deals if d.get("dealId")}
+
+            if (contact_comp_ids & relevant_company_ids) or (contact_deal_ids & relevant_deal_ids):
+                high_priority_contacts.append(contact)
+            else:
+                fallback_contacts.append(contact)
+
+        refined_contacts = high_priority_contacts + fallback_contacts
+        logging.info(f"Refined: {len(high_priority_contacts)} directly linked + {len(fallback_contacts)} fallback")
+
+    refined_total = len(refined_contacts)
+    logging.info(f"Contact refinement complete:")
+    logging.info(f"   → Directly linked to relevant company/deal: {len(high_priority_contacts) if 'high_priority_contacts' in locals() else 0}")
+    logging.info(f"   → Fallback (name-matched only): {refined_total - len(high_priority_contacts) if 'high_priority_contacts' in locals() else refined_total}")
+    logging.info(f"   → Total refined contacts: {refined_total}")
+    logging.info(f"   → New contacts preserved: {len(new_contacts)}")
+
+    refined_contact_info = {
+        "contact_results": {
+            "total": refined_total,
+            "results": refined_contacts
+        },
+        "new_contacts": new_contacts,  # Always preserve
+        "associated_companies": associated_companies,
+        "associated_deals": associated_deals
+    }
+
+    ti.xcom_push(key="contact_info_with_associations", value=refined_contact_info)
 
 def parse_notes_tasks_meeting(ti, **context):
     """Parse notes, tasks, and meetings from conversation"""
@@ -1898,9 +1740,11 @@ def validate_entity_creation_rules(ti, **context):
     """
     Validate that entity creation follows HubSpot association rules.
     Returns validation result and detailed error messages.
+    
+    CRITICAL FIX: Check BOTH existing AND new entities when validating associations.
     """
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
-    contact_info = ti.xcom_pull(key="contact_info", default={})
+    contact_info = ti.xcom_pull(key="contact_info_with_associations", default={})
     company_info = ti.xcom_pull(key="company_info", default={})
     deal_info = ti.xcom_pull(key="deal_info", default={})
     notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", default={})
@@ -1916,7 +1760,9 @@ def validate_entity_creation_rules(ti, **context):
     validation_errors = []
     
     # Get all existing and new entities
-    existing_contacts = contact_info.get("contact_results", {}).get("total", 0)
+    # Note: contact_info_with_associations uses different structure
+    contact_results = contact_info.get("contact_results", {})
+    existing_contacts = contact_results.get("total", 0) if isinstance(contact_results, dict) else len(contact_results.get("results", []))
     new_contacts = len(contact_info.get("new_contacts", []))
     
     existing_companies = company_info.get("company_results", {}).get("total", 0)
@@ -1931,11 +1777,19 @@ def validate_entity_creation_rules(ti, **context):
     meeting_details = notes_tasks_meeting.get("meeting_details", {})
     has_meeting = bool(meeting_details and any(str(v).strip() for v in meeting_details.values() if v is not None))
     
+    # Calculate totals (existing + new)
     total_contacts = existing_contacts + new_contacts
     total_companies = existing_companies + new_companies
     total_deals = existing_deals + new_deals
     
-    # RULE 1: Meetings/Notes/Tasks must have at least one association
+    logging.info(f"=== VALIDATION COUNTS ===")
+    logging.info(f"Contacts: {existing_contacts} existing + {new_contacts} new = {total_contacts} total")
+    logging.info(f"Companies: {existing_companies} existing + {new_companies} new = {total_companies} total")
+    logging.info(f"Deals: {existing_deals} existing + {new_deals} new = {total_deals} total")
+    logging.info(f"Engagements: {len(notes)} notes, {len(tasks)} tasks, {1 if has_meeting else 0} meeting")
+    
+    # RULE 1: Meetings/Notes/Tasks must have at least one base entity (contact, deal, OR company)
+    # This checks TOTAL entities (existing + new)
     has_base_entity = total_contacts > 0 or total_deals > 0 or total_companies > 0
     
     if notes and not has_base_entity:
@@ -1943,7 +1797,7 @@ def validate_entity_creation_rules(ti, **context):
             "entity_type": "Notes",
             "count": len(notes),
             "issue": "Notes cannot be created without at least one associated contact, deal, or company.",
-            "suggestion": "Please specify a contact, company, or deal to associate with these notes."
+            "suggestion": "Please specify a contact, company, or deal to associate with these notes. You can provide names, emails, or other identifying information."
         })
     
     if tasks and not has_base_entity:
@@ -1951,49 +1805,81 @@ def validate_entity_creation_rules(ti, **context):
             "entity_type": "Tasks",
             "count": len(tasks),
             "issue": "Tasks cannot be created without at least one associated contact, deal, or company.",
-            "suggestion": "Please specify a contact, company, or deal to associate with these tasks."
+            "suggestion": "Please specify a contact, company, or deal to associate with these tasks. You can provide names, emails, or other identifying information."
         })
     
-    if meeting_details and not has_base_entity:
+    if has_meeting and not has_base_entity:
         validation_errors.append({
             "entity_type": "Meeting",
-            "count": len(meeting_details),
+            "count": 1,
             "issue": "Meetings cannot be created without at least one associated contact, deal, or company.",
-            "suggestion": "Please specify a contact, company, or deal to associate with this meeting."
+            "suggestion": "Please specify a contact, company, or deal to associate with this meeting. You can provide names, emails, or other identifying information."
         })
     
-    # RULE 2: Deals should have contact association
+    # RULE 2: NEW Deals should be associated with contacts (existing OR new)
+    # Only validate if we're creating NEW deals AND have NO contacts at all
     if new_deals > 0 and total_contacts == 0:
         validation_errors.append({
             "entity_type": "Deals",
             "count": new_deals,
-            "issue": "Deals should be associated with a contact for proper follow-up and ownership.",
-            "suggestion": "Please specify a contact to associate with the deal(s). You can provide the contact's name, email, or other identifying information."
+            "issue": f"Creating {new_deals} new deal(s) but no contacts are specified (existing or new).",
+            "suggestion": "Please specify at least one contact to associate with the deal(s). You can:\n" +
+                         "  • Mention an existing contact by name or email\n" +
+                         "  • Include details for a new contact to be created\n" +
+                         "  • The system found these contacts but they need to be mentioned in deal context: " +
+                         (f"{existing_contacts} existing contact(s)" if existing_contacts > 0 else "none")
         })
     
-    # RULE 3: Contacts with company info should be linked
-    # This is a soft rule - we check if company context exists but contact isn't linked
+    # RULE 3: NEW Contacts with company context should ideally have company association
+    # This is informational only - we auto-link them, so it's not an error
     if new_contacts > 0 and (existing_companies > 0 or new_companies > 0):
-        # This is actually good - they'll be auto-associated
-        logging.info(f"✓ {new_contacts} contact(s) will be associated with {existing_companies + new_companies} company/companies")
+        logging.info(f"✓ {new_contacts} new contact(s) will be associated with {existing_companies + new_companies} company/companies")
+    
+    # RULE 4: NEW Companies should ideally be associated with contacts
+    # This is a soft validation - only log warning, don't block
+    if new_companies > 0 and total_contacts == 0:
+        logging.warning(f"⚠ {new_companies} new company/companies being created without any contact association")
+        # Note: We don't add this to validation_errors because companies can exist standalone
     
     # Build validation result
     validation_result = {
         "is_valid": len(validation_errors) == 0,
         "errors": validation_errors,
         "entity_summary": {
-            "contacts": {"existing": existing_contacts, "new": new_contacts, "total": total_contacts},
-            "companies": {"existing": existing_companies, "new": new_companies, "total": total_companies},
-            "deals": {"existing": existing_deals, "new": new_deals, "total": total_deals},
+            "contacts": {
+                "existing": existing_contacts, 
+                "new": new_contacts, 
+                "total": total_contacts
+            },
+            "companies": {
+                "existing": existing_companies, 
+                "new": new_companies, 
+                "total": total_companies
+            },
+            "deals": {
+                "existing": existing_deals, 
+                "new": new_deals, 
+                "total": total_deals
+            },
             "notes": len(notes),
             "tasks": len(tasks),
-            "meetings": len(meeting_details)
+            "meetings": 1 if has_meeting else 0
         },
         "sender_name": sender_name
     }
     
     ti.xcom_push(key="validation_result", value=validation_result)
-    logging.info(f"Validation complete: {'PASSED' if validation_result['is_valid'] else 'FAILED with ' + str(len(validation_errors)) + ' error(s)'}")
+    
+    if validation_result["is_valid"]:
+        logging.info(f"✅ VALIDATION PASSED")
+        logging.info(f"   - {total_contacts} contact(s) available for associations")
+        logging.info(f"   - {total_companies} company/companies available for associations")
+        logging.info(f"   - {total_deals} deal(s) will be processed")
+        logging.info(f"   - {len(notes)} note(s), {len(tasks)} task(s), {1 if has_meeting else 0} meeting(s)")
+    else:
+        logging.warning(f"❌ VALIDATION FAILED with {len(validation_errors)} error(s):")
+        for idx, error in enumerate(validation_errors, 1):
+            logging.warning(f"   {idx}. {error['entity_type']}: {error['issue']}")
     
     return validation_result
     
@@ -2299,7 +2185,7 @@ def compile_search_results(ti, **context):
     """Compile all search results for confirmation email"""
     owner_info = ti.xcom_pull(key="owner_info")
     deal_info = ti.xcom_pull(key="deal_info")
-    contact_info = ti.xcom_pull(key="contact_info")
+    contact_info = ti.xcom_pull(key="contact_info_with_associations", default={})
     company_info = ti.xcom_pull(key="company_info")
     notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting")
     task_threshold_info = ti.xcom_pull(key="task_threshold_info", default={})
@@ -2369,7 +2255,7 @@ def compose_confirmation_email(ti, **context):
     confirmation_needed = ti.xcom_pull(key="confirmation_needed", default=False)
     engagement_summary = ti.xcom_pull(key="engagement_summary", default={})
     notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", default={})
-    deal_stage_info = ti.xcom_pull(key="deal_stage_info", default={"deal_stages": []})  # ADD THIS
+    deal_stage_info = ti.xcom_pull(key="deal_stage_info", default={"deal_stages": []})  # This is already correct
     corrected_tasks = notes_tasks_meeting.get("tasks", [])
     
     if not confirmation_needed:
@@ -2378,7 +2264,7 @@ def compose_confirmation_email(ti, **context):
 
     # Valid deal stages
     VALID_DEAL_STAGES = [
-        "Lead", "Qualified Lead", "Solution Discussion", "Proposal", 
+        "Lead", "Qualified Lead", "Solution Discussion", "Proposal",
         "Negotiations", "Contracting", "Closed Won", "Closed Lost", "Inactive"
     ]
 
@@ -2913,9 +2799,25 @@ def compose_confirmation_email(ti, **context):
         # ADD THIS: Deal Stage Validation Section
         if deal_stage_info.get('deal_stages'):
             email_content += "<div style='margin-bottom: 15px;'>"
+        has_stage_issues = False
+        for stage_info in deal_stage_info.get('deal_stages', []):
+            original_stage = stage_info.get('original_stage', '')
+            validated_stage = stage_info.get('validated_stage', 'Lead')
+            
+            # Check if there's an actual issue (no stage or invalid stage)
+            if not original_stage or original_stage.strip() == '':
+                has_stage_issues = True
+                break
+            elif validated_stage == 'Lead' and original_stage.lower() != 'lead':
+                has_stage_issues = True
+                break
+        
+        # Only show the section if there are issues
+        if has_stage_issues:
+            email_content += "<br>"
             email_content += "<h3>Deal Stage Assignment Details</h3>"
             
-            for stage_info in deal_stage_info.get('deal_stages', []):
+        for stage_info in deal_stage_info.get('deal_stages', []):
                 deal_name = stage_info.get('deal_name', 'Unknown Deal')
                 original_stage = stage_info.get('original_stage', '')
                 validated_stage = stage_info.get('validated_stage', 'Lead')
@@ -2940,16 +2842,10 @@ def compose_confirmation_email(ti, **context):
                         <br><strong>Action:</strong> Assigning to default stage 'Lead'.
                     </p>
                     """
-                else:
-                    # Valid stage specified
-                    email_content += f"""
-                    <h4 style='color: #2c5aa0;'>Deal Stage for "{deal_name}":</h4>
-                    <p style='background-color: #d4edda; padding: 10px; border-left: 4px solid #28a745;'>
-                        <strong>Status:</strong> Deal stage '{validated_stage}' is valid and will be used.
-                    </p>
-                    """
-            
-            email_content += "</div>"
+            # Don't show anything for valid stages
+        
+        email_content += "<br>"
+
         # Task Owners
         if len(meaningful_tasks) > 0:
             email_content += "<div style='margin-bottom: 15px;'>"
@@ -3527,7 +3423,7 @@ def compose_engagement_summary_email(ti, **context):
         if risk_flags.get("no_activity_14_days"):
             email_content += "<li>No activity in the last 14 days.</li>"
         if risk_flags.get("stage_unchanged_21_days"):
-            email_content += "<li>Stage hasn’t changed in the previous 21 days.</li>"
+            email_content += "<li>Stage hasn't changed in the previous 21 days.</li>"
         email_content += "</ul></div>"
 
     if has_detailed_deal:
@@ -3724,25 +3620,29 @@ with DAG(
         provide_context=True
     )
 
-    search_deals_task = PythonOperator(
-        task_id="search_deals",
-        python_callable=search_deals,
-        provide_context=True,
-        retries=2,
-    )
-
     search_contacts_task = PythonOperator(
-        task_id="search_contacts",
-        python_callable=search_contacts,
+        task_id="search_contacts_with_associations",
+        python_callable=search_contacts_with_associations,
         provide_context=True,
         retries=2
     )
 
-    search_companies_task = PythonOperator(
-        task_id="search_companies",
-        python_callable=search_companies,
-        provide_context=True,
-        retries=2
+    validate_companies_task = PythonOperator(
+        task_id="validate_companies_against_associations",
+        python_callable=validate_companies_against_associations,
+        provide_context=True
+    )
+
+    validate_deals_task = PythonOperator(
+        task_id="validate_deals_against_associations",
+        python_callable=validate_deals_against_associations,
+        provide_context=True
+    )
+
+    refine_contacts_task = PythonOperator(
+        task_id="refine_contacts_by_associations",
+        python_callable=refine_contacts_by_associations,
+        provide_context=True
     )
 
     parse_notes_tasks_task = PythonOperator(
@@ -3840,26 +3740,39 @@ with DAG(
     )
 
     load_context_task >> analyze_entities_task >> summarize_engagement_task >> summarize_engagement_360_task >> branch_task
-    
-    # Summary workflow path (when request_summary is True)
+
+    # === Summary Path ===
     branch_task >> compose_summary_email_task >> send_summary_email_task >> end_task
-    validate_deal_stage_task >> [search_deals_task, search_contacts_task, search_companies_task]
-    
-    # Entity creation workflow path
+
+    # === Entity Processing Path ===
     branch_task >> determine_owner_task >> validate_deal_stage_task
-    determine_owner_task >> [search_deals_task, search_contacts_task, search_companies_task]
-    [search_deals_task, search_contacts_task, search_companies_task] >> parse_notes_tasks_task
+
+    # Correct order: search contacts first (with associations), then validate companies and deals
+    validate_deal_stage_task >> search_contacts_task >> validate_companies_task >> validate_deals_task
+
+    validate_companies_task >> refine_contacts_task
+    validate_deals_task >> refine_contacts_task
+    refine_contacts_task >> parse_notes_tasks_task
+
+    # Also allow determine_owner_task to trigger contact search in parallel if needed
+    determine_owner_task >> search_contacts_task
+
+    # After all searches/validation, parse notes/tasks/meetings
+    validate_deals_task >> refine_contacts_task >> parse_notes_tasks_task
+
+    # Continue existing flow
     parse_notes_tasks_task >> check_threshold_task >> validate_rules_task >> validation_branch_task
-    
-    # Validation passes → check if action needed
+
+    # Validation passes → compile results
     validation_branch_task >> compile_task >> check_action_branch_task
-    
-    # Action needed → send confirmation
+
+    # Action needed → confirmation flow
     check_action_branch_task >> compose_email_task >> send_email_task >> end_task
-    
-    # No action needed → send acknowledgment
+
+    # No action → polite acknowledgment
     check_action_branch_task >> compose_no_action_task >> send_no_action_task >> end_task
-    
-    # Validation fails → send error
+
+    # Validation fails → error email
     validation_branch_task >> compose_validation_error_task >> send_validation_error_task >> validation_end_task
+
     validation_end_task >> end_task
