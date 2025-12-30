@@ -1,6 +1,8 @@
 """
 Airflow DAG for monitoring mailbox for CV submissions and screening responses.
 Intelligently routes emails to appropriate DAGs based on content analysis.
+Extracts candidate email from CV PDF for accurate candidate matching.
+Includes full thread history extraction with PDF content integration.
 """
 
 from airflow import DAG
@@ -12,22 +14,343 @@ import logging
 from email.utils import parseaddr
 from pathlib import Path
 import json
+import os
+import base64
 
+import sys
+import logging
+
+try:
+    sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+    logging.info(f"Appended to sys.path: {os.path.dirname(os.path.realpath(__file__))}")
+except Exception as e:
+    logging.error(f"Error appending to sys.path: {e}")
+    
 # Import utility functions
 from agent_dags.utils.email_utils import (
     authenticate_gmail,
     fetch_unread_emails_with_attachments,
     get_last_checked_timestamp,
-    update_last_checked_timestamp
+    update_last_checked_timestamp,
+    process_email_attachments
 )
-from agent_dags.utils.agent_utils import get_ai_response, extract_json_from_text
+from agent_dags.utils.agent_utils import get_ai_response, extract_json_from_text, extract_pdf_content
+
+# Import Google Sheets utilities
+from agent_dags.utils.sheets_utils import (
+    authenticate_google_sheets,
+    find_candidate_in_sheet,
+    get_candidate_details
+)
+
+
+# ============================================================================
+# THREAD HISTORY EXTRACTION WITH PDF CONTENT
+# ============================================================================
+
+def extract_message_body(payload):
+    """
+    Extract the text body from email payload.
+    
+    Args:
+        payload: Gmail message payload
+    
+    Returns:
+        str: Extracted message body
+    """
+    try:
+        # Check for direct body
+        if "body" in payload and "data" in payload["body"]:
+            body_data = payload["body"]["data"]
+            decoded = base64.urlsafe_b64decode(body_data).decode("utf-8", errors="ignore")
+            return decoded
+        
+        # Check for multipart message
+        if "parts" in payload:
+            for part in payload["parts"]:
+                mime_type = part.get("mimeType", "")
+                
+                # Prefer text/plain, fallback to text/html
+                if mime_type == "text/plain":
+                    if "data" in part.get("body", {}):
+                        body_data = part["body"]["data"]
+                        decoded = base64.urlsafe_b64decode(body_data).decode("utf-8", errors="ignore")
+                        return decoded
+                
+                # Recursive check for nested parts
+                if "parts" in part:
+                    nested_body = extract_message_body(part)
+                    if nested_body:
+                        return nested_body
+        
+        return ""
+        
+    except Exception as e:
+        logging.error(f"Error extracting message body: {str(e)}")
+        return ""
+
+
+def extract_thread_history_with_attachments(service, thread_id, attachment_dir, current_message_id=None):
+    """
+    Extract all messages from a Gmail thread with PDF content integrated.
+    
+    Args:
+        service: Gmail API service instance
+        thread_id: Gmail thread ID
+        attachment_dir: Directory to save/process attachments
+        current_message_id: ID of the current/latest message (will be excluded from history)
+    
+    Returns:
+        dict: {
+            'history': [  # All messages except the current one
+                {
+                    'role': 'user' or 'assistant',
+                    'content': 'message body',
+                    'sender': 'email@example.com',
+                    'timestamp': 1234567890,
+                    'has_pdf': True/False,
+                    'pdf_content': 'extracted text...'
+                }
+            ],
+            'current_message': {  # The latest message
+                'content': 'message body',
+                'sender': 'email@example.com',
+                'pdf_content': 'extracted text...' or None
+            }
+        }
+    """
+    try:
+        # Fetch the entire thread
+        thread = service.users().threads().get(
+            userId="me",
+            id=thread_id,
+            format="full"
+        ).execute()
+        
+        messages = thread.get("messages", [])
+        
+        if not messages:
+            logging.warning(f"No messages found in thread {thread_id}")
+            return {'history': [], 'current_message': None}
+        
+        # Get the authenticated email address to determine role
+        profile = service.users().getProfile(userId="me").execute()
+        bot_email = profile.get("emailAddress", "").lower()
+        
+        history = []
+        current_message = None
+        
+        # Process messages in chronological order (oldest to newest)
+        for idx, msg in enumerate(messages):
+            try:
+                message_id = msg.get("id")
+                payload = msg.get("payload", {})
+                
+                # Extract headers
+                headers = {
+                    header["name"]: header["value"]
+                    for header in payload.get("headers", [])
+                }
+                
+                sender = headers.get("From", "")
+                _, sender_email = parseaddr(sender)
+                sender_email = sender_email.lower()
+                
+                # Determine role based on sender
+                role = "assistant" if sender_email == bot_email else "user"
+                
+                # Extract message body
+                body = extract_message_body(payload)
+                
+                # Get timestamp
+                timestamp = int(msg.get("internalDate", 0))
+                
+                # Process attachments (looking for PDFs)
+                attachments = process_email_attachments(
+                    service=service,
+                    message_id=message_id,
+                    payload=payload,
+                    attachment_dir=attachment_dir
+                )
+                
+                # Extract PDF content if present
+                pdf_content = None
+                has_pdf = False
+                
+                for att in attachments:
+                    if att.get("mime_type") == "application/pdf":
+                        has_pdf = True
+                        pdf_path = att.get("path")
+                        
+                        if pdf_path and Path(pdf_path).exists():
+                            logging.info(f"Extracting PDF content from {pdf_path} in message {message_id}")
+                            pdf_data = extract_pdf_content(pdf_path)
+                            
+                            # Handle both dict and string returns
+                            if isinstance(pdf_data, dict):
+                                pdf_content = pdf_data.get("content", "")
+                            else:
+                                pdf_content = pdf_data
+                            break  # Use first PDF found
+                
+                # Build message object
+                message_obj = {
+                    'role': role,
+                    'content': body,
+                    'sender': sender_email,
+                    'timestamp': timestamp,
+                    'has_pdf': has_pdf,
+                    'pdf_content': pdf_content,
+                    'message_id': message_id
+                }
+                
+                # If this is the current message (last one), separate it
+                if current_message_id and message_id == current_message_id:
+                    current_message = message_obj
+                    logging.info(f"Identified current message: {message_id}")
+                elif idx == len(messages) - 1 and not current_message_id:
+                    # If no current_message_id provided, treat last message as current
+                    current_message = message_obj
+                    logging.info(f"Using last message as current: {message_id}")
+                else:
+                    # Add to history
+                    history.append(message_obj)
+                    logging.info(f"Added message {message_id} to history (role: {role}, has_pdf: {has_pdf})")
+            except Exception as msg_e:
+                logging.error(f"Error processing message {msg.get('id')}: {str(msg_e)}", exc_info=True)
+                continue
+        
+        logging.info(f"Extracted {len(history)} historical messages and 1 current message from thread {thread_id}")
+        
+        return {
+            'history': history,
+            'current_message': current_message
+        }
+        
+    except Exception as e:
+        logging.error(f"Error extracting thread history: {str(e)}", exc_info=True)
+        return {'history': [], 'current_message': None}
+
+
+def format_history_for_ai(history_data):
+    """
+    Format extracted thread history for AI conversation context.
+    Returns list compatible with get_ai_response expectations.
+    """
+    formatted_history = []
+    
+    history = history_data.get('history', [])
+    
+    # Group user messages with following assistant messages
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        
+        if msg['role'] == 'user':
+            # Build user content
+            user_content = msg['content']
+            if msg.get('has_pdf') and msg.get('pdf_content'):
+                user_content += f"\n\n[Attached PDF Content]:\n{msg['pdf_content']}"
+            
+            # Look for assistant response
+            assistant_content = ""
+            if i + 1 < len(history) and history[i + 1]['role'] == 'assistant':
+                assistant_msg = history[i + 1]
+                assistant_content = assistant_msg['content']
+                if assistant_msg.get('has_pdf') and assistant_msg.get('pdf_content'):
+                    assistant_content += f"\n\n[Attached PDF Content]:\n{assistant_msg['pdf_content']}"
+                i += 2  # Skip both messages
+            else:
+                i += 1
+            
+            formatted_history.append({
+                'prompt': user_content,
+                'response': assistant_content
+            })
+        else:
+            # Skip standalone assistant messages
+            i += 1
+    
+    return formatted_history
+
+
+def build_current_message_with_pdf(history_data):
+    """
+    Build the current user message with PDF content if present.
+    
+    Args:
+        history_data: Output from extract_thread_history_with_attachments
+    
+    Returns:
+        str: Current message content with PDF appended if present
+    """
+    current = history_data.get('current_message')
+    
+    if not current:
+        return ""
+    
+    content = current.get('content', '')
+    
+    # Append PDF content if present in current message
+    if current.get('has_pdf') and current.get('pdf_content'):
+        content += f"\n\n[Attached PDF Content]:\n{current['pdf_content']}"
+    
+    return content
+
+
+# ============================================================================
+# ORIGINAL FUNCTIONS (ENHANCED)
+# ============================================================================
+
+def find_cv_in_thread(service, thread_id, attachment_dir):
+    """
+    Search all messages in a Gmail thread for CV attachments.
+    Returns first CV attachment found (PDF or image), else None.
+    """
+    try:
+        thread = service.users().threads().get(
+            userId="me",
+            id=thread_id,
+            format="full"
+        ).execute()
+
+        # Traverse newest → oldest
+        for msg in reversed(thread.get("messages", [])):
+            payload = msg.get("payload", {})
+            message_id = msg.get("id")
+
+            attachments = process_email_attachments(
+                service=service,
+                message_id=message_id,
+                payload=payload,
+                attachment_dir=attachment_dir
+            )
+
+            cv_attachments = [
+                att for att in attachments
+                if att["mime_type"] == "application/pdf"
+                or att["mime_type"].startswith("image/")
+            ]
+
+            if cv_attachments:
+                logging.info(
+                    f"Found CV in previous thread message {message_id}"
+                )
+                return cv_attachments
+
+        return None
+
+    except Exception as e:
+        logging.error(f"Thread CV lookup failed: {str(e)}")
+        return None
 
 # Configuration constants
 GMAIL_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.email_credentials", default_var=None)
 RECRUITMENT_FROM_ADDRESS = Variable.get("ltai.v3.lowtouch.recruitment.from_address", default_var=None)
+GOOGLE_SHEETS_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.sheets_credentials", default_var=None)
+GOOGLE_SHEETS_ID = Variable.get("ltai.v3.lowtouch.recruitment.sheets_id", default_var=None)
 LAST_PROCESSED_FILE = "/appz/cache/cv_last_processed_email.json"
 ATTACHMENT_DIR = "/appz/data/cv_attachments/"
-CANDIDATE_DATA_DIR = "/appz/data/recruitment/"
 
 # Default DAG arguments
 default_args = {
@@ -37,6 +360,58 @@ default_args = {
     "retries": 1,
     "retry_delay": timedelta(seconds=15),
 }
+
+
+def extract_email_from_cv(cv_text, model_name):
+    """
+    Extract candidate email address from CV text using AI.
+    
+    Args:
+        cv_text: Extracted text from CV PDF
+        model_name: AI model to use for extraction
+    
+    Returns:
+        str: Extracted email address or None if not found
+    """
+    try:
+        prompt = f"""Extract the candidate's email address from this CV/resume text.
+
+## CV Text:
+{cv_text[:3000]}
+
+## Instructions:
+- Look for email addresses in the contact information section
+- Return ONLY the email address, nothing else
+- If multiple emails are found, return the primary/personal email
+- If no email is found, return "NOT_FOUND"
+
+## Output Format:
+```json
+{{
+    "email": "<email_address or NOT_FOUND>",
+    "confidence": <0-100>,
+    "location": "<where in CV the email was found, e.g., 'header', 'contact section'>"
+}}
+```
+"""
+        
+        response = get_ai_response(prompt, stream=False, model=model_name)
+        result = extract_json_from_text(response)
+        
+        extracted_email = result.get('email', 'NOT_FOUND')
+        confidence = result.get('confidence', 0)
+        location = result.get('location', 'unknown')
+        
+        if extracted_email and extracted_email != 'NOT_FOUND':
+            logging.info(f"Extracted email from CV: {extracted_email} (confidence: {confidence}%, location: {location})")
+            return extracted_email
+        else:
+            logging.warning("No email found in CV text")
+            return None
+            
+    except Exception as e:
+        logging.error(f"Error extracting email from CV: {str(e)}")
+        return None
 
 
 def fetch_cv_emails(**kwargs):
@@ -87,142 +462,289 @@ def fetch_cv_emails(**kwargs):
 
 def classify_email_type(**kwargs):
     """
-    Classify each email using AI to determine if it's:
-    1. New CV submission (trigger cv_analyse)
-    2. Screening response (trigger screening_response_analysis)
-    3. Other (log and skip)
+    Classify each email using AI with full thread context and PDF content.
+    Extracts complete conversation history and integrates PDF content.
     """
-    ti = kwargs['ti']
-    unread_emails = ti.xcom_pull(task_ids='fetch_cv_emails', key='unread_emails')
-    
+    ti = kwargs["ti"]
+    unread_emails = ti.xcom_pull(
+        task_ids="fetch_cv_emails",
+        key="unread_emails"
+    )
+
     if not unread_emails:
         logging.info("No emails to classify")
-        ti.xcom_push(key='classified_emails', value=[])
+        ti.xcom_push(key="classified_emails", value=[])
         return []
-    
-    MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
+
+    # Gmail service (reuse same credentials)
+    service = authenticate_gmail(
+        GMAIL_CREDENTIALS,
+        RECRUITMENT_FROM_ADDRESS
+    )
+
+    if not service:
+        raise RuntimeError("Failed to authenticate Gmail service")
+
+    # Google Sheets auth
+    auth_type = Variable.get(
+        "ltai.v3.lowtouch.recruitment.sheets_auth_type",
+        default_var="oauth"
+    )
+    sheets_service = authenticate_google_sheets(
+        GOOGLE_SHEETS_CREDENTIALS,
+        auth_type=auth_type
+    )
+    sheets_available = bool(sheets_service)
+
+    MODEL_NAME = Variable.get(
+        "ltai.v3.lowtouch.recruitment.model_name",
+        default_var="recruitment:0.3af"
+    )
+
     classified_emails = []
-    
+
     for email in unread_emails:
         try:
-            email_id = email.get('id', 'unknown')
-            headers = email.get('headers', {})
-            sender = headers.get('From', 'Unknown')
+            email_id = email.get("id")
+            thread_id = email.get("threadId")
+            headers = email.get("headers", {})
+            sender = headers.get("From", "Unknown")
             _, sender_email = parseaddr(sender)
-            subject = headers.get('Subject', '')
-            body = email.get('body', '')
-            attachments = email.get('attachments', [])
-            has_cv_attachment = any(
-                att.get('mime_type') == 'application/pdf' or 
-                att.get('mime_type', '').startswith('image/') 
-                for att in attachments
+            subject = headers.get("Subject", "")
+
+            # =====================================================================
+            # EXTRACT FULL THREAD HISTORY WITH PDF CONTENT
+            # =====================================================================
+            logging.info(f"Extracting thread history for email {email_id} in thread {thread_id}")
+            
+            thread_data = extract_thread_history_with_attachments(
+                service=service,
+                thread_id=thread_id,
+                attachment_dir=ATTACHMENT_DIR,
+                current_message_id=email_id
             )
             
-            # Check if candidate profile exists
-            safe_email = sender_email.replace('@', '_at_').replace('/', '_').replace('\\', '_')
-            profile_path = Path(f"{CANDIDATE_DATA_DIR}{safe_email}.json")
-            candidate_exists = profile_path.exists()
+            # Format history for AI
+            conversation_history = format_history_for_ai(thread_data)
             
-            # Load profile if exists
-            candidate_profile = None
-            if candidate_exists:
-                try:
-                    with open(profile_path, 'r', encoding='utf-8') as f:
-                        candidate_profile = json.load(f)
-                except Exception as e:
-                    logging.warning(f"Failed to load candidate profile: {str(e)}")
+            # Build current message with PDF
+            current_message_content = build_current_message_with_pdf(thread_data)
             
-            logging.info(f"Classifying email from {sender_email}")
-            logging.info(f"Has CV attachment: {has_cv_attachment}, Candidate exists: {candidate_exists}")
+            logging.info(f"Thread context: {len(conversation_history)} previous messages")
             
-            # Build classification prompt
-            prompt = f"""Analyze this email and determine its type for recruitment workflow routing.
+            # =====================================================================
+            # FIND CV IN CURRENT OR PREVIOUS MESSAGES
+            # =====================================================================
+            attachments = email.get("attachments", [])
+            cv_attachments = [
+                att for att in attachments
+                if att.get("mime_type") == "application/pdf"
+                or att.get("mime_type", "").startswith("image/")
+            ]
 
-## Email Details:
-- From: {sender_email}
-- Subject: {subject}
-- Has PDF/Image Attachments: {has_cv_attachment}
-- Body: {body}
+            # Fallback: search previous thread messages for CV
+            if not cv_attachments and thread_id:
+                logging.info(f"No CV in current message. Searching thread {thread_id}")
+                thread_cvs = find_cv_in_thread(
+                    service=service,
+                    thread_id=thread_id,
+                    attachment_dir=ATTACHMENT_DIR
+                )
+                if thread_cvs:
+                    cv_attachments = thread_cvs
+
+            has_cv_attachment = bool(cv_attachments)
+
+            # =====================================================================
+            # EXTRACT CANDIDATE EMAIL FROM CV
+            # =====================================================================
+            candidate_email = None
+            cv_text = None
+
+            if cv_attachments:
+                for att in cv_attachments:
+                    if att.get("mime_type") == "application/pdf":
+                        cv_path = att.get("path")
+                        if cv_path and Path(cv_path).exists():
+                            logging.info(f"Extracting CV text from {cv_path}")
+                            cv_data = extract_pdf_content(cv_path)
+                            
+                            # Handle both dict and string returns
+                            if isinstance(cv_data, dict):
+                                cv_text = cv_data.get("content", "")
+                            else:
+                                cv_text = cv_data
+                            
+                            candidate_email = extract_email_from_cv(cv_text, MODEL_NAME)
+                            if candidate_email:
+                                break
+
+            search_email = candidate_email or sender_email
+
+            # =====================================================================
+            # GOOGLE SHEETS LOOKUP
+            # =====================================================================
+            candidate_exists = False
+            candidate_profile = None
+
+            if sheets_available and GOOGLE_SHEETS_ID:
+                try:
+                    existing = find_candidate_in_sheet(
+                        sheets_service,
+                        GOOGLE_SHEETS_ID,
+                        search_email,
+                        sheet_name="Sheet1"  # Add this parameter
+                    )
+
+                    if existing:
+                        candidate_exists = True
+                        candidate_profile = get_candidate_details(
+                            sheets_service,
+                            GOOGLE_SHEETS_ID,
+                            search_email,
+                            sheet_name="Sheet1"  # Add this parameter
+                        )
+                except Exception as e:
+                    logging.error(f"Error accessing Google Sheets: {str(e)}")
+                    candidate_exists = False
+                    candidate_profile = None
+
+            # =====================================================================
+            # BUILD AI CLASSIFICATION PROMPT WITH THREAD CONTEXT
+            # =====================================================================
+            prompt = f"""
+Analyze this recruitment email with full conversation context.
+
+## Current Message:
+Sender: {sender_email}
+Candidate Email (from CV): {candidate_email or "Not extracted"}
+Search Email Used: {search_email}
+Subject: {subject}
+Has CV Attachment: {has_cv_attachment}
+
+Content:
+{current_message_content}
+
+## Conversation Context:
+Previous Messages in Thread: {len(conversation_history)}
+"""
+
+            # Add conversation history summary
+            if conversation_history:
+                prompt += "\nPrevious Conversation:\n"
+                for i, hist_msg in enumerate(conversation_history[-3:], 1):  # Last 3 conversation pairs
+                    # Each hist_msg has 'prompt' (user) and 'response' (assistant)
+                    user_msg = hist_msg.get('prompt', '')
+                    assistant_msg = hist_msg.get('response', '')
+                    
+                    if user_msg:
+                        prompt += f"{i}a. [user]: {user_msg[:200]}...\n"
+                    if assistant_msg:
+                        prompt += f"{i}b. [assistant]: {assistant_msg[:200]}...\n"
+
+            prompt += f"""
 
 ## Candidate Status:
-- Existing Candidate: {candidate_exists}
+Exists in System: {candidate_exists}
 """
-            
-            if candidate_profile:
-                screening_completed = candidate_profile.get('screening_stage', {}).get('completed', False)
-                prompt += f"""- Screening Stage Completed: {screening_completed}
-- Previous Job Applied: {candidate_profile.get('job_title', 'Unknown')}
-"""
-            
-            prompt += """
-## Classification Rules:
-1. **NEW_CV_APPLICATION**: 
-   - Email contains CV/resume attachment (PDF or image)
-   - Candidate is applying for the first time OR
-   - Candidate is reapplying with a new CV attachment
-   
-2. **SCREENING_RESPONSE**: 
-   - Email is a reply/response from an existing candidate
-   - No CV attachment (or CV is same as before)
-   - Email body contains answers to questions
-   - Candidate profile exists in system
-   
-3. **OTHER**: 
-   - Doesn't fit above categories
-   - Follow-up questions
-   - General inquiries
 
-## Output Format:
-```json
-{
-    "email_type": "<NEW_CV_APPLICATION or SCREENING_RESPONSE or OTHER>",
-    "confidence": <0-100>,
-    "reasoning": "<brief explanation for classification>",
-    "target_dag": "<cv_analyse or screening_response_analysis or none>"
-}
-```
+            if candidate_profile:
+                prompt += f"""
+Candidate Profile:
+- Name: {candidate_profile.get("candidate_name")}
+- Email: {candidate_profile.get("email")}
+- Job Applied: {candidate_profile.get("job_title")}
+- Status: {candidate_profile.get("status")}
+- Score: {candidate_profile.get("total_score")}
 """
+
+            prompt += """
+
+## Classification Rules:
+1. NEW_CV_APPLICATION
+   - CV attached in this email OR previous thread message
+   - First-time application or reapplication
+
+2. SCREENING_RESPONSE
+   - Existing candidate in system
+   - No new CV in current message
+   - Contains answers to screening questions
+
+3. OTHER
+   - General queries, follow-ups, rejected/hired candidates
+   - No CV and not a screening response
+
+## Return JSON only:
+{
+  "email_type": "NEW_CV_APPLICATION | SCREENING_RESPONSE | OTHER",
+  "confidence": 0-100,
+  "reasoning": "...",
+  "target_dag": "cv_analyse | screening_response_analysis | none"
+}
+"""
+
+            # =====================================================================
+            # AI CLASSIFICATION WITH CONVERSATION HISTORY
+            # =====================================================================
+            logging.info(f"Classifying email {email_id} using AI model {MODEL_NAME}")
+            ai_response = get_ai_response(
+                prompt,
+                conversation_history=conversation_history,
+                stream=False,
+                model=MODEL_NAME
+            )
             
-            # Get AI classification
-            classification_response = get_ai_response(prompt, stream=False, model=MODEL_NAME)
-            classification = extract_json_from_text(classification_response)
-            
-            email_type = classification.get('email_type', 'OTHER')
-            confidence = classification.get('confidence', 0)
-            reasoning = classification.get('reasoning', 'No reasoning provided')
-            target_dag = classification.get('target_dag', 'none')
-            
-            logging.info(f"Email {email_id} classified as: {email_type} (confidence: {confidence}%)")
+            classification = extract_json_from_text(ai_response)
+
+            email_type = classification.get("email_type", "OTHER")
+            confidence = classification.get("confidence", 0)
+            reasoning = classification.get("reasoning", "")
+            target_dag = classification.get("target_dag", "none")
+
+            logging.info(f"Email {email_id} classified as {email_type} (confidence: {confidence}%)")
             logging.info(f"Reasoning: {reasoning}")
-            logging.info(f"Target DAG: {target_dag}")
-            
-            # Add classification to email data
-            email['classification'] = {
-                'type': email_type,
-                'confidence': confidence,
-                'reasoning': reasoning,
-                'target_dag': target_dag,
-                'candidate_exists': candidate_exists
+
+            # =====================================================================
+            # ATTACH RESULTS
+            # =====================================================================
+            email["classification"] = {
+                "type": email_type,
+                "confidence": confidence,
+                "reasoning": reasoning,
+                "target_dag": target_dag,
+                "candidate_exists": candidate_exists,
+                "candidate_profile": candidate_profile
             }
-            
+
+            email["extracted_candidate_email"] = candidate_email
+            email["search_email"] = search_email
+            email["cv_text_preview"] = cv_text[:500] if cv_text else None
+            email["thread_history"] = thread_data
+            email["conversation_context"] = conversation_history
+
             classified_emails.append(email)
-            
+
         except Exception as e:
-            logging.error(f"Error classifying email {email.get('id')}: {str(e)}")
-            # Default to NEW_CV_APPLICATION if classification fails and has attachment
-            email['classification'] = {
-                'type': 'NEW_CV_APPLICATION' if has_cv_attachment else 'OTHER',
-                'confidence': 50,
-                'reasoning': f'Classification failed: {str(e)}',
-                'target_dag': 'cv_analyse' if has_cv_attachment else 'none',
-                'candidate_exists': candidate_exists
+            logging.error(
+                f"Classification failed for email {email.get('id')}: {e}",
+                exc_info=True
+            )
+
+            # Fallback classification
+            email["classification"] = {
+                "type": "NEW_CV_APPLICATION" if email.get("attachments") else "OTHER",
+                "confidence": 50,
+                "reasoning": f"Error during classification: {str(e)}",
+                "target_dag": "cv_analyse" if email.get("attachments") else "none",
+                "candidate_exists": False,
+                "candidate_profile": None
             }
+
             classified_emails.append(email)
-    
-    # Push classified emails to XCom
-    ti.xcom_push(key='classified_emails', value=classified_emails)
-    logging.info(f"Classified {len(classified_emails)} emails")
-    
+
+    ti.xcom_push(key="classified_emails", value=classified_emails)
+    logging.info(f"Classified {len(classified_emails)} emails with thread context")
+
     return classified_emails
 
 
@@ -257,7 +779,9 @@ def route_emails_to_dags(**kwargs):
     routing_summary = {
         'cv_analyse': 0,
         'screening_response_analysis': 0,
-        'skipped': 0
+        'skipped': 0,
+        'emails_extracted_from_cv': 0,
+        'emails_with_thread_context': 0
     }
     
     for email in classified_emails:
@@ -267,6 +791,16 @@ def route_emails_to_dags(**kwargs):
             target_dag = classification.get('target_dag', 'none')
             email_type = classification.get('type', 'OTHER')
             sender = email.get('headers', {}).get('From', 'Unknown')
+            candidate_exists = classification.get('candidate_exists', False)
+            extracted_email = email.get('extracted_candidate_email')
+            search_email = email.get('search_email')
+            thread_history = email.get('thread_history', {})
+            
+            if extracted_email:
+                routing_summary['emails_extracted_from_cv'] += 1
+            
+            if thread_history.get('history'):
+                routing_summary['emails_with_thread_context'] += 1
             
             if target_dag == 'none' or email_type == 'OTHER':
                 logging.info(f"Skipping email {email_id} (type: {email_type})")
@@ -278,6 +812,9 @@ def route_emails_to_dags(**kwargs):
             
             logging.info(f"Routing email {email_id} from {sender} to DAG: {target_dag}")
             logging.info(f"Classification: {email_type} (confidence: {classification.get('confidence')}%)")
+            logging.info(f"Candidate email used for search: {search_email}")
+            logging.info(f"Candidate exists in system: {candidate_exists}")
+            logging.info(f"Thread history messages: {len(thread_history.get('history', []))}")
             
             # Create and execute trigger operator
             trigger_task = TriggerDagRunOperator(
@@ -302,6 +839,8 @@ def route_emails_to_dags(**kwargs):
     logging.info("Email Routing Summary:")
     logging.info(f"  - New CV Applications (cv_analyse): {routing_summary['cv_analyse']}")
     logging.info(f"  - Screening Responses (screening_response_analysis): {routing_summary['screening_response_analysis']}")
+    logging.info(f"  - Emails extracted from CV: {routing_summary['emails_extracted_from_cv']}")
+    logging.info(f"  - Emails with thread context: {routing_summary['emails_with_thread_context']}")
     logging.info(f"  - Skipped/Other: {routing_summary['skipped']}")
     logging.info("=" * 60)
     
@@ -318,51 +857,47 @@ def log_no_emails(**kwargs):
     return "No emails to process"
 
 
-# Define the DAG
+# ============================================================================
+# DAG DEFINITION
+# ============================================================================
+
 with DAG(
     "cv_monitor_mailbox",
     default_args=default_args,
     schedule_interval=timedelta(minutes=2),  # Check every 2 minutes
     catchup=False,
     doc_md="""
-    # Smart CV Mailbox Monitor DAG
+    # Smart CV Mailbox Monitor DAG with Thread History & PDF Content
     
     This DAG monitors a Gmail mailbox for incoming recruitment emails and intelligently 
-    routes them to the appropriate processing DAG.
+    routes them to the appropriate processing DAG. It extracts complete conversation
+    history from email threads and integrates PDF content at the appropriate points.
     
     ## Workflow:
     1. Fetch unread emails with attachments from Gmail
-    2. Classify each email using AI:
+    2. Extract full thread history with all previous messages
+    3. Extract PDF content from attachments in each message
+    4. Integrate PDF content into conversation history
+    5. Extract candidate email from CV PDF using AI
+    6. Use extracted email to search Google Sheets for candidate profile
+    7. Classify each email using AI with full conversation context:
        - NEW_CV_APPLICATION: First-time CV submission or reapplication
        - SCREENING_RESPONSE: Response to screening questions
        - OTHER: General inquiries or follow-ups
-    3. Route emails to appropriate DAGs:
+    8. Route emails to appropriate DAGs:
        - `cv_analyse`: For new CV applications
        - `screening_response_analysis`: For screening responses
        - Skip: For other types
     
-    ## Classification Logic:
-    - Uses AI to analyze email content, attachments, and candidate history
-    - Checks if candidate profile exists in system
-    - Considers attachment types and email body content
-    - Provides confidence scores and reasoning for each classification
+    ## Key Features:
+    - **Full Thread History**: Extracts all messages from email conversation
+    - **PDF Content Integration**: Attaches PDF content to appropriate messages in history
+    - **AI-powered Email Extraction**: Extracts candidate email from CV text
+    - **Context-Aware Classification**: Uses conversation history for better classification
+    - **Smart Routing**: Routes to appropriate DAG based on email type
     
-    ## Configuration:
-    - Polls mailbox every 2 minutes
-    - Processes only emails received after last check
-    - Extracts PDF and image attachments
-    - Maintains candidate profile database at /appz/data/recruitment/
-    
-    ## Required Variables:
-    - ltai.v3.lowtouch.recruitment.email_credentials
-    - ltai.v3.lowtouch.recruitment.from_address
-    - ltai.v3.lowtouch.recruitment.model_name
-    
-    ## Triggered DAGs:
-    - cv_analyse: Processes new CV submissions
-    - screening_response_analysis: Processes screening question responses
     """,
-    tags=["cv", "monitor", "mailbox", "recruitment", "intelligent-routing"]
+    tags=["cv", "monitor", "mailbox", "recruitment", "intelligent-routing", "google-sheets", "pdf-extraction", "email-extraction"]
 ) as dag:
     
     # Task 1: Fetch emails with attachments
@@ -372,7 +907,7 @@ with DAG(
         provide_context=True
     )
     
-    # Task 2: Classify emails using AI
+    # Task 2: Classify emails using AI (with PDF email extraction)
     classify_emails_task = PythonOperator(
         task_id='classify_email_type',
         python_callable=classify_email_type,

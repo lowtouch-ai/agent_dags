@@ -1,6 +1,7 @@
 """
 Airflow DAG for analyzing CVs from email attachments.
 Processes PDF resumes and extracts candidate information.
+Stores results in Google Sheets.
 """
 
 from airflow import DAG
@@ -21,13 +22,24 @@ try:
 except Exception as e:
     logging.error(f"Error appending to sys.path: {e}")
 
-# Import your email utilities if needed
+# Import your email utilities
 from agent_dags.utils.email_utils import authenticate_gmail, send_email, mark_email_as_read
 from agent_dags.utils.agent_utils import get_ai_response, extract_json_from_text
+
+# Import Google Sheets utilities
+from agent_dags.utils.sheets_utils import (
+    authenticate_google_sheets,
+    append_candidate_to_sheet,
+    update_candidate_status,
+    find_candidate_in_sheet
+)
 
 # Configuration constants
 GMAIL_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.email_credentials", default_var=None)
 RECRUITMENT_FROM_ADDRESS = Variable.get("ltai.v3.lowtouch.recruitment.from_address", default_var=None)
+GOOGLE_SHEETS_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.sheets_credentials", default_var=None)
+GOOGLE_SHEETS_ID = Variable.get("ltai.v3.lowtouch.recruitment.sheets_id", default_var=None)
+
 # Default DAG arguments
 default_args = {
     "owner": "lowtouch.ai_developers",
@@ -112,13 +124,15 @@ def extract_cv_content(**kwargs):
     kwargs['ti'].xcom_push(key='email_content', value=email_content)
     
     return cv_data
+
+
 def retrive_jd_from_web(**kwargs):
     """
     Retrieve Job Description (JD) from a web source.
-    This is a placeholder function and should be implemented to fetch actual JD data.
     """
     cv_data = kwargs['ti'].xcom_pull(task_ids='extract_cv_content', key='cv_data')
-    email_data = kwargs['ti'].xcom_pull(task_ids='email_data', key='cv_data')
+    email_content = kwargs['ti'].xcom_pull(task_ids='extract_cv_content', key='email_content')
+    
     logging.info("Retrieving Job Description from web source...")
     prompt = f"""
     # Task
@@ -126,7 +140,7 @@ def retrive_jd_from_web(**kwargs):
     ## Candidate Info
     {cv_data}
     ## Email data
-    {email_data}
+    {email_content}
     ## Output format
     ```json
     {{
@@ -143,9 +157,11 @@ def retrive_jd_from_web(**kwargs):
     logging.info(f"Retrieved Job Description: {jd_response}...")
     jd_data = extract_json_from_text(jd_response)
     logging.debug(f"Extracted JD Data: {jd_data}")
+    
     # Push JD data to XCom for downstream tasks
     kwargs['ti'].xcom_push(key='jd_data', value=jd_data)
     return jd_data
+
 
 def get_the_jd_for_cv_analysis(**kwargs):
     """
@@ -156,7 +172,7 @@ def get_the_jd_for_cv_analysis(**kwargs):
     # Pull data from XCom
     jd_list = ti.xcom_pull(task_ids='retrive_jd_from_web', key='jd_data')
     cv_data = ti.xcom_pull(task_ids='extract_cv_content', key='cv_data')
-    email_content = ti.xcom_pull(task_ids='email_content', key='cv_data')
+    email_content = ti.xcom_pull(task_ids='extract_cv_content', key='email_content')
 
     MODEL_NAME = Variable.get(
         "ltai.v3.lowtouch.recruitment.model_name",
@@ -180,7 +196,6 @@ def get_the_jd_for_cv_analysis(**kwargs):
     {cv_data}
     ## Email content
     {email_content}
-    ##
 
     Output STRICTLY in JSON:
     {{
@@ -245,22 +260,21 @@ def get_the_jd_for_cv_analysis(**kwargs):
 def calculate_candidate_score(analysis_json):
     """
     Calculate the candidate score based on the provided analysis JSON.
-    Args:
-    analysis_json (dict): The JSON object from the recruitment AI response.
-    Returns:
-    dict: A dictionary containing the scores and eligibility status.
     """
     # Extract data from JSON
     must_have_skills = analysis_json.get('must_have_skills', [])
     nice_to_have_skills = analysis_json.get('nice_to_have_skills', [])
     experience_match = analysis_json.get('experience_match', {})
     education_match = analysis_json.get('education_match', {})
+    
     # Score arrays
     must_have_scores = []
     nice_to_have_scores = []
     other_scores = []
+    
     # Track ineligibility reasons
     reasons = []
+    
     # Score Must-Have Skills
     for skill in must_have_skills:
         match = skill.get('match', False)
@@ -269,27 +283,33 @@ def calculate_candidate_score(analysis_json):
         else:
             must_have_scores.append(50)
             reasons.append("missing Must-Have skills")
+    
     # Score Nice-to-Have Skills
     for skill in nice_to_have_skills:
         match = skill.get('match', False)
         nice_to_have_scores.append(100 if match else 0)
+    
     # Score Other Criteria (Experience and Education)
-    # Now: full match=100, no match=0 (ineligible if no match)
     exp_match = experience_match.get('match', False)
     experience_score = 100 if exp_match else 0
     if not exp_match:
         reasons.append("experience mismatch")
+    
     edu_match = education_match.get('match', False)
     education_score = 100 if edu_match else 0
     if not edu_match:
         reasons.append("education mismatch")
+    
     other_scores.extend([experience_score, education_score])
+    
     # Aggregate Scores
     must_have_avg = round(statistics.mean(must_have_scores)) if must_have_scores else 0
     nice_to_have_avg = round(statistics.mean(nice_to_have_scores)) if nice_to_have_scores else 0
     other_avg = round(statistics.mean(other_scores)) if other_scores else 0
+    
     # Eligibility Check
     ineligible = False
+    
     if ineligible:
         total_score = 0
         remarks = "Ineligible due to: " + ", ".join(reasons) + "."
@@ -300,6 +320,7 @@ def calculate_candidate_score(analysis_json):
         nice_to_have_weighted = (nice_to_have_avg / 100) * 30
         other_weighted = (other_avg / 100) * 10
         total_score = round(must_have_weighted + nice_to_have_weighted + other_weighted)
+    
     return {
         'must_have_score': must_have_avg,
         'nice_to_have_score': nice_to_have_avg,
@@ -308,9 +329,7 @@ def calculate_candidate_score(analysis_json):
         'eligible': not ineligible,
         'remarks': remarks
     }
-import os
-import json
-from pathlib import Path
+
 
 def get_the_score_for_cv_analysis(**kwargs):
     """
@@ -324,29 +343,26 @@ def get_the_score_for_cv_analysis(**kwargs):
         logging.warning("Missing CV or JD data for scoring")
         return None
     
-    prompt = f"""Match the CV with the Job Description (JD)
+    prompt = f"""Match the CV with the Job Description (JD). Also extract the candidate's name from the CV.
     CV: {cv_data}
     JD: {jd_data}
     ## Output format
 ```json
     {{
+        "candidate_name": "<full name of candidate>",
         "job_title": "<job title>",
         "selected": <true or false>,
         "must_have_skills": [
             {{
                 "skill_name": "<skill name>",
                 "match": <true or false>
-            }},
-            {{...}},
-            {{...}}
+            }}
         ],
         "nice_to_have_skills": [
             {{
                 "skill_name": "<skill name>",
                 "match": <true or false>
-            }},
-            {{...}},
-            {{...}}
+            }}
         ],
         "experience_match": {{
             "required_experience_years": "<years>",
@@ -358,8 +374,8 @@ def get_the_score_for_cv_analysis(**kwargs):
             "candidate_education": "<education details>",
             "match": <true or false>
         }},
-        "reason": <reason for selection or rejection>,
-        "candidate_email": "<candidate email>",
+        "reason": "<reason for selection or rejection>",
+        "candidate_email": "<candidate email>"
     }}
 ```
     """
@@ -370,17 +386,23 @@ def get_the_score_for_cv_analysis(**kwargs):
     
     score_data = extract_json_from_text(score_response)
     calculated_scores = calculate_candidate_score(score_data)
-    logging.info(f"Calculated Score:: {calculated_scores}")
+    
+    # Merge score_data with calculated_scores
+    final_score_data = {**score_data, **calculated_scores}
+    
+    logging.info(f"Calculated Score: {calculated_scores}")
     
     # Store the data to file
     try:
+        from pathlib import Path
+        
         # Create directory if it doesn't exist
         output_dir = Path("/appz/data/recruitment")
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # Get candidate email from the score data
-        candidate_email = calculated_scores.get('candidate_email', 'unknown')
-        # Sanitize email for filename (replace @ and other invalid characters)
+        candidate_email = score_data.get('candidate_email', 'unknown')
+        # Sanitize email for filename
         safe_email = candidate_email.replace('@', '_at_').replace('/', '_').replace('\\', '_')
         
         # Create the file path
@@ -388,44 +410,125 @@ def get_the_score_for_cv_analysis(**kwargs):
         
         # Write the data to file
         with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(calculated_scores, f, indent=2, ensure_ascii=False)
+            json.dump(final_score_data, f, indent=2, ensure_ascii=False)
         
         logging.info(f"Score data saved to: {output_file}")
         
     except Exception as e:
         logging.error(f"Failed to save score data to file: {str(e)}")
-        # Continue execution even if file save fails
     
-    ti.xcom_push(key='score_data', value=calculated_scores)
-    logging.debug(f"Score Data: {calculated_scores}")
+    ti.xcom_push(key='score_data', value=final_score_data)
+    logging.debug(f"Score Data: {final_score_data}")
     
-    return score_data
+    return final_score_data
+
+
+def save_to_google_sheets(**kwargs):
+    """
+    Save candidate data to Google Sheets.
+    """
+    ti = kwargs['ti']
+    
+    # Get data from previous tasks
+    score_data = ti.xcom_pull(task_ids='get_the_score_for_cv_analysis', key='score_data')
+    cv_data = ti.xcom_pull(task_ids='extract_cv_content', key='cv_data')
+    
+    if not score_data or not cv_data:
+        logging.warning("Missing score or CV data for Google Sheets")
+        return "Missing data"
+    
+    # Get authentication type (default to oauth)
+    auth_type = Variable.get(
+        "ltai.v3.lowtouch.recruitment.sheets_auth_type", 
+        default_var="oauth"
+    )
+    
+    # Authenticate with Google Sheets
+    service = authenticate_google_sheets(GOOGLE_SHEETS_CREDENTIALS, auth_type=auth_type)
+    
+    if not service:
+        logging.error("Failed to authenticate with Google Sheets")
+        return "Authentication failed"
+    
+    # Prepare candidate data for Google Sheets
+    candidate_data = {
+        'candidate_email': score_data.get('candidate_email', ''),
+        'candidate_name': score_data.get('candidate_name', ''),
+        'job_title': score_data.get('job_title', ''),
+        'total_score': score_data.get('total_score', 0),
+        'must_have_score': score_data.get('must_have_score', 0),
+        'nice_to_have_score': score_data.get('nice_to_have_score', 0),
+        'other_criteria_score': score_data.get('other_criteria_score', 0),
+        'eligible': score_data.get('eligible', False),
+        'remarks': score_data.get('remarks', ''),
+        'experience_years': score_data.get('experience_match', {}).get('candidate_experience_years', ''),
+        'education': score_data.get('education_match', {}).get('candidate_education', ''),
+        'email_subject': cv_data.get('subject', ''),
+        'sender': cv_data.get('sender', ''),
+        'status': 'Email Sent' if score_data.get('eligible') else 'Rejected'
+    }
+    
+    # Check if candidate already exists
+    existing_candidate = find_candidate_in_sheet(
+        service, 
+        GOOGLE_SHEETS_ID, 
+        candidate_data['candidate_email']
+    )
+    
+    if existing_candidate:
+        logging.info(f"Candidate {candidate_data['candidate_email']} already exists. Updating status...")
+        success = update_candidate_status(
+            service,
+            GOOGLE_SHEETS_ID,
+            candidate_data['candidate_email'],
+            candidate_data['status']
+        )
+    else:
+        # Append new candidate
+        success = append_candidate_to_sheet(
+            service,
+            GOOGLE_SHEETS_ID,
+            candidate_data
+        )
+    
+    if success:
+        logging.info(f"Successfully saved candidate data to Google Sheets")
+        return "Success"
+    else:
+        logging.error("Failed to save candidate data to Google Sheets")
+        return "Failed"
+
 
 def send_response_email(**kwargs):
     """
     Send a response email to the candidate based on eligibility.
-    Uses the email_utils for authentication and sending.
     """
     ti = kwargs['ti']
     email_data = kwargs['dag_run'].conf.get('email_data', {})
     score_data = ti.xcom_pull(task_ids='get_the_score_for_cv_analysis', key='score_data')
     cv_data = ti.xcom_pull(task_ids='extract_cv_content', key='cv_data')
+    
     if not email_data or not score_data or not cv_data:
         logging.warning("Missing data for sending response email")
         return "Missing data for email"
+    
     headers = email_data.get('headers', {})
     sender = headers.get('From', 'Unknown')
     subject = headers.get('Subject', 'No Subject')
     thread_id = email_data.get('threadId')
     original_message_id = headers.get('Message-ID', '')
     references = headers.get('References', '')
+    
     if original_message_id and original_message_id not in references:
         references = f"{references} {original_message_id}".strip()
+    
     # Parse sender email
     _, sender_email = parseaddr(sender)
+    
     if not sender_email:
         logging.warning(f"Could not parse sender email from {sender}")
         return "Invalid sender email"
+    
     # Compose email body based on eligibility
     if not score_data.get("eligible", False):
         # Rejection email
@@ -464,7 +567,7 @@ def send_response_email(**kwargs):
         """
         logging.info("Candidate not selected, sending rejection email.")
     else:
-        # Selection email (initial assessment)
+        # Selection email
         MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
         agent_response_prompt = f"""Compose a personalized response email for a selected candidate after initial screening. Include the following structure in the email body:
 
@@ -493,32 +596,39 @@ Use a professional, encouraging tone throughout. Output only clean, valid HTML f
         agent_response_prompt += f"\nJob details: {jd_data}"
         response = get_ai_response(agent_response_prompt, stream=False, model=MODEL_NAME)
     
-        # Clean HTML from response (similar to step_6)
+        # Clean HTML from response
         match = re.search(r'```html.*?\n(.*?)```', response, re.DOTALL)
         body = match.group(1).strip() if match else response.strip()
-        # Fallback if not valid HTML
+        
         if not body.strip().startswith('<!DOCTYPE') and not body.strip().startswith('<html'):
             body = body.strip()
         logging.info("Candidate selected, sending initial assessment email.")
+    
     # Authenticate
     service = authenticate_gmail(GMAIL_CREDENTIALS, RECRUITMENT_FROM_ADDRESS)
+    
     if not service:
         logging.error("Gmail authentication failed, aborting email response.")
         return "Gmail authentication failed"
-    # For CV DAG, simple reply to sender (no CC/BCC unless specified)
-    cc = None  # Add logic if needed
-    bcc = None  # Add logic if needed
+    
+    cc = None
+    bcc = None
     subject = f"Re: {subject}"
-    result = send_email(service, sender_email, subject, body, original_message_id, references, 
-                   RECRUITMENT_FROM_ADDRESS, cc=cc, bcc=bcc, thread_id=thread_id)
+    
+    result = send_email(
+        service, sender_email, subject, body, 
+        original_message_id, references, 
+        RECRUITMENT_FROM_ADDRESS, 
+        cc=cc, bcc=bcc, thread_id=thread_id
+    )
+    
     if result:
         logging.info(f"Email sent successfully to {sender_email}")
-        # Optionally mark original as read
-        # mark_email_as_read(service, email_data.get('id'))
         return f"Email sent successfully to {sender_email}"
     else:
         logging.error("Failed to send email")
         return "Failed to send email"
+
 
 # Define the DAG
 with DAG(
@@ -533,17 +643,21 @@ with DAG(
     
     ## Workflow:
     1. Extract CV content from PDF attachments
-    2. Analyze CV content to extract candidate information
-    3. Store analysis results
-    4. (Optional) Send response email to candidate
+    2. Retrieve matching job descriptions
+    3. Get detailed JD for analysis
+    4. Score the CV against JD
+    5. Save results to Google Sheets
+    6. Send response email to candidate
     
     ## Configuration:
     - Triggered DAG (no schedule)
     - Receives email data via conf parameter
     - Processes PDF attachments with extracted text content
+    - Stores results in Google Sheets for tracking
     """,
-    tags=["cv", "analysis", "recruitment"]
+    tags=["cv", "analysis", "recruitment", "google-sheets"]
 ) as dag:
+    
     extract_cv_task = PythonOperator(
         task_id="extract_cv_content",
         python_callable=extract_cv_content,
@@ -568,6 +682,11 @@ with DAG(
         provide_context=True
     )
 
+    save_sheets_task = PythonOperator(
+        task_id="save_to_google_sheets",
+        python_callable=save_to_google_sheets,
+        provide_context=True
+    )
 
     send_response_task = PythonOperator(
         task_id="send_response_email",
@@ -576,4 +695,4 @@ with DAG(
     )
 
     # Set task dependencies
-    extract_cv_task >> retrieve_jd_task >> get_jd_task >> score_cv_task >> send_response_task
+    extract_cv_task >> retrieve_jd_task >> get_jd_task >> score_cv_task >> save_sheets_task >> send_response_task
