@@ -31,6 +31,7 @@ OLLAMA_HOST = Variable.get("ltai.v3.hubspot.ollama.host", "http://agentomatic:80
 HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")
 HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
 HUBSPOT_UI_URL = Variable.get("ltai.v3.hubspot.ui.url")
+HUBSPOT_TASK_UI_URL = Variable.get("ltai.v3.hubspot.task.ui.url")
 
 # Global cache for deal stage mappings
 DEAL_STAGE_CACHE = {}
@@ -728,7 +729,7 @@ def send_confirmation_email(**kwargs):
     <ul><li><strong>Task:</strong> {fp_subject}</li>
         <li><strong>ID:</strong> {followup_id}</li>
         <li><strong>Due:</strong> {fp_due_formatted}</li>
-        <li><strong>Link:</strong> <a href="{HUBSPOT_UI_URL}/tasks/{followup_id}">Open Task</a></li>
+        <li><strong>Link:</strong> <a href="{HUBSPOT_TASK_UI_URL}/view/all/task/{followup_id}">Open Task</a></li>
     </ul>
 </div>"""
 
@@ -771,7 +772,7 @@ def send_confirmation_email(**kwargs):
         <li><strong>ID:</strong> {task_id}</li>
         <li><strong>Priority:</strong> {orig_priority}</li>
         <li><strong>Status:</strong> Completed</li>
-        <li><strong>Link:</strong> <a href="{HUBSPOT_UI_URL}/tasks/{task_id}">Open Task</a></li>
+        <li><strong>Link:</strong> <a href="{HUBSPOT_TASK_UI_URL}/view/all/task/{task_id}">Open Task</a></li>
     </ul>
     
     {followup_section}
