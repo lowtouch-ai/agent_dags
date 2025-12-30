@@ -2,7 +2,7 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.decorators import task, task_group
 from typing import List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 from ollama import Client
 from airflow.models import Variable
@@ -14,8 +14,12 @@ import json
 import re
 import html
 import smtplib
+import requests
 from email.mime.image import MIMEImage
 import os
+import pandas as pd
+import numpy as np
+from requests.auth import HTTPBasicAuth
 
 
 # Configure detailed logging
@@ -39,24 +43,134 @@ SENDER_EMAIL = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_FROM_ADDRESS", def
 RECEIVER_EMAIL = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_TO_ADDRESS", default_var=SENDER_EMAIL)
 
 OLLAMA_HOST = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_OLLAMA_HOST", "http://agentomatic:8000/")
-POD_BATCH_SIZE = 6
+
+# Prometheus Configuration
+PROMETHEUS_URL = Variable.get("ltai.v1.sretradeideas.TRADEIDEAS_PROMETHEUS_URL", "https://ti-pre-prod-prometheus.lowtouchcloud.io")
+PROMETHEUS_USER = Variable.get("ltai.v1.sretradeideas.AGENT_PROMETHEUS_USER_TRADEIDEAS")
+PROMETHEUS_PASSWORD = Variable.get("ltai.v1.sretradeideas.AGENT_PROMETHEUS_PASSWORD_TRADEIDEAS")
+logging.info(f"Using Prometheus user: {PROMETHEUS_USER}, password: {PROMETHEUS_PASSWORD}")
+auth = HTTPBasicAuth(PROMETHEUS_USER, PROMETHEUS_PASSWORD)
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# IP-to-Name Mapping from queries.md
+NODE_MAPPING = {
+    "192.168.1.5": "microk8s-cert-expiry",
+    "172.233.193.238": "engine-master",
+    "192.168.144.198": "Ti-preprod-worker-0",
+    "192.168.144.151": "Ti-preprod-worker-1",
+    "192.168.181.210": "Ti-preprod-worker-2",
+    "172.233.197.223": "VPN-Server-Preprod",
+}
+
+def get_node_name(instance):
+    ip = instance.split(':')[0]
+    return NODE_MAPPING.get(ip, f"Unknown Node ({ip})")
 
 # === Precise Date & Time Helpers (computed once per DAG run) ===
-def _get_last_7_days_range():
-    """Returns (start_iso, end_iso) for last 7 full days (UTC)"""
-    end_date = (datetime.utcnow() - timedelta(days=7)).date()
-    start_date = end_date - timedelta(days=6)
-    start = f"{start_date}T00:00:00Z"
-    end = f"{end_date}T23:59:59Z"
-    return start, end
+def get_weekly_ranges():
+    now = datetime.now(IST)
+    
+    # Calculate "This Monday 11am" (The trigger time)
+    days_since_monday = now.weekday()  # Monday is 0
+    today_11am = now.replace(hour=11, minute=0, second=0, microsecond=0)
+    
+    # If run on Monday after 11am, 'this_monday' is This week. 
+    # If run before, it's Last Week (but schedule ensures we run after).
+    this_monday_11am = today_11am - timedelta(days=days_since_monday)
 
-# For use in prompts
-PREVIOUS_WEEK_START, PREVIOUS_WEEK_END = _get_last_7_days_range()
-PREVIOUS_WEEK_FULL_RANGE = f"previous week ({PREVIOUS_WEEK_START} to {PREVIOUS_WEEK_END})"
+    # Current Week: Last Monday -> This Monday
+    current_end_dt = this_monday_11am
+    current_start_dt = current_end_dt - timedelta(days=7)
+    
+    # Previous Week: Two Mondays ago -> Last Monday
+    previous_end_dt = current_start_dt
+    previous_start_dt = previous_end_dt - timedelta(days=7)
 
-# For display
-PREVIOUS_WEEK_DATE_STR = (datetime.utcnow() - timedelta(days=7)).strftime('%Y-%m-%d')
+    # Convert to timestamps
+    current_start = current_start_dt.astimezone(timezone.utc).timestamp()
+    current_end = current_end_dt.astimezone(timezone.utc).timestamp()
+    previous_start = previous_start_dt.astimezone(timezone.utc).timestamp()
+    previous_end = previous_end_dt.astimezone(timezone.utc).timestamp()
 
+    # Labels
+    current_period_str = f"{current_start_dt.strftime('%Y-%m-%d %H:%M')} to {current_end_dt.strftime('%Y-%m-%d %H:%M')} IST"
+    previous_period_str = f"{previous_start_dt.strftime('%Y-%m-%d %H:%M')} to {previous_end_dt.strftime('%Y-%m-%d %H:%M')} IST"
+
+    return (
+        (current_start, current_end),
+        (previous_start, previous_end),
+        current_period_str,
+        previous_period_str,
+        current_start_dt,
+        current_end_dt,
+        previous_start_dt,
+        previous_end_dt
+    )
+
+CURRENT_START, CURRENT_END = get_weekly_ranges()[0]
+PREVIOUS_START, PREVIOUS_END = get_weekly_ranges()[1]
+CURRENT_PERIOD = get_weekly_ranges()[2]
+PREVIOUS_PERIOD = get_weekly_ranges()[3]
+CURRENT_START_DT, CURRENT_END_DT, PREVIOUS_START_DT, PREVIOUS_END_DT = get_weekly_ranges()[4:]
+
+
+YESTERDAY_DATE_STR = CURRENT_END_DT.strftime('%Y-%m-%d') # Used for file naming
+
+def query_prometheus_range(query: str, start: float, end: float, step: str = "5m"):
+    url = f"{PROMETHEUS_URL}/api/v1/query_range"
+    params = {
+        "query": query,
+        "start": start,
+        "end": end,
+        "step": step
+    }
+    logging.info(f"Querying Prometheus range: {query} from {start} to {end}")
+    resp = requests.get(url, params=params, auth=auth, timeout=60, verify=True)
+    resp.raise_for_status()
+    data = resp.json()["data"]["result"]
+    rows = []
+    for result in data:
+        metric = result["metric"]
+        instance = metric.get("instance", "unknown")
+        for timestamp, value_str in result["values"]:
+            try:
+                value = float(value_str)
+            except ValueError:
+                continue
+            rows.append({
+                "instance": instance,
+                "timestamp": timestamp,
+                "value": value,
+                **metric  # Include other metrics like pod, mountpoint, etc.
+            })
+    df = pd.DataFrame(rows)
+    logging.info(f"Fetched {len(df)} rows for query: {query}")
+    return df
+
+def query_prometheus_instant(query: str, time: float = None):
+    url = f"{PROMETHEUS_URL}/api/v1/query"
+    params = {"query": query}
+    if time:
+        params["time"] = time
+    logging.info(f"Querying Prometheus instant: {query} at {time}")
+    resp = requests.get(url, params=params, auth=auth, timeout=60, verify=True)
+    resp.raise_for_status()
+    data = resp.json()["data"]
+    result_type = data["resultType"]
+    results = data["result"]
+    processed = []
+    if result_type == "scalar":
+        processed = [{"value": float(results[1])}]
+    elif result_type == "vector":
+        for r in results:
+            metric = r["metric"]
+            value = float(r["value"][1])
+            processed.append({"value": value, **metric})
+    logging.info(f"Fetched {len(processed)} results for instant query: {query}")
+    return processed
+
+       
 def get_ai_response(prompt, conversation_history=None):
     try:
         logging.debug(f"Query received: {prompt}")
@@ -64,12 +178,9 @@ def get_ai_response(prompt, conversation_history=None):
             raise ValueError("Invalid prompt provided.")
 
         client = Client(host=OLLAMA_HOST)
-        logging.debug(f"Connecting to Ollama at {OLLAMA_HOST} with model 'SRE/AILAB:0.4'")
-
         messages = []
         if conversation_history:
             messages.extend(conversation_history)
-        
         messages.append({"role": "user", "content": prompt})
 
         response = client.chat(
@@ -77,455 +188,1765 @@ def get_ai_response(prompt, conversation_history=None):
             messages=messages,
             stream=False
         )
-        logging.info(f"Raw response from agent: {str(response)[:500]}...")
-
         if 'message' not in response or 'content' not in response['message']:
-            logging.error("Response lacks expected 'message.content' structure")
             raise ValueError("Invalid response format from AI.")
         
         ai_content = response['message']['content'].strip()
         if not ai_content:
-            logging.warning("AI returned empty content")
             raise ValueError("No response generated.")
-
         return ai_content
     except Exception as e:
         logging.error(f"Error in get_ai_response: {str(e)}")
         raise
 
-# === Enhanced Generic helper to generate SRE reports ===
-def generate_sre_report(ti, key, description, period=None):
-    if period == "previous week":
-        period = PREVIOUS_WEEK_FULL_RANGE
-    elif period is None:
-        period = "last 7 days"
 
-    prompt = f"""You are the SRE TradeIdeas agent.
-Generate a **complete {description} report** for the period: **{period}**.
-Be precise about the time range in your response.
-"""
-    response = get_ai_response(prompt)
-    ti.xcom_push(key=key, value=response)
-    return response
-
-# === Node CPU ===
-def node_cpu_this_week(ti, **context): return generate_sre_report(ti, "node_cpu_this_week", "node-level CPU utilization", "last 7 days")
-def node_cpu_last_week(ti, **context): return generate_sre_report(ti, "node_cpu_last_week", "node-level CPU utilization", "previous week")
-
-# === Node Memory ===
-def node_memory_this_week(ti, **context): return generate_sre_report(ti, "node_memory_this_week", "node-level memory utilization", "last 7 days")
-def node_memory_last_week(ti, **context): return generate_sre_report(ti, "node_memory_last_week", "node-level memory utilization", "previous week")
-
-# === Node Disk ===
-def node_disk_this_week(ti, **context): return generate_sre_report(ti, "node_disk_this_week", "node-level disk utilization", "last 7 days")
-def node_disk_last_week(ti, **context): return generate_sre_report(ti, "node_disk_last_week", "node-level disk utilization", "previous week")
-
-# === Node Readiness ===
-def node_readiness_check(ti, **context): return generate_sre_report(ti, "node_readiness_check", "node readiness check")
-
-# === Pod Restart ===
-def pod_restart_this_week(ti, **context): return generate_sre_report(ti, "pod_restart_this_week", "pod restart count", "last 7 days")
-
-# === MySQL Health ===
-def mysql_health_this_week(ti, **context): return generate_sre_report(ti, "mysql_health_this_week", "MySQL health status", "last 7 days")
-def mysql_health_last_week(ti, **context): return generate_sre_report(ti, "mysql_health_last_week", "MySQL health status", "previous week")
-
-# === Certificate Checks ===
-def kubernetes_version_check(ti, **context): return generate_sre_report(ti, "kubernetes_version_check", "Kubernetes version check")
-def kubernetes_eol_and_next_version(ti, **context): return generate_sre_report(ti, "kubernetes_eol_and_next_version", "Kubernetes Current Version EOL Details and Next Supported Kubernetes Version")
-def microk8s_expiry_check(ti, **context): return generate_sre_report(ti, "microk8s_expiry_check", "MicroK8s master node certificate expiry check")
-
-# === LKE PVC Storage Details ===
-def lke_pvc_storage_details(ti, **context): return generate_sre_report(ti, "lke_pvc_storage_details", "LKE PVC storage details with disk sizes", "last 7 days")
-def lke_pvc_storage_details_last_week(ti, **context): return generate_sre_report(ti, "lke_pvc_storage_details_last_week", "LKE PVC storage details with disk sizes", "previous week")
-
-# === Comparison Functions ===
-def generate_sre_comparison(ti, key, report_name, data_this_key, data_last_key, instructions):
-    data_this = ti.xcom_pull(key=data_this_key)
-    data_last = ti.xcom_pull(key=data_last_key)
-    prompt = f"""
-You are the SRE TradeIdeas agent.
-**This Week's {report_name} Data:** {data_this}
-**Previous Week's {report_name} Data:** {data_last}
----
-{instructions}
-"""
-    response = get_ai_response(prompt)
-    ti.xcom_push(key=key, value=response)
-    return response
-
-def node_cpu_this_vs_last_week(ti, **context):
-    instructions = """
-Each record contains: `instance_ip`, `node_name`, `avg_cpu`, `max_cpu`.
-**Compute**: `avg_cpu_diff`, `max_cpu_diff` (round 4 decimals)
-**Output exactly this:**
-### CPU Utilization Comparison - Node Level (This Week vs Previous Week)
-| Node Name | Instance IP | Avg CPU (%) - This Week | Avg CPU (%) - Previous Week | Avg CPU Diff (%) | Max CPU (%) - This Week | Max CPU (%) - Previous Week | Max CPU Diff (%) |
-### Summary
-List nodes with |max_diff| > 20%, else “No significant CPU changes.”
-"""
-    return generate_sre_comparison(ti, "node_cpu_this_vs_last_week", "Node-Level CPU Utilization", "node_cpu_this_week", "node_cpu_last_week", instructions)
-
-def node_memory_this_vs_last_week(ti, **context):
-    instructions = """
-Each record contains: `instance_ip`, `node_name`, `total_memory_gb`, `avg_available_gb`, `max_usage_percent`.
-**Compute**: `avg_avail_diff`, `max_usage_diff` (round 2 decimals)
-**Output exactly this:**
-### Memory Utilization Comparison - Node Level (This Week vs Previous Week)
-| Instance IP | Node Name | Total Mem (GB) | Avg Avail This Week | Avg Avail Previous Week | Avg Diff (GB) | Max Usage This Week (%) | Max Usage Previous Week (%) | Max Diff (%) |
-### Summary
-List instances with |max_diff| > 20%, else “No significant memory issues.”
-"""
-    return generate_sre_comparison(ti, "node_memory_this_vs_last_week", "Node-Level Memory Utilization", "node_memory_this_week", "node_memory_last_week", instructions)
-
-def node_disk_this_vs_last_week(ti, **context):
-    instructions = """
-Each record contains: `instance_ip`, `node_name`, `mountpoint`, `used_percent`.
-**Compute**: `used_diff` (round 2 decimals)
-**Output exactly this:**
-### Disk Utilization Comparison - Node Level (This Week vs Previous Week)
-| Instance IP | Node Name | Mountpoint | Used (%) - This Week | Used (%) - Previous Week | Diff (%) |
-### Summary
-Show entries with |used_diff| > 20%, else “No significant disk issues.”
-"""
-    return generate_sre_comparison(ti, "node_disk_this_vs_last_week", "Node-Level Disk Utilization", "node_disk_this_week", "node_disk_last_week", instructions)
-
-def mysql_health_this_vs_last_week(ti, **context):
-    instructions = """
-Each record contains: `status`, `downtime_count`, `total_downtime_seconds`, `avg_probe_duration_seconds`.
-**Compute**: `count_diff`, `duration_diff` (round 1 decimal)
-**Output exactly this:**
-### MySQL Health Comparison (This Week vs Previous Week)
-| Endpoint | Status This Week | Status Previous Week | Count This Week | Count Previous Week | Diff | Duration This Week | Duration Previous Week | Duration Diff (s) |
-### Summary
-Describe downtime trends and current status.
-"""
-    return generate_sre_comparison(ti, "mysql_health_this_vs_last_week", "MySQL Health Status", "mysql_health_this_week", "mysql_health_last_week", instructions)
-
-def lke_pvc_this_vs_last_week(ti, **context):
-    instructions = """
-Each record contains: `pvc_name`, `namespace`, `storageclass`, `capacity_gib`, `used_current_gib`, `used_prev_gib`, etc.
-**Output exactly this:**
-### LKE PVC Storage Comparison (This Week vs Previous Week)
-| Persistent Volume Claim | Namespace   | Storage Class      | Capacity (GiB) | Used This Week (GiB) | Used Previous Week (GiB) | Used Diff (GiB) | Available This Week | Available Previous Week | Available Diff |
-### Summary
-[Concise summary of storage growth or anomalies]
-"""
-    return generate_sre_comparison(ti, "lke_pvc_this_vs_last_week", "LKE PVC Storage Comparison", "lke_pvc_storage_details", "lke_pvc_storage_details_last_week", instructions)
-
-# === POD-LEVEL DYNAMIC TASKS (This Week + Previous Week + Comparison) ===
-@task
-def pod_metrics_for_namespace(ns: str, period: str):
-    """Fetch CPU and Memory + Running Pods count + Problematic Pods (Failed/Pending/Unknown)"""
-
-    # 1. Number of running pods
-    count_prompt = f"""
-    Execute this exact Prometheus query and return only the number:
-    count( kube_pod_status_phase{{namespace="{ns}", phase="Running"}} == 1 )
-    Give only the plain number, nothing else.
+#CPU Functions
+def fetch_node_cpu_detailed(ti, key, start, end, date_str):
     """
-    total_running_pods = int(re.search(r'\d+', get_ai_response(count_prompt) or '').group() or 0)
-
-    # 2. Problematic pods (Failed, Pending, Unknown) – list only bad ones
-    problem_prompt = f"""
-    Execute this exact query:
-    sum by (pod, namespace, phase) (kube_pod_status_phase{{namespace="{ns}", phase=~"Failed|Pending|Unknown"}} == 1)
-    If result is empty → respond exactly: No problematic pods
-    If result has values → return only the problematic pods in this format:
-    - <pod-name> (<phase>)
+    Fetches FULL metrics (CPU cores, usage, disk I/O) for This week and generates the detailed table.
     """
-    problematic_pods = get_ai_response(problem_prompt).strip()
-
-    cpu_prompt = f"""
-    Generate the **pod-level CPU utilization** for namespace `{ns}` for {period}.
-    Return a markdown table with columns: pod, avg_cpu_cores, max_cpu_cores.
-    """
-    cpu = get_ai_response(cpu_prompt)
-
-    mem_prompt = f"""
-    Generate the **pod-level memory utilization** for namespace `{ns}` for {period}.
-    Return a markdown table with columns: pod, avg_memory_gb, max_memory_gb.
-    """
-    mem = get_ai_response(mem_prompt)
-
-    return {
-        "namespace": ns,
-        "period": period,
-        "total_running_pods": total_running_pods,
-        "problematic_pods": problematic_pods,
-        "cpu": cpu.strip(),
-        "memory": mem.strip()
+    # 1. Define Queries for Detailed Report
+    queries = {
+        "usage": '(1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100',
+        "count": 'count by (instance) (node_cpu_seconds_total{mode="idle"})',
+        "disk_read": 'sum by (instance) (rate(node_disk_read_bytes_total[5m]))',
+        "disk_write": 'sum by (instance) (rate(node_disk_written_bytes_total[5m]))'
     }
 
-@task
-def get_real_pod_counts(namespaces: list) -> dict:
-    result = {}
-    for ns in namespaces:
-        prompt = f"""
-        Execute this exact Prometheus query and return ONLY the number:
-        count(kube_pod_status_phase{{namespace="{ns}", phase="Running"}} == 1)
-        """
-        response = get_ai_response(prompt).strip()
-        num = re.search(r'\d+', response)
-        result[ns] = int(num.group()) if num else 0
-    return result
+    # 2. Fetch Data
+    dfs = {}
+    for name, q in queries.items():
+        dfs[name] = query_prometheus_range(q, start, end, "5m")
 
-@task
-def compile_pod_sections_this_week(namespace_results: list, real_counts: dict, **context):
-    ti = context['ti']
-    logging.info("compile_pod_sections_today: merging %d batches", len(namespace_results))
+    # 3. Process Data
+    node_stats = {}
 
-    # Load ordered namespaces
-    raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
+    def get_or_create_record(instance_label):
+        ip = instance_label.split(':')[0]
+        if ip not in node_stats:
+            node_stats[ip] = {
+                "ip": ip,
+                "node_name": get_node_name(instance_label),
+                "total_cpu": 0,
+                "avg_cpu_pct": 0,
+                "max_cpu_pct": 0,
+                "current_cpu_pct": 0,
+                "disk_read": 0,
+                "disk_write": 0
+            }
+        return node_stats[ip]
+
+    # Aggregate Cores
+    if not dfs["count"].empty:
+        for instance, group in dfs["count"].groupby('instance'):
+            record = get_or_create_record(instance)
+            record["total_cpu"] = int(group['value'].max())
+
+    # Aggregate Usage
+    if not dfs["usage"].empty:
+        for instance, group in dfs["usage"].groupby('instance'):
+            record = get_or_create_record(instance)
+            record["avg_cpu_pct"] = group['value'].mean()
+            record["max_cpu_pct"] = group['value'].max()
+            record["current_cpu_pct"] = group['value'].iloc[-1]
+
+    # Aggregate Disk I/O
+    if not dfs["disk_read"].empty:
+        for instance, group in dfs["disk_read"].groupby('instance'):
+            record = get_or_create_record(instance)
+            record["disk_read"] = group['value'].mean()
+    
+    if not dfs["disk_write"].empty:
+        for instance, group in dfs["disk_write"].groupby('instance'):
+            record = get_or_create_record(instance)
+            record["disk_write"] = group['value'].mean()
+
+    # 4. Generate Table
+    sorted_stats = sorted(node_stats.values(), key=lambda x: x['node_name'])
+
+    markdown = f"### CPU Utilization per Node (This Week)\n"
+    markdown += "| Node Name | Total CPU (Cores) | Available CPU (Cores) | Avg CPU Utilization (%) | Max CPU Usage (%) | Current CPU Usage (%) | Disk Read (B/s) | Disk Write (B/s) |\n"
+    markdown += "|-----------|-------------------|-----------------------|-------------------------|-------------------|-----------------------|-----------------|------------------|\n"
+
+    final_data_list = []
+
+    for stat in sorted_stats:
+        total = stat["total_cpu"]
+        avg_pct = stat["avg_cpu_pct"]
+        
+        available_cores = 0
+        if total > 0:
+            available_cores = total * (1 - (avg_pct / 100))
+
+        row = {
+            "instance_ip": stat["ip"],
+            "node_name": stat["node_name"],
+            "total_cpu": str(total),
+            "available_cpu": f"{available_cores:.2f}",
+            "avg_cpu": f"{avg_pct:.2f}",
+            "max_cpu": f"{stat['max_cpu_pct']:.2f}",
+            "current_cpu": f"{stat['current_cpu_pct']:.2f}",
+            "disk_read": f"{stat['disk_read']:.2f}",
+            "disk_write": f"{stat['disk_write']:.2f}"
+        }
+        
+        markdown += f"| {row['node_name']} | {row['total_cpu']} | {row['available_cpu']} | {row['avg_cpu']} | {row['max_cpu']} | {row['current_cpu']} | {row['disk_read']} | {row['disk_write']} |\n"
+        final_data_list.append(row)
+
+    ti.xcom_push(key=key, value=markdown)
+    ti.xcom_push(key=f"{key}_data", value=json.dumps(final_data_list))
+    return markdown
+
+def fetch_node_cpu_basic(ti, key, start, end):
+    """
+    Fetches ONLY Avg and Max CPU for Last Week comparison.
+    No table generation, just data push.
+    """
+    query_used = '(1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100'
+    df_used = query_prometheus_range(query_used, start, end, "5m")
+
+    data = []
+    if not df_used.empty:
+        grouped = df_used.groupby('instance')
+        for instance, group in grouped:
+            avg_cpu = round(group['value'].mean(), 2)
+            max_cpu = round(group['value'].max(), 2)
+            # We only need minimal data for comparison
+            data.append({
+                'instance_ip': instance.split(':')[0],
+                'node_name': get_node_name(instance),
+                'avg_cpu': avg_cpu,
+                'max_cpu': max_cpu
+            })
+    
+    logging.info(f"Generated Last Week Data for XCom: {json.dumps(data, indent=2)}")
+    # We push raw JSON only, no markdown needed for Last Week
+    ti.xcom_push(key=f"{key}_data", value=json.dumps(data))
+    return f"Fetched basic CPU stats for {len(data)} nodes"
+
+def node_cpu_thisweek(ti, **context):
+    date_display = CURRENT_END_DT.strftime('%Y-%m-%d')
+    return fetch_node_cpu_detailed(ti, "node_cpu_thisweek", CURRENT_START, CURRENT_END, date_display)
+
+def node_cpu_lastweek(ti, **context):
+    return fetch_node_cpu_basic(ti, "node_cpu_lastweek", PREVIOUS_START, PREVIOUS_END)
+
+def node_cpu_thisweek_vs_lastweek(ti, **context):
+    data_thisweek = json.loads(ti.xcom_pull(key="node_cpu_thisweek_data"))
+    data_lastweek = json.loads(ti.xcom_pull(key="node_cpu_lastweek_data"))
+
+    thisweek_dict = {d['node_name']: d for d in data_thisweek}
+    lastweek_dict = {d['node_name']: d for d in data_lastweek}
+
+    all_nodes = set(thisweek_dict.keys()) | set(lastweek_dict.keys())
+    comparison = []
+    significant = []
+    
+    for node in all_nodes:
+        # Default to 0 if node missing
+        t = thisweek_dict.get(node, {})
+        y = lastweek_dict.get(node, {})
+
+        # CRITICAL FIX: Convert string values from "This Week" data to float for math
+        t_avg = float(t.get('avg_cpu', 0))
+        t_max = float(t.get('max_cpu', 0))
+        
+        y_avg = float(y.get('avg_cpu', 0))
+        y_max = float(y.get('max_cpu', 0))
+
+        avg_diff = round(t_avg - y_avg, 4)
+        max_diff = round(t_max - y_max, 4)
+
+        comparison.append({
+            'node_name': node,
+            'instance_ip': t.get('instance_ip', y.get('instance_ip', 'Unknown')),
+            'avg_cpu_p1': t_avg,
+            'avg_cpu_p2': y_avg,
+            'avg_cpu_diff': avg_diff,
+            'max_cpu_p1': t_max,
+            'max_cpu_p2': y_max,
+            'max_cpu_diff': max_diff
+        })
+
+        if abs(max_diff) > 20:
+            significant.append(f"{node} ({max_diff}%)")
+
+    # Use Date strings if available in context, otherwise fallback to Period labels
+    p1_label = context.get('current_period', CURRENT_PERIOD)
+    p2_label = context.get('previous_period', PREVIOUS_PERIOD)
+
+    markdown = f"### CPU Utilization Comparison - This Week vs Last Week ({p1_label} vs {p2_label})\n"
+    markdown += "| Node Name | Instance IP | Avg CPU (%) - This Week | Avg CPU (%) - Last Week | Avg CPU Diff (%) | Max CPU (%) - This Week | Max CPU (%) - Last Week | Max CPU Diff (%) |\n"
+    markdown += "|-----------|-------------|---------------------|--------------------|------------------|---------------------|--------------------|------------------|\n"
+    
+    for row in comparison:
+        markdown += f"| {row['node_name']} | {row['instance_ip']} | {row['avg_cpu_p1']} | {row['avg_cpu_p2']} | {row['avg_cpu_diff']} | {row['max_cpu_p1']} | {row['max_cpu_p2']} | {row['max_cpu_diff']} |\n"
+
+    summary = "No significant CPU changes." if not significant else f"Nodes with |max_diff| > 20%: {', '.join(significant)}"
+    markdown += f"\n### Summary\n{summary}\n"
+
+    ti.xcom_push(key="node_cpu_thisweek_vs_lastweek", value=markdown)
+    return markdown
+
+
+#Memory Functions
+def fetch_node_memory_detailed(ti, key, start, end, date_str):
+    """
+    Fetches Memory metrics for This week using range queries and generates a detailed table.
+    """
+    # 1. Define Queries (All Range)
+    queries = {
+        "total": 'node_memory_MemTotal_bytes / 1024 / 1024 / 1024',
+        "avail": 'node_memory_MemAvailable_bytes / 1024 / 1024 / 1024'
+    }
+
+    # 2. Fetch Data
+    dfs = {}
+    for name, q in queries.items():
+        dfs[name] = query_prometheus_range(q, start, end, "5m")
+
+    # 3. Process Data
+    node_stats = {}
+
+    def get_or_create_record(instance_label):
+        ip = instance_label.split(':')[0]
+        if ip not in node_stats:
+            node_stats[ip] = {
+                "ip": ip,
+                "node_name": get_node_name(instance_label),
+                "total_mem_gb": 0,
+                "avg_avail_gb": 0,
+                "min_avail_gb": 0,
+                "current_avail_gb": 0,
+                "max_usage_pct": 0
+            }
+        return node_stats[ip]
+
+    # Process Total Memory (Constant, take max to be safe)
+    if not dfs["total"].empty:
+        for instance, group in dfs["total"].groupby('instance'):
+            record = get_or_create_record(instance)
+            record["total_mem_gb"] = group['value'].max()
+
+    # Process Available Memory
+    if not dfs["avail"].empty:
+        for instance, group in dfs["avail"].groupby('instance'):
+            record = get_or_create_record(instance)
+            record["avg_avail_gb"] = group['value'].mean()
+            record["min_avail_gb"] = group['value'].min()
+            record["current_avail_gb"] = group['value'].iloc[-1]
+
+    # Calculate Max Usage %
+    for stat in node_stats.values():
+        total = stat["total_mem_gb"]
+        min_avail = stat["min_avail_gb"]
+        if total > 0:
+            # Max Usage = 100 * (1 - (Min Available / Total))
+            stat["max_usage_pct"] = 100 * (1 - (min_avail / total))
+        else:
+            stat["max_usage_pct"] = 0
+
+    # 4. Generate Table
+    sorted_stats = sorted(node_stats.values(), key=lambda x: x['max_usage_pct'], reverse=True)
+
+    markdown = f"### Memory Utilization per Node (This Week)\n"
+    markdown += "| Node Name | Instance IP | Total Memory (GB) | Avg Available (GB) | Current Available (GB) | Max Usage (%) |\n"
+    markdown += "|-----------|-------------|-------------------|--------------------|------------------------|---------------|\n"
+
+    final_data_list = []
+
+    for stat in sorted_stats:
+        row = {
+            "node_name": stat["node_name"],
+            "instance_ip": stat["ip"],
+            "total_memory_gb": f"{stat['total_mem_gb']:.2f}",
+            "avg_available_gb": f"{stat['avg_avail_gb']:.2f}",
+            "current_available_gb": f"{stat['current_avail_gb']:.2f}",
+            "max_usage_percent": f"{stat['max_usage_pct']:.2f}"
+        }
+        
+        markdown += f"| {row['node_name']} | {row['instance_ip']} | {row['total_memory_gb']} | {row['avg_available_gb']} | {row['current_available_gb']} | {row['max_usage_percent']} |\n"
+        final_data_list.append(row)
+
+    ti.xcom_push(key=key, value=markdown)
+    ti.xcom_push(key=f"{key}_data", value=json.dumps(final_data_list))
+    return markdown
+
+def fetch_node_memory_basic(ti, key, start, end):
+    """
+    Fetches ONLY data needed for Last Week comparison using range queries.
+    """
+    queries = {
+        "total": 'node_memory_MemTotal_bytes / 1024 / 1024 / 1024',
+        "avail": 'node_memory_MemAvailable_bytes / 1024 / 1024 / 1024'
+    }
+
+    dfs = {}
+    for name, q in queries.items():
+        dfs[name] = query_prometheus_range(q, start, end, "5m")
+
+    node_stats = {}
+
+    # Helper to merge total and avail data
+    def get_record(instance):
+        if instance not in node_stats:
+            node_stats[instance] = {"total": 0, "avg_avail": 0, "min_avail": 0}
+        return node_stats[instance]
+
+    if not dfs["total"].empty:
+        for instance, group in dfs["total"].groupby('instance'):
+            get_record(instance)["total"] = group['value'].max()
+
+    if not dfs["avail"].empty:
+        for instance, group in dfs["avail"].groupby('instance'):
+            rec = get_record(instance)
+            rec["avg_avail"] = group['value'].mean()
+            rec["min_avail"] = group['value'].min()
+
+    data = []
+    for instance, stat in node_stats.items():
+        total = stat["total"]
+        min_avail = stat["min_avail"]
+        max_usage = 0
+        if total > 0:
+            max_usage = 100 * (1 - (min_avail / total))
+        
+        data.append({
+            'instance_ip': instance.split(':')[0],
+            'node_name': get_node_name(instance),
+            'total_memory_gb': round(total, 2),
+            'avg_available_gb': round(stat["avg_avail"], 2),
+            'max_usage_percent': round(max_usage, 2)
+        })
+
+    logging.info(f"Generated Last Week Memory Data: {json.dumps(data, indent=2)}")
+    ti.xcom_push(key=f"{key}_data", value=json.dumps(data))
+    return f"Fetched basic Memory stats for {len(data)} nodes"
+
+def node_memory_thisweek(ti, **context):
+    date_display = CURRENT_END_DT.strftime('%Y-%m-%d')
+    return fetch_node_memory_detailed(ti, "node_memory_thisweek", CURRENT_START, CURRENT_END, date_display)
+
+def node_memory_lastweek(ti, **context):
+    return fetch_node_memory_basic(ti, "node_memory_lastweek", PREVIOUS_START, PREVIOUS_END)
+
+def node_memory_thisweek_vs_lastweek(ti, **context):
+    data_thisweek = json.loads(ti.xcom_pull(key="node_memory_thisweek_data"))
+    data_lastweek = json.loads(ti.xcom_pull(key="node_memory_lastweek_data"))
+
+    thisweek_dict = {d['node_name']: d for d in data_thisweek}
+    lastweek_dict = {d['node_name']: d for d in data_lastweek}
+
+    all_nodes = set(thisweek_dict.keys()) | set(lastweek_dict.keys())
+    comparison = []
+    significant = []
+    
+    for node in all_nodes:
+        t = thisweek_dict.get(node, {})
+        y = lastweek_dict.get(node, {})
+
+        # Convert to float to avoid TypeErrors
+        t_total = float(t.get('total_memory_gb', 0))
+        y_total = float(y.get('total_memory_gb', 0))
+        
+        t_avg = float(t.get('avg_available_gb', 0))
+        y_avg = float(y.get('avg_available_gb', 0))
+        
+        t_max_usage = float(t.get('max_usage_percent', 0))
+        y_max_usage = float(y.get('max_usage_percent', 0))
+
+        avg_diff = round(t_avg - y_avg, 2)
+        max_diff = round(t_max_usage - y_max_usage, 2)
+
+        comparison.append({
+            'node_name': node,
+            'instance_ip': t.get('instance_ip', y.get('instance_ip', 'Unknown')),
+            'total_mem_p1': t_total,
+            'total_mem_p2': y_total,
+            'avg_avail_p1': t_avg,
+            'avg_avail_p2': y_avg,
+            'avg_diff': avg_diff,
+            'max_usage_p1': t_max_usage,
+            'max_usage_p2': y_max_usage,
+            'max_diff': max_diff
+        })
+        
+        if abs(max_diff) > 20:
+            significant.append(f"{node} ({max_diff}%)")
+
+    # Use Date strings if available
+    p1_label = context.get('current_period', CURRENT_PERIOD)
+    p2_label = context.get('previous_period', PREVIOUS_PERIOD)
+
+    markdown = f"### Memory Utilization Comparison - This Week vs Last Week ({p1_label} vs {p2_label})\n"
+    markdown += "| Node Name | Instance IP | Total Mem (GB) | Avg Avail (GB) - This Week | Avg Avail (GB) - Last Week | Avg Diff (GB) | Max Usage (%) - This Week | Max Usage (%) - Last Week | Max Diff (%) |\n"
+    markdown += "|-----------|-------------|----------------|------------------------|-----------------------|---------------|-----------------------|----------------------|--------------|\n"
+    
+    for row in comparison:
+        markdown += f"| {row['node_name']} | {row['instance_ip']} | {row['total_mem_p1']} | {row['avg_avail_p1']} | {row['avg_avail_p2']} | {row['avg_diff']} | {row['max_usage_p1']} | {row['max_usage_p2']} | {row['max_diff']} |\n"
+
+    summary = "No significant memory issues." if not significant else f"Nodes with |max_diff| > 20%: {', '.join(significant)}"
+    markdown += f"\n### Summary\n{summary}\n"
+
+    ti.xcom_push(key="node_memory_thisweek_vs_lastweek", value=markdown)
+    return markdown
+
+#Disk Functions
+def fetch_node_disk_detailed(ti, key, start, end, date_str):
+    """
+    Fetches Disk metrics for This week using range queries and generates a detailed table.
+    Filters: Specific mountpoints (/ | /data | /var/lib/docker)
+    """
+    # 1. Define Queries
+    # We fetch Size and Free; Used% is calculated in Python to ensure consistency
+    queries = {
+        "size": 'node_filesystem_size_bytes{mountpoint=~"/|/data|/var/lib/docker", fstype!~"tmpfs|overlay"} / 1024 / 1024 / 1024',
+        "free": 'node_filesystem_free_bytes{mountpoint=~"/|/data|/var/lib/docker", fstype!~"tmpfs|overlay"} / 1024 / 1024 / 1024'
+    }
+
+    # 2. Fetch Data
+    dfs = {}
+    for name, q in queries.items():
+        dfs[name] = query_prometheus_range(q, start, end, "5m")
+
+    # 3. Process Data
+    # Key = (instance_ip, mountpoint)
+    disk_stats = {}
+
+    def get_or_create_record(instance, mountpoint):
+        ip = instance.split(':')[0]
+        composite_key = (ip, mountpoint)
+        if composite_key not in disk_stats:
+            disk_stats[composite_key] = {
+                "ip": ip,
+                "node_name": get_node_name(instance),
+                "mountpoint": mountpoint,
+                "total_size_gb": 0,
+                "free_space_gb": 0,
+                "used_percent": 0
+            }
+        return disk_stats[composite_key]
+
+    # Process Size
+    if not dfs["size"].empty:
+        # Group by instance AND mountpoint
+        for (instance, mountpoint), group in dfs["size"].groupby(['instance', 'mountpoint']):
+            record = get_or_create_record(instance, mountpoint)
+            record["total_size_gb"] = group['value'].mean()
+
+    # Process Free
+    if not dfs["free"].empty:
+        for (instance, mountpoint), group in dfs["free"].groupby(['instance', 'mountpoint']):
+            record = get_or_create_record(instance, mountpoint)
+            record["free_space_gb"] = group['value'].mean()
+
+    # Calculate Used Percent
+    for stat in disk_stats.values():
+        total = stat["total_size_gb"]
+        free = stat["free_space_gb"]
+        if total > 0:
+            stat["used_percent"] = 100 * (1 - (free / total))
+        else:
+            stat["used_percent"] = 0
+
+    # 4. Generate Table
+    # Sort: engine-master first, then others
+    sorted_stats = sorted(disk_stats.values(), key=lambda x: (0 if 'engine-master' in x['node_name'] else 1, x['node_name'], x['mountpoint']))
+
+    markdown = f"### Disk Utilization per Node (This Week)\n"
+    markdown += "| Node Name | Instance IP | Mountpoint | Total Size (GB) | Free Space (GB) | Used (%) |\n"
+    markdown += "|-----------|-------------|------------|-----------------|-----------------|----------|\n"
+
+    final_data_list = []
+
+    for stat in sorted_stats:
+        row = {
+            "node_name": stat["node_name"],
+            "instance_ip": stat["ip"],
+            "mountpoint": stat["mountpoint"],
+            "total_size_gb": f"{stat['total_size_gb']:.2f}",
+            "free_space_gb": f"{stat['free_space_gb']:.2f}",
+            "used_percent": f"{stat['used_percent']:.2f}"
+        }
+        
+        markdown += f"| {row['node_name']} | {row['instance_ip']} | {row['mountpoint']} | {row['total_size_gb']} | {row['free_space_gb']} | {row['used_percent']} |\n"
+        final_data_list.append(row)
+
+    ti.xcom_push(key=key, value=markdown)
+    ti.xcom_push(key=f"{key}_data", value=json.dumps(final_data_list))
+    return markdown
+
+def fetch_node_disk_basic(ti, key, start, end):
+    """
+    Fetches ONLY data needed for Last Week comparison using range queries.
+    Filters: General regex (ext*|xfs) excluding pods.
+    """
+    queries = {
+        "size": 'node_filesystem_size_bytes{fstype=~"ext.*|xfs",mountpoint !~".*pod.*"} / 1024 / 1024 / 1024',
+        "free": 'node_filesystem_free_bytes{fstype=~"ext.*|xfs",mountpoint !~".*pod.*"} / 1024 / 1024 / 1024'
+    }
+
+    dfs = {}
+    for name, q in queries.items():
+        dfs[name] = query_prometheus_range(q, start, end, "5m")
+
+    disk_stats = {}
+
+    def get_record(instance, mountpoint):
+        composite_key = (instance, mountpoint)
+        if composite_key not in disk_stats:
+            disk_stats[composite_key] = {
+                "instance": instance,
+                "mountpoint": mountpoint, 
+                "total": 0, 
+                "free": 0
+            }
+        return disk_stats[composite_key]
+
+    # Process Size
+    if not dfs["size"].empty:
+        for (instance, mountpoint), group in dfs["size"].groupby(['instance', 'mountpoint']):
+            get_record(instance, mountpoint)["total"] = group['value'].mean()
+
+    # Process Free
+    if not dfs["free"].empty:
+        for (instance, mountpoint), group in dfs["free"].groupby(['instance', 'mountpoint']):
+            get_record(instance, mountpoint)["free"] = group['value'].mean()
+
+    data = []
+    for stat in disk_stats.values():
+        total = stat["total"]
+        free = stat["free"]
+        used_percent = 0
+        
+        if total > 0:
+            used_percent = 100 * (1 - (free / total))
+        
+        data.append({
+            'instance_ip': stat['instance'].split(':')[0],
+            'node_name': get_node_name(stat['instance']),
+            'mountpoint': stat['mountpoint'],
+            'total_size_gb': round(total, 2),
+            'free_space_gb': round(free, 2),
+            'used_percent': round(used_percent, 2)
+        })
+
+    logging.info(f"Generated Last Week Disk Data: {json.dumps(data, indent=2)}")
+    ti.xcom_push(key=f"{key}_data", value=json.dumps(data))
+    return f"Fetched basic Disk stats for {len(data)} mountpoints"
+
+# === DAG Tasks ===
+
+def node_disk_thisweek(ti, **context):
+    date_display = CURRENT_END_DT.strftime('%Y-%m-%d')
+    return fetch_node_disk_detailed(ti, "node_disk_thisweek", CURRENT_START, CURRENT_END, date_display)
+
+def node_disk_lastweek(ti, **context):
+    return fetch_node_disk_basic(ti, "node_disk_lastweek", PREVIOUS_START, PREVIOUS_END)
+
+def node_disk_thisweek_vs_lastweek(ti, **context):
+    data_thisweek = json.loads(ti.xcom_pull(key="node_disk_thisweek_data"))
+    data_lastweek = json.loads(ti.xcom_pull(key="node_disk_lastweek_data"))
+
+    # Map by (node_name, mountpoint) tuple
+    thisweek_dict = {(d['node_name'], d['mountpoint']): d for d in data_thisweek}
+    lastweek_dict = {(d['node_name'], d['mountpoint']): d for d in data_lastweek}
+
+    all_keys = set(thisweek_dict.keys()) | set(lastweek_dict.keys())
+    comparison = []
+    significant = []
+    
+    for key in all_keys:
+        node, mountpoint = key
+        t = thisweek_dict.get(key, {})
+        y = lastweek_dict.get(key, {})
+
+        # Convert to float to avoid TypeErrors
+        t_used = float(t.get('used_percent', 0))
+        y_used = float(y.get('used_percent', 0))
+        
+        used_diff = round(t_used - y_used, 2)
+
+        comparison.append({
+            'node_name': node,
+            'instance_ip': t.get('instance_ip', y.get('instance_ip', 'Unknown')),
+            'mountpoint': mountpoint,
+            'used_p1': t_used,
+            'used_p2': y_used,
+            'diff': used_diff
+        })
+        
+        if abs(used_diff) > 20:
+            significant.append(f"{node} ({mountpoint}: {used_diff}%)")
+
+    # Use Date strings if available
+    p1_label = context.get('current_period', CURRENT_PERIOD)
+    p2_label = context.get('previous_period', PREVIOUS_PERIOD)
+
+    markdown = f"### Disk Utilization Comparison - Node Level ({p1_label} vs {p2_label})\n"
+    markdown += "| Node Name | Instance IP | Mountpoint | Used (%) - This Week | Used (%) - Last Week | Diff (%) |\n"
+    markdown += "|-----------|-------------|------------|------------------|-----------------|----------|\n"
+    
+    # Sort comparison list for readability
+    comparison.sort(key=lambda x: (x['node_name'], x['mountpoint']))
+
+    for row in comparison:
+        markdown += f"| {row['node_name']} | {row['instance_ip']} | {row['mountpoint']} | {row['used_p1']} | {row['used_p2']} | {row['diff']} |\n"
+
+    summary = "No significant disk issues." if not significant else f"Entries with |used_diff| > 20%: {', '.join(significant)}"
+    markdown += f"\n### Summary\n{summary}\n"
+
+    ti.xcom_push(key="node_disk_thisweek_vs_lastweek", value=markdown)
+    return markdown
+
+# Node Readiness Check
+def fetch_node_readiness(ti, **context):
+    query = 'up{job=~"(kubernetes-cadvisor|node-exporter|backup_metrics)"}'
+    results = query_prometheus_instant(query)
+    data = []
+    for r in results:
+        instance = r.get('instance', 'Unknown Instance')
+        job = r.get('job', 'Unknown Job')
+        status = "Ready" if r['value'] == 1 else "Not Ready"
+        if job == 'node-exporter':
+            instance = instance.split(':')[0]  # Strip port
+            node_name = get_node_name(instance)
+            instance_ip = instance
+        else:
+            node_name = instance # For other jobs, use full instance
+        data.append({
+            'node_name': node_name,
+            'job': job,
+            'status': status
+        })
+
+    markdown = "### Node Readiness Check\n"
+    markdown += "| Instance | Job | Status |\n"
+    markdown += "|-------------|-----------|--------|\n"
+    for row in data:
+        markdown += f"| {row['node_name']} | {row['job']} | {row['status']} |\n"
+
+    ti.xcom_push(key="node_readiness_check", value=markdown)
+    return markdown
+
+
+# Pod Restart Functions
+def fetch_pod_restart(ti, key, start, end, period_str, date_str):
+    """
+    Fetches Pod Restart counts using range queries for specific namespaces.
+    Reports the Total Restart Count at the end of the period.
+    """
+    # 1. Fetch Namespaces from Airflow Variable
     try:
-        namespaces = json.loads(raw)
-    except:
-        namespaces = [ns.strip() for ns in raw.split(",") if ns.strip()]
+        namespaces_list = json.loads(
+            Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
+        )
+    except Exception as e:
+        logging.warning(
+            "Failed to parse Airflow Variable 'ltai.v1.sretradeideas.pod.namespaces'. "
+            "Reason: %s. Falling back to hard-coded default namespaces.", str(e))
+        namespaces_list = ["alpha-prod", "tipreprod-prod"]
 
-    # Merge all batches
-    merged = {}
+    # Create regex for Prometheus (e.g., "alpha-prod|tipreprod-prod")
+    namespace_regex = "|".join(namespaces_list)
 
-    for batch in namespace_results:
-        if not batch or not isinstance(batch, dict): continue
-        key = (batch["namespace"], batch["period"])
-        if key not in merged:
-            merged[key] = {"cpu": [], "memory": []}
+    # 2. Define Query
+    # We use the raw counter as requested. We fetch via range to ensure we have data for the specific window.
+    # Note: We filter > 0 in the query to reduce data load, or we can filter in Python.
+    # Query: kube_pod_container_status_restarts_total{namespace=~"alpha-prod|tipreprod-prod"} > 0
+    query = f'kube_pod_container_status_restarts_total{{namespace=~"{namespace_regex}"}} > 0'
 
-        def is_valid_row(line):
-            line = line.strip()
-            if not line.startswith("|") or line.count("|") < 4: return False
-            parts = [p.strip() for p in line.split("|")[1:-1]]
-            if len(parts) < 3 or parts[0] in ["pod", "Pod", "", "Namespace"]: return False
-            return any(c.isdigit() or c == "." for c in "".join(parts[1:]))
+    # 3. Fetch Range Data
+    # We fetch the range to ensure valid data existence over the period, 
+    # but we primarily care about the count at the END of the period.
+    df = query_prometheus_range(query, start, end, "5m")
 
-        for line in batch["cpu"].splitlines():
-            if is_valid_row(line):
-                merged[key]["cpu"].append(line.strip())
-        for line in batch["memory"].splitlines():
-            if is_valid_row(line):
-                merged[key]["memory"].append(line.strip())
+    data = []
+    if not df.empty:
+        # Group by pod and container to handle the time series
+        grouped = df.groupby(['pod', 'container'])
+        for (pod, container), group in grouped:
+            # We take the last value in the series (status at the end of the window)
+            last_value = int(group['value'].iloc[-1])
+            
+            # Double check > 0 (redundant if query has > 0, but safe)
+            if last_value > 0:
+                data.append({
+                    'pod': pod,
+                    'container': container,
+                    'restart_count': last_value
+                })
 
-    sections = []
+    # 4. Generate Markdown
+    markdown = f"### Pod Restart Count (Date: {date_str})\n"
+    
+    if not data:
+        markdown += "No pod restarts detected.\n"
+    else:
+        # Sort by restart count descending
+        data.sort(key=lambda x: x['restart_count'], reverse=True)
+        
+        markdown += "| Pod | Container | Restart Count |\n"
+        markdown += "|-----|-----------|---------------|\n"
+        for row in data:
+            markdown += f"| {row['pod']} | {row['container']} | {row['restart_count']} |\n"
+
+    # 5. Push XCom
+    ti.xcom_push(key=key, value=markdown)
+    ti.xcom_push(key=f"{key}_data", value=json.dumps(data))
+    return markdown
+
+def pod_restart_thisweek(ti, **context):
+    date_display = CURRENT_END_DT.strftime('%Y-%m-%d')
+    return fetch_pod_restart(ti, "pod_restart_thisweek", CURRENT_START, CURRENT_END, CURRENT_PERIOD, date_display)
+
+
+# Pod MySQL Health Functions
+def fetch_mysql_health_detailed(ti, key, start, end, date_str):
+    """
+    Fetches MySQL health metrics for This week and generates the detailed table.
+    """
+    # 1. Fetch Probe Success (Range)
+    # We use range to calculate downtime count and duration over the period
+    df_success = query_prometheus_range('probe_success', start, end, "5m")
+    
+    # 2. Fetch Probe Duration (Range)
+    # We need the "Latest" value from this series
+    df_duration = query_prometheus_range('probe_duration_seconds', start, end, "5m")
+
+    # 3. Process Data
+    endpoints = {}
+
+    def get_record(instance):
+        if instance not in endpoints:
+            endpoints[instance] = {
+                "endpoint": instance, # usually the url or instance name
+                "current_status": "Unknown",
+                "downtime_count": 0,
+                "total_downtime_seconds": 0,
+                "latest_probe_duration": 0.0
+            }
+        return endpoints[instance]
+
+    # Process Success/Downtime
+    if not df_success.empty:
+        grouped = df_success.groupby('instance')
+        for instance, group in grouped:
+            rec = get_record(instance)
+            sorted_group = group.sort_values('timestamp')
+            
+            # Current Status (Last value: 1=UP, 0=DOWN)
+            last_val = sorted_group['value'].iloc[-1]
+            rec["current_status"] = "UP" if last_val == 1 else "DOWN"
+            
+            # Downtime Count: changes() / 2
+            # Count how many times value changes, divide by 2
+            # We use .ne(0) to count changes. 
+            # Note: diff() gives NaN for first element, fillna(0) treats start as steady.
+            changes = sorted_group['value'].diff().fillna(0).abs().astype(bool).sum()
+            # If counting raw flips, strict PromQL changes() counts value jumps.
+            # We convert to native int to avoid JSON error
+            rec["downtime_count"] = int(changes // 2)
+
+            # Total Downtime: sum((1 - success) * 60)
+            # Count number of '0's
+            down_samples = (sorted_group['value'] == 0).sum()
+            rec["total_downtime_seconds"] = int(down_samples * 60)
+
+    # Process Duration
+    if not df_duration.empty:
+        grouped = df_duration.groupby('instance')
+        for instance, group in grouped:
+            rec = get_record(instance)
+            # Latest Duration = Last value in range
+            rec["latest_probe_duration"] = float(group['value'].iloc[-1])
+
+    # 4. Generate Table
+    markdown = f"### Database Health Status (Period: This Week)\n"
+    markdown += "| Endpoint | Current Status | Downtime Count | Total Downtime (seconds) | Latest Probe Duration (s) |\n"
+    markdown += "|----------|----------------|----------------|--------------------------|---------------------------|\n"
+
+    final_data_list = []
+
+    # Sort to ensure consistent order
+    for instance, rec in sorted(endpoints.items()):
+        row = {
+            "endpoint": rec["endpoint"],
+            "current_status": rec["current_status"],
+            "downtime_count": rec["downtime_count"],
+            "total_downtime_seconds": rec["total_downtime_seconds"],
+            "latest_probe_duration": round(rec["latest_probe_duration"], 4)
+        }
+        
+        markdown += f"| {row['endpoint']} | {row['current_status']} | {row['downtime_count']} | {row['total_downtime_seconds']} | {row['latest_probe_duration']} |\n"
+        final_data_list.append(row)
+
+    ti.xcom_push(key=key, value=markdown)
+    ti.xcom_push(key=f"{key}_data", value=json.dumps(final_data_list))
+    return markdown
+
+def fetch_mysql_health_basic(ti, key, start, end):
+    """
+    Fetches MySQL metrics for Last Week comparison.
+    """
+    df_success = query_prometheus_range('probe_success', start, end, "5m")
+    df_duration = query_prometheus_range('probe_duration_seconds', start, end, "5m")
+
+    endpoints = {}
+    def get_record(instance):
+        if instance not in endpoints:
+            endpoints[instance] = {
+                "endpoint": instance, 
+                "status": "Unknown", 
+                "downtime_count": 0, 
+                "total_downtime": 0,
+                "probe_duration": 0.0
+            }
+        return endpoints[instance]
+
+    if not df_success.empty:
+        for instance, group in df_success.groupby('instance'):
+            rec = get_record(instance)
+            sorted_group = group.sort_values('timestamp')
+            
+            last_val = sorted_group['value'].iloc[-1]
+            rec["status"] = "UP" if last_val == 1 else "DOWN"
+            
+            changes = sorted_group['value'].diff().fillna(0).abs().astype(bool).sum()
+            rec["downtime_count"] = int(changes // 2) # Explicit int cast
+            
+            down_samples = (sorted_group['value'] == 0).sum()
+            rec["total_downtime"] = int(down_samples * 60) # Explicit int cast
+
+    if not df_duration.empty:
+        for instance, group in df_duration.groupby('instance'):
+            rec = get_record(instance)
+            rec["probe_duration"] = float(group['value'].iloc[-1]) # Explicit float cast
+
+    data_list = list(endpoints.values())
+    
+    logging.info(f"Generated Last Week MySQL Data: {json.dumps(data_list, indent=2)}")
+    ti.xcom_push(key=f"{key}_data", value=json.dumps(data_list))
+    return f"Fetched basic MySQL stats for {len(data_list)} endpoints"
+
+# === DAG Tasks ===
+
+def mysql_health_thisweek(ti, **context):
+    date_display = CURRENT_END_DT.strftime('%Y-%m-%d')
+    return fetch_mysql_health_detailed(ti, "mysql_health_thisweek", CURRENT_START, CURRENT_END, date_display)
+
+def mysql_health_lastweek(ti, **context):
+    return fetch_mysql_health_basic(ti, "mysql_health_lastweek", PREVIOUS_START, PREVIOUS_END)
+
+def mysql_health_thisweek_vs_lastweek(ti, **context):
+    data_thisweek = json.loads(ti.xcom_pull(key="mysql_health_thisweek_data"))
+    data_lastweek = json.loads(ti.xcom_pull(key="mysql_health_lastweek_data"))
+
+    # Map by endpoint
+    thisweek_dict = {d['endpoint']: d for d in data_thisweek}
+    lastweek_dict = {d['endpoint']: d for d in data_lastweek}
+
+    all_endpoints = set(thisweek_dict.keys()) | set(lastweek_dict.keys())
+    comparison = []
+    
+    for endpoint in all_endpoints:
+        # Defaults
+        t = thisweek_dict.get(endpoint, {})
+        y = lastweek_dict.get(endpoint, {})
+
+        # Extract values with safe defaults
+        status_p1 = t.get('current_status', 'Unknown')
+        status_p2 = y.get('status', 'Unknown')
+        
+        count_p1 = int(t.get('downtime_count', 0))
+        count_p2 = int(y.get('downtime_count', 0))
+        count_diff = count_p1 - count_p2
+        
+        dur_p1 = int(t.get('total_downtime_seconds', 0))
+        dur_p2 = int(y.get('total_downtime', 0))
+        dur_diff = dur_p1 - dur_p2
+        
+        probe_p1 = float(t.get('latest_probe_duration', 0.0))
+        probe_p2 = float(y.get('probe_duration', 0.0))
+        # Note: No diff needed for probe duration in table, but available if needed
+
+        comparison.append({
+            'endpoint': endpoint,
+            'status_p1': status_p1,
+            'status_p2': status_p2,
+            'count_p1': count_p1,
+            'count_p2': count_p2,
+            'count_diff': count_diff,
+            'duration_p1': dur_p1,
+            'duration_p2': dur_p2,
+            'duration_diff': dur_diff,
+            'probe_p1': round(probe_p1, 4),
+            'probe_p2': round(probe_p2, 4)
+        })
+
+    # Use Date strings
+    p1_label = CURRENT_END_DT.strftime('%Y-%m-%d')
+    p2_label = PREVIOUS_END_DT.strftime('%Y-%m-%d')
+
+    markdown = f"### MySQL Health Comparison (Period1: {p1_label}, Period2: {p2_label})\n"
+    markdown += "| Endpoint | Status P1 | Status P2 | Count P1 | Count P2 | Diff | Duration P1 | Duration P2 | Duration Diff (s) | Probe P1 | Probe P2 |\n"
+    markdown += "|----------|-----------|-----------|----------|----------|------|-------------|-------------|-------------------|----------|----------|\n"
+    
+    for row in comparison:
+        markdown += f"| {row['endpoint']} | {row['status_p1']} | {row['status_p2']} | {row['count_p1']} | {row['count_p2']} | {row['count_diff']} | {row['duration_p1']} | {row['duration_p2']} | {row['duration_diff']} | {row['probe_p1']} | {row['probe_p2']} |\n"
+
+    # Only show summary if there are actual downtimes or changes
+    summaries = []
+    for row in comparison:
+        if row['count_diff'] != 0 or row['duration_diff'] != 0:
+             summaries.append(f"{row['endpoint']} Diff: {row['count_diff']} counts, {row['duration_diff']}s")
+
+    summary = "No changes in downtime." if not summaries else "; ".join(summaries)
+    markdown += f"\n### Summary\n{summary}\n"
+
+    ti.xcom_push(key="mysql_health_thisweek_vs_lastweek", value=markdown)
+    return markdown
+
+
+def kubernetes_version_check(ti, **context):
+    query = 'kubernetes_build_info'
+    results = query_prometheus_instant(query)
+    data = []
+    for r in results:
+        hostname = r.get('kubernetes_io_hostname', 'Unknown Hostname')
+        git_version = r.get('git_version', 'Unknown Version')
+        go_version = r.get('go_version', 'Unknown Go Version')
+        build_date = r.get('build_date', 'Unknown Build Date')
+        data.append({
+            'hostname': hostname,
+            'git_version': git_version,
+            'go_version': go_version,
+            'build_date': build_date
+        })
+
+    markdown = "### Kubernetes Version Check\n"
+    markdown += "| Hostname | Git Version | Go Version | Build Date |\n"
+    markdown += "|----------|-------------|------------|------------|\n"
+    for row in data:
+        markdown += f"| {row['hostname']} | {row['git_version']} | {row['go_version']} | {row['build_date']} |\n"
+
+    ti.xcom_push(key="kubernetes_version_check", value=markdown)
+    return markdown
+
+
+def fetch_kubernetes_eol(ti, key, start, end):
+    """
+    Fetches K8s version and EOL details, formatting strictly as requested.
+    """
+    # 1. Get Current Version from Prometheus
+    # Query returns something like: kubernetes_build_info{git_version="v1.29.2", ...} 1
+    query = 'count by (git_version) (kubernetes_build_info)'
+    df = query_prometheus_range(query, start, end, "1h")
+    
+    current_version_full = "Unknown"
+    short_version = "Unknown"
+
+    if not df.empty:
+        # Extract the version string (e.g., "v1.29.2")
+        # Assuming the dataframe has the metric labels available. 
+        # If your 'query_prometheus_range' returns a dataframe with 'git_version' column:
+        if 'git_version' in df.columns:
+             current_version_full = df['git_version'].iloc[-1]
+        # Fallback: sometimes the metric label is packed in a 'metric' dictionary column
+        elif 'metric' in df.columns:
+             metric_dict = df['metric'].iloc[-1]
+             current_version_full = metric_dict.get('git_version', 'Unknown')
+    
+    # Parse "v1.29.2" -> "1.29"
+    if current_version_full.startswith('v'):
+        parts = current_version_full[1:].split('.')
+        if len(parts) >= 2:
+            short_version = f"{parts[0]}.{parts[1]}"
+
+    # 2. Fetch Official EOL Data
+    eol_data = []
+    try:
+        resp = requests.get("https://endoflife.date/api/kubernetes.json", timeout=10)
+        resp.raise_for_status()
+        eol_data = resp.json()
+    except Exception as e:
+        logging.error(f"Failed to fetch EOL data: {e}")
+        return "Error fetching Kubernetes lifecycle data."
+
+    # 3. Analyze Versions
+    current_info = {}
+    next_info = {}
+    
+    # Sort descending (newest first)
+    eol_data.sort(key=lambda x: float(x['cycle']), reverse=True)
+    
+    for i, release in enumerate(eol_data):
+        if release['cycle'] == short_version:
+            current_info = release
+            # The "next" version is the one appearing before this in the sorted list
+            if i > 0:
+                next_info = eol_data[i-1]
+            break
+
+    # 4. Format Output
+    # Helper to calculate days
+    def get_days_remaining(date_str):
+        if not date_str or date_str is False: 
+            return "Unknown"
+        try:
+            target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+            today = datetime.now().date()
+            delta = (target_date - today).days
+            return delta
+        except:
+            return "Unknown"
+
+    # Extract Dates
+    active_date = current_info.get('support', 'Unknown') # 'support' usually maps to Active Support in this API
+    maint_date = current_info.get('eol', 'Unknown')      # 'eol' maps to Maintenance/End of Life
+
+    active_days = get_days_remaining(active_date)
+    maint_days = get_days_remaining(maint_date)
+
+    # Build String
+    output = f"### Kubernetes Current Version EOL Details and Next Supported Kubernetes Version\n"
+    output += f"Current Kubernetes Version: {current_version_full}\n"
+    
+    # Active Support Line
+    if isinstance(active_days, int):
+        status_str = "days remaining" if active_days >= 0 else "days ago"
+        output += f"- Active Support Ends: {active_date} ({abs(active_days)} {status_str})\n"
+    else:
+        output += f"- Active Support Ends: {active_date}\n"
+
+    # Maintenance Support Line
+    if isinstance(maint_days, int):
+        status_str = "days remaining" if maint_days >= 0 else "days ago"
+        output += f"- Maintenance Support Ends: {maint_date} ({abs(maint_days)} {status_str})\n"
+    else:
+        output += f"- Maintenance Support Ends: {maint_date}\n"
+
+    # Next Version Section
+    output += "Next Supported Kubernetes Version\n"
+    next_ver = next_info.get('cycle', 'None')
+    output += f"- Next Version: {next_ver}\n"
+
+    ti.xcom_push(key=key, value=output)
+    return output
+
+def kubernetes_eol_and_next_version(ti, **context):
+    return fetch_kubernetes_eol(ti, "kubernetes_eol_and_next_version", CURRENT_START, CURRENT_END)
+
+
+from datetime import datetime
+
+def fetch_microk8s_expiry(ti, **context):
+    query = 'microk8s_cert_expiry {cert=~"(ca.crt|server.crt|front-proxy-client.crt)", nodename="engine-master"}'
+    
+    # Fetch results
+    try:
+        results = query_prometheus_instant(query)
+    except Exception as e:
+        logging.error(f"Error fetching microk8s expiry: {e}")
+        results = []
+
+    data = []
+    for r in results:
+        cert = r.get('cert', 'Unknown Cert')
+        instance = r.get('instance', 'Unknown Instance')
+        try:
+            expiry_ts = float(r['value'])
+            expiry_date = datetime.fromtimestamp(expiry_ts).strftime('%Y-%m-%d %H:%M:%S')
+        except (ValueError, TypeError):
+            expiry_date = "Invalid Timestamp"
+
+        data.append({
+            'cert': cert,
+            'instance': instance,
+            'expiry_date': expiry_date
+        })
+
+    # Generate Markdown
+    markdown = "### MicroK8s Master Node Certificate Expiry Check\n"
+    markdown += "| Certificate | Instance | Expiry Date |\n"
+    markdown += "|------------|----------|-------------|\n"
+    
+    if not data:
+        # Display "No Data Available" row if list is empty
+        markdown += "| No Data Available | - | - |\n"
+    else:
+        for row in data:
+            markdown += f"| {row['cert']} | {row['instance']} | {row['expiry_date']} |\n"
+
+    ti.xcom_push(key="microk8s_expiry_check", value=markdown)
+    return markdown
+
+def fetch_lke_pvc_storage_detailed(ti, key, start, end, date_str):
+    """
+    Fetches LKE PVC metrics for This week using range queries and generates a detailed table.
+    """
+    # 1. Define Queries
+    queries = {
+        "info": 'sum by (namespace, persistentvolumeclaim, storageclass) (kube_persistentvolumeclaim_info)',
+        "capacity": 'sum by (namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes / 1024 / 1024 / 1024)',
+        "used": 'sum by (namespace, persistentvolumeclaim) (kubelet_volume_stats_used_bytes / 1024 / 1024 / 1024)',
+        "available": 'sum by (namespace, persistentvolumeclaim) (kubelet_volume_stats_available_bytes / 1024 / 1024 / 1024)',
+        "status": 'sum by (namespace, persistentvolumeclaim, phase) (kube_persistentvolumeclaim_status_phase == 1)'
+    }
+
+    # 2. Fetch Data
+    dfs = {}
+    for name, q in queries.items():
+        dfs[name] = query_prometheus_range(q, start, end, "5m")
+
+    # 3. Process Data
+    pvc_data = {}
+
+    def get_record(ns, pvc):
+        key = (ns, pvc)
+        if key not in pvc_data:
+            pvc_data[key] = {
+                "namespace": ns,
+                "pvc_name": pvc,
+                "storageclass": "Unknown",
+                "capacity": 0.0,
+                "used": 0.0,
+                "available": 0.0,
+                "status": "Unknown"
+            }
+        return pvc_data[key]
+
+    # --- Process 1: Info ---
+    if not dfs["info"].empty:
+        for _, row in dfs["info"].iterrows():
+            metric = row.get('metric', {})
+            # Fallback if flattened
+            ns = row.get('namespace') or metric.get('namespace')
+            pvc = row.get('persistentvolumeclaim') or metric.get('persistentvolumeclaim')
+            sc = row.get('storageclass') or metric.get('storageclass')
+            
+            if ns and pvc:
+                rec = get_record(ns, pvc)
+                if sc: rec["storageclass"] = sc
+
+    # --- Process 2, 3, 4: Metrics ---
+    def process_metric(metric_name, field_name):
+        if not dfs[metric_name].empty:
+            df = dfs[metric_name]
+            if 'metric' in df.columns:
+                grouped = df.groupby(df['metric'].apply(lambda x: (x.get('namespace'), x.get('persistentvolumeclaim'))))
+            else:
+                grouped = df.groupby(['namespace', 'persistentvolumeclaim'])
+
+            for (ns, pvc), group in grouped:
+                if ns and pvc:
+                    rec = get_record(ns, pvc)
+                    rec[field_name] = float(group['value'].iloc[-1])
+
+    process_metric("capacity", "capacity")
+    process_metric("used", "used")
+    process_metric("available", "available")
+
+    # --- Process 5: Status ---
+    if not dfs["status"].empty:
+        df = dfs["status"]
+        if 'metric' in df.columns:
+             # FIX: Syntax error was here (dfs["status] -> df)
+             grouped = df.groupby(df['metric'].apply(lambda x: (x.get('namespace'), x.get('persistentvolumeclaim'), x.get('phase'))))
+        else:
+             grouped = df.groupby(['namespace', 'persistentvolumeclaim', 'phase'])
+
+        for (ns, pvc, phase), group in grouped:
+            if ns and pvc and phase:
+                 if group['value'].iloc[-1] == 1:
+                     rec = get_record(ns, pvc)
+                     rec["status"] = phase
+
+    # 4. Generate Table
+    # Sorting: Alpha-Prod (0) -> TiPreprod-Prod (1) -> Others (2)
+    def sort_key(x):
+        ns = x['namespace']
+        if ns == 'alpha-prod':
+            priority = 0
+        elif ns == 'tipreprod-prod':
+            priority = 1
+        else:
+            priority = 2
+        return (priority, ns, x['pvc_name'])
+
+    sorted_data = sorted(pvc_data.values(), key=sort_key)
+
+    markdown = f"### LKE PVC Storage Details (Period: {date_str})\n"
+    markdown += "| Persistent Volume Claim | Name Space | Storage Class | Capacity (GiB) | Used (GiB) | Available (GiB) | Status |\n"
+    markdown += "|-------------------------|------------|---------------|----------------|------------|-----------------|--------|\n"
+    
+    final_list = []
+    for row in sorted_data:
+        row_formatted = {
+            "pvc_name": row['pvc_name'],
+            "namespace": row['namespace'],
+            "storageclass": row['storageclass'],
+            "capacity": f"{row['capacity']:.4f}",
+            "used": f"{row['used']:.4f}",
+            "available": f"{row['available']:.4f}",
+            "status": row['status']
+        }
+        markdown += f"| {row_formatted['pvc_name']} | {row_formatted['namespace']} | {row_formatted['storageclass']} | {row_formatted['capacity']} | {row_formatted['used']} | {row_formatted['available']} | {row_formatted['status']} |\n"
+        final_list.append(row)
+
+    ti.xcom_push(key=key, value=markdown)
+    ti.xcom_push(key=f"{key}_data", value=json.dumps(final_list))
+    return markdown
+
+def fetch_lke_pvc_storage_basic(ti, key, start, end):
+    """
+    Fetches Basic LKE PVC metrics for Last Week comparison.
+    """
+    # Same queries, we just need Used and Available mainly
+    queries = {
+        "info": 'sum by (namespace, persistentvolumeclaim, storageclass) (kube_persistentvolumeclaim_info)',
+        "capacity": 'sum by (namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes / 1024 / 1024 / 1024)',
+        "used": 'sum by (namespace, persistentvolumeclaim) (kubelet_volume_stats_used_bytes / 1024 / 1024 / 1024)',
+        "available": 'sum by (namespace, persistentvolumeclaim) (kubelet_volume_stats_available_bytes / 1024 / 1024 / 1024)',
+    }
+
+    dfs = {}
+    for name, q in queries.items():
+        dfs[name] = query_prometheus_range(q, start, end, "5m")
+
+    pvc_data = {}
+    def get_record(ns, pvc):
+        key = (ns, pvc)
+        if key not in pvc_data:
+            pvc_data[key] = {"namespace": ns, "pvc_name": pvc, "storageclass": "Unknown", "capacity": 0.0, "used": 0.0, "available": 0.0}
+        return pvc_data[key]
+
+    # Info
+    if not dfs["info"].empty:
+        for _, row in dfs["info"].iterrows():
+            ns = row.get('namespace') or row.get('metric', {}).get('namespace')
+            pvc = row.get('persistentvolumeclaim') or row.get('metric', {}).get('persistentvolumeclaim')
+            sc = row.get('storageclass') or row.get('metric', {}).get('storageclass')
+            if ns and pvc and sc:
+                get_record(ns, pvc)["storageclass"] = sc
+
+    # Metrics
+    for metric in ["capacity", "used", "available"]:
+        if not dfs[metric].empty:
+            if 'metric' in dfs[metric].columns:
+                 grouped = dfs[metric].groupby(dfs[metric]['metric'].apply(lambda x: (x.get('namespace'), x.get('persistentvolumeclaim'))))
+            else:
+                 grouped = dfs[metric].groupby(['namespace', 'persistentvolumeclaim'])
+            
+            for (ns, pvc), group in grouped:
+                if ns and pvc:
+                    val = group['value'].iloc[-1]
+                    get_record(ns, pvc)[metric] = float(val)
+
+    final_list = list(pvc_data.values())
+    ti.xcom_push(key=f"{key}_data", value=json.dumps(final_list))
+    return f"Fetched basic PVC stats for {len(final_list)} items"
+
+def lke_pvc_storage_details(ti, **context):
+    date_display = CURRENT_END_DT.strftime('%Y-%m-%d')
+    return fetch_lke_pvc_storage_detailed(ti, "lke_pvc_storage_details", CURRENT_START, CURRENT_END, date_display)
+
+def lke_pvc_storage_details_lastweek(ti, **context):
+    return fetch_lke_pvc_storage_basic(ti, "lke_pvc_storage_details_lastweek", PREVIOUS_START, PREVIOUS_END)
+
+def lke_pvc_thisweek_vs_lastweek(ti, **context):
+    data_thisweek = json.loads(ti.xcom_pull(key="lke_pvc_storage_details_data"))
+    data_lastweek = json.loads(ti.xcom_pull(key="lke_pvc_storage_details_lastweek_data"))
+
+    # Map keys
+    thisweek_dict = {(d['namespace'], d['pvc_name']): d for d in data_thisweek}
+    lastweek_dict = {(d['namespace'], d['pvc_name']): d for d in data_lastweek}
+
+    all_keys = set(thisweek_dict.keys()) | set(lastweek_dict.keys())
+    comparison = []
+
+    for key in all_keys:
+        ns, pvc = key
+        t = thisweek_dict.get(key, {'capacity': 0, 'used': 0, 'available': 0})
+        y = lastweek_dict.get(key, {'capacity': 0, 'used': 0, 'available': 0})
+
+        # Calculate Diffs (Round to 2 decimals for Comparison table)
+        used_diff = round(t['used'] - y['used'], 2)
+        avail_diff = round(t['available'] - y['available'], 2)
+        
+        comparison.append({
+            'pvc_name': pvc,
+            'namespace': ns,
+            'storageclass': t.get('storageclass', y.get('storageclass', 'Unknown')),
+            'capacity': round(t['capacity'], 2),
+            'used_curr': round(t['used'], 2),
+            'used_prev': round(y['used'], 2),
+            'used_diff': used_diff,
+            'avail_curr': round(t['available'], 2),
+            'avail_prev': round(y['available'], 2),
+            'avail_diff': avail_diff
+        })
+
+    # Use Dates
+    p1_label = CURRENT_END_DT.strftime('%Y-%m-%d')
+    p2_label = PREVIOUS_END_DT.strftime('%Y-%m-%d')
+
+    markdown = f"### LKE PVC Storage Comparison (Period1: {p1_label}, Period2: {p2_label})\n"
+    markdown += "| Persistent Volume Claim | Namespace | Storage Class | Capacity (GiB) | Used Current (GiB) | Used Previous (GiB) | Used Diff (GiB) | Available Current (GiB) | Available Previous (GiB) | Available Diff (GiB) |\n"
+    markdown += "|-------------------------|-----------|---------------|----------------|--------------------|---------------------|-----------------|-------------------------|--------------------------|----------------------|\n"
+    
+    # Sort
+    comparison.sort(key=lambda x: (x['namespace'], x['pvc_name']))
+
+    for row in comparison:
+        markdown += f"| {row['pvc_name']} | {row['namespace']} | {row['storageclass']} | {row['capacity']} | {row['used_curr']} | {row['used_prev']} | {row['used_diff']} | {row['avail_curr']} | {row['avail_prev']} | {row['avail_diff']} |\n"
+
+
+    ti.xcom_push(key="lke_pvc_thisweek_vs_lastweek", value=markdown)
+    return markdown
+
+#Pod Metrics    
+def fetch_pod_data_for_period(namespaces, start, end, period_label):
+    """
+    Fetches Pod data. 
+    - Uses INSTANT queries for Status (Running/Problematic) to avoid stale historical data.
+    - Uses RANGE queries for CPU/Memory to get averages.
+    """
+    results = []
+    
+    # 1. Status Queries (Use INSTANT at 'end' time)
+    # This ensures we match exactly what you see in Prometheus right now.
+    
     for ns in namespaces:
-        key_this = (ns, "last 7 days")
-        if key_this not in merged: continue
+        ns = ns.strip() # Safety trim
+        
+        # A. Running Pods (Instant)
+        q_running = f'count(kube_pod_status_phase{{namespace="{ns}", phase="Running"}} == 1)'
+        try:
+            # We use the instant helper we defined earlier (returns list of dicts)
+            run_res = query_prometheus_instant(q_running, time=end)
+            total_running = int(run_res[0]['value']) if run_res else 0
+        except Exception as e:
+            logging.error(f"Error fetching running pods for {ns}: {e}")
+            total_running = 0
 
-        data = merged[key_this]
-        actual_count = real_counts.get(ns, "unknown")
-        problematic = context['ti'].xcom_pull(task_ids='fetch_real_problematic_pods').get(ns, "No problematic pods")
-
-        sections.append(f"### Namespace: `{ns}`")
-        sections.append(f"**Running Pods**: {actual_count} | **Problematic Pods**: {problematic}\n")
-
-        def safe_float(s): 
-                try: return float(s) 
-                except: return 0.0
+        # B. Problematic Pods (Instant)
+        # We only want pods that are CURRENTLY Failed/Pending/Unknown
+        q_problem = f'sum by (pod, phase) (kube_pod_status_phase{{namespace="{ns}", phase=~"Failed|Pending|Unknown"}} == 1)'
+        problem_list = []
+        try:
+            prob_res = query_prometheus_instant(q_problem, time=end)
+            # Result format: [{'metric': {'pod': 'x', 'phase': 'Pending'}, 'value': 1.0}, ...]
+            # Or if flattened by helper: [{'pod': 'x', 'phase': 'Pending', 'value': 1.0}]
+            
+            for r in prob_res:
+                # Helper might return flattened dict or nested metric dict
+                pod_name = r.get('pod') or r.get('metric', {}).get('pod')
+                phase = r.get('phase') or r.get('metric', {}).get('phase')
                 
-        if data["cpu"]:
-            sections.append("#### CPU Utilization (Last 7 Days)")
+                # Double check value is 1 (Active)
+                if r['value'] == 1:
+                    problem_list.append(f"{pod_name} ({phase})")
+                    
+        except Exception as e:
+            logging.error(f"Error fetching problematic pods for {ns}: {e}")
+
+        problematic_str = "\n".join(problem_list) if problem_list else "No problematic pods"
+
+        # C. CPU Metrics (Range - Keep as is for Averages)
+        q_cpu = f'sum by (pod) (rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace="{ns}"}}[5m]))'
+        df_cpu = query_prometheus_range(q_cpu, start, end, "5m")
+        
+        cpu_data = []
+        if not df_cpu.empty:
+            if 'metric' in df_cpu.columns:
+                 grouped = df_cpu.groupby(df_cpu['metric'].apply(lambda x: x.get('pod')))
+            else:
+                 grouped = df_cpu.groupby(['pod'])
+            
+            for pod_key, group in grouped:
+                # Handle tuple keys from groupby
+                pod = pod_key[0] if isinstance(pod_key, tuple) else pod_key
+                if not pod: continue
+                
+                cpu_data.append({
+                    'pod': str(pod),
+                    'avg': round(float(group['value'].mean()), 4),
+                    'max': round(float(group['value'].max()), 4),
+                    'current': round(float(group['value'].iloc[-1]), 4)
+                })
+
+        # D. Memory Metrics (Range)
+        q_mem = f'sum by (pod) (container_memory_working_set_bytes{{image!="", namespace="{ns}"}}) / 1024 / 1024 / 1024'
+        df_mem = query_prometheus_range(q_mem, start, end, "5m")
+        
+        mem_data = []
+        if not df_mem.empty:
+            if 'metric' in df_mem.columns:
+                 grouped = df_mem.groupby(df_mem['metric'].apply(lambda x: x.get('pod')))
+            else:
+                 grouped = df_mem.groupby(['pod'])
+
+            for pod_key, group in grouped:
+                pod = pod_key[0] if isinstance(pod_key, tuple) else pod_key
+                if not pod: continue
+                
+                mem_data.append({
+                    'pod': str(pod),
+                    'avg': round(float(group['value'].mean()), 4),
+                    'max': round(float(group['value'].max()), 4),
+                    'current': round(float(group['value'].iloc[-1]), 4)
+                })
+
+        results.append({
+            "namespace": ns,
+            "period": period_label,
+            "total_running": total_running,
+            "problematic_pods": problematic_str,
+            "cpu_data": cpu_data,
+            "memory_data": mem_data
+        })
+        
+    return results
+
+# === AIRFLOW TASKS ===
+
+def pod_details_thisweek(ti, **context):
+    # 1. Get Namespaces & Clean them
+    try:
+        raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
+        namespaces_raw = json.loads(raw)
+        # Ensure list and strip whitespace
+        namespaces = [str(n).strip() for n in namespaces_raw]
+    except:
+        namespaces = ["alpha-prod", "tipreprod-prod"]
+
+    # 2. Fetch
+    data = fetch_pod_data_for_period(namespaces, CURRENT_START, CURRENT_END, "last 7 days")
+    
+    # 3. Build Map for lookup
+    # Key is the stripped namespace
+    data_map = {d['namespace']: d for d in data}
+    
+    sections = []
+    
+    for ns in namespaces:
+        # Debug log if missing
+        if ns not in data_map: 
+            logging.warning(f"Namespace {ns} found in variable but no data returned from fetch function.")
+            continue
+            
+        d = data_map[ns]
+        
+        # Header + Counts
+        sections.append(f"### Namespace: `{ns}`")
+        sections.append(f"**Running Pods**: {d['total_running']} | **Problematic Pods**: {d['problematic_pods']}\n")
+        
+        # CPU
+        if d['cpu_data']:
+            sections.append(f"#### CPU Utilization (This Week)")
             sections.append("| Pod | Avg (cores) | Max (cores) | Current (cores) |")
             sections.append("|-----|-------------|-------------|-----------------|")
-            sorted_cpu = sorted(data["cpu"], key=lambda x: safe_float(x.split("|")[2].strip()), reverse=True)
-            sections.extend(sorted_cpu)
+            for row in sorted(d['cpu_data'], key=lambda x: x['avg'], reverse=True):
+                sections.append(f"| {row['pod']} | {row['avg']} | {row['max']} | {row['current']} |")
             sections.append("")
+        else:
+             sections.append("_No CPU data available for this namespace._\n")
 
-        if data["memory"]:
-            sections.append("#### Memory Utilization (Last 7 Days)")
+        # Memory
+        if d['memory_data']:
+            sections.append(f"#### Memory Utilization (This Week)")
             sections.append("| Pod | Avg (GB) | Max (GB) | Current (GB) |")
             sections.append("|-----|----------|----------|-------------|")
-            sorted_mem = sorted(data["memory"], key=lambda x: safe_float(x.split("|")[2].strip()), reverse=True)
-            sections.extend(sorted_mem)
+            for row in sorted(d['memory_data'], key=lambda x: x['avg'], reverse=True):
+                sections.append(f"| {row['pod']} | {row['avg']} | {row['max']} | {row['current']} |")
             sections.append("")
-
+        else:
+             sections.append("_No Memory data available for this namespace._\n")
+        
         sections.append("---")
 
-    result = "\n".join(sections).strip()
-    ti.xcom_push(key="pod_this_week_markdown", value=result)
-    return result
-
-@task
-def compile_pod_comparison(namespace_results: list, **context):
-    ti = context['ti']
+    markdown = "\n".join(sections)
     
-    merged = {}
-    for batch in namespace_results:
-        if not batch: continue
-        key = (batch["namespace"], batch["period"])
-        if key not in merged:
-            merged[key] = {**batch, "cpu_lines": [], "mem_lines": []}
-        for line in batch["cpu"].split('\n'):
-            if line.strip().startswith('|') and '|' in line and not line.startswith('| pod |') and not line.startswith('|---'):
-                merged[key]["cpu_lines"].append(line.strip())
-        for line in batch["memory"].split('\n'):
-            if line.strip().startswith('|') and '|' in line and not line.startswith('| pod |') and not line.startswith('|---'):
-                merged[key]["mem_lines"].append(line.strip())
+    ti.xcom_push(key="pod_details_thisweek", value=markdown)
+    ti.xcom_push(key="pod_details_thisweek_data", value=json.dumps(data))
+    return markdown
 
-    raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var="[]")
+def pod_details_lastweek(ti, **context):
     try:
+        raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
         namespaces = json.loads(raw)
     except:
-        namespaces = [ns.strip() for ns in raw.split(",") if ns.strip()]
+        namespaces = ["alpha-prod", "tipreprod-prod"]
 
+    # Fetch Data
+    data = fetch_pod_data_for_period(namespaces, PREVIOUS_START, PREVIOUS_END, "Last Week")
+    
+    # We only need the JSON for comparison
+    ti.xcom_push(key="pod_details_lastweek_data", value=json.dumps(data))
+    return "Fetched Pod Details for Last Week"
+
+def pod_details_thisweek_vs_lastweek(ti, **context):
+    data_thisweek = json.loads(ti.xcom_pull(key="pod_details_thisweek_data"))
+    data_lastweek = json.loads(ti.xcom_pull(key="pod_details_lastweek_data"))
+    
+    # Organize by Namespace
+    thisweek_map = {d['namespace']: d for d in data_thisweek}
+    lastweek_map = {d['namespace']: d for d in data_lastweek}
+    
+    all_ns = set(thisweek_map.keys()) | set(lastweek_map.keys())
+    
+    # Determine sorting order from Variable, or fallback to alphabetical
+    try:
+        raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
+        ordered_ns = json.loads(raw)
+    except:
+        ordered_ns = sorted(list(all_ns))
+        
     sections = []
-    for ns in namespaces:
-        this = merged.get((ns, "last 7 days"))
-        last = merged.get((ns, "previous week"))
-        if not this or not last: continue
+    
+    for ns in ordered_ns:
+        if ns not in all_ns: continue
+        
+        t_ns = thisweek_map.get(ns, {'cpu_data': [], 'memory_data': []})
+        y_ns = lastweek_map.get(ns, {'cpu_data': [], 'memory_data': []})
+        
+        # --- CPU Comparison ---
+        t_cpu = {x['pod']: x for x in t_ns['cpu_data']}
+        y_cpu = {x['pod']: x for x in y_ns['cpu_data']}
+        all_pods_cpu = set(t_cpu.keys()) | set(y_cpu.keys())
+        
+        cpu_rows = []
+        for pod in all_pods_cpu:
+            t = t_cpu.get(pod, {'avg': 0, 'max': 0})
+            y = y_cpu.get(pod, {'avg': 0, 'max': 0})
+            
+            diff_avg = round(t['avg'] - y['avg'], 4)
+            diff_max = round(t['max'] - y['max'], 4)
+            
+            cpu_rows.append({
+                "pod": pod,
+                "t_avg": t['avg'], "y_avg": y['avg'], "diff_avg": diff_avg,
+                "t_max": t['max'], "y_max": y['max'], "diff_max": diff_max
+            })
 
-        prompt = f"""
-You are the SRE TradeIdeas agent.
-Generate a clean comparison between this week and previous week for namespace `{ns}`.
+        # --- Memory Comparison ---
+        t_mem = {x['pod']: x for x in t_ns['memory_data']}
+        y_mem = {x['pod']: x for x in y_ns['memory_data']}
+        all_pods_mem = set(t_mem.keys()) | set(y_mem.keys())
+        
+        mem_rows = []
+        for pod in all_pods_mem:
+            t = t_mem.get(pod, {'avg': 0, 'max': 0})
+            y = y_mem.get(pod, {'avg': 0, 'max': 0})
+            
+            diff_avg = round(t['avg'] - y['avg'], 4)
+            diff_max = round(t['max'] - y['max'], 4)
+            
+            mem_rows.append({
+                "pod": pod,
+                "t_avg": t['avg'], "y_avg": y['avg'], "diff_avg": diff_avg,
+                "t_max": t['max'], "y_max": y['max'], "diff_max": diff_max
+            })
+            
+        # Build Section
+        sections.append(f"### {ns} — Pod CPU & Memory Comparison")
+        
+        # CPU Table
+        sections.append("#### CPU Changes")
+        sections.append("| Pod | This Week Avg | Last Week Avg | Diff | This Week Max | Last Week Max | Max Diff |")
+        sections.append("|-----|-----------|----------|------|-----------|----------|----------|")
+        # Sort by Max Diff magnitude
+        for row in sorted(cpu_rows, key=lambda x: abs(x['diff_max']), reverse=True):
+             sections.append(f"| {row['pod']} | {row['t_avg']} | {row['y_avg']} | {row['diff_avg']} | {row['t_max']} | {row['y_max']} | {row['diff_max']} |")
 
-This Week CPU rows:
-{"\n".join(this["cpu_lines"])}
+        sections.append("")
+        
+        # Memory Table
+        sections.append("#### Memory Changes")
+        sections.append("| Pod | This Week Avg (GB) | Last Week Avg | Diff | This Week Max (GB) | Last Week Max | Max Diff |")
+        sections.append("|-----|----------------|----------|------|----------------|----------|----------|")
+        for row in sorted(mem_rows, key=lambda x: abs(x['diff_max']), reverse=True):
+             sections.append(f"| {row['pod']} | {row['t_avg']} | {row['y_avg']} | {row['diff_avg']} | {row['t_max']} | {row['y_max']} | {row['diff_max']} |")
+             
+        sections.append("\n---\n")
 
-This Week Memory rows:
-{"\n".join(this["mem_lines"])}
-
-Previous Week CPU rows:
-{"\n".join(last["cpu_lines"])}
-
-Previous Week Memory rows:
-{"\n".join(last["mem_lines"])}
-
-Return exactly this format:
-### {ns} — Pod CPU & Memory Comparison (This Week vs Previous Week)
-#### CPU Changes
-| Pod | This Week Avg | Prev Week Avg | Diff | This Week Max | Prev Week Max | Max Diff |
-...
-#### Memory Changes
-| Pod | This Week Avg (GB) | Prev Week Avg | Diff | ...
-### Summary
-Highlight pods with >0.8 core or >2GB change.
-"""
-        comparison = get_ai_response(prompt)
-        sections.append(comparison)
-
-    result = "\n\n---\n\n".join(sections)
-    ti.xcom_push(key="pod_comparison_markdown", value=result)
+    result = "\n".join(sections)
+    ti.xcom_push(key="pod_details_thisweek_vs_lastweek", value=result)
     return result
 
-# === FULLY DETAILED OVERALL SUMMARY (like daily) ===
+# === Overall Summary (AI) ===
 def overall_summary(ti, **context):
-    node_cpu_this       = ti.xcom_pull(key="node_cpu_this_week") or "No data"
-    node_memory_this    = ti.xcom_pull(key="node_memory_this_week") or "No data"
-    node_disk_this      = ti.xcom_pull(key="node_disk_this_week") or "No data"
-    node_readiness      = ti.xcom_pull(key="node_readiness_check") or "No data"
-    pod_this_week       = ti.xcom_pull(key="pod_this_week_markdown") or "No data"
-    pod_restarts        = ti.xcom_pull(key="pod_restart_this_week") or "No data"
-    mysql_this_week     = ti.xcom_pull(key="mysql_health_this_week") or "No data"
-    k8s_version         = ti.xcom_pull(key="kubernetes_version_check") or "No data"
-    k8s_eol             = ti.xcom_pull(key="kubernetes_eol_and_next_version") or "No data"
-    cert_expiry         = ti.xcom_pull(key="microk8s_expiry_check") or "No data"
-    pvc_this_week       = ti.xcom_pull(key="lke_pvc_storage_details") or "No data"
+    def xp(key, default="No data"): return ti.xcom_pull(key=key) or default
+    
+    # Static & This Week Metrics
+    node_cpu = xp("node_cpu_thisweek")
+    node_memory = xp("node_memory_thisweek")
+    node_disk = xp("node_disk_thisweek")
+    node_readiness = xp("node_readiness_check") # Ensure fetch_node_readiness pushes to this key
+    
+    # --- FIX: Updated Keys for Pods ---
+    pod_thisweek = xp("pod_details_thisweek", "No pod data") 
+    
+    pod_restart = xp("pod_restart_thisweek")
+    mysql_health = xp("mysql_health_thisweek")
+    
+    kubernetes_ver = xp("kubernetes_version_check")
+    k8s_eol = xp("kubernetes_eol_and_next_version")
+    microk8s_exp = xp("microk8s_expiry_check")
+    lke_pvc = xp("lke_pvc_storage_details")
 
-    node_cpu_cmp        = ti.xcom_pull(key="node_cpu_this_vs_last_week") or "No comparison"
-    node_mem_cmp        = ti.xcom_pull(key="node_memory_this_vs_last_week") or "No comparison"
-    node_disk_cmp       = ti.xcom_pull(key="node_disk_this_vs_last_week") or "No comparison"
-    pod_cmp             = ti.xcom_pull(key="pod_comparison_markdown") or "No comparison"
-    mysql_cmp           = ti.xcom_pull(key="mysql_health_this_vs_last_week") or "No comparison"
-    pvc_cmp             = ti.xcom_pull(key="lke_pvc_this_vs_last_week") or "No comparison"
+    # Comparisons
+    node_cpu_cmp = xp("node_cpu_thisweek_vs_lastweek")
+    node_mem_cmp = xp("node_memory_thisweek_vs_lastweek")
+    node_disk_cmp = xp("node_disk_thisweek_vs_lastweek")
+    
+    # --- FIX: Updated Keys for Pod Comparison ---
+    pod_cmp = xp("pod_details_thisweek_vs_lastweek", "No comparison")
+    
+    mysql_cmp = xp("mysql_health_thisweek_vs_lastweek")
+    pvc_cmp = xp("lke_pvc_thisweek_vs_lastweek")
 
-    prompt = f"""
-You are the SRE TradeIdeas agent.
-Generate a **complete Weekly SRE Summary** and **Week-over-Week Insights**.
+    prompt = f"""You are the SRE TradeIdeas agent.
+Generate a **complete overall summary** for This week's SRE report, followed by a **comparative summary**.
 
-### This Week Summary 
-- Node CPU: {node_cpu_this}
-- Node Memory: {node_memory_this}
-- Node Disk: {node_disk_this}
+### Part 1: This Week's Summary
+- Node CPU: {node_cpu}
+- Node Memory: {node_memory}
+- Node Disk: {node_disk}
 - Node Readiness: {node_readiness}
-- Pod Metrics: {pod_this_week}
-- Pod Restarts: {pod_restarts}
-- MySQL Health: {mysql_this_week}
-- PVC Storage: {pvc_this_week}
-- Kubernetes Version: {k8s_version}
+- Pod Metrics (by Namespace): {pod_thisweek}
+- Pod Restarts: {pod_restart}
+- MySQL Health: {mysql_health}
+- LKE PVC: {lke_pvc}
+- Kubernetes Version: {kubernetes_ver}
 - Kubernetes EOL: {k8s_eol}
-- Certificate Expiry: {cert_expiry}
+- MicroK8s Expiry: {microk8s_exp}
 
-### Week-over-Week Comparison
-- Node CPU Changes: {node_cpu_cmp}
-- Node Memory Changes: {node_mem_cmp}
-- Node Disk Changes: {node_disk_cmp}
-- Pod CPU/Memory Changes: {pod_cmp}
-- PVC Storage Growth: {pvc_cmp}
-- MySQL Downtime Changes: {mysql_cmp}
+### Part 2: Comparison Summary
+- Node CPU: {node_cpu_cmp}
+- Node Memory: {node_mem_cmp}
+- Node Disk: {node_disk_cmp}
+- Pod CPU & Memory: {pod_cmp}
+- LKE PVC: {pvc_cmp}
+- MySQL Health: {mysql_cmp}
 
-Write two clear sections:
-1. **Weekly Summary (This Week)**
-2. **Week-over-Week Comparison & Alerts**
-Highlight any critical regressions or anomalies.
+Write two sections: **Overall Summary (This Week)** and **Comparison Summary (This Week vs Last Week)**.
+Highlight critical alerts and anomalies.
 """
     response = get_ai_response(prompt)
     ti.xcom_push(key="overall_summary", value=response)
     return response
 
 
-# === FULLY DETAILED REPORT COMPILATION (exact same style as daily) ===
+# === Compile SRE Report ===
 def compile_sre_report(ti, **context):
+    def xp(key, default="No data"): return ti.xcom_pull(key=key) or default
+    
+    # 1. Fetching Data
+    node_cpu = xp("node_cpu_thisweek")
+    node_memory = xp("node_memory_thisweek")
+    node_disk = xp("node_disk_thisweek")
+    node_readiness = xp("node_readiness_check")
+    
+    # --- FIX: Updated Key ---
+    pod_thisweek = xp("pod_details_thisweek", "No pod data")
+    
+    pod_restart = xp("pod_restart_thisweek")
+    mysql_health = xp("mysql_health_thisweek")
+    kubernetes_ver = xp("kubernetes_version_check")
+    k8s_eol = xp("kubernetes_eol_and_next_version")
+    microk8s_exp = xp("microk8s_expiry_check")
+    lke_pvc = xp("lke_pvc_storage_details")
+
+    # 2. Fetching Comparisons
+    node_cpu_cmp = xp("node_cpu_thisweek_vs_lastweek")
+    node_mem_cmp = xp("node_memory_thisweek_vs_lastweek")
+    node_disk_cmp = xp("node_disk_thisweek_vs_lastweek")
+    
+    # --- FIX: Updated Key ---
+    pod_cmp = xp("pod_details_thisweek_vs_lastweek", "No comparison")
+    
+    mysql_cmp = xp("mysql_health_thisweek_vs_lastweek")
+    pvc_cmp = xp("lke_pvc_thisweek_vs_lastweek")
+    
+    overall_summary = xp("overall_summary", "No summary")
+
+    # 3. Building Report
     report = f"""
 # SRE Weekly Report – TradeIdeas Platform
- **Generated**: Monday 11:00 AM IST
+**Generated**: **11:00 AM IST**
 
 ---
 
-## 1. Node-Level Metrics (Last 7 Days)
-{ti.xcom_pull(key="node_cpu_this_week") or "No data"}
-{ti.xcom_pull(key="node_memory_this_week") or "No data"}
-{ti.xcom_pull(key="node_disk_this_week") or "No data"}
-{ti.xcom_pull(key="node_readiness_check") or "No data"}
+## 1. Node-Level Metrics (This Week)
+{node_cpu}
+{node_memory}
+{node_disk}
+{node_readiness}
 
 ---
 
-## 2. Pod-Level Metrics (Last 7 Days)
-{ti.xcom_pull(key="pod_this_week_markdown") or "No data"}
+## 2. Pod-Level Metrics (This Week) – **Grouped by Namespace**
+{pod_thisweek}
 
 ---
 
-## 3. Pod Restart Count (Last 7 Days)
-{ti.xcom_pull(key="pod_restart_this_week") or "No data"}
+## 3. Pod Restart Count (This Week)
+{pod_restart}
 
 ---
 
 ## 4. Storage (LKE PVCs)
-{ti.xcom_pull(key="lke_pvc_storage_details") or "No data"}
+{lke_pvc}
 
 ---
 
 ## 5. Database Health
-{ti.xcom_pull(key="mysql_health_this_week") or "No data"}
+{mysql_health}
 
 ---
 
-## 6. Kubernetes Checks
-{ti.xcom_pull(key="kubernetes_version_check") or "No data"}
-{ti.xcom_pull(key="kubernetes_eol_and_next_version") or "No data"}
-{ti.xcom_pull(key="microk8s_expiry_check") or "No data"}
+## 6. Kubernetes Check
+{kubernetes_ver}
+{k8s_eol}
+{microk8s_exp}
 
 ---
 
-## 7. Week-over-Week Comparison
-{ti.xcom_pull(key="node_cpu_this_vs_last_week") or "No comparison"}
-{ti.xcom_pull(key="node_memory_this_vs_last_week") or "No comparison"}
-{ti.xcom_pull(key="node_disk_this_vs_last_week") or "No comparison"}
-{ti.xcom_pull(key="pod_comparison_markdown") or "No comparison"}
-{ti.xcom_pull(key="lke_pvc_this_vs_last_week") or "No comparison"}
-{ti.xcom_pull(key="mysql_health_this_vs_last_week") or "No comparison"}
+## 7. Node-Level Metrics (This Week vs Last Week)
+{node_cpu_cmp}
+{node_mem_cmp}
+{node_disk_cmp}
 
 ---
 
-## 8. Overall Weekly Summary & Recommendations
-{ti.xcom_pull(key="overall_summary") or "No summary"}
+## 8. Pod-Level CPU & Memory (This Week vs Last Week) – **Grouped by Namespace**
+{pod_cmp}
 
 ---
 
-**End of Weekly Report**  
-*Generated by SRE TradeIdeas Agent – Every Monday @ 11:00 AM IST*
-"""
-    report = re.sub(r'\n{3,}', '\n\n', report.strip())
+## 9. LKE PVC Storage Details (This Week vs Last Week)
+{pvc_cmp}
+
+---
+
+## 10. Database Health (This Week vs Last Week)
+{mysql_cmp}
+
+---
+
+## 11. Overall Summary
+{overall_summary}
+
+---
+
+**End of Report** *Generated by SRE TradeIdeas Agent @ 11:00 AM IST*
+""".strip()
+
+    report = re.sub(r'\n{3,}', '\n\n', report)
     ti.xcom_push(key="sre_full_report", value=report)
     return report
-
 
 # === t11: Convert SRE Markdown Report to HTML (Local Markdown Parser) ===
 def preprocess_markdown(markdown_text):
@@ -626,7 +2047,7 @@ def convert_to_html(ti, **context):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SRE Daily Report</title>
+<title>SRE Weekly Report</title>
 <style>
 body {{
     font-family: Arial, sans-serif;
@@ -723,6 +2144,7 @@ a:hover {{
     return full_html
 
 
+# === t12: Send SRE Report via Gmail ===
 def send_sre_email(ti, **context):
     """Send SRE HTML report via SMTP with PDF attachment"""
     html_report = ti.xcom_pull(key="sre_html_report")
@@ -749,13 +2171,13 @@ def send_sre_email(ti, **context):
     # Clean up any code block wrappers
     html_body = re.sub(r'```html\s*|```', '', html_report).strip()
 
-    subject = f"SRE Daily Report – {datetime.utcnow().strftime('%Y-%m-%d')}"
+    subject = f"SRE Weekly Report – {datetime.utcnow().strftime('%Y-%m-%d')}"
     recipient = RECEIVER_EMAIL
 
     try:
         # Initialize SMTP connection
         logging.info(f"Connecting to SMTP server {SMTP_HOST}:{SMTP_PORT} as {SMTP_USER}")
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=50)
         server.starttls()
         server.login(SMTP_USER, SMTP_PASSWORD)
 
@@ -802,7 +2224,7 @@ def send_sre_email(ti, **context):
     except Exception as e:
         logging.error(f"Failed to send email via SMTP: {str(e)}")
         raise
-        
+
 def generate_pdf_report_callable(ti=None, **context):
     """
     TradeIdeas SRE PDF – ReportLab (ABSOLUTE FINAL VERSION)
@@ -812,7 +2234,7 @@ def generate_pdf_report_callable(ti=None, **context):
     • Professional layout
     """
     try:
-        md = ti.xcom_pull(key="sre_full_report") or "# No SRE report generated."
+        md = ti.xcom_pull(key="sre_full_report") or "# No report generated."
         md = preprocess_markdown(md)
 
         date_str = YESTERDAY_DATE_STR
@@ -956,229 +2378,96 @@ def generate_pdf_report_callable(ti=None, **context):
         logging.error("PDF generation failed", exc_info=True)
         raise
 
-
 # === DAG ===
 with DAG(
-    dag_id="sre-tradeideas_weekly",
+    dag_id="sre-tradeideas_weekly", 
     default_args=default_args,
-    schedule_interval="30 5 * * 1",  # Every Monday 05:30 UTC → 11:00 AM IST
+    schedule_interval="30 5 * * 1",  # 11:00 AM IST on Mondays (05:30 UTC)
     catchup=False,
-    tags=["sre", "tradeideas", "weekly", "11am-ist"],
+    tags=["sre", "tradeideas", "weekly", "monday-11am"],
     max_active_runs=1,
 ) as dag:
 
-    # === Static Tasks - This Week (Last 7 Days) ===
-    t1  = PythonOperator(task_id="node_cpu_this_week", python_callable=node_cpu_this_week, provide_context=True)
-    t2  = PythonOperator(task_id="node_memory_this_week", python_callable=node_memory_this_week, provide_context=True)
-    t3  = PythonOperator(task_id="node_disk_this_week", python_callable=node_disk_this_week, provide_context=True)
-    t4  = PythonOperator(task_id="node_readiness_check", python_callable=node_readiness_check, provide_context=True)
-    t5  = PythonOperator(task_id="pod_restart_this_week", python_callable=pod_restart_this_week, provide_context=True)
-    t6  = PythonOperator(task_id="mysql_health_this_week", python_callable=mysql_health_this_week, provide_context=True)
-    t7  = PythonOperator(task_id="kubernetes_version_check", python_callable=kubernetes_version_check, provide_context=True)
+    # Static Tasks - This Week
+    t1 = PythonOperator(task_id="node_cpu_thisweek", python_callable=node_cpu_thisweek, provide_context=True)
+    t2 = PythonOperator(task_id="node_memory_thisweek", python_callable=node_memory_thisweek, provide_context=True)
+    t3 = PythonOperator(task_id="node_disk_thisweek", python_callable=node_disk_thisweek, provide_context=True)
+    t4 = PythonOperator(task_id="node_readiness_check", python_callable=fetch_node_readiness, provide_context=True)
+    t5 = PythonOperator(task_id="pod_restart_thisweek", python_callable=pod_restart_thisweek, provide_context=True)
+    t6 = PythonOperator(task_id="mysql_health_thisweek", python_callable=mysql_health_thisweek, provide_context=True)
+    t7 = PythonOperator(task_id="kubernetes_version_check", python_callable=kubernetes_version_check, provide_context=True)
     t7_1 = PythonOperator(task_id="kubernetes_eol_and_next_version", python_callable=kubernetes_eol_and_next_version, provide_context=True)
-    t8  = PythonOperator(task_id="microk8s_expiry_check", python_callable=microk8s_expiry_check, provide_context=True)
-    t9  = PythonOperator(task_id="lke_pvc_storage_details", python_callable=lke_pvc_storage_details, provide_context=True)
+    t8 = PythonOperator(task_id="microk8s_expiry_check", python_callable=fetch_microk8s_expiry, provide_context=True)
+    t9 = PythonOperator(task_id="lke_pvc_storage_details", python_callable=lke_pvc_storage_details, provide_context=True)
 
-    # === Static Tasks - Previous Week (Absolute Range) ===
-    t10 = PythonOperator(task_id="node_cpu_last_week", python_callable=node_cpu_last_week, provide_context=True)
-    t11 = PythonOperator(task_id="node_memory_last_week", python_callable=node_memory_last_week, provide_context=True)
-    t12 = PythonOperator(task_id="node_disk_last_week", python_callable=node_disk_last_week, provide_context=True)
-    t13 = PythonOperator(task_id="lke_pvc_storage_details_last_week", python_callable=lke_pvc_storage_details_last_week, provide_context=True)
-    t14 = PythonOperator(task_id="mysql_health_last_week", python_callable=mysql_health_last_week, provide_context=True)
+    # Static Tasks - Last Week (previous period)
+    t10 = PythonOperator(task_id="node_cpu_lastweek", python_callable=node_cpu_lastweek, provide_context=True)
+    t11 = PythonOperator(task_id="node_memory_lastweek", python_callable=node_memory_lastweek, provide_context=True)
+    t12 = PythonOperator(task_id="node_disk_lastweek", python_callable=node_disk_lastweek, provide_context=True)
+    t13 = PythonOperator(task_id="lke_pvc_storage_details_lastweek", python_callable=lke_pvc_storage_details_lastweek, provide_context=True)
+    t14 = PythonOperator(task_id="mysql_health_lastweek", python_callable=mysql_health_lastweek, provide_context=True)
 
-    # === Comparison Tasks ===
-    t15 = PythonOperator(task_id="node_cpu_this_vs_last_week", python_callable=node_cpu_this_vs_last_week, provide_context=True)
-    t16 = PythonOperator(task_id="node_memory_this_vs_last_week", python_callable=node_memory_this_vs_last_week, provide_context=True)
-    t17 = PythonOperator(task_id="node_disk_this_vs_last_week", python_callable=node_disk_this_vs_last_week, provide_context=True)
-    t18 = PythonOperator(task_id="lke_pvc_this_vs_last_week", python_callable=lke_pvc_this_vs_last_week, provide_context=True)
-    t19 = PythonOperator(task_id="mysql_health_this_vs_last_week", python_callable=mysql_health_this_vs_last_week, provide_context=True)
+    # Comparison tasks
+    t15 = PythonOperator(task_id="node_cpu_thisweek_vs_lastweek", python_callable=node_cpu_thisweek_vs_lastweek, provide_context=True)
+    t16 = PythonOperator(task_id="node_memory_thisweek_vs_lastweek", python_callable=node_memory_thisweek_vs_lastweek, provide_context=True)
+    t17 = PythonOperator(task_id="node_disk_thisweek_vs_lastweek", python_callable=node_disk_thisweek_vs_lastweek, provide_context=True)
+    t18 = PythonOperator(task_id="lke_pvc_thisweek_vs_lastweek", python_callable=lke_pvc_thisweek_vs_lastweek, provide_context=True)
+    t19 = PythonOperator(task_id="mysql_health_thisweek_vs_lastweek", python_callable=mysql_health_thisweek_vs_lastweek, provide_context=True)
 
+    # Pod Tasks - This Week
+    t_pod_thisweek = PythonOperator(
+        task_id="pod_details_thisweek",
+        python_callable=pod_details_thisweek,
+        provide_context=True
+    )
+
+    # Pod Tasks - Last Week
+    t_pod_lastweek = PythonOperator(
+        task_id="pod_details_lastweek",
+        python_callable=pod_details_lastweek,
+        provide_context=True
+    )
+
+    # Pod Tasks - Comparison
+    t_pod_comparison = PythonOperator(
+        task_id="pod_details_thisweek_vs_lastweek",
+        python_callable=pod_details_thisweek_vs_lastweek,
+        provide_context=True
+    )
+
+    # Final tasks
     t20 = PythonOperator(task_id="overall_summary", python_callable=overall_summary, provide_context=True)
     t21 = PythonOperator(task_id="compile_sre_report", python_callable=compile_sre_report, provide_context=True)
-    t21_1 = PythonOperator(task_id="generate_pdf", python_callable=generate_pdf_report_callable, provide_context=True)
+    t_generate_pdf = PythonOperator(task_id="generate_pdf", python_callable=generate_pdf_report_callable, provide_context=True)
     t22 = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html, provide_context=True)
     t23 = PythonOperator(task_id="send_sre_email", python_callable=send_sre_email, provide_context=True)
 
-    # === POD DYNAMIC FLOW - BATCHED (6 pods max per AI call) ===
-    try:
-        namespaces_list = json.loads(
-            Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
-        )
-    except Exception:
-        logging.warning(
-            "Failed to parse Airflow Variable 'ltai.v1.sretradeideas.pod.namespaces' (value was: %s). "
-            "Reason: %s. Falling back to hard-coded default namespaces.", pod_namespaces_var, str(e))
-        namespaces_list = ["alpha-prod", "tipreprod-prod"]
+    # === DEPENDENCIES ===
 
-    @task(task_id="fetch_real_problematic_pods")
-    def fetch_real_problematic_pods(namespaces: List[str]) -> dict:
-        result = {}
-        for ns in namespaces:
-            prompt = f"""
-            Namespace: `{ns}`
-            Execute this exact Prometheus query:
-            sum by (pod, phase) (kube_pod_status_phase{{namespace="{ns}", phase=~"Failed|Pending|Unknown"}} == 1)
-            Return ONLY one of these two exact responses:
-            • If no problematic pods → respond exactly: No problematic pods
-            • If any → respond with one line per pod in this format (no extra text):
-            - my-pod-abc123 (Failed)
-            - another-pod-xyz (Pending)
+    # 1. Comparison Tasks (Depend on This Week + Last Week)
+    [t1, t10] >> t15   # CPU
+    [t2, t11] >> t16   # Memory
+    [t3, t12] >> t17   # Disk
+    [t9, t13] >> t18   # PVC
+    [t6, t14] >> t19   # MySQL
+    
+    # 2. Pod Comparison (Depends on Pod This Week + Pod Last Week)
+    [t_pod_thisweek, t_pod_lastweek] >> t_pod_comparison
 
-            Do not include headers, counts, timestamps, or markdown.
-            """
-            resp = get_ai_response(prompt).strip()
-            result[ns] = resp if "no problematic" not in resp.lower() else "No problematic pods"
-        return result
+    # 3. Overall Summary (t20)
+    # This must wait for ALL data generation and comparison tasks to finish.
+    # We include:
+    # - Static checks (t4, t5, t7, t7_1, t8)
+    # - Comparison results (t15, t16, t17, t18, t19)
+    # - Pod results (t_pod_thisweek, t_pod_comparison)
+    
+    summary_dependencies = [
+        t4, t5, t7, t7_1, t8,         # Single metrics (Readiness, Pod Restart, K8s versions, Certs)
+        t15, t16, t17, t18, t19,      # Infrastructure Comparisons
+        t_pod_thisweek, t_pod_comparison # Pod Metrics
+    ]
 
-    real_problematic_pods_task = fetch_real_problematic_pods(namespaces_list)
+    summary_dependencies >> t20
 
-    @task
-    def get_pods_in_namespace(ns: str) -> List[str]:
-        prompt = f"""
-        Execute this query and return only pod names (one per line):
-        sum by(pod) (kube_pod_info{{namespace='{ns}'}})
-        """
-        resp = get_ai_response(prompt)
-        return [line.strip() for line in resp.splitlines() if line.strip()]
-
-    @task
-    def process_pod_batch(pods_batch: List[str], ns: str, period: str):
-        if not pods_batch:
-            return []
-
-        pod_regex = "|".join(pods_batch)
-        is_previous_week = "previous week" in period.lower()
-
-        if is_previous_week:
-            start = PREVIOUS_WEEK_START
-            end = PREVIOUS_WEEK_END
-            time_range = f"[{start}:{end}]"
-            cpu_prompt = f"""
-            Namespace: {ns} — Previous Week ({start} to {end})
-            
-            Run this exact query and process results:
-            sum by (pod) (rate(container_cpu_usage_seconds_total{{namespace=~"{ns}", pod=~"{pod_regex}", image!="", container!="POD"}}[5m])){time_range}
-            
-            For each pod:
-            - avg_cpu_cores  = MeanTool(values)   → round to 4 decimals
-            - max_cpu_cores  = MaxTool(values)    → round to 4 decimals
-        
-
-            Return ONLY this markdown table, sorted by avg_cpu_cores DESC:
-            | pod                  | avg_cpu_cores | max_cpu_cores |
-            |----------------------|---------------|---------------|
-            Use `N/A` if no data for a pod.
-            """
-            
-            mem_prompt = f"""
-            Same absolute range — memory:
-
-            Query:
-            sum by (pod) (container_memory_working_set_bytes{{namespace=~"{ns}", pod=~"{pod_regex}", image!=""}}){time_range}
-
-
-            For each pod:
-            - avg_memory_gb = MeanTool(values) / 1024 / 1024 / 1024 → round to 2 decimals
-            - max_memory_gb = MaxTool(values) / 1024 / 1024 / 1024 → round to 2 decimals
-
-
-            Return ONLY this markdown table, sorted by avg_memory_gb DESC:
-            | pod                  | avg_memory_gb | max_memory_gb |
-            |----------------------|---------------|---------------|
-            Use `N/A` if no data.
-            """
-        else:
-            cpu_prompt = f"""
-    Namespace: {ns} — Last 24 hours (relative)
-
-    Use these exact queries:
-
-    Average CPU:
-    avg_over_time(avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace=~"{ns}", pod=~"{pod_regex}"}}[5m]))[7d:5m])
-
-    Max CPU:
-    max_over_time(avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace=~"{ns}", pod=~"{pod_regex}"}}[5m]))[7d:5m])
-
-    Current CPU:
-    avg by(pod)(rate(container_cpu_usage_seconds_total{{image!="", container!="POD", namespace=~"{ns}", pod=~"{pod_regex}"}}[5m]))
-
-    Return ONLY this table, sorted by avg_cpu_cores DESC:
-    | pod                  | avg_cpu_cores | max_cpu_cores | current_cpu_cores |
-    |----------------------|---------------|---------------|-------------------|
-    Round to 4 decimals. Use N/A if missing.
-    """
-
-            mem_prompt = f"""
-    Same namespace, last 24 hours — memory in GB.
-
-    Average:
-    avg_over_time(sum by(pod)(container_memory_working_set_bytes{{image!="", namespace=~"{ns}", pod=~"{pod_regex}"}})[7d:5m]) / 1024 / 1024 / 1024
-
-    Max:
-    max_over_time(sum by(pod)(container_memory_working_set_bytes{{image!="", namespace=~"{ns}", pod=~"{pod_regex}"}})[7d:5m]) / 1024 / 1024 / 1024
-
-    Current:
-    sum by(pod)(container_memory_working_set_bytes{{image!="", namespace=~"{ns}", pod=~"{pod_regex}"}}) / 1024 / 1024 / 1024
-
-    Return ONLY this table, sorted by avg_memory_gb DESC:
-    | pod                  | avg_memory_gb | max_memory_gb | current_memory_gb |
-    |----------------------|---------------|---------------|-------------------|
-    Round to 2 decimals. Use N/A if missing.
-            """
-
-        return [{
-            "namespace": ns,
-            "period": period,
-            "cpu": get_ai_response(cpu_prompt).strip(),
-            "memory": get_ai_response(mem_prompt).strip()
-        }]
-
-    @task
-    def merge_batch_results(batches: List) -> List:
-        return [item for batch in batches for item in batch]
-
-    @task_group(group_id="pod_metrics_batched")
-    def pod_metrics_batched():
-        namespace_results = []
-      
-        for ns in namespaces_list:
-            pods = get_pods_in_namespace.override(task_id=f"list_pods_{ns}")(ns=ns)
-
-            @task(task_id=f"split_{ns}")
-            def split_pods(pod_list: List[str]) -> List[List[str]]:
-                return [pod_list[i:i + POD_BATCH_SIZE] for i in range(0, len(pod_list), POD_BATCH_SIZE)]
-
-            batches = split_pods(pods)
-
-            # This Week
-            this_week_batches = process_pod_batch.partial(ns=ns, period="last 7 days").expand(pods_batch=batches)
-            this_week_merged = merge_batch_results.override(task_id=f"merged_this_week_{ns}")(this_week_batches)
-
-            # Previous Week
-            last_week_batches = process_pod_batch.partial(ns=ns, period="previous week").expand(pods_batch=batches)
-            last_week_merged = merge_batch_results.override(task_id=f"merged_last_week_{ns}")(last_week_batches)
-
-            namespace_results.extend([this_week_merged, last_week_merged])
-
-        all_data = merge_batch_results(namespace_results)
-        return all_data
-
-    all_pod_data = pod_metrics_batched()
-    real_pod_counts = get_real_pod_counts(namespaces_list)
-
-    all_pod_data >> real_problematic_pods_task
-
-    pod_this_week_markdown = compile_pod_sections_this_week(
-        namespace_results=all_pod_data,
-        real_counts=real_pod_counts
-    )
-
-    pod_comparison_markdown = compile_pod_comparison(all_pod_data)
-
-    # === DEPENDENCIES (exact mirror of daily) ===
-    [t1, t2, t3, t4, t5, t6, t7, t7_1, t8, t9, t10, t11, t12, t13, t14] >> t15 >> t16 >> t17 >> t18 >> t19
-
-    t4 >> all_pod_data
-    all_pod_data >> pod_this_week_markdown >> t20
-    all_pod_data >> pod_comparison_markdown >> t20
-    t19 >> t20 >> t21 >> t21_1 >> t22 >> t23
+    # 4. Final Reporting Pipeline
+    t20 >> t21 >> t_generate_pdf >> t22 >> t23

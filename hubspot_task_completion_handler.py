@@ -1,0 +1,833 @@
+import base64
+import logging
+import json
+import re
+from datetime import datetime, timedelta, timezone
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import requests
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.models import Variable
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from ollama import Client
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
+default_args = {
+    "owner": "lowtouch.ai_developers",
+    "depends_on_past": False,
+    "start_date": datetime(2025, 1, 1),
+    "retry_delay": timedelta(minutes=5),
+}
+
+HUBSPOT_FROM_ADDRESS = Variable.get("ltai.v3.hubspot.from.address")
+GMAIL_CREDENTIALS = Variable.get("ltai.v3.hubspot.gmail.credentials")
+OLLAMA_HOST = Variable.get("ltai.v3.hubspot.ollama.host", "http://agentomatic:8000")
+HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")
+HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
+HUBSPOT_UI_URL = Variable.get("ltai.v3.hubspot.ui.url")
+HUBSPOT_TASK_UI_URL = Variable.get("ltai.v3.hubspot.task.ui.url")
+
+# Global cache for deal stage mappings
+DEAL_STAGE_CACHE = {}
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+def authenticate_gmail():
+    """Authenticate Gmail API"""
+    try:
+        creds = Credentials.from_authorized_user_info(json.loads(GMAIL_CREDENTIALS))
+        service = build("gmail", "v1", credentials=creds)
+        profile = service.users().getProfile(userId="me").execute()
+        logged_in_email = profile.get("emailAddress", "")
+        if logged_in_email.lower() != HUBSPOT_FROM_ADDRESS.lower():
+            raise ValueError(f"Wrong Gmail account! Expected {HUBSPOT_FROM_ADDRESS}, got {logged_in_email}")
+        logging.info(f"Authenticated Gmail account: {logged_in_email}")
+        return service
+    except Exception as e:
+        logging.error(f"Failed to authenticate Gmail: {str(e)}")
+        return None
+
+def get_ai_response(prompt, conversation_history=None, expect_json=False):
+    """Get response from AI model"""
+    try:
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
+        messages = []
+
+        if expect_json:
+            messages.append({
+                "role": "system",
+                "content": "You are a JSON-only API. Always respond with valid JSON objects. Never include explanatory text, HTML, or markdown formatting. Only return the requested JSON structure."
+            })
+
+        if conversation_history:
+            for item in conversation_history:
+                messages.append({"role": "user", "content": item["prompt"]})
+                messages.append({"role": "assistant", "content": item["response"]})
+        
+        messages.append({"role": "user", "content": prompt})
+        response = client.chat(model='hubspot:v6af', messages=messages, stream=False)
+        ai_content = response.message.content
+        ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
+        return ai_content.strip()
+    except Exception as e:
+        logging.error(f"Error in get_ai_response: {e}")
+        if expect_json:
+            return f'{{"error": "Error processing AI request: {str(e)}"}}'
+        else:
+            return f"<html><body>Error processing AI request: {str(e)}</body></html>"
+
+def extract_json_from_text(text):
+    """Extract JSON from text with markdown or other wrappers."""
+    try:
+        text = text.strip()
+        text = re.sub(r'```json\s*', '', text)
+        text = re.sub(r'```\s*', '', text)
+        
+        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        return None
+    except Exception as e:
+        logging.error(f"Error extracting JSON: {e}")
+        return None
+
+def mark_message_as_read(service, message_id):
+    """Mark email as read - with proper error handling"""
+    try:
+        service.users().messages().modify(
+            userId='me',
+            id=message_id,
+            body={'removeLabelIds': ['UNREAD']}
+        ).execute()
+        logging.info(f"Marked message {message_id} as read")
+        return True
+    except Exception as e:
+        # Log the error but don't fail the task
+        logging.warning(f"Could not mark message {message_id} as read: {e}")
+        logging.info("This may be due to Gmail API permissions - the email will remain unread")
+        return False
+
+def extract_all_recipients(email_data):
+    """Extract all recipients (To, Cc, Bcc) from email headers."""
+    headers = email_data.get("headers", {})
+    
+    def parse_addresses(header_value):
+        if not header_value:
+            return []
+        addresses = []
+        for addr in header_value.split(','):
+            addr = addr.strip()
+            email_match = re.search(r'<([^>]+)>', addr)
+            if email_match:
+                addresses.append(email_match.group(1).strip())
+            elif '@' in addr:
+                addresses.append(addr.strip())
+        return addresses
+    
+    to_recipients = parse_addresses(headers.get("To", ""))
+    cc_recipients = parse_addresses(headers.get("Cc", ""))
+    bcc_recipients = parse_addresses(headers.get("Bcc", ""))
+    
+    return {
+        "to": to_recipients,
+        "cc": cc_recipients,
+        "bcc": bcc_recipients
+    }
+
+# ============================================================================
+# HUBSPOT API FUNCTIONS
+# ============================================================================
+def get_owner_id_by_name(query):
+    """Get HubSpot owner ID by name or email"""
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/owners"
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+        params = {}
+        if '@' in query:
+            params["email"] = query
+        
+        response = requests.get(endpoint, headers=headers, params=params, timeout=30)
+        response.raise_for_status()
+        
+        owners = response.json().get("results", [])
+        
+        query_lower = query.lower()
+        
+        if '@' in query:
+            for owner in owners:
+                if owner.get("email", "").lower() == query_lower:
+                    logging.info(f"Found owner by email: {owner.get('id')} ({query})")
+                    return owner.get("id")
+        else:
+            for owner in owners:
+                full_name = f"{owner.get('firstName', '')} {owner.get('lastName', '')}".strip().lower()
+                if query_lower == full_name or query_lower in full_name.split():
+                    logging.info(f"Found owner by name: {owner.get('id')} ({full_name})")
+                    return owner.get("id")
+        
+        logging.warning(f"No owner found for query: {query}")
+        return None
+        
+    except Exception as e:
+        logging.error(f"Failed to get owner: {e}")
+        return None
+def get_task_details(task_id):
+    """Get full details of a HubSpot task"""
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/tasks/{task_id}"
+        headers = {
+            "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        properties = [
+            "hs_task_subject", "hs_task_body", "hs_timestamp", 
+            "hs_task_priority", "hs_task_status", "hubspot_owner_id"
+        ]
+        props_param = "&".join([f"properties={p}" for p in properties])
+        
+        response = requests.get(f"{endpoint}?{props_param}", headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        task_data = response.json()
+        logging.info(f"Retrieved task {task_id}: {task_data.get('properties', {}).get('hs_task_subject')}")
+        return task_data
+        
+    except Exception as e:
+        logging.error(f"Failed to get task {task_id}: {e}")
+        return None
+
+def update_task_status(task_id, status="COMPLETED"):
+    """Update task status in HubSpot"""
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/tasks/{task_id}"
+        headers = {
+            "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "properties": {
+                "hs_task_status": status
+            }
+        }
+        
+        response = requests.patch(endpoint, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        
+        logging.info(f"✓ Updated task {task_id} status to {status}")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Failed to update task {task_id}: {e}")
+        return False
+
+def create_followup_task(original_task, due_date=None, owner_name=None):
+    """Create a follow-up task based on original task"""
+    try:
+        original_props = original_task.get("properties", {})
+        
+        # Calculate due date (default: 2 weeks from now)
+        if not due_date:
+            due_date = datetime.now(timezone.utc) + timedelta(weeks=2)
+        
+        # Convert to milliseconds timestamp
+        due_timestamp = int(due_date.timestamp() * 1000)
+        
+        # Prepare new task properties
+        task_subject = f"Follow-up: {original_props.get('hs_task_subject', 'Task')}"
+        task_body = f"Follow-up task created from completed task.\n\nOriginal task: {original_props.get('hs_task_subject', '')}\nOriginal notes: {original_props.get('hs_task_body', '')}"
+        
+        owner_id = original_props.get("hubspot_owner_id")
+        if owner_name:
+            new_owner_id = get_owner_id_by_name(owner_name)
+            if new_owner_id:
+                owner_id = new_owner_id
+                logging.info(f"Using specified owner ID {owner_id} for {owner_name}")
+            else:
+                logging.warning(f"Specified owner '{owner_name}' not found, defaulting to original owner {owner_id}")
+       
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/tasks"
+        headers = {
+            "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "properties": {
+                "hs_task_subject": task_subject,
+                "hs_task_body": task_body,
+                "hs_timestamp": due_timestamp,
+                "hs_task_priority": original_props.get("hs_task_priority", "MEDIUM"),
+                "hs_task_status": "NOT_STARTED",
+                "hubspot_owner_id": owner_id
+            }
+        }
+        
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        
+        new_task = response.json()
+        new_task_id = new_task.get("id")
+        
+        logging.info(f"✓ Created follow-up task {new_task_id}")
+        
+        # Copy associations from original task
+        copy_task_associations(original_task.get("id"), new_task_id)
+        
+        return new_task
+        
+    except Exception as e:
+        logging.error(f"Failed to create follow-up task: {e}")
+        return None
+
+def copy_task_associations(source_task_id, target_task_id):
+    """Copy associations from source task to target task"""
+    try:
+        # Get associations from source task
+        for assoc_type in ["contacts", "companies", "deals"]:
+            endpoint = f"{HUBSPOT_BASE_URL}/crm/v4/objects/tasks/{source_task_id}/associations/{assoc_type}"
+            headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+            
+            response = requests.get(endpoint, headers=headers, timeout=30)
+            if response.status_code == 200:
+                results = response.json().get("results", [])
+                
+                # Create associations for target task
+                for result in results:
+                    assoc_id = result.get("toObjectId")
+                    assoc_type_id = result.get("associationTypes", [{}])[0].get("typeId")
+                    
+                    if assoc_id and assoc_type_id:
+                        create_endpoint = f"{HUBSPOT_BASE_URL}/crm/v4/objects/tasks/{target_task_id}/associations/{assoc_type}/{assoc_id}"
+                        create_payload = [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": assoc_type_id}]
+                        
+                        requests.put(create_endpoint, headers=headers, json=create_payload, timeout=30)
+                
+                logging.info(f"✓ Copied {len(results)} {assoc_type} associations")
+                
+    except Exception as e:
+        logging.warning(f"Failed to copy associations: {e}")
+
+def get_associated_deal_id(task_id):
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v4/objects/tasks/{task_id}/associations/deals"
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+        response = requests.get(endpoint, headers=headers, timeout=30)
+        response.raise_for_status()
+        results = response.json().get("results", [])
+        if results:
+            deal_id = results[0].get("toObjectId")
+            logging.info(f"Found associated deal {deal_id} for task {task_id}")
+            return deal_id
+        return None
+    except Exception as e:
+        logging.warning(f"No associated deal for task {task_id}: {e}")
+        return None
+
+def fetch_deal_stages():
+    """Fetch deal stages from all pipelines and cache them"""
+    global DEAL_STAGE_CACHE
+    if "default" in DEAL_STAGE_CACHE:
+        return DEAL_STAGE_CACHE["default"]
+    
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/pipelines/deals"
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+        response = requests.get(endpoint, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        pipelines = response.json().get("results", [])
+        if not pipelines:
+            logging.warning("No deal pipelines found")
+            return {}
+        
+        stage_map = {}
+        for pipeline in pipelines:
+            pipe_label = pipeline.get("label", "Unknown")
+            stages = pipeline.get("stages", [])
+            logging.info(f"Loading stages from pipeline: {pipe_label}")
+            
+            for stage in stages:
+                stage_id = stage.get("id")
+                label = stage.get("label", "").strip()
+                if not label or not stage_id:
+                    continue
+                
+                lowered = label.lower()
+                stage_map[lowered] = stage_id
+                stage_map[lowered.replace(" ", "")] = stage_id
+                stage_map[lowered.replace(" ", "_")] = stage_id
+                stage_map[re.sub(r'\s+', ' ', lowered)] = stage_id
+        
+        DEAL_STAGE_CACHE["default"] = stage_map
+        logging.info(f"Cached {len(stage_map)} total stages across {len(pipelines)} pipeline(s)")
+        return stage_map
+    
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            logging.error("Deal pipelines endpoint not found. Check API version and permissions.")
+        else:
+            logging.error(f"HTTP error fetching deal stages: {e}")
+        return {}
+    except Exception as e:
+        logging.error(f"Failed to fetch deal stages: {e}")
+        return {}
+
+def update_deal(deal_id, properties):
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/deals/{deal_id}"
+        headers = {
+            "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {"properties": properties}
+        
+        response = requests.patch(endpoint, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        
+        logging.info(f"✓ Updated deal {deal_id} with: {properties}")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to update deal {deal_id}: {e}")
+        return False
+
+def get_deal_details(deal_id):
+    """Fetch current deal properties"""
+    if not deal_id:
+        return None
+    try:
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/deals/{deal_id}"
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}"}
+        properties = ["dealstage", "amount", "closedate", "pipeline"]
+        props_param = "&".join([f"properties={p}" for p in properties])
+        response = requests.get(f"{endpoint}?{props_param}", headers=headers, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        props = data.get("properties", {})
+        current_stage_id = props.get("dealstage")
+        amount = props.get("amount")
+        closedate_ms = props.get("closedate")
+        
+        stage_label = None
+        stage_map = fetch_deal_stages()
+        for label, sid in stage_map.items():
+            if sid == current_stage_id:
+                stage_label = label
+                break
+        
+        closedate_str = None
+        if closedate_ms:
+            try:
+                closedate_str = datetime.fromtimestamp(int(closedate_ms)/1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            except:
+                pass
+        
+        return {
+            "current_stage_label": stage_label or current_stage_id or "Unknown",
+            "current_amount": amount,
+            "current_closedate": closedate_str
+        }
+    except Exception as e:
+        logging.error(f"Failed to fetch deal details for {deal_id}: {e}")
+        return None
+
+# ============================================================================
+# TASK PROCESSING FUNCTIONS
+# ============================================================================
+def analyze_task_completion_request(**kwargs):
+    """Analyze if email is a task completion request and extract details"""
+    email_data = kwargs['dag_run'].conf.get('email_data', {})
+    
+    if not email_data:
+        logging.error("No email data provided")
+        return None
+    
+    email_content = email_data.get("content", "")
+    
+    # Find task_id from thread history if not in direct headers
+    task_id = None
+    
+    # First try direct headers
+    headers = email_data.get("headers", {})
+    task_id = headers.get("X-Task-ID")
+    
+    if task_id:
+        logging.info(f"Found task ID {task_id} in direct headers")
+    
+    # If not found and it's a reply, search thread history for bot message
+    if not task_id and email_data.get("is_reply", False):
+        thread_history = email_data.get("thread_history", [])
+        logging.info(f"Searching thread history ({len(thread_history)} messages) for bot reminder")
+        for msg in reversed(thread_history):
+            if msg.get("from_bot", False):
+                msg_headers = msg.get("headers", {})
+                candidate_id = msg_headers.get("X-Task-ID")
+                candidate_type = msg_headers.get("X-Task-Type")
+                if candidate_id and candidate_type == "daily-reminder":
+                    task_id = candidate_id
+                    logging.info(f"✓ Found task ID {task_id} in bot message from thread history")
+                    break
+    
+    if not task_id:
+        logging.warning("No task ID found in email headers or thread history")
+        return None
+
+    deal_id = get_associated_deal_id(task_id)
+    deal_details = get_deal_details(deal_id) if deal_id else None
+    
+    deal_context = ""
+    if deal_details:
+        deal_context = f"""
+Associated Deal ID: {deal_id}
+Current Stage: {deal_details.get('current_stage_label', 'Unknown')}
+Current Amount: {deal_details.get('current_amount', 'Not set')}
+Current Close Date: {deal_details.get('current_closedate', 'Not set')}
+"""
+    else:
+        deal_context = "No associated deal found."
+    
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    
+    # ENHANCED AI PROMPT with better deal update detection
+    analysis_prompt = f"""Today's date is {today}. Analyze this email reply to determine if the user wants to mark a task as completed and/or create a follow-up task and/or update the associated deal.
+
+Email content: "{email_content}"
+Deal Context:
+{deal_context}
+
+IMPORTANT DEAL UPDATE RULES:
+- If user says "we lost the deal", "lost this deal", or similar → set dealstage_label to "Closed Lost"
+- If user says "we won", "closed the deal", or similar → set dealstage_label to "Closed Won"
+- If user mentions updating the deal stage/status → extract the exact stage name
+- If user mentions deal amount changes → extract the new amount
+- If user mentions close date changes → extract the new date
+- If ANY deal field should be updated, set update_deal to TRUE
+- Only set update_deal to FALSE if there are NO deal-related changes mentioned
+
+Calculate dates relative to today ({today}):
+- tomorrow = {(datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")}
+- next week = {(datetime.now(timezone.utc) + timedelta(weeks=1)).strftime("%Y-%m-%d")}
+- next month = {(datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d")}
+
+Return ONLY valid JSON with NO additional text:
+{{
+    "mark_completed": true/false,
+    "create_followup": true/false,
+    "followup_due_date": "YYYY-MM-DD or null",
+    "followup_notes": "string or empty",
+    "followup_owner_name": "name/email or empty",
+    "update_deal": true/false,
+    "deal_updates": {{
+        "dealstage_label": "Exact stage name like 'Closed Lost' or null",
+        "amount": "number as string or null",
+        "closedate": "YYYY-MM-DD or null"
+    }}
+}}
+"""
+    
+    ai_response = get_ai_response(analysis_prompt, expect_json=True)
+    
+    try:
+        analysis = json.loads(ai_response)
+    except:
+        analysis = extract_json_from_text(ai_response)
+    
+    if not analysis:
+        logging.error("Failed to parse AI analysis")
+        return None
+
+    if "deal_updates" not in analysis or not isinstance(analysis["deal_updates"], dict):
+        analysis["deal_updates"] = {}
+    
+    followup_due = analysis.get("followup_due_date", "")
+    if not followup_due or followup_due.lower() in ["null", "default"]:
+        followup_due = (datetime.now(timezone.utc) + timedelta(weeks=2)).strftime("%Y-%m-%d")
+    
+    result = {
+        "task_id": task_id,
+        "email_data": email_data,
+        "mark_completed": analysis.get("mark_completed", False),
+        "create_followup": analysis.get("create_followup", False),
+        "followup_due_date": followup_due,
+        "followup_notes": analysis.get("followup_notes", ""),
+        "followup_owner_name": analysis.get("followup_owner_name", ""),
+        "update_deal": analysis.get("update_deal", False),
+        "deal_updates": analysis.get("deal_updates", {}),
+        "deal_id": deal_id  # Store deal_id in analysis result
+    }
+    
+    kwargs['ti'].xcom_push(key="task_completion_analysis", value=result)
+    logging.info(f"Analysis result: {result}")
+    
+    return result
+
+def process_task_completion(**kwargs):
+    """Process task completion and follow-up creation"""
+    ti = kwargs['ti']
+    analysis = ti.xcom_pull(key="task_completion_analysis", task_ids="analyze_request")
+    
+    if not analysis:
+        logging.error("No analysis data found")
+        return {"success": False, "error": "No analysis data"}
+    
+    task_id = analysis["task_id"]
+    deal_id = analysis.get("deal_id")
+    
+    results = {
+        "task_id": task_id,
+        "completed": False,
+        "followup_created": False,
+        "followup_task_id": None,
+        "deal_updated": False,
+        "deal_id": deal_id,
+        "deal_update_details": {},
+        "error": None
+    }
+    
+    # Get original task details
+    original_task = get_task_details(task_id)
+    if not original_task:
+        results["error"] = "Failed to retrieve original task"
+        ti.xcom_push(key="processing_results", value=results)
+        return results
+    
+    # Mark task as completed if requested
+    if analysis.get("mark_completed"):
+        success = update_task_status(task_id, "COMPLETED")
+        results["completed"] = success
+        if not success:
+            results["error"] = "Failed to mark task as completed"
+    
+    # Create follow-up task if requested
+    if analysis.get("create_followup"):
+        due_date_str = analysis.get("followup_due_date", "default")
+        
+        # Parse due date
+        if due_date_str == "default":
+            due_date = None # Will use default 2 weeks
+        else:
+            try:
+                due_date = datetime.strptime(due_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except:
+                due_date = None
+       
+        followup_task = create_followup_task(
+            original_task, 
+            due_date,
+            owner_name=analysis.get("followup_owner_name") if analysis.get("followup_owner_name") else None
+        )
+       
+        if followup_task:
+            results["followup_created"] = True
+            results["followup_task_id"] = followup_task.get("id")
+    
+    # FIXED: Deal Update Logic
+    if deal_id and analysis.get("update_deal"):
+        updates = analysis.get("deal_updates") or {}
+        props = {}
+
+        stage_map = fetch_deal_stages()
+
+        stage_label_raw = updates.get("dealstage_label")
+        stage_label = (stage_label_raw or "").strip() if stage_label_raw is not None else ""
+        
+        if stage_label:
+            # Try multiple normalization strategies
+            normalized = stage_label.lower()
+            no_space = stage_label.lower().replace(" ", "")
+            underscor = stage_label.lower().replace(" ", "_")
+            clean = re.sub(r'\s+', ' ', stage_label).lower()
+            
+            stage_id = (
+                stage_map.get(normalized) or
+                stage_map.get(no_space) or
+                stage_map.get(underscor) or
+                stage_map.get(clean)
+            )
+            
+            if stage_id:
+                props["dealstage"] = stage_id
+                logging.info(f"✓ Mapped '{stage_label}' → stage ID {stage_id}")
+            else:
+                logging.warning(f"Stage not found: '{stage_label}'. Available stages: {list(stage_map.keys())[:10]}")
+        
+        if updates.get("amount"):
+            try:
+                amt = str(updates["amount"]).replace("$", "").replace(",", "").strip()
+                props["amount"] = str(int(float(amt)))
+            except:
+                logging.warning(f"Could not parse amount: {updates.get('amount')}")
+        
+        if updates.get("closedate"):
+            try:
+                cd = datetime.strptime(updates["closedate"], "%Y-%m-%d")
+                props["closedate"] = int(cd.timestamp() * 1000)
+            except:
+                logging.warning(f"Could not parse closedate: {updates.get('closedate')}")
+        
+        if props:
+            results["deal_updated"] = update_deal(deal_id, props)
+            results["deal_update_details"] = props
+            logging.info(f"Deal update attempted with props: {props}")
+        else:
+            logging.warning(f"update_deal was TRUE but no valid properties extracted from: {updates}")
+    
+    ti.xcom_push(key="processing_results", value=results)
+    logging.info(f"Processing results: {results}")
+    
+    return results
+
+def send_confirmation_email(**kwargs):
+    """Send clean, professional confirmation email with Task IDs and actual follow-up due date"""
+    ti = kwargs['ti']
+    analysis = ti.xcom_pull(key="task_completion_analysis", task_ids="analyze_request")
+    results = ti.xcom_pull(key="processing_results", task_ids="process_task")
+    
+    if not analysis or not results:
+        logging.error("Missing data for confirmation email")
+        return
+    
+    email_data = analysis["email_data"]
+    headers = email_data.get("headers", {})
+    sender_email = headers.get("From", "")
+    task_id = results["task_id"]
+    
+    name_match = re.search(r'^([^<]+)', sender_email)
+    sender_name = name_match.group(1).strip().split()[0] if name_match else "there"
+    
+    orig_task = get_task_details(task_id)
+    orig_props = orig_task.get("properties", {}) if orig_task else {}
+    orig_subject = orig_props.get("hs_task_subject", "Task")
+    orig_priority = orig_props.get("hs_task_priority", "MEDIUM").title()
+    
+    followup_id = results.get("followup_task_id")
+    fp_subject = "Follow-up task"
+    fp_due_formatted = "Not specified"
+    if followup_id:
+        fp_task = get_task_details(followup_id)
+        if fp_task:
+            fp_props = fp_task.get("properties", {})
+            fp_subject = fp_props.get("hs_task_subject", fp_subject)
+            fp_ms = fp_props.get("hs_timestamp")
+            if fp_ms:
+                try:
+                    fp_due_formatted = datetime.fromtimestamp(int(fp_ms)/1000, tz=timezone.utc).strftime("%B %d, %Y")
+                except:
+                    pass
+
+    followup_section = ""
+    if results.get("followup_created"):
+        followup_section = f"""
+<p style="margin-top:25px;"><strong>New Follow-Up Task Created:</strong></p>
+<div style="margin-left:20px;">
+    <ul><li><strong>Task:</strong> {fp_subject}</li>
+        <li><strong>ID:</strong> {followup_id}</li>
+        <li><strong>Due:</strong> {fp_due_formatted}</li>
+        <li><strong>Link:</strong> <a href="{HUBSPOT_TASK_UI_URL}/view/all/task/{followup_id}">Open Task</a></li>
+    </ul>
+</div>"""
+
+    deal_section = ""
+    if results.get("deal_id"):
+        deal_id = results["deal_id"]
+        if results.get("deal_updated"):
+            det = results.get("deal_update_details", {})
+            lines = []
+            if "dealstage" in det:
+                lines.append(f"<li>Stage updated</li>")
+            if "amount" in det:
+                lines.append(f"<li>Amount updated to ${int(det['amount']):,}</li>")
+            if "closedate" in det:
+                try:
+                    dt = datetime.fromtimestamp(det["closedate"]/1000, tz=timezone.utc)
+                    lines.append(f"<li>Close date: {dt.strftime('%B %d, %Y')}</li>")
+                except:
+                    pass
+            deal_section = f"""
+<p style="margin-top:25px;"><strong>Associated Deal Updated:</strong></p>
+<div style="margin-left:20px;">
+    <ul><li><strong>ID:</strong> {deal_id}</li>
+        <li><strong>Link:</strong> <a href="{HUBSPOT_UI_URL}/deals/{deal_id}">Open Deal</a></li>
+        {''.join(lines)}
+    </ul>
+</div>"""
+        elif analysis.get("update_deal"):
+            deal_section = "<p><em>Deal update requested but could not be applied.</em></p>"
+
+    email_html = f"""<html><head><style>
+    body {{font-family:Arial,sans-serif;line-height:1.6;color:#333;max-width:600px;margin:auto;padding:20px;}}
+    ul {{padding-left:20px;}}
+    </style></head><body>
+    <p>Hello {sender_name},</p>
+    <p>Thank you for your update. Your request has been processed.</p>
+    
+    <p><strong>Completed Task:</strong></p>
+    <ul><li><strong>Task:</strong> {orig_subject}</li>
+        <li><strong>ID:</strong> {task_id}</li>
+        <li><strong>Priority:</strong> {orig_priority}</li>
+        <li><strong>Status:</strong> Completed</li>
+        <li><strong>Link:</strong> <a href="{HUBSPOT_TASK_UI_URL}/view/all/task/{task_id}">Open Task</a></li>
+    </ul>
+    
+    {followup_section}
+    {deal_section}
+    
+    <p>Reply to this email if you need changes.</p>
+    <p>Best Regards,<br>HubSpot Task Assistant<br><a href="http://lowtouch.ai">lowtouch.ai</a></p>
+    </body></html>"""
+
+    try:
+        service = authenticate_gmail()
+        if not service:
+            return
+        
+        recipients = extract_all_recipients(email_data)
+        msg = MIMEMultipart('alternative')
+        msg["From"] = f"HubSpot Task Assistant <{HUBSPOT_FROM_ADDRESS}>"
+        msg["To"] = sender_email
+        if recipients["cc"]:
+            msg["Cc"] = ', '.join(recipients["cc"])
+        
+        subject = headers.get("Subject", "Task Update")
+        if not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+        msg["Subject"] = subject
+        
+        if headers.get("Message-ID"):
+            msg["In-Reply-To"] = headers["Message-ID"]
+            msg["References"] = headers.get("References", "") + " " + headers["Message-ID"]
+        
+        msg.attach(MIMEText(email_html, "html"))
+        
+        raw = base64.urlsafe_b64encode(msg.as_string().encode()).decode()
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        
+        mark_message_as_read(service, email_data.get("id"))
+        logging.info("Confirmation email sent")
+        
+    except Exception as e:
+        logging.error(f"Email send failed: {e}")
+
+# ============================================================================
+# DAG DEFINITION
+# ============================================================================
+with DAG(
+    "hubspot_task_completion_handler",
+    default_args=default_args,
+    schedule_interval=None,  # Triggered by email listener
+    catchup=False,
+    tags=["hubspot", "tasks", "deal", "completion"],
+    description="Handle task completion + deal updates via email with dynamic stage mapping"
+) as dag:
+
+    analyze = PythonOperator(task_id="analyze_request", python_callable=analyze_task_completion_request, provide_context=True)
+    process = PythonOperator(task_id="process_task", python_callable=process_task_completion, provide_context=True)
+    confirm = PythonOperator(task_id="send_confirmation", python_callable=send_confirmation_email, provide_context=True)
+
+    analyze >> process >> confirm
