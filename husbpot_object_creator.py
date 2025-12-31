@@ -1043,7 +1043,7 @@ def create_contacts(ti, **context):
         logging.info("All requested contacts already exist → nothing to create")
         success_result = {
             "created_contacts": [],
-            "contacts_errors": [f"Skipped {len(skipped_contacts)} duplicate contacts"],
+            "failed_contacts": [],
             "contact_creation_status": {"status": "success"},
             "contact_creation_response": {
                 "status": "success",
@@ -1152,7 +1152,7 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         # === SUCCESS ===
         result = {
             "created_contacts": created_contacts,
-            "contacts_errors": errors + [f"Skipped {len(skipped_contacts)} duplicates"],
+            "failed_contacts": [],  # No failures on success
             "contact_creation_status": {"status": "success"},
             "contact_creation_response": parsed,
             "contact_creation_final_status": "success"
@@ -1174,10 +1174,22 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         is_final = current_try >= max_tries
 
         status_type = "final_failure" if is_final else "failure"
+
+        # On failure: mark ALL filtered contacts as failed
+        failed_list = [
+            {
+                "firstname": c.get("firstname", ""),
+                "lastname": c.get("lastname", ""),
+                "email": c.get("email", ""),
+                "error": error_msg
+            }
+            for c in filtered_contacts
+        ]
+
         fallback = {
             "created_contacts": [],
-            "contacts_errors": [error_msg] + [f"Skipped {len(skipped_contacts)} duplicates"],
-            "contact_creation_status": {"status": status_type, "reason": error_msg},
+            "failed_contacts": failed_list,
+            "contact_creation_status": {"status": "final_failure" if is_final else "failure", "reason": error_msg},
             "contact_creation_response": {"raw_response": response} if response else None,
             "contact_creation_final_status": "failed" if is_final else "retrying"
         }
@@ -1213,7 +1225,7 @@ def create_companies(ti, **context):
         logging.info("No companies to create")
         result = {
             "created_companies": [],
-            "companies_errors": [],
+            "failed_companies": [],
             "company_creation_status": {"status": "success"},
             "company_creation_response": {"status": "success", "created_companies": [], "errors": []},
             "company_creation_final_status": "success"
@@ -1309,7 +1321,7 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         # === SUCCESS ===
         result = {
             "created_companies": created_companies,
-            "companies_errors": errors,
+            "failed_companies": [],  # Success → no failures
             "company_creation_status": {"status": "success"},
             "company_creation_response": parsed,
             "company_creation_final_status": "success"
@@ -1331,10 +1343,20 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         is_final = current_try >= max_tries
 
         status_type = "final_failure" if is_final else "failure"
+
+
+        failed_list = [
+            {
+                "name": company.get("name", "Unknown Company"),
+                "error": error_msg
+            }
+            for company in to_create_companies
+        ]
+
         fallback = {
             "created_companies": [],
-            "companies_errors": [error_msg],
-            "company_creation_status": {"status": status_type, "reason": error_msg},
+            "failed_companies": failed_list,
+            "company_creation_status": {"status": "final_failure" if is_final else "failure", "reason": error_msg},
             "company_creation_response": {"raw_response": response} if response else None,
             "company_creation_final_status": "failed" if is_final else "retrying"
         }
@@ -1371,7 +1393,7 @@ def create_deals(ti, **context):
         logging.info("No deals to create")
         result = {
             "created_deals": [],
-            "deals_errors": [],
+            "failed_deals": [],
             "deal_creation_status": {"status": "success"},
             "deal_creation_response": {"status": "success", "created_deals": [], "errors": []},
             "deal_creation_final_status": "success"
@@ -1492,7 +1514,7 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         # === SUCCESS ===
         result = {
             "created_deals": created_deals,
-            "deals_errors": errors,
+            "failed_deals": [],
             "deal_creation_status": {"status": "success"},
             "deal_creation_response": parsed,
             "deal_creation_final_status": "success"
@@ -1514,10 +1536,20 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         is_final = current_try >= max_tries
 
         status_type = "final_failure" if is_final else "failure"
+
+
+        failed_list = [
+            {
+                "dealName": deal.get("dealName", "Unknown Deal"),
+                "error": error_msg
+            }
+            for deal in to_create_deals
+        ]
+
         fallback = {
             "created_deals": [],
-            "deals_errors": [error_msg],
-            "deal_creation_status": {"status": status_type, "reason": error_msg},
+            "failed_deals": failed_list,
+            "deal_creation_status": {"status": "final_failure" if is_final else "failure", "reason": error_msg},
             "deal_creation_response": {"raw_response": response} if response else None,
             "deal_creation_final_status": "failed" if is_final else "retrying"
         }
@@ -3162,6 +3194,72 @@ def create_associations(ti, **context):
     updated_contacts = ti.xcom_pull(key="updated_contacts", default=[])
     updated_companies = ti.xcom_pull(key="updated_companies", default=[])
     updated_deals = ti.xcom_pull(key="updated_deals", default=[])
+
+    failed_contacts = ti.xcom_pull(key="failed_contacts", default=[])
+    failed_companies = ti.xcom_pull(key="failed_companies", default=[])
+    failed_deals = ti.xcom_pull(key="failed_deals", default=[])
+    failed_meetings = ti.xcom_pull(key="failed_meetings", default=[])
+    failed_notes = ti.xcom_pull(key="failed_notes", default=[])
+    failed_tasks = ti.xcom_pull(key="failed_tasks", default=[])
+
+    failed_updated_contacts = ti.xcom_pull(key="failed_updated_contacts", default=[])
+    failed_updated_companies = ti.xcom_pull(key="failed_updated_companies", default=[])
+    failed_updated_deals = ti.xcom_pull(key="failed_updated_deals", default=[])
+
+    errors = []
+
+        # === Add error messages for each failed item ===
+
+    # Failed to CREATE contacts
+    for item in failed_contacts:
+        # Try to get a good name to show the user
+        firstname = item.get("firstname", "")
+        lastname = item.get("lastname", "")
+        email = item.get("email", "")
+        name = f"{firstname} {lastname}".strip()
+        if not name and email:
+            name = email
+        if not name:
+            name = "Unknown Contact"
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to create contact '{name}': {error_msg}")
+
+    # Failed to CREATE companies
+    for item in failed_companies:
+        name = item.get("name", "Unknown Company")
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to create company '{name}': {error_msg}")
+
+    # Failed to CREATE deals
+    for item in failed_deals:
+        name = item.get("dealName", "Unknown Deal")
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to create deal '{name}': {error_msg}")
+
+    # Example for tasks:
+    for item in failed_tasks:
+        details = item.get("task_details", "Unknown Task")
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to create task '{details}': {error_msg}")
+
+    # Failed to UPDATE contacts
+    for item in failed_updated_contacts:
+        email = item.get("email", "Unknown Contact")
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to update contact '{email}': {error_msg}")
+
+    # Failed to UPDATE companies
+    for item in failed_updated_companies:
+        name = item.get("name", "Unknown Company")
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to update company '{name}': {error_msg}")
+
+    # Failed to UPDATE deals
+    for item in failed_updated_deals:
+        name = item.get("dealName", "Unknown Deal")
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to update deal '{name}': {error_msg}")
+
     # Selected existing entities from analysis
     selected_entities = analysis_results.get("selected_entities", {})
     existing_contact_ids = [str(c.get("contactId")) for c in selected_entities.get("contacts", []) if c.get("contactId")]
@@ -3467,6 +3565,62 @@ def compose_response_html(ti, **context):
     # Filter out updated tasks from created tasks to avoid duplication
     updated_task_ids = [task.get("id") for task in updated_tasks if task.get("id")]
     final_created_tasks = [t for t in created_tasks if t.get("id") not in updated_task_ids]
+
+    failed_contacts = ti.xcom_pull(key="failed_contacts", default=[])
+    failed_companies = ti.xcom_pull(key="failed_companies", default=[])
+    failed_deals = ti.xcom_pull(key="failed_deals", default=[])
+    failed_meetings = ti.xcom_pull(key="failed_meetings", default=[])
+    failed_notes = ti.xcom_pull(key="failed_notes", default=[])
+    failed_tasks = ti.xcom_pull(key="failed_tasks", default=[])
+
+    failed_updated_contacts = ti.xcom_pull(key="failed_updated_contacts", default=[])
+    failed_updated_companies = ti.xcom_pull(key="failed_updated_companies", default=[])
+    failed_updated_deals = ti.xcom_pull(key="failed_updated_deals", default=[])
+
+    errors = []
+
+    for item in failed_contacts:
+        firstname = item.get("firstname", "")
+        lastname = item.get("lastname", "")
+        email = item.get("email", "")
+        name = f"{firstname} {lastname}".strip() or email or "Unknown Contact"
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to create contact '{name}': {error_msg}")
+
+    for item in failed_companies:
+        name = item.get("name", "Unknown Company")
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to create company '{name}': {error_msg}")
+
+    for item in failed_deals:
+        name = item.get("dealName") or item.get("deal_name", "Unknown Deal")
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to create deal '{name}': {error_msg}")
+
+    for item in failed_meetings:
+        title = item.get("meeting_title", "Unknown Meeting")
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to create meeting '{title}': {error_msg}")
+
+    for item in failed_tasks:
+        details = item.get("task_details", "Unknown Task")
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to create task '{details}': {error_msg}")
+
+    for item in failed_updated_contacts:
+        email = item.get("email", "Unknown Contact")
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to update contact '{email}': {error_msg}")
+
+    for item in failed_updated_companies:
+        name = item.get("name", "Unknown Company")
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to update company '{name}': {error_msg}")
+
+    for item in failed_updated_deals:
+        name = item.get("dealName", "Unknown Deal")
+        error_msg = item.get("error", "Unknown error")
+        errors.append(f"Failed to update deal '{name}': {error_msg}")
     
     email_content = f"""<!DOCTYPE html>
 <html>
@@ -3478,6 +3632,18 @@ def compose_response_html(ti, **context):
         h3 {{ color: #333; margin-top: 30px; margin-bottom: 15px; }}
         .greeting {{ margin-bottom: 20px; }}
         .closing {{ margin-top: 30px; }}
+
+        /* NEW: Style for red error box */
+        .error-box {{
+            padding: 15px;
+            border-radius: 4px;
+        }}
+        .error-box h3 {{
+            margin: 0 0 10px 0;
+        }}
+        .error-list {{
+            padding-left: 20px;
+        }}
     </style>
 </head>
 <body>
@@ -4080,6 +4246,20 @@ def compose_response_html(ti, **context):
     #             """
             
     #         email_content += "</tbody></table>"
+    if errors:
+        email_content += """
+    <div class="error-box">
+        <h3>Errors Encountered</h3>
+        <p>The following problems occurred during processing:</p>
+        <ul class="error-list">
+    """
+        for error in errors:
+            email_content += f"        <li>{error}</li>\n"
+        email_content += """
+        </ul>
+        <p>Please review the details above and let me know if you need assistance resolving these issues.</p>
+    </div>
+    """
     
     # Closing
     email_content += """
