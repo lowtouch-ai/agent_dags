@@ -560,7 +560,7 @@ CRITICAL REMINDERS:
             <div class="signature">
                 <p>Best regards,<br>
                 The HubSpot Assistant Team<br>
-                <a href="http://lowtouch.ai" class="company">Lowtouch.ai</a></p>
+                <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
             </div>
         </body>
         </html>
@@ -4328,7 +4328,7 @@ def compose_response_html(ti, **context):
     email_content += """
     <div class="closing">
         <p>Please let me know if any adjustments or corrections are needed.</p>
-        <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">Lowtouch.ai</a></p>
+        <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">lowtouch.ai</a></p>
     </div>
 </body>
 </html>"""

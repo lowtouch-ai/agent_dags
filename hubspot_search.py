@@ -533,7 +533,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
             <div class="signature">
                 <p>Best regards,<br>
                 The HubSpot Assistant Team<br>
-                <a href="http://lowtouch.ai" class="company">Lowtouch.ai</a></p>
+                <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
             </div>
         </body>
         </html>
@@ -1803,6 +1803,7 @@ For tasks (only if task parsing is enabled):
   - If no task owner is specified, use the default task owner: {default_task_owner_name} (ID: {default_task_owner_id}).
   - If no due date is specified, use the date three business days from the current date.
   - For due date is today is mentioned, use the current date. Tomorrow is current date + 1 day, after 2 days is current date + 2 days and so on. day after tomorrow is current date + 2 days.
+  - When a task due date is mentioned using a day of the week (for example: Monday, Tuesday, Wednesday), resolve the exact calendar date for that day relative to today, instead of applying any default offset.
   - Assign a priority (high, medium, low) based on context; default to 'medium' if not specified.
 
 Return this exact JSON structure:
@@ -2028,7 +2029,20 @@ def compose_validation_error_email(ti, **context):
     entity_summary = validation_result.get("entity_summary", {})
     sender_name = validation_result.get("sender_name", "there")
     
-    # Build error details HTML
+    # Determine the primary entity type that failed due to missing association
+    # We look for the first error (or you can adjust logic if multiple)
+    primary_entity = None
+    for error in errors:
+        entity_type = error.get("entity_type", "")
+        if entity_type in ["Task", "Meeting", "Note", "Deal"]:
+            primary_entity = entity_type
+            break
+    
+    # Default fallback if somehow not detected
+    if not primary_entity:
+        primary_entity = "Task"  # or raise/log an error
+    
+    # Build error details HTML (kept but not used in these specific templates)
     error_details_html = ""
     for idx, error in enumerate(errors, 1):
         entity_type = error.get("entity_type", "Entity")
@@ -2045,7 +2059,8 @@ def compose_validation_error_email(ti, **context):
         """
 
     # Compose full email
-    email_html = f"""<!DOCTYPE html>
+    if primary_entity == "Deal":
+        email_html = f"""<!DOCTYPE html>
 <html>
 <head>
     <style>
@@ -2073,29 +2088,64 @@ def compose_validation_error_email(ti, **context):
     </style>
 </head>
 <body>
-    <div class="greeting">
-        <p>Hello {sender_name},</p>
-        <p>Thank you for your request to log information in HubSpot. I've reviewed your request and found that some entities cannot be created due to HubSpot's association requirements.</p>
+    <p>Hello {sender_name},</p>
+    <p>Thank you for your request to create a deal in HubSpot. I reviewed the request and noticed that the deal cannot be completed yet due to a missing required association.</p>
+    
+    <h4 class="section-title">What's needed</h4>
+    <p><li>HubSpot requires every deal to be linked to a contact for proper follow-up and ownership.</li><br>
+    Since no contact was specified, the deal could not be created.</p>
+    
+    <p><strong>Next steps</strong></p>
+    <p>Please reply to this email with one of the following:</p>
+    <ul>
+        <li>The contact you would like this deal associated with (name, email, or other identifying details), or</li>
+        <li>Confirmation to link the deal to an existing contact in your HubSpot account</li>
+    </ul>
+    
+    <p>Once I have this information, I'll take care of the rest right away.</p>
+    <p>If you have any questions, feel free to let me know.</p>
+    
+    <div class="signature">
+        <p><strong>Best regards,</strong><br>
+         The HubSpot Assistant Team<br>
+         <a href="http://lowtouch.ai">lowtouch.ai</a></p>
     </div>
+</body>
+</html>"""
+        
+    else:
+        # Default (Task, Meeting, Note)
+        email_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 700px; margin: 0 auto; padding: 20px; }}
+        .section-title {{ color: #000; margin-top: 30px; margin-bottom: 15px; font-size: 18px; }}
+        .signature {{ margin-top: 20px; padding-top: 15px; border-top: 1px solid #ddd; }}
+    </style>
+</head>
+<body>
+    <p>Hello {sender_name},</p>
+    <p>Thank you for your request to create a task in HubSpot. I reviewed the request and noticed that the task cannot be completed due to a missing required association.</p>
+
+    <h4 class="section-title">What's needed</h4>
+    <p>HubSpot requires every task to be linked to at least one of the following:
+    <ul>
+        <li>A contact</li>
+        <li>A company</li>
+        <li>A deal</li>
+    </ul>
+    Since no association was specified, the task could not be created.</p>
     
-    <h3 class="section-title"> Issues Found</h3>
-    {error_details_html}
-    
-    <h4 class="section-title"> How to fix this</h4>
-        <p><strong>HubSpot Association Rules:</strong></p>
-            <li><strong>Meetings, Notes, and Tasks</strong> must be linked to at least one: Contact, Deal, or Company</li>
-            <li><strong>Deals</strong> should be associated with a Contact for proper follow-up</li>
-            <li><strong>Contacts</strong> can be standalone, but work best when linked to a Company</li>
-        <p style="margin-top: 15px;"><strong>To proceed, please reply with:</strong></p>
-        <ul style="margin: 10px 0; padding-left: 20px;">
-            <li>The missing contact/company/deal information, OR</li>
-            <li>Confirmation to use an existing contact/company/deal (if applicable)</li>
-        </ul>
-    
-    <div class="closing">
-        <p>I'm ready to help once you provide the additional information. Simply reply to this email with the details, and I'll process your request right away.</p>
-        <p>If you have any questions about these requirements, feel free to ask!</p>
-    </div>
+    <p><strong>Next steps</strong></p>
+    <p>Please reply to this email with one of the following:</p>
+    <ul>
+        <li>The contact, company, or deal you would like this task associated with, or</li>
+        <li>Confirmation to link the task to an existing contact, company, or deal in your HubSpot account</li>
+    </ul>
+
+    <p>Once I have this information, I'll take care of the rest right away.</p>
+    <p>If you have any questions or would like guidance on the best association to use, feel free to let me know.</p>
     
     <div class="signature">
         <p><strong>Best regards,</strong><br>
@@ -2106,7 +2156,7 @@ def compose_validation_error_email(ti, **context):
 </html>"""
     
     ti.xcom_push(key="validation_error_email", value=email_html)
-    logging.info(f"Composed validation error email with {len(errors)} error(s)")
+    logging.info(f"Composed validation error email for primary entity: {primary_entity}")
     
     return email_html
 
@@ -3021,7 +3071,7 @@ def compose_confirmation_email(ti, **context):
     email_content += """
         <div class="closing">
             <p>Please confirm whether this summary looks correct before I proceed.</p>
-            <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">Lowtouch.ai</a></p>
+            <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">lowtouch.ai</a></p>
         </div>
     </body>
     </html>
@@ -3331,7 +3381,7 @@ def compose_engagement_summary_email(ti, **context):
 <body>
     <h2>Engagement Summary Request</h2>
     <p>I apologize, but I encountered an issue retrieving the engagement summary. Please check if the contact/deal information is correct and try again.</p>
-    <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">Lowtouch.ai</a></p>
+    <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">lowtouch.ai</a></p>
 </body>
 </html>"""
         ti.xcom_push(key="engagement_summary_email", value=error_email)
@@ -3590,7 +3640,7 @@ def compose_engagement_summary_email(ti, **context):
         <p>This summary provides a comprehensive overview to help you prepare for your upcoming engagement.</p>
         <p>If you need any clarifications or additional information, please let me know.</p>
         <br>
-        <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">Lowtouch.ai</a></p>
+        <p><strong>Best regards,</strong><br>The HubSpot Assistant Team<br><a href="http://lowtouch.ai">lowtouch.ai</a></p>
     </div>
 </body>
 </html>"""
