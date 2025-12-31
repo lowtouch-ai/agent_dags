@@ -396,6 +396,120 @@ def trigger_task_completion_dag(**kwargs):
     
     logging.info(f"Triggered task completion handler for {len(task_completion_emails)} emails")
 
+def send_unauthorized_response(service, email_object, sender_name=""):
+    """
+    Send a professional response to unauthorized senders explaining that their email cannot be processed.
+    
+    Args:
+        service: Authenticated Gmail service object
+        email_object: Dictionary containing at least 'headers' and 'id'
+        sender_name: Extracted first name of the sender (optional, for personalization)
+    """
+    headers = email_object.get("headers", {})
+    sender_email_raw = headers.get("From", "")
+    subject = headers.get("Subject", "Your message to HubSpot Assistant")
+    original_message_id = headers.get("Message-ID", "")
+    references = headers.get("References", "")
+
+    # Extract clean sender email (handle "Name <email@domain.com>" format)
+    email_match = re.search(r'<(.+?)>', sender_email_raw)
+    sender_email = email_match.group(1) if email_match else sender_email_raw.split()[-1].strip("<>")
+
+    # Build reply threading headers
+    if original_message_id:
+        references = f"{references} {original_message_id}".strip() if references else original_message_id
+
+    if not subject.lower().startswith("re:"):
+        subject = f"Re: {subject}"
+
+    # Personalization: Add comma after name if available
+    greeting_name = f" {sender_name}," if sender_name else ""
+
+    # Professional HTML response body
+    html_body = f"""<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif;
+            line-height: 1.6;
+            color: #333333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{
+            margin-bottom: 15px;
+        }}
+        .message {{
+            margin: 15px 0;
+        }}
+        .closing {{
+            margin-top: 20px;
+        }}
+        .signature {{
+            margin-top: 30px;
+            font-weight: bold;
+            color: #000000;
+        }}
+        .company {{
+            color: #666666;
+            font-size: 0.9em;
+            margin-top: 8px;
+        }}
+        .company a {{
+            color: #0066cc;
+            text-decoration: none;
+        }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello{greeting_name}</p>
+    </div>
+
+    <div class="message">
+        <p>Thank you for reaching out to the HubSpot Assistant mailbox.</p>
+        
+        <p>We’re unable to process your request at this time, as this email address is restricted to authorized users only.</p>
+        
+        <p>If you believe this message was sent in error or if you require access to the HubSpot Assistant, please contact your account administrator or reach out to our support team for assistance.</p>
+    </div>
+
+    <div class="closing">
+        <p>Thank you for your understanding.</p>
+    </div>
+
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <span class="company"><a href="http://lowtouch.ai">lowtouch.ai</a></span></p>
+    </div>
+</body>
+</html>"""
+
+    # Compose the email
+    msg = MIMEMultipart()
+    msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
+    msg["To"] = sender_email
+    msg["Subject"] = subject
+    if original_message_id:
+        msg["In-Reply-To"] = original_message_id
+        msg["References"] = references
+
+    msg.attach(MIMEText(html_body, "html"))
+
+    try:
+        raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
+        service.users().messages().send(
+            userId="me",
+            body={"raw": raw_msg}
+        ).execute()
+        logging.info(f"Sent unauthorized access response to {sender_email}")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to send unauthorized response to {sender_email}: {str(e)}")
+        return False
+
 def fetch_unread_emails(**kwargs):
     """Fetch unread emails and extract full thread history for each."""
     service = authenticate_gmail()
@@ -449,7 +563,22 @@ def fetch_unread_emails(**kwargs):
         
         # Validate sender is whitelisted
         if not is_email_whitelisted(sender):
-            logging.warning(f"Unauthorized email from {sender} - marking as read and skipping")
+            logging.warning(f"Unauthorized email from {sender} - sending rejection response and marking as read")
+            
+            # Extract sender name for personalization
+            name_match = re.search(r'^([^<]+)', sender)
+            sender_name = name_match.group(1).strip() if name_match else ""
+
+            # Temporary email object for response function
+            temp_email_object = {
+                "headers": headers,
+                "id": msg_id
+            }
+
+            # Send professional response
+            send_unauthorized_response(service, temp_email_object, sender_name)
+
+            # Mark as read and skip further processing
             mark_message_as_read(service, msg_id)
             continue
         
@@ -528,7 +657,7 @@ def fetch_unread_emails(**kwargs):
         
         unread_emails.append(email_object)
         processed_message_ids.add(msg_id)
-        
+        mark_message_as_read(service, msg_id)
         if timestamp > max_timestamp:
             max_timestamp = timestamp
             
