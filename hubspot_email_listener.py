@@ -278,6 +278,67 @@ def extract_all_recipients(email_data):
         "bcc": bcc_recipients
     }
 
+def send_email_reply(service, email, html_content):
+    """Exact same sending logic as your original code."""
+    headers = email.get("headers", {})
+    email_id = email.get("id", "unknown")
+
+    try:
+        # Threading
+        original_message_id = headers.get("Message-ID", "")
+        references = headers.get("References", "")
+        if original_message_id:
+            references = f"{references} {original_message_id}".strip() if references else original_message_id
+
+        # Subject
+        subject = headers.get("Subject", "No Subject")
+        if not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+
+        # Recipients
+        all_recipients = extract_all_recipients(email)
+        sender_email = headers.get("From", "")
+
+        primary_recipient = sender_email
+
+        cc_recipients = [
+            addr for addr in all_recipients["to"] + all_recipients["cc"]
+            if addr.lower() != sender_email.lower()
+            and HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
+        ]
+        bcc_recipients = [
+            addr for addr in all_recipients["bcc"]
+            if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
+        ]
+
+        cc_string = ', '.join(cc_recipients) if cc_recipients else None
+        bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
+
+        # Compose
+        msg = MIMEMultipart()
+        msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
+        msg["To"] = primary_recipient
+        if cc_string: msg["Cc"] = cc_string
+        if bcc_string: msg["Bcc"] = bcc_string
+        msg["Subject"] = subject
+        if original_message_id: msg["In-Reply-To"] = original_message_id
+        if references: msg["References"] = references
+        msg.attach(MIMEText(html_content, "html"))
+
+        # Send
+        raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
+        service.users().messages().send(
+            userId="me",
+            body={"raw": raw_msg}
+        ).execute()
+
+        logging.info(f"Sent reply to {sender_email} for email {email_id}")
+        return True
+
+    except Exception as e:
+        logging.error(f"Failed to send email {email_id}: {e}", exc_info=True)
+        return False
+
 def check_if_task_completion_reply(email_data):
     # Check direct headers (for non-replies)
     headers = email_data.get("headers", {})
@@ -1001,7 +1062,7 @@ Return exactly one valid JSON. No reasoning field. No extra text.
         elif "no_action" in task_type:
             ti.xcom_push(key="no_action_emails", value=unread_emails)
             logging.info("→ No action needed for the emails")
-            return "handle_general_queries"
+            return "analyze_and_search_with_tools"
 
 
 def extract_latest_reply(email_content):
@@ -1126,9 +1187,80 @@ def trigger_continuation_dag(**kwargs):
 
     logging.info(f"Triggered continuation for {len(reply_emails)} emails")
 
-def handle_general_queries(**kwargs):
-    """Send a friendly AI response if possible.
-    If AI fails → send a polite 'technical issue' apology."""
+def generate_spelling_variants_for_prompt(user_content, chat_history=None):
+    """
+    Generate potential spelling variants for contact/company/deal names.
+    Returns (inject_text: str for prompt, variants_dict: dict)
+    """
+    # Build recent context for better detection
+    context_lines = []
+    if chat_history:
+        for msg in chat_history[-4:]:  # Last 4 messages
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            context_lines.append(f"{role.upper()}: {content}")
+    context_lines.append(f"USER: {user_content}")
+    full_context = "\n\n".join(context_lines)
+
+    variant_prompt = f"""You are a spelling variant assistant for a HubSpot email assistant.
+
+Extract any contact names, company names, or deal names from the latest user message that might have typos.
+For each potentially misspelled name, give 3–5 plausible lowercase variants (include original as first).
+
+Rules:
+- Always include the original spelling first.
+- Only suggest variants if it looks like a typo.
+- Max 5 variants per name.
+- Use lowercase only.
+- If no likely typos, return empty lists.
+
+CONVERSATION CONTEXT:
+{full_context}
+
+Return ONLY valid JSON:
+{{
+    "potential_variants": {{
+        "contacts": [{{"original": "Neah", "variants": ["neah", "neha", "neeha", "nehha"]}}],
+        "companies": [{{"original": "Microsft", "variants": ["microsft", "microsoft", "micrsoft"]}}],
+        "deals": []
+    }},
+    "has_potential_typos": true|false
+}}
+"""
+
+    try:
+        response = get_ai_response(variant_prompt, expect_json=True)
+        data = json.loads(response.strip())
+        variants = data.get("potential_variants", {})
+        has_typos = data.get("has_potential_typos", False)
+
+        if not has_typos or not any(variants.values()):
+            return "", {}
+
+        inject_text = """
+IMPORTANT SPELLING VARIANTS DETECTED:
+The user may have misspelled names. Use the most plausible/correct spelling when interpreting the request, building filters, or report titles:
+
+"""
+        if variants.get("contacts"):
+            inject_text += f"CONTACTS: {json.dumps(variants['contacts'], indent=2)}\n"
+        if variants.get("companies"):
+            inject_text += f"COMPANIES: {json.dumps(variants['companies'], indent=2)}\n"
+        if variants.get("deals"):
+            inject_text += f"DEALS: {json.dumps(variants['deals'], indent=2)}\n"
+
+        inject_text += "\nPrefer the correct spelling (usually the 2nd item) in searches and titles.\n"
+
+        logging.info(f"Spelling variants generated: {variants}")
+        return inject_text, variants
+
+    except Exception as e:
+        logging.warning(f"Spelling variant generation failed: {e}")
+        return "", {}
+
+def analyze_and_search_with_tools(**kwargs):
+    """LLM analyzes email and performs search if needed. Handles ambiguity and cross-entity queries."""
+    import re  # Import at the beginning of the function
     
     ti = kwargs['ti']
     unread_emails = ti.xcom_pull(task_ids="branch_task", key="no_action_emails") or []
@@ -1141,359 +1273,1136 @@ def handle_general_queries(**kwargs):
     if not service:
         logging.error("Gmail authentication failed, cannot send responses")
         return
-    
-    # Define signature once
-    EMAIL_SIGNATURE = "HubSpot via lowtouch.ai Team"
-    AGENT_NAME = "HubSpot Assistant"
+
+    processed_emails = []
 
     for email in unread_emails:
+        email_id = email.get("id", "unknown")
+        content = email.get("content", "").strip()
+        headers = email.get("headers", {})
+        sender_email = headers.get("From", "")
+        thread_history = email.get("thread_history", [])
+        chat_history = email.get("chat_history", [])  # ← ADD THIS LINE
+
+        sender_name = "there"
+        name_match = re.search(r'^([^<]+)', sender_email)
+        if name_match:
+            sender_name = name_match.group(1).strip().split()[0] if name_match.group(1).strip() else "there"
+
+        # === ADD SPELLING VARIANT DETECTION HERE ===
+        spelling_inject_text, spelling_variants = generate_spelling_variants_for_prompt(
+            user_content=content,
+            chat_history=chat_history  # ← Pass full history
+        )
+
         try:
-            headers = email.get("headers", {})
-            sender_email = headers.get("From", "")
-            email_id = email.get("id", "unknown")
+            # CHECK IF CLARIFICATION WAS ALREADY SENT IN THIS THREAD
+            clarification_context = ""
+            clarification_already_sent = False
+            original_query_type = None
+            target_entity = None
+            original_query = None
             
-            # Extract sender name
-            sender_name = "there"
-            name_match = re.search(r'^([^<]+)', sender_email)
-            if name_match:
-                sender_name = name_match.group(1).strip()
+            for msg in reversed(thread_history):  # Latest bot message first
+                if msg.get("from_bot", False):
+                    bot_content = msg.get("content", "")
+                    # Look for metadata markers in the HTML content
+                    if ("Multiple Matches Found" in bot_content or 
+                        "please clarify which one" in bot_content.lower() or
+                        "Attached File" in bot_content):
+                        clarification_already_sent = True
+                        
+                        # Try to extract metadata from HTML comments (if stored)
+                        query_type_match = re.search(r'<!--\s*QUERY_TYPE:\s*(\S+)\s*-->', bot_content)
+                        target_entity_match = re.search(r'<!--\s*TARGET_ENTITY:\s*(\S+)\s*-->', bot_content)
+                        original_query_match = re.search(r'<!--\s*ORIGINAL_QUERY:\s*(.+?)\s*-->', bot_content)
+                        
+                        if query_type_match:
+                            original_query_type = query_type_match.group(1)
+                        if target_entity_match:
+                            target_entity = target_entity_match.group(1)
+                        if original_query_match:
+                            original_query = original_query_match.group(1)
+                        
+                        clarification_context = f"""
+IMPORTANT: A clarification request was previously sent to the user.
+Original user request: "{original_query if original_query else 'get associated data'}"
+Query type: {original_query_type if original_query_type else 'unknown'}
+Target entity: {target_entity if target_entity else 'unknown'}
+User is now replying with: "{content}"
 
-            # === STEP 1: Try AI-generated response ===
-            ai_response = None
-            try:
-                prompt = f"""You are a friendly HubSpot email assistant. You can answer generic questions about hubspot also causal greetings and Thanking mails.
-User message: "{email.get("content", "").strip()}"
-
-Reply in 1-2 short, polite, professional sentences.
-- If greeting: acknowledge warmly.
-- If out of context: say you're HubSpot-focused.
-- If no content: ask for clarification.
-- If user asks for HubSpot info: provide concise, accurate answers.
-- Hubspot query rules:
-    - If user asks about any contact or contact details call the tool `search_contacts` and answer the question based on the output. The output should be in HTML - table Format .
-      * Ensure that the output strictly returns all of the following fields: Contact ID,Firstname,Lastname,Email,Phone,Job Title,Contact Owner Name,Last Modified Date in table format.
-      * When only first name or last name is given,search based on that and if multiple contacts are found ask for clarification to choose a specific one after returning the table of contacts found.
-      * Keep each phone number, email, and job title in a single line (no text wrapping across lines).
-      * Ensure phone numbers follow a uniform formatting standard (e.g., +91 98765 43210 or +1 312 555 7241).
-      * Avoid unnecessary line breaks in any field.
-      * Do not follow the pagination rule in email response.If there are 100 matches of a contact,return all 100 in the email itself. 
-    - If user asks about any company or company details call the tool `search_companies` and answer the question based on the output. The output should be in HTML - table Format .
-      * Ensure that the output strictly returns all of the following fields: Company Id, Company Name,Domain,Company Owner,Lifecycle Stage,Associated Deals (IDs + names + stages) in table format.
-      * Do not follow the pagination rule in email response.If there are 100 matches of a company,return all 100 in the email itself.
-    - If user asks about any deal or deal details call the tool `search_deals` and answer the question based on the output. The output should be in HTML - table Format .
-      * Ensure that the output strictly returns all of the following fields: Deal ID, Deal Name, Deal Stage(Dont take the deal stage id,take the deal stage name(for example if deal stage id is appoinmentschedule,then the deal stage will be APPOINTMENT SCHEDULE)), Deal Owner, Deal Amount, Expected Close Date, Associated Company, and Associated Contacts in table format.
-      * Do not merge, or concatenate the stage name — preserve all spaces, casing, and formatting.
-      * Treat current system date as **NOW**.
-      * The result set must be sorted on Expected Close Date in ascending order, prioritizing deals with the earliest closing dates
-      * If the user does not specify a time period → return all deals with close date today or later.
-      * If a date range or timeframe is mentioned in the query:
-      * Convert natural language into a valid start_date → end_date range.
-      * Return only deals whose Expected Close Date lies within that period.
-      * Include today's date when filtering.(Example if the  Query is to check the "deals expiring by this month end" then date Range will be 1 Dec 2025 to 31 Dec 2025)
-      * When the user asks for deals expiring by this month end, ALWAYS apply the date filter as follows:
-        - gte must be strictly set to today's date (current system date)
-        - lte must be strictly set to the last date of the current month
-        - Even if the user does not explicitly mention 'from today', you must assume that the date range ALWAYS starts from today.
-      * Do not follow the pagination rule in email response.If there are 100 matches for deals,return all 100 in the email itself. 
-    - If user asking a entity detail along with a timeperiod use LTE, GTE or both based on user request. The output should be in HTML - table Format.
-    - If the user asks about their tasks parse the senders name and invoke `get_all_owners` to get the hubspot owner id and then invoke `search_tasks` to get the tasks assigned to the owner on the sepcified date. The output should be in HTML - table Format.
-      * Ensure that the output strictly returns all of the following fields:Task_ID,Task Subject,Due Date,Status,Priority.
-      * Do not follow the pagination rule in email response.If there are 100 matches for tasks,return all 100 in the email itself without any followp response.
-- All the **dates** should be in YYYY-MM-DD format and do not include time.
-- If a column has no data for a particular record, give the value for that as **N/A**.Do not leave any coloumn blank.
-- Always maintain a friendly and professional tone.
-
-**IMPORTANT: Response Format**
-You MUST return your response in this EXACT format:
-
-1. First, a JSON object on its own line:
-{{"trigger_report": false}}
-
-2. Then, immediately followed by the HTML email content
-
-**CRITICAL RULES**: 
-- If the query results contain MORE THAN 10 records, set "trigger_report": true (and HTML is optional)
-- If the query results contains LESS THAN OR EQUAL TO 10 records, set "trigger_report": false (and you MUST include the complete HTML email response)
-- If trigger_report is false, you MUST include the complete HTML email response
-- NEVER return ONLY the JSON without HTML when trigger_report is false
-Your final response must be in below format if the trigger_report is false:
-```
-        <html>
-        <head>
-            <style>
-        table {{width: 100%;border-collapse: collapse;margin: 20px 0;background: #ffffff;border: 1px solid #e0e0e0;font-size: 14px;}}
-        th {{background-color: #f3f6fc;color: #333;padding: 10px;border: 1px solid #d0d7e2;text-align: left;font-weight: bold;white-space: nowrap;}}
-        td {{padding: 10px;border: 1px solid #e0e0e0;text-align: left;white-space: nowrap;}}
-        h3 {{color: #333;margin-top: 30px;margin-bottom: 15px;}}
-
-            body {{
-                    font-family: Arial, sans-serif;
-                    line-height: 1.6;
-                    color: #333;
-                    max-width: 600px;
-                    margin: 0 auto;
-                    padding: 20px;
-                }}
-                .greeting {{
-                    margin-bottom: 15px;
-                }}
-                .message {{
-                    margin: 15px 0;
-                }}
-                .closing {{
-                    margin-top: 15px;
-                }}
-                .signature {{
-                    margin-top: 15px;
-                    font-weight: bold;
-                }}
-                .company {{
-                    color: #666;
-                    font-size: 0.9em;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="greeting">
-                <p>Hello {sender_name},</p>
-            </div>
+INSTRUCTIONS FOR CLARIFICATION RESPONSE:
+1. Parse the user's response to identify which specific entity they're selecting:
+   - If they mention a row number (e.g., "row 1", "first one"), use that
+   - If they provide an email address, match by email
+   - If they provide a name with company, match by that combination
+   
+2. Extract the entity ID from the clarification
+   
+3. CRITICAL: If the original query type contains "for" (like "company_for_contact", "deals_for_contact"):
+   This means they want ASSOCIATED data, not the entity itself.
+   After identifying the entity:
+   - Use the entity ID to search for the TARGET entity
+   - For "company_for_contact": use contact_id to search companies
+   - For "deals_for_contact": use contact_id to search deals
+   - For "contacts_for_company": use company_id to search contacts
+   
+4. Return the FINAL results (the target entity data) with proper fields
+"""
+                        break
             
-            <div class="message">
-                <p>"Here your resposne should be replaced."</p>
-            </div>
-            
-            <div class="closing">
-                <p>If you need additional information, please don't hesitate to ask.</p>
-            </div>
-            
-            <div class="signature">
-                <p>Best regards,<br>
-                The HubSpot Assistant Team<br>
-                <a href="http://lowtouch.ai" class="company">Lowtouch.ai</a></p>
-            </div>
-        </body>
-        </html>```
+            # MAIN PROMPT
+            prompt = f"""You are a friendly HubSpot email assistant with the following capabilities:
+- Answer generic HubSpot questions
+- Handle greetings and casual conversation
+- Search HubSpot data (contacts, companies, deals, tasks)
+- Handle associated data queries (e.g., "deals for a contact", "company for a contact")
+- consider spelling variants when searching: {spelling_inject_text}
+
+User message: "{content}"
+{clarification_context}
+
+═══════════════════════════════════════════════════════════════════
+REQUIRED OUTPUT FIELDS BY ENTITY TYPE:
+═══════════════════════════════════════════════════════════════════
+
+**CONTACTS:** Always return these fields in this order:
+- Contact ID
+- Firstname
+- Lastname
+- Email
+- Phone
+- Job Title
+- Contact Owner Name
+- Last Modified Date
+
+**COMPANIES:** Always return these fields in this order:
+- Company Id
+- Company Name
+- Domain
+
+**DEALS:** Always return these fields in this order:
+- Deal ID
+- Deal Name
+- Deal Stage (use human-readable name, e.g., "APPOINTMENT SCHEDULED" not "appointmentscheduled")
+- Deal Owner
+- Deal Amount
+- Expected Close Date
+- Associated Company
+- Associated Contacts
+
+**TASKS:** Always return these fields in this order:
+- Task ID
+- Task Name
+- Status
+- Priority
+- Due Date
+- Owner
+
+═══════════════════════════════════════════════════════════════════
+CRITICAL WORKFLOW:
+═══════════════════════════════════════════════════════════════════
+IMPORTANT:
+**Pagination Handling:**
+- Fetch ALL results up to 200 max
+- Do not follow the limit 10 rule for pagination here.
+**1. IDENTIFY QUERY TYPE:**
+   - Direct entity query: "show me all contacts", "find company X"
+   - Associated data query: "deals for contact X", "company for contact Y", "contacts in company Z"
+   - Cross-entity query: "tasks for deal X", "deals for company Y"
+
+**2. FOR DIRECT QUERIES:**
+   - Contact query → call `search_contacts`
+   - Company query → call `search_companies`
+   - Deal query → call `search_deals`
+   - Task query → first get owner_id via `get_all_owners`, then call `search_tasks`
+
+**3. FOR ASSOCIATED DATA QUERIES (CRITICAL):**
+   Step 1: Search for PRIMARY entity first
+   Step 2: If multiple matches found → Mark as ambiguous and return:
+      {{
+        "is_ambiguous": true,
+        "requires_clarification": true,
+        "ambiguous_entity": "contacts|companies|deals",
+        "results": [...all matches with ALL required fields...],
+        "result_count": <count>,
+        "search_term": "what user searched for",
+        "metadata": {{
+          "query_type": "company_for_contact|deals_for_contact|contacts_for_company|deals_for_company|etc",
+          "original_query": "{content}",
+          "target_entity": "companies|deals|contacts"
+        }}
+      }}
+   Step 3: After clarification received:
+      - Parse user's clarification response
+      - Identify the specific entity they selected
+      - Extract the entity ID
+      - NOW search for the TARGET entity using this ID
+      - Return final results with proper fields
+
+**4. HANDLING CLARIFICATION RESPONSES:**
+   When clarification_already_sent is True AND original_query_type contains associations:
+   a) Parse user's response (email, "row 1", "first one", name + company)
+   b) Identify which entity from the original list they're selecting
+   c) Get that entity's ID
+   d) Check the query_type and target_entity
+   e) If query_type is like "company_for_contact":
+      - Use the selected contact's ID
+      - Call search_companies with association to this contact_id
+      - Return company data with proper fields
+   f) If query_type is like "deals_for_contact":
+      - Use the selected contact's ID
+      - Call search_deals with association to this contact_id
+      - Return deals data with proper fields
+   g) Return as:
+      {{
+        "clarification_resolved": true,
+        "needs_search": true,
+        "results": [...final target entity results...],
+        "result_count": <count>,
+        "entity": "companies|deals|contacts",
+        "clarified_entity_id": "the ID they selected"
+      }}
+
+═══════════════════════════════════════════════════════════════════
+SEARCH GUIDELINES:
+═══════════════════════════════════════════════════════════════════
+
+- Search by partial names (first or last name only is fine)
+- Fetch ALL results up to 200 max (no pagination in email)
+- Keep data single-line (no wrapping for phone/email)
+- Phone format: +91 98765 43210
+- Use "N/A" for empty fields (never blank)
+- Dates: YYYY-MM-DD format only
+
+═══════════════════════════════════════════════════════════════════
+DATE HANDLING FOR DEALS:
+═══════════════════════════════════════════════════════════════════
+
+- Parse natural language: "this month", "next week", "Q4 2024"
+- Convert to date ranges: start_date (GTE) and end_date (LTE)
+- "This month end" = GTE:today, LTE:last_day_of_current_month
+- Always include today when relevant
+- Sort deals by Expected Close Date (ascending)
+
+═══════════════════════════════════════════════════════════════════
+AMBIGUITY DETECTION (CRITICAL):
+═══════════════════════════════════════════════════════════════════
+
+Mark as ambiguous ONLY when ALL conditions met:
+1. User wants ASSOCIATED data (not a direct list)
+2. Primary entity has MULTIPLE matches
+3. User hasn't provided unique identifier (no email, no company context)
+
+Examples:
+✓ AMBIGUOUS: "Get deals for Priya" + finds 3 Priyas + no email given
+✓ AMBIGUOUS: "Company for John Smith" + finds 5 John Smiths + no unique info
+✗ NOT ambiguous: "Show all contacts named Sarah" (they want the list)
+✗ NOT ambiguous: "Deals for priya@company.com" (unique identifier given)
+✗ NOT ambiguous: "Companies in Tech sector" (direct company search)
+
+═══════════════════════════════════════════════════════════════════
+MANDATORY OUTPUT FORMAT:
+═══════════════════════════════════════════════════════════════════
+
+**If no search needed (greetings/thanks):**
+{{"needs_search": false, "response_type": "casual"}}
+
+**If search performed successfully:**
+{{
+  "needs_search": true,
+  "results": [...exact results with required fields...],
+  "result_count": <number>,
+  "entity": "contacts|companies|deals|tasks"
+}}
+
+**If ambiguous (clarification needed):**
+{{
+  "needs_search": true,
+  "is_ambiguous": true,
+  "requires_clarification": true,
+  "ambiguous_entity": "contacts|companies|deals",
+  "results": [...all matching entities with ALL required fields...],
+  "result_count": <number>,
+  "search_term": "what user searched for",
+  "metadata": {{
+    "query_type": "company_for_contact|deals_for_contact|direct_search|etc",
+    "original_query": "{content}",
+    "target_entity": "companies|deals|contacts|none"
+  }}
+}}
+
+**If clarification received and resolved:**
+{{
+  "needs_search": true,
+  "clarification_resolved": true,
+  "results": [...final target entity results with required fields...],
+  "result_count": <number>,
+  "entity": "contacts|companies|deals|tasks",
+  "clarified_entity_id": "12345"
+}}
 """
 
-                ai_response = get_ai_response(prompt=prompt, expect_json=False)
-                logging.info(f"AI generated response (raw): {ai_response}")
+            # Get AI response
+            ai_response = get_ai_response(prompt=prompt, expect_json=True)
+            logging.info(f"AI response for {email_id}: {ai_response}")
+            analysis = json.loads(ai_response) if isinstance(ai_response, str) else ai_response
 
-                # ===== NEW CODE STARTS HERE =====
-                # First, try to detect if this is a JSON response with trigger_report
-                parsed_json = None
-                try:
-                    # Try direct JSON parse
-                    parsed_json = json.loads(ai_response)
-                    logging.info(f"Parsed as JSON: {parsed_json}")
-                except json.JSONDecodeError:
-                    # Try extracting JSON from text
-                    parsed_json = extract_json_from_text(ai_response)
-                    if parsed_json:
-                        logging.info(f"Extracted JSON from text: {parsed_json}")
-
-                # Check if we got a valid response with trigger_report flag
-                if parsed_json and isinstance(parsed_json, dict) and "trigger_report" in parsed_json:
-                    # We have a valid JSON response with trigger_report
-                    if parsed_json.get("trigger_report", False):
-                        # More than 10 records - trigger report DAG
-                        logging.info(f"AI detected >10 results, triggering report DAG for email {email_id}")
+            # HANDLE AMBIGUITY - SEND CLARIFICATION WITH METADATA EMBEDDED IN HTML
+            if analysis.get("requires_clarification", False) and analysis.get("is_ambiguous", False):
+                logging.info(f"⚠️ AMBIGUITY DETECTED for {email_id}")
+                
+                results = analysis.get("results", [])
+                entity = analysis.get("ambiguous_entity", "records")
+                search_term = analysis.get("search_term", "the search term")
+                total_count = analysis.get("result_count", len(results))
+                metadata = analysis.get("metadata", {})
+                
+                query_type = metadata.get("query_type", "direct_search")
+                target_entity = metadata.get("target_entity", "none")
+                original_query = metadata.get("original_query", content)
+                
+                # Send clarification based on count
+                if total_count > 10:
+                    logging.info(f"Count > 10 ({total_count}), exporting to Excel")
+                    
+                    df = pd.DataFrame(results)
+                    export_result = export_to_file(
+                        data=df,
+                        export_format='excel',
+                        filename=f"clarification_{entity}_{email_id[:8]}",
+                        export_dir='/appz/cache/exports'
+                    )
+                    
+                    if export_result.get("success"):
+                        excel_path = export_result["filepath"]
+                        excel_filename = export_result["filename"]
                         
-                        mark_message_as_read(service, email_id)
-                        ti.xcom_push(key="general_query_report", value=[email])
-                        # Call trigger_report_dag directly
-                        kwargs_copy = kwargs.copy()
-                        kwargs_copy['ti'] = ti
-                        trigger_report_dag(**kwargs_copy)
-                        continue
+                        clarification_html = build_clarification_email_with_excel(
+                            sender_name=sender_name,
+                            total_count=total_count,
+                            entity=entity,
+                            search_term=search_term,
+                            query_type=query_type,
+                            target_entity=target_entity,
+                            original_query=original_query
+                        )
+                        
+                        send_email_with_attachment(
+                            service=service,
+                            email=email,
+                            html_content=clarification_html,
+                            attachment_path=excel_path,
+                            attachment_filename=excel_filename
+                        )
+                        
+                        logging.info(f"✓ Sent clarification with Excel for {email_id}")
                     else:
-                        html_content = None
-                        if isinstance(ai_response, str):
-                            match = re.search(r'```html.*?\n(.*?)```', ai_response, re.DOTALL)
-                            if match:
-                                html_content = match.group(1).strip()
-                            else:
-                                html_match = re.search(r'(<html.*?</html>)', ai_response, re.DOTALL | re.IGNORECASE)
-                                if html_match:
-                                    html_content = html_match.group(1).strip()
-                        
-                        # ⭐ VALIDATION: If no HTML found, raise error to trigger fallback
-                        if not html_content or '<html' not in html_content.lower():
-                            raise ValueError("AI returned trigger_report=false but provided no HTML content")
-                        
-                        ai_response = html_content
-                        logging.info(f"Extracted HTML content successfully")
-                        # trigger_report is false, but we still need HTML
-                        # The AI should have included HTML in the response string
-                        # Extract HTML from the original ai_response string
-                        if isinstance(ai_response, str):
-                            # Look for HTML in markdown block
-                            match = re.search(r'```html.*?\n(.*?)```', ai_response, re.DOTALL)
-                            if match:
-                                ai_response = match.group(1).strip()
-                                logging.info(f"Extracted HTML from markdown code block")
-                            else:
-                                # Check if HTML exists directly in response
-                                if '<html' in ai_response.lower() or '<body' in ai_response.lower():
-                                    # Remove the JSON part and keep only HTML
-                                    html_match = re.search(r'(<html.*?</html>)', ai_response, re.DOTALL | re.IGNORECASE)
-                                    if html_match:
-                                        ai_response = html_match.group(1).strip()
-                                        logging.info(f"Extracted HTML directly from response")
-                                    else:
-                                        raise ValueError("Response contains HTML tags but couldn't extract valid HTML")
-                                else:
-                                    raise ValueError("AI response has trigger_report=false but no HTML content found")
-                        else:
-                            raise ValueError("Expected string response containing HTML")
+                        logging.error(f"Excel export failed: {export_result.get('error')}")
+                        clarification_html = build_clarification_email_html(
+                            sender_name=sender_name,
+                            results=results[:10],
+                            entity=entity,
+                            search_term=search_term,
+                            total_count=total_count,
+                            query_type=query_type,
+                            target_entity=target_entity,
+                            original_query=original_query
+                        )
+                        send_email_reply(service, email, clarification_html)
                 else:
-                    # Not a JSON response, treat entire response as HTML
-                    if isinstance(ai_response, str):
-                        match = re.search(r'```html.*?\n(.*?)```', ai_response, re.DOTALL)
-                        if match:
-                            ai_response = match.group(1).strip()
-                        else:
-                            ai_response = ai_response.strip()
-                    else:
-                        raise ValueError(f"Unexpected response type: {type(ai_response)}")
+                    # <=10 results: HTML table
+                    clarification_html = build_clarification_email_html(
+                        sender_name=sender_name,
+                        results=results,
+                        entity=entity,
+                        search_term=search_term,
+                        total_count=total_count,
+                        query_type=query_type,
+                        target_entity=target_entity,
+                        original_query=original_query
+                    )
+                    send_email_reply(service, email, clarification_html)
+                    logging.info(f"✓ Sent clarification HTML for {email_id}")
                 
-                # ===== NEW CODE ENDS HERE =====
-
-                logging.info(f"Final AI response (first 200 chars): {str(ai_response)[:200]}...")
-                
-                # Validate we have usable HTML
-                if not ai_response or len(ai_response) < 5 or "error" in str(ai_response).lower():
-                    raise ValueError("Invalid AI response")
-
-            except Exception as ai_error:
-                logging.warning(f"AI failed for {email_id}: {ai_error} → using technical fallback")
-                ai_response = None  # Force fallback
-
-            # === STEP 2: Decide final response ===
-            if ai_response:
-                final_response = ai_response
-                log_prefix = "AI"
-            else:
-                final_response = f"""
-        <html>
-        <head>
-            <style>
-                body {{
-                    font-family: Arial, sans-serif;
-                    line-height: 1.6;
-                    color: #333;
-                    max-width: 600px;
-                    margin: 0 auto;
-                    padding: 20px;
-                }}
-                .greeting {{
-                    margin-bottom: 15px;
-                }}
-                .message {{
-                    margin: 15px 0;
-                }}
-                .closing {{
-                    margin-top: 15px;
-                }}
-                .signature {{
-                    margin-top: 15px;
-                    font-weight: bold;
-                }}
-                .company {{
-                    color: #666;
-                    font-size: 0.9em;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="greeting">
-                <p>Hello {sender_name},</p>
-            </div>
-            
-            <div class="message">
-                <p>We're currently experiencing a temporary technical issue that may affect your experience with the HubSpot Assistant.</p>
-                
-                <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
-                
-                <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
-            </div>
-            
-            <div class="closing">
-                <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
-            </div>
-            
-            <div class="signature">
-                <p>Best regards,<br>
-                The HubSpot Assistant Team<br>
-                <a href="http://lowtouch.ai" class="company">Lowtouch.ai</a></p>
-            </div>
-        </body>
-        </html>
-        """
-                log_prefix = "Fallback"
-
-            # === STEP 3: Build and Send Email ===
-            try:
-                logging.info(f"{log_prefix} response → sending to {sender_email}")
-
-                # Threading
-                original_message_id = headers.get("Message-ID", "")
-                references = headers.get("References", "")
-                if original_message_id:
-                    references = f"{references} {original_message_id}".strip() if references else original_message_id
-
-                subject = headers.get("Subject", "No Subject")
-                if not subject.lower().startswith("re:"):
-                    subject = f"Re: {subject}"
-
-                # Recipients
-                all_recipients = extract_all_recipients(email)
-                primary_recipient = sender_email
-
-                cc_recipients = [
-                    addr for addr in all_recipients["to"] + all_recipients["cc"]
-                    if addr.lower() != sender_email.lower()
-                    and HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
-                ]
-                bcc_recipients = [
-                    addr for addr in all_recipients["bcc"]
-                    if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
-                ]
-
-                cc_string = ', '.join(cc_recipients) if cc_recipients else None
-                bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
-
-                # Compose
-                msg = MIMEMultipart()
-                msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
-                msg["To"] = primary_recipient
-                if cc_string: msg["Cc"] = cc_string
-                if bcc_string: msg["Bcc"] = bcc_string
-                msg["Subject"] = subject
-                if original_message_id: msg["In-Reply-To"] = original_message_id
-                if references: msg["References"] = references
-                msg.attach(MIMEText(final_response, "html"))
-
-                # Send
-                raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
-                result = service.users().messages().send(
-                    userId="me",
-                    body={"raw": raw_msg}
-                ).execute()
-
                 mark_message_as_read(service, email_id)
-                logging.info(f"Sent {log_prefix.lower()} response for email {email_id}")
+                continue
 
-            except Exception as send_error:
-                logging.error(f"Failed to send email for {email_id}: {send_error}", exc_info=True)
-                mark_message_as_read(service, email_id)
+            # HANDLE CLARIFICATION RESOLUTION
+            # HANDLE CLARIFICATION RESOLUTION
+            if analysis.get("clarification_resolved", False):
+                logging.info(f"✓ Clarification resolved for {email_id}")
+                
+                # Results should contain the FINAL TARGET entity data
+                results = analysis.get("results", [])
+                entity = analysis.get("entity", "records")
+                result_count = analysis.get("result_count", len(results))
+                clarified_entity_id = analysis.get("clarified_entity_id", "unknown")
+                
+                logging.info(f"Final results after clarification: {result_count} {entity} (clarified entity ID: {clarified_entity_id})")
+                
+                # ⭐ CRITICAL FIX: Don't send email here, let generate_final_response_or_trigger_report handle it
+                # Just add to processed_emails list so Task 2 can format and send it properly
+                processed_emails.append({
+                    "email": email,
+                    "sender_name": sender_name,
+                    "analysis": analysis  # This contains the resolved results
+                })
+                
+                # DON'T mark as read yet - Task 2 will do it after sending
+                logging.info(f"✓ Passed clarification results to Task 2 for {email_id}")
+                continue
+
+            # NORMAL PROCESSING - no ambiguity
+            processed_emails.append({
+                "email": email,
+                "sender_name": sender_name,
+                "analysis": analysis
+            })
 
         except Exception as e:
-            logging.error(f"Unexpected error for email {email.get('id', 'unknown')}: {e}", exc_info=True)
+            logging.error(f"Task 1 FAILED for {email_id}: {e}", exc_info=True)
+            fallback_html = f"""
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{ margin-bottom: 15px; }}
+        .message {{ margin: 15px 0; }}
+        .closing {{ margin-top: 15px; }}
+        .signature {{ margin-top: 15px; font-weight: bold; }}
+        .company {{ color: #666; font-size: 0.9em; }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+    </div>
+    
+    <div class="message">
+        <p>We're currently experiencing a temporary technical issue that may affect your experience with the HubSpot Assistant.</p>
+        
+        <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
+        
+        <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
+    </div>
+    
+    <div class="closing">
+        <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
+    </div>
+    
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>
+"""
             try:
-                mark_message_as_read(service, email["id"])
-            except:
-                pass
-            continue
+                send_email_reply(service, email, fallback_html)
+                logging.info(f"Sent technical fallback for {email_id}")
+            except Exception as send_err:
+                logging.error(f"Failed to send fallback for {email_id}: {send_err}")
+            finally:
+                mark_message_as_read(service, email_id)
+
+    if processed_emails:
+        ti.xcom_push(key="llm_search_results", value=processed_emails)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# HELPER FUNCTIONS - UPDATE THESE IN YOUR CODEBASE
+# ═══════════════════════════════════════════════════════════════════
+
+def build_clarification_email_html(sender_name, results, entity, search_term, total_count, query_type="direct_search", target_entity="none", original_query="",closest_match_name=None, was_typo=False):
+    """Build HTML email for clarification with metadata embedded as HTML comments."""
+    
+    entity_display = entity.replace("_", " ").title()
+    
+    # Build table rows
+    table_rows = ""
+    for idx, result in enumerate(results[:10], 1):
+        row_data = ""
+        if entity == "contacts":
+            row_data = f"""
+                <td>{idx}</td>
+                <td>{result.get('Firstname', 'N/A')} {result.get('Lastname', 'N/A')}</td>
+                <td>{result.get('Email', 'N/A')}</td>
+                <td>{result.get('Phone', 'N/A')}</td>
+                <td>{result.get('Contact ID', 'N/A')}</td>
+            """
+        elif entity == "companies":
+            row_data = f"""
+                <td>{idx}</td>
+                <td>{result.get('Company Name', result.get('name', 'N/A'))}</td>
+                <td>{result.get('Domain', result.get('domain', 'N/A'))}</td>
+                <td>{result.get('Company Id', result.get('id', 'N/A'))}</td>
+            """
+        elif entity == "deals":
+            row_data = f"""
+                <td>{idx}</td>
+                <td>{result.get('Deal Name', result.get('dealname', 'N/A'))}</td>
+                <td>{result.get('Deal Amount', result.get('amount', 'N/A'))}</td>
+                <td>{result.get('Deal Stage', result.get('dealstage', 'N/A'))}</td>
+            """
+        
+        table_rows += f"<tr>{row_data}</tr>"
+    
+    # Build query type message
+    query_type_msg = ""
+    if "for" in query_type:
+        target_display = target_entity.replace("_", " ").title() if target_entity != "none" else "associated data"
+        query_type_msg = f"<p><strong>Note:</strong> Once you clarify which {entity_display.lower()} you're referring to, I'll fetch the associated <strong>{target_display}</strong> for you.</p>"
+    
+    if was_typo:
+        closest_text = f" <strong>{closest_match_name}</strong>" if closest_match_name else " a close match"
+        intro_message = f"""
+        <p>I couldn't find an exact match for "<strong>{search_term}</strong>", 
+        but the closest match appears to be{closest_text}.</p>
+        <p>Here are the top results — did you mean one of these?</p>
+        """
+    else:
+        intro_message = f"""
+        <p>I found <strong>{total_count} {entity_display}</strong> matching "<strong>{search_term}</strong>".</p>
+        """
+    
+    # EMBED METADATA AS HTML COMMENTS (invisible to user, readable by code)
+    metadata_comments = f"""
+<!-- QUERY_TYPE: {query_type} -->
+<!-- TARGET_ENTITY: {target_entity} -->
+<!-- ORIGINAL_QUERY: {original_query} -->
+"""
+    
+    html = f"""
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; padding: 20px; max-width: 900px; margin: 0 auto; }}
+        .content {{ margin: 20px 0; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 0.9em; }}
+        th {{ background-color: #f0f0f0; padding: 10px; text-align: left; border: 1px solid #ddd; }}
+        td {{ padding: 10px; border: 1px solid #ddd; }}
+        tr:nth-child(even) {{ background-color: #f9f9f9; }}
+        .footer {{ margin-top: 20px; font-size: 0.9em; color: #666; }}
+        .note {{ background-color: #fff3cd; padding: 10px; border-left: 4px solid #ffc107; margin: 15px 0; }}
+    </style>
+</head>
+<body>
+{metadata_comments}
+    <div class="content">
+        <p>Hello {sender_name},</p>
+        {intro_message}
+        {query_type_msg}
+        
+        <p>Please reply with one of the following to help me identify the specific {entity_display.lower()}:</p>
+        <ul>
+            <li><strong>Row number</strong> from the table below (e.g., "row 1" or "first one")</li>
+            <li><strong>Email address</strong> (e.g., "priya.desai@northpeaksys.com")</li>
+            <li><strong>Full name with company</strong> (e.g., "Priya Desai at NorthPeak")</li>
+        </ul>
+        
+        <table>
+            {table_rows}
+        </table>
+        
+        {'<p><em>Showing the matches. Reply with identifying information to proceed.</em></p>' if total_count > 10 else ''}
+    </div>
+    
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>
+"""
+    return html
+
+def build_clarification_email_with_excel(sender_name, total_count, entity, search_term,query_type="direct_search", target_entity="none", original_query="",closest_match_name=None, was_typo=False):
+    """Build HTML email for clarification when sending Excel attachment."""
+    
+    entity_display = entity.replace("_", " ").title()
+    
+    query_type_msg = ""
+    if "for" in query_type:
+        target_display = target_entity.replace("_", " ").title() if target_entity != "none" else "associated data"
+        query_type_msg = f"""
+        <div class="note">
+            <strong>Note:</strong> Once you clarify which {entity_display.lower()} you're referring to, 
+            I'll fetch the associated <strong>{target_display}</strong> for you.
+        </div>
+        """
+    if was_typo:
+        closest_text = f" <strong>{closest_match_name}</strong>" if closest_match_name else " a close match"
+        intro_message = f"""
+        <p>I couldn't find an exact match for "<strong>{search_term}</strong>", 
+        but the closest match appears to be{closest_text}.</p>
+        <p>Please review the attached Excel file — did you mean one of these?</p>
+        """
+    else:
+        intro_message = f"""
+        <p>I found <strong>{total_count} {entity_display}</strong> matching "<strong>{search_term}</strong>".</p>
+        """
+    
+    # EMBED METADATA AS HTML COMMENTS
+    metadata_comments = f"""
+<!-- QUERY_TYPE: {query_type} -->
+<!-- TARGET_ENTITY: {target_entity} -->
+<!-- ORIGINAL_QUERY: {original_query} -->
+"""
+    
+    html = f"""
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }}
+        .content {{ margin: 20px 0; }}
+        .note {{ background-color: #fff3cd; padding: 10px; border-left: 4px solid #ffc107; margin: 15px 0; }}
+        .footer {{ margin-top: 20px; font-size: 0.9em; color: #666; }}
+    </style>
+</head>
+<body>
+{metadata_comments}
+    
+    <div class="content">
+        <p>Hello {sender_name},</p>
+        
+        {intro_message}
+        {query_type_msg}
+        
+        <p>Please review the attached Excel file and reply with one of the following:</p>
+        <ul>
+            <li><strong>Row number</strong> (e.g., "row 15")</li>
+            <li><strong>Email address</strong> (e.g., "contact@company.com")</li>
+            <li><strong>Full name with company</strong> (e.g., "John Smith at Acme Corp")</li>
+        </ul>
+    </div>
+    
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>
+"""
+    return html
+
+def build_response_html(sender_name, results, entity, result_count):
+    """Build final response HTML with proper field formatting."""
+    
+    entity_display = entity.replace("_", " ").title()
+    
+    # Build table based on entity type
+    if entity == "contacts":
+        headers = ["Contact ID", "Firstname", "Lastname", "Email", "Phone", "Job Title", "Owner", "Last Modified"]
+        rows = ""
+        for r in results:
+            rows += f"""
+            <tr>
+                <td>{r.get('Contact ID', r.get('id', 'N/A'))}</td>
+                <td>{r.get('Firstname', r.get('firstname', 'N/A'))}</td>
+                <td>{r.get('Lastname', r.get('lastname', 'N/A'))}</td>
+                <td>{r.get('Email', r.get('email', 'N/A'))}</td>
+                <td>{r.get('Phone', r.get('phone', 'N/A'))}</td>
+                <td>{r.get('Job Title', r.get('jobtitle', 'N/A'))}</td>
+                <td>{r.get('Contact Owner Name', r.get('hubspot_owner_id', 'N/A'))}</td>
+                <td>{r.get('Last Modified Date', r.get('lastmodifieddate', 'N/A'))}</td>
+            </tr>
+            """
+    elif entity == "companies":
+        headers = ["Company ID", "Company Name", "Domain"]
+        rows = ""
+        for r in results:
+            rows += f"""
+            <tr>
+                <td>{r.get('Company Id', r.get('id', 'N/A'))}</td>
+                <td>{r.get('Company Name', r.get('name', 'N/A'))}</td>
+                <td>{r.get('Domain', r.get('domain', 'N/A'))}</td>
+            </tr>
+            """
+    elif entity == "deals":
+        headers = ["Deal ID", "Deal Name", "Deal Stage", "Owner", "Amount", "Close Date", "Company", "Contacts"]
+        rows = ""
+        for r in results:
+            rows += f"""
+            <tr>
+                <td>{r.get('Deal ID', r.get('id', 'N/A'))}</td>
+                <td>{r.get('Deal Name', r.get('dealname', 'N/A'))}</td>
+                <td>{r.get('Deal Stage', r.get('dealstage', 'N/A'))}</td>
+                <td>{r.get('Deal Owner', r.get('hubspot_owner_id', 'N/A'))}</td>
+                <td>{r.get('Deal Amount', r.get('amount', 'N/A'))}</td>
+                <td>{r.get('Expected Close Date', r.get('closedate', 'N/A'))}</td>
+                <td>{r.get('Associated Company', r.get('associated_company', 'N/A'))}</td>
+                <td>{r.get('Associated Contacts', r.get('associated_contacts', 'N/A'))}</td>
+            </tr>
+            """
+    else:
+        headers = ["Data"]
+        rows = f"<tr><td>{str(results)}</td></tr>"
+    
+    header_html = "".join([f"<th>{h}</th>" for h in headers])
+    
+    html = f"""
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; padding: 20px; max-width: 1200px; margin: 0 auto; }}
+        .header {{ background-color: #ff7a59; color: white; padding: 15px; border-radius: 5px; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
+        th {{ background-color: #f0f0f0; padding: 10px; text-align: left; border: 1px solid #ddd; font-size: 0.85em; }}
+        td {{ padding: 10px; border: 1px solid #ddd; font-size: 0.85em; }}
+        tr:nth-child(even) {{ background-color: #f9f9f9; }}
+        .footer {{ margin-top: 20px; font-size: 0.9em; color: #666; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>✅ {entity_display} Results</h2>
+    </div>
+    
+    <p>Hello {sender_name},</p>
+    <p>I found <strong>{result_count} {entity_display}</strong> for you:</p>
+    
+    <table>
+        <tr>{header_html}</tr>
+        {rows}
+    </table>
+    
+    <div class="footer">
+        <p>Best regards,<br>HubSpot Assistant</p>
+    </div>
+</body>
+</html>
+"""
+    return html
+
+
+# ==================== SEND EMAIL WITH ATTACHMENT ====================
+def send_email_with_attachment(service, email, html_content, attachment_path, attachment_filename):
+    """Send email reply with file attachment."""
+    headers = email.get("headers", {})
+    
+    try:
+        # Threading
+        original_message_id = headers.get("Message-ID", "")
+        references = headers.get("References", "")
+        if original_message_id:
+            references = f"{references} {original_message_id}".strip() if references else original_message_id
+
+        # Subject
+        subject = headers.get("Subject", "No Subject")
+        if not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+
+        # Recipients
+        sender_email = headers.get("From", "")
+        
+        # Compose
+        msg = MIMEMultipart()
+        msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
+        msg["To"] = sender_email
+        msg["Subject"] = subject
+        if original_message_id:
+            msg["In-Reply-To"] = original_message_id
+        if references:
+            msg["References"] = references
+        
+        msg.attach(MIMEText(html_content, "html"))
+        
+        # Attach Excel file
+        with open(attachment_path, "rb") as f:
+            part = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            part.set_payload(f.read())
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", f"attachment; filename={attachment_filename}")
+        msg.attach(part)
+
+        # Send
+        raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
+        service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
+        
+        logging.info(f"Sent email with attachment {attachment_filename}")
+        return True
+
+    except Exception as e:
+        logging.error(f"Failed to send email with attachment: {e}", exc_info=True)
+        return False
+
+
+# ==================== TASK 2: Format Response or Trigger Report ====================
+def generate_final_response_or_trigger_report(**kwargs):
+    """Final formatting or report trigger. On ANY failure → send technical fallback."""
+    ti = kwargs['ti']
+    items = ti.xcom_pull(task_ids="analyze_and_search_with_tools", key="llm_search_results") or []
+    
+    if not items:
+        logging.info("No successfully processed emails from Task 1")
+        return
+
+    service = authenticate_gmail()
+    if not service:
+        logging.error("Gmail authentication failed in Task 2")
+        return
+
+    for item in items:
+        email = item["email"]
+        email_id = email.get("id", "unknown")
+        sender_name = item["sender_name"]
+        analysis = item["analysis"]
+
+        try:
+            if not analysis.get("needs_search", False):
+                # Casual response
+                casual_html = f"""
+                <html>
+                <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+                    <p>Hello {sender_name},</p>
+                    <p>Thank you for your message! We're happy to help with anything HubSpot-related.</p>
+                    <p>Feel free to ask about contacts, deals, tasks, or anything else!</p>
+                    <p>Best regards,<br>The HubSpot Assistant Team<br>
+                    <a href="http://lowtouch.ai" style="color:#666;font-size:0.9em;">lowtouch.ai</a></p>
+                </body>
+                </html>
+                """
+                send_email_reply(service, email, casual_html)
+                mark_message_as_read(service, email_id)
+                continue
+
+            count = analysis.get("result_count", 0)
+            logging.info(f"Processing email {email_id} with count: {count}")
+            results = analysis.get("results", [])
+            logging.info(f"Results for {email_id}: {len(results)} items")
+            entity = analysis.get("entity", "records")
+            logging.info(f"Entity type for {email_id}: {entity}")
+
+            # Direct routing based on count
+            if count > 10:
+                logging.info(f"Triggering report DAG ({count} results) for {email_id}")
+                mark_message_as_read(service, email_id)
+                ti.xcom_push(key="general_query_report", value=[email])
+                trigger_report_dag(**kwargs)
+                continue
+
+            # For count <= 10, generate HTML directly using templates
+            prompt = f"""You are a friendly HubSpot email assistant. Generate a professional HTML email response.
+
+Sender: {sender_name}
+Entity: {entity}
+Results count: {count}
+
+Data:
+{json.dumps(results, default=str)}
+
+CRUCIAL VALIDATION INSTRUCTIONS:
+**Format response based on count:**
+   - 0 results → Use "No Results" template
+   - 1 result → Use "Single Result (Inline)" template  
+   - 2-10 results → Use "Multiple Results (Table)" template
+
+**HTML TEMPLATE FOR NO RESULTS (0 found):**
+<html>
+<head>
+    <style>
+        body {{{{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}}}
+        .greeting {{{{ margin-bottom: 15px; }}}}
+        .message {{{{ margin: 15px 0; }}}}
+        .closing {{{{ margin-top: 15px; }}}}
+        .signature {{{{ margin-top: 15px; font-weight: bold; }}}}
+        .company {{{{ color: #666; font-size: 0.9em; }}}}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+    </div>
+    
+    <div class="message">
+        <p>I didn't find any {entity} in HubSpot that match the criteria you shared.</p>
+    </div>
+    
+    <div class="closing">
+        <p>If you need additional information, please don't hesitate to ask.</p>
+    </div>
+    
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>
+
+**HTML TEMPLATE FOR SINGLE RESULT (1 found - INLINE):**
+<html>
+<head>
+    <style>
+        body {{{{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}}}
+        .greeting {{{{ margin-bottom: 15px; }}}}
+        .message {{{{ margin: 15px 0; }}}}
+        .details {{{{ margin: 20px 0; padding: 15px; }}}}
+        .details p {{{{ margin: 8px 0; }}}}
+        .closing {{{{ margin-top: 15px; }}}}
+        .signature {{{{ margin-top: 15px; font-weight: bold; }}}}
+        .company {{{{ color: #666; font-size: 0.9em; }}}}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+    </div>
+    
+    <div class="message">
+        <p>Here's the {entity} that matches your request in HubSpot.</p>
+    </div>
+    
+    <div class="details">
+        <p><strong>{entity.capitalize()} details:</strong></p>
+        <ul>
+            <!-- Populate with actual data fields from results[0] -->
+        </ul>
+    </div>
+    
+    <div class="closing">
+        <p>If you need additional information, please don't hesitate to ask.</p>
+    </div>
+    
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>
+
+**HTML TEMPLATE FOR MULTIPLE RESULTS (2-10 found - TABLE):**
+<html>
+<head>
+    <style>
+        body {{{{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }}}}
+        table {{{{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: #ffffff;
+            border: 1px solid #e0e0e0;
+            font-size: 14px;
+        }}}}
+        th {{{{
+            background-color: #f3f6fc;
+            color: #333;
+            padding: 10px;
+            border: 1px solid #d0d7e2;
+            text-align: left;
+            font-weight: bold;
+            white-space: nowrap;
+        }}}}
+        td {{{{
+            padding: 10px;
+            border: 1px solid #e0e0e0;
+            text-align: left;
+            white-space: nowrap;
+        }}}}
+        .greeting {{{{ margin-bottom: 15px; }}}}
+        .message {{{{ margin: 15px 0; }}}}
+        .closing {{{{ margin-top: 15px; }}}}
+        .signature {{{{ margin-top: 15px; font-weight: bold; }}}}
+        .company {{{{ color: #666; font-size: 0.9em; }}}}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+    </div>
+    
+    <div class="message">
+        <p>Here's the list of {entity} from HubSpot based on your request.</p>
+    </div>
+    
+    <table>
+        <thead>
+            <tr>
+                <!-- Populate column headers dynamically based on data fields -->
+            </tr>
+        </thead>
+        <tbody>
+            <!-- Populate rows with actual data from results -->
+        </tbody>
+    </table>
+    
+    <div class="closing">
+        <p>If you need additional information, please don't hesitate to ask.</p>
+    </div>
+    
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>
+
+INSTRUCTIONS:
+1. Select the appropriate template based on the count (0, 1, or 2-10)
+2. Fill in all placeholders with actual data from the results
+3. For single results, use inline formatting with all relevant fields in a bulleted list
+4. For multiple results, create a proper table with all relevant columns
+5. Keep phone numbers and emails on single lines
+6. Use consistent date formatting (MMM DD, YYYY)
+7. Return ONLY the complete HTML email - no JSON, no markdown fences, just the HTML
+8. Start with <html> and end with </html>"""
+
+            logging.info(f"Requesting HTML generation for {count} {entity}")
+            ai_response = get_ai_response(prompt=prompt, expect_json=False)
+            logging.info(f"AI response received, length: {len(ai_response)}")
+
+            # Extract HTML from response
+            html_content = extract_html_from_response(ai_response)
+            
+            if not html_content:
+                logging.error(f"HTML extraction failed. Raw response preview: {ai_response[:500]}")
+                raise ValueError("No HTML extracted from AI response")
+
+            logging.info(f"Successfully extracted HTML ({len(html_content)} chars)")
+            send_email_reply(service, email, html_content)
+            mark_message_as_read(service, email_id)
+            logging.info(f"✓ Response sent successfully for {email_id}")
+
+        except Exception as e:
+            logging.warning(f"Task 2 FAILED for {email_id}: {e} → Sending technical fallback")
+            fallback_html = f"""
+    <html>
+    <head>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                max-width: 600px;
+                margin: 0 auto;
+                padding: 20px;
+            }}
+            .greeting {{ margin-bottom: 15px; }}
+            .message {{ margin: 15px 0; }}
+            .closing {{ margin-top: 15px; }}
+            .signature {{ margin-top: 15px; font-weight: bold; }}
+            .company {{ color: #666; font-size: 0.9em; }}
+        </style>
+    </head>
+    <body>
+        <div class="greeting">
+            <p>Hello {sender_name},</p>
+        </div>
+        
+        <div class="message">
+            <p>We're currently experiencing a temporary technical issue that may affect your experience with the HubSpot Assistant.</p>
+            
+            <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
+            
+            <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
+        </div>
+        
+        <div class="closing">
+            <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
+        </div>
+        
+        <div class="signature">
+            <p>Best regards,<br>
+            The HubSpot Assistant Team<br>
+            <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
+        </div>
+    </body>
+    </html>
+    """
+            try:
+                send_email_reply(service, email, fallback_html)
+                logging.info(f"Sent technical fallback (Task 2 failure) for {email_id}")
+            except Exception as send_err:
+                logging.error(f"Failed to send fallback for {email_id}: {send_err}")
+            finally:
+                mark_message_as_read(service, email_id)
+
+
+def extract_html_from_response(response):
+    """
+    Robust HTML extraction from AI response.
+    Handles multiple formats: markdown fences, raw HTML, JSON-wrapped HTML.
+    """
+    if not response:
+        return None
+    
+    response = response.strip()
+    
+    # Method 1: Extract from ```html markdown fence
+    match = re.search(r'```html\s*(.*?)```', response, re.DOTALL | re.IGNORECASE)
+    if match:
+        html = match.group(1).strip()
+        if html.startswith('<html'):
+            return html
+    
+    # Method 2: Extract from generic ``` fence (in case no language specified)
+    match = re.search(r'```\s*(<!DOCTYPE html>.*?</html>|<html.*?</html>)', response, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    
+    # Method 3: Find complete <html>...</html> block
+    match = re.search(r'(<html[^>]*>.*?</html>)', response, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    
+    # Method 4: Find <!DOCTYPE html>...</html> block
+    match = re.search(r'(<!DOCTYPE html>.*?</html>)', response, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    
+    # Method 5: Check if entire response is HTML (starts with <html or <!DOCTYPE)
+    if response.startswith('<!DOCTYPE') or response.startswith('<html'):
+        return response
+    
+    # Method 6: Try to extract from JSON if response is JSON-wrapped
+    try:
+        json_obj = json.loads(response)
+        if isinstance(json_obj, dict):
+            # Check common keys that might contain HTML
+            for key in ['html', 'html_content', 'content', 'response', 'email_html']:
+                if key in json_obj and isinstance(json_obj[key], str):
+                    html = json_obj[key].strip()
+                    if '<html' in html.lower():
+                        return html
+    except:
+        pass
+    
+    logging.warning("HTML extraction failed with all methods")
+    return None
 
 def get_deal_stage_labels():
     """
@@ -1762,6 +2671,14 @@ def trigger_report_dag(**kwargs):
             email_id = email.get("id", "unknown")
             email_match = re.search(r'<(.+?)>', sender_email)
             clean_sender_email = email_match.group(1) if email_match else sender_email.lower()
+            chat_history = email.get("chat_history", [])
+
+            # === SPELLING VARIANT DETECTION FOR REPORTS ===
+            user_message = email.get("content", "").strip()
+            spelling_inject_text, spelling_variants = generate_spelling_variants_for_prompt(
+                user_content=user_message,
+                chat_history=chat_history
+            )
             sender_name = "there"
             name_match = re.search(r'^([^<]+)', sender_email)
             if name_match:
@@ -1789,7 +2706,7 @@ def trigger_report_dag(**kwargs):
                 # AI Analysis
                 analysis_prompt = f"""You are a HubSpot data analyst. Analyze this request and determine what data to search for.
 User request: "{email.get("content", "").strip()}"
-
+extract the enitites details also use the spelling variants:{spelling_inject_text}
 IMPORTANT RULES:
 1. For company-related queries (e.g., "deals associated with company XYZ"):
    - Use the "associations.company" property to filter by company id
@@ -2390,7 +3307,7 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
     <div class="signature">
         <p>Best regards,<br>
         The HubSpot Assistant Team<br>
-        <a href="http://lowtouch.ai" class="company">Lowtouch.ai</a></p>
+        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
     </div>
 </body>
 </html>
@@ -2494,11 +3411,18 @@ with DAG(
         provide_context=True
     )
 
-    handle_general_queries_task = PythonOperator(
-    task_id="handle_general_queries",
-    python_callable=handle_general_queries,
-    provide_context=True,
-)
+    decide_and_search = PythonOperator(
+        task_id='analyze_and_search_with_tools',
+        python_callable=analyze_and_search_with_tools,
+        provide_context=True # Important: allows **kwargs with ti
+    )
+    
+    # === NEW TASK 2: Format response or trigger report ===
+    generate_response = PythonOperator(
+        task_id='generate_final_response_or_trigger_report',
+        python_callable=generate_final_response_or_trigger_report,
+        provide_context=True,
+    )
 
     trigger_report_task = PythonOperator(
         task_id="trigger_report_dag",
@@ -2518,4 +3442,5 @@ with DAG(
         provide_context=True
     )
 
-    fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, handle_general_queries_task, trigger_report_task, trigger_task_completion_task, no_email_found_task]
+    fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, decide_and_search, trigger_report_task, trigger_task_completion_task, no_email_found_task]
+    fetch_emails_task >> branch_task >> decide_and_search >> generate_response
