@@ -699,16 +699,16 @@ def combined_excel_pdf_summary(ti, **context):
 
         prompt = f"""Generate a **Final Assessment Report and cost comparison Report** based on the extracted details from the Excel invoice and the attached PDF/Image.
 
+    CRITICAL INSTRUCTIONS:
+    - ALL bullet points MUST be formatted using valid HTML list tags:
+    - Use <ul> and <li> for all bullets.
+    - Do NOT use Markdown bullet formats such as "-", "*", or "•".
+    - Only use <strong> for bold text.
+    - The final output MUST be fully valid HTML with no Markdown.
+      
       You must follow these instructions strictly when generating the final output:
 
         1. OUTPUT DECISION LOGIC
-        - If an Excel assessment report is provided:
-            • Generate a detailed Assessment Summary.
-            • Include key findings, risks, red flags, optimization opportunities, and performance insights.
-        - If a PDF or image is provided:
-            • Generate a detailed Cost Comparison Summary.
-            • Identify which provided service is being compared to which Akamai service.
-            • Include cost breakdown, savings, risks, optimization opportunities, and performance benefits.
         - If both Excel and PDF/image files are provided:
             • Combine both outputs into one seamless, unified report.
             • Include both the Assessment Summary and the Cost Comparison Summary.

@@ -11,7 +11,7 @@ import json
 
 # Define Airflow Variables with default values
 SITEMAP_URL = Variable.get("lowtouch_sitemap_url", default_var="https://www.lowtouch.ai/sitemap_index.xml")
-UUID = Variable.get("lowtouch_uuid", default_var="febe553a-e665-4000-9cf4-b6ab84b0560f")
+UUID = Variable.get("lowtouch_uuid")
 SLACK_WEBHOOK_URL = Variable.get("SLACK_WEBHOOK_URL", default_var=None)
 SERVER_NAME = Variable.get("SERVER", default_var="UNKNOWN")
 
