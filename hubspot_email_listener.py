@@ -626,7 +626,7 @@ def mark_message_as_read(service, message_id):
         logging.error(f"Error marking message {message_id} as read: {e}")
         return False
 
-def get_ai_response(prompt, conversation_history=None, expect_json=False):
+def get_ai_response(prompt, conversation_history=None, expect_json=False, stream=True):
     try:
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
         messages = []
@@ -641,16 +641,41 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
             for item in conversation_history:
                 messages.append({"role": "user", "content": item["prompt"]})
                 messages.append({"role": "assistant", "content": item["response"]})
+        
         messages.append({"role": "user", "content": prompt})
-        response = client.chat(model='hubspot:v6af', messages=messages, stream=False)
-        ai_content = response.message.content
+        
+        response = client.chat(model='hubspot:v6af', messages=messages, stream=stream)
+        
+        # Handle response based on streaming mode
+        if stream:
+            ai_content = ""
+            try:
+                for chunk in response:
+                    if hasattr(chunk, 'message') and hasattr(chunk.message, 'content'):
+                        ai_content += chunk.message.content
+                    else:
+                        logging.error("Chunk lacks expected 'message.content' structure")
+            except Exception as stream_error:
+                # Streaming failed - log it and raise to outer exception handler
+                logging.error(f"Streaming error: {stream_error}")
+                raise  # Re-raise to be caught by outer except block
+        else:
+            if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
+                logging.error("Response lacks expected 'message.content' structure")
+                if expect_json:
+                    return '{"error": "Invalid response format from AI"}'
+                else:
+                    return "<html><body>Invalid response format from AI</body></html>"
+            ai_content = response.message.content
 
+        # Clean up markdown code blocks
         ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
 
+        # Add HTML wrapper if needed
         if not expect_json and not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html') and not ai_content.strip().startswith('{'):
             ai_content = f"<html><body>{ai_content}</body></html>"
 
-        return ai_content.strip()
+        return ai_content.strip()        
     except Exception as e:
         logging.error(f"Error in get_ai_response: {e}")
         if expect_json:
@@ -949,7 +974,7 @@ def export_to_file(data, export_format='excel', filename=None, export_dir='/appz
     except Exception as e:
         logging.error(f"Export failed: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
-
+        
 def branch_function(**kwargs):
     ti = kwargs['ti']
     unread_emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="unread_emails")
@@ -1429,7 +1454,6 @@ Your final response must be in below format if the trigger_report is false:
                         
                         mark_message_as_read(service, email_id)
                         ti.xcom_push(key="general_query_report", value=[email])
-                        # Call trigger_report_dag directly
                         kwargs_copy = kwargs.copy()
                         kwargs_copy['ti'] = ti
                         trigger_report_dag(**kwargs_copy)

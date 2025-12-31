@@ -50,37 +50,101 @@ def authenticate_gmail():
         logging.error(f"Failed to authenticate Gmail: {str(e)}")
         return None
 
-def get_ai_response(prompt, conversation_history=None, expect_json=False):
+def get_ai_response(prompt, conversation_history=None, expect_json=False, stream=True):
     try:
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
         messages = []
 
+        # Strong system prompt when expecting JSON
         if expect_json:
             messages.append({
                 "role": "system",
-                "content": "You are a JSON-only API. Always respond with valid JSON objects. Never include explanatory text, HTML, or markdown formatting. Only return the requested JSON structure."
+                "content": (
+                    "You are a strict JSON-only API. Respond with ONLY a single valid JSON object. "
+                    "Never include explanations, reasoning, <think> tags, markdown, code blocks, HTML, or any extra text. "
+                    "Do not wrap the JSON in ```json markers. Always output valid, parseable JSON directly. "
+                    "If you cannot produce valid JSON, respond with: {\"error\": \"failed to generate valid response\"}"
+                )
             })
 
+        # Add conversation history if provided
         if conversation_history:
             for item in conversation_history:
                 if "role" in item and "content" in item:
                     messages.append({"role": item["role"], "content": item["content"]})
                 else:
                     messages.append({"role": "user", "content": item.get("prompt", "")})
-                    messages.append({"role": "assistant", "content": item.get("response", "")})
-                    
-        messages.append({"role": "user", "content": prompt})
-        response = client.chat(model='hubspot:v6af', messages=messages, stream=False)
-        ai_content = response.message.content
-        ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
+                    if item.get("response"):
+                        messages.append({"role": "assistant", "content": item.get("response", "")})
 
+        # Add the current user prompt
+        messages.append({"role": "user", "content": prompt})
+
+        # Call Ollama
+        response = client.chat(model='hubspot:v6af', messages=messages, stream=stream)
+
+        # Accumulate streamed response
+        ai_content = ""
+        if stream:
+            try:
+                for chunk in response:
+                    if hasattr(chunk, 'message') and hasattr(chunk.message, 'content'):
+                        ai_content += chunk.message.content
+                    else:
+                        logging.warning("Chunk missing expected message.content structure")
+            except Exception as e:
+                logging.error(f"Error during streaming: {e}")
+                raise
+        else:
+            if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
+                raise ValueError("Non-streaming response missing message.content")
+            ai_content = response.message.content
+
+        # === POST-PROCESSING CLEANUP ===
+        raw_content = ai_content  # Keep for debugging
+        ai_content = ai_content.strip()
+
+        # Remove markdown code blocks (```json, ```, etc.)
+        ai_content = re.sub(r'```(?:json|html)?\n?', '', ai_content)
+        ai_content = re.sub(r'```', '', ai_content)
+
+        # Remove <think>...</think> tags and their content
+        ai_content = re.sub(r'<think>.*?</think>', '', ai_content, flags=re.DOTALL)
+
+        # Remove any leading/trailing whitespace again
+        ai_content = ai_content.strip()
+
+        # If expecting JSON, extract and validate
         if expect_json:
-            return ai_content
-        if not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html') and not ai_content.strip().startswith('{'):
+            if not ai_content:
+                logging.error("AI returned empty response after cleanup")
+                raise ValueError("Empty response from AI after processing")
+
+            # Try to find the first valid JSON object
+            json_match = re.search(r'\{.*\}', ai_content, re.DOTALL)
+            if not json_match:
+                logging.error(f"No JSON object found in AI response: {raw_content[:500]}")
+                raise ValueError("No JSON found in model output")
+
+            ai_content = json_match.group(0)
+
+            # Final validation: try to parse it
+            try:
+                test_parse = json.loads(ai_content)
+                logging.info("Successfully parsed cleaned JSON from AI")
+            except json.JSONDecodeError as e:
+                logging.error(f"Still invalid JSON after extraction: {ai_content[:500]}")
+                logging.error(f"JSON error: {e}")
+                raise ValueError(f"Invalid JSON from AI: {e}")
+
+            return ai_content  # Return clean, validated JSON string
+
+        # Non-JSON mode: fallback HTML wrapping
+        if not ai_content.startswith('<!DOCTYPE') and not ai_content.startswith('<html') and not ai_content.startswith('{'):
             ai_content = f"<html><body>{ai_content}</body></html>"
         return ai_content.strip()
     except Exception as e:
-        logging.error(f"Error in get_ai_response: {e}")
+        logging.error(f"Error in get_ai_response: {e}", exc_info=True)
         raise
 
 def parse_email_addresses(address_string):
@@ -4260,7 +4324,6 @@ def compose_response_html(ti, **context):
         <p>Please review the details above and let me know if you need assistance resolving these issues.</p>
     </div>
     """
-    
     # Closing
     email_content += """
     <div class="closing">
