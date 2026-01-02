@@ -704,30 +704,8 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
                 messages.append({"role": "assistant", "content": item["response"]})
         
         messages.append({"role": "user", "content": prompt})
-        
-        response = client.chat(model='hubspot:v6af', messages=messages, stream=stream)
-        
-        # Handle response based on streaming mode
-        if stream:
-            ai_content = ""
-            try:
-                for chunk in response:
-                    if hasattr(chunk, 'message') and hasattr(chunk.message, 'content'):
-                        ai_content += chunk.message.content
-                    else:
-                        logging.error("Chunk lacks expected 'message.content' structure")
-            except Exception as stream_error:
-                # Streaming failed - log it and raise to outer exception handler
-                logging.error(f"Streaming error: {stream_error}")
-                raise  # Re-raise to be caught by outer except block
-        else:
-            if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
-                logging.error("Response lacks expected 'message.content' structure")
-                if expect_json:
-                    return '{"error": "Invalid response format from AI"}'
-                else:
-                    return "<html><body>Invalid response format from AI</body></html>"
-            ai_content = response.message.content
+        response = client.chat(model='hubspot:v6af', messages=messages, stream=False)
+        ai_content = response.message.content
 
         # Clean up markdown code blocks
         ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
@@ -1448,6 +1426,26 @@ def analyze_and_search_with_tools(**kwargs):
             user_content=content,
             chat_history=chat_history  # ← Pass full history
         )
+        # Check if spelling correction was applied
+        was_typo_corrected = False
+        closest_match_name = None
+
+        if spelling_variants:
+            # Check if any variants were used in the search
+            for entity_type in ['contacts', 'companies', 'deals']:
+                variants_list = spelling_variants.get(entity_type, [])
+                for variant_group in variants_list:
+                    original = variant_group.get('original', '').lower()
+                    variants = variant_group.get('variants', [])
+                    
+                    # If we have variants, the second one is usually the corrected version
+                    if len(variants) > 1 and original != variants[1]:
+                        was_typo_corrected = True
+                        closest_match_name = variants[1].title()  # Capitalize properly
+                        logging.info(f"✓ Detected typo correction: '{original}' → '{closest_match_name}'")
+                        break
+                if was_typo_corrected:
+                    break
 
         try:
             # CHECK IF CLARIFICATION WAS ALREADY SENT IN THIS THREAD
@@ -1507,6 +1505,10 @@ INSTRUCTIONS FOR CLARIFICATION RESPONSE:
             
             # MAIN PROMPT
             prompt = f"""You are a friendly HubSpot email assistant with the following capabilities:
+
+CRITICAL RULE: ALWAYS fetch ALL matching results up to 200 maximum. NEVER use pagination or limits of 10.
+When searching, use max_results=200 parameter to get everything at once.
+
 - Answer generic HubSpot questions
 - Handle greetings and casual conversation
 - Search HubSpot data (contacts, companies, deals, tasks)
@@ -1558,8 +1560,13 @@ CRITICAL WORKFLOW:
 ═══════════════════════════════════════════════════════════════════
 IMPORTANT:
 **Pagination Handling:**
-- Fetch ALL results up to 200 max
-- Do not follow the limit 10 rule for pagination here.
+**PAGINATION - CRITICAL OVERRIDE:**
+- ALWAYS set max_results=200 in ALL search calls
+- NEVER paginate or limit to 10 results
+- Example: search_contacts(filters=[...], max_results=200)
+- Example: search_deals(filters=[...], max_results=200)
+- If you see ANY pagination code, DELETE IT and use max_results=200
+
 **1. IDENTIFY QUERY TYPE:**
    - Direct entity query: "show me all contacts", "find company X"
    - Associated data query: "deals for contact X", "company for contact Y", "contacts in company Z"
@@ -1594,29 +1601,58 @@ IMPORTANT:
       - NOW search for the TARGET entity using this ID
       - Return final results with proper fields
 
-**4. HANDLING CLARIFICATION RESPONSES:**
-   When clarification_already_sent is True AND original_query_type contains associations:
-   a) Parse user's response (email, "row 1", "first one", name + company)
-   b) Identify which entity from the original list they're selecting
-   c) Get that entity's ID
-   d) Check the query_type and target_entity
-   e) If query_type is like "company_for_contact":
-      - Use the selected contact's ID
-      - Call search_companies with association to this contact_id
-      - Return company data with proper fields
-   f) If query_type is like "deals_for_contact":
-      - Use the selected contact's ID
-      - Call search_deals with association to this contact_id
-      - Return deals data with proper fields
-   g) Return as:
+**4. HANDLING CLARIFICATION RESPONSES (CRITICAL):**
+   When clarification_already_sent is True:
+   
+   a) PARSE USER'S CLARIFICATION:
+      - Extract row number: "row 1", "first one", "the second", "number 3"
+      - Extract email: look for @domain.com pattern
+      - Extract name + company: "John at Acme", "Sarah Smith from Tech Corp"
+   
+   b) MATCH TO ORIGINAL RESULTS:
+      - Row number: use results[row_number]
+      - Email: find result where Email field matches exactly
+      - Name + company: find best match combining name fields and company
+   
+   c) GET THE ENTITY ID:
+      - Extract the ID field from the matched result
+      - For contacts: use "Contact ID" or "id" field
+      - For companies: use "Company Id" or "id" field
+      - For deals: use "Deal ID" or "id" field
+   
+   d) CHECK QUERY TYPE:
+      - If query_type == "company_for_contact":
+        * Use the contact ID you just found
+        * Call search_companies with filter: {{"propertyName": "associations.contact", "operator": "CONTAINS_TOKEN", "value": "<contact_id>"}}
+        * Return company results with proper Company fields
+      
+      - If query_type == "deals_for_contact":
+        * Use the contact ID you just found
+        * Call search_deals with filter: {{"propertyName": "associations.contact", "operator": "CONTAINS_TOKEN", "value": "<contact_id>"}}
+        * Return deal results with proper Deal fields
+      
+      - If query_type == "contacts_for_company":
+        * Use the company ID you just found
+        * Call search_contacts with filter: {{"propertyName": "associatedcompanyid", "operator": "EQ", "value": "<company_id>"}}
+        * Return contact results with proper Contact fields
+      
+      - If query_type == "direct_search" (no association):
+        * Return the selected entity directly - no additional search needed
+        * Just return that one contact/company/deal they selected
+   
+   e) RETURN FORMAT:
       {{
         "clarification_resolved": true,
         "needs_search": true,
-        "results": [...final target entity results...],
+        "results": [...TARGET entity results with ALL required fields...],
         "result_count": <count>,
-        "entity": "companies|deals|contacts",
-        "clarified_entity_id": "the ID they selected"
+        "entity": "<target_entity_type>",
+        "clarified_entity_id": "<the ID they selected>",
+        "selected_from_original": "<original entity info for logging>"
       }}
+   
+   🚨 CRITICAL: After clarification, return ONLY the TARGET entity data they asked for.
+   If they wanted "deals for Priya", don't return Priya's contact info - return her DEALS.
 
 ═══════════════════════════════════════════════════════════════════
 SEARCH GUIDELINES:
@@ -1734,12 +1770,14 @@ MANDATORY OUTPUT FORMAT:
                         
                         clarification_html = build_clarification_email_with_excel(
                             sender_name=sender_name,
-                            total_count=total_count,
                             entity=entity,
                             search_term=search_term,
+                            total_count=total_count,
                             query_type=query_type,
                             target_entity=target_entity,
-                            original_query=original_query
+                            original_query=original_query,
+                            closest_match_name=closest_match_name,  # ADD THIS
+                            was_typo=was_typo_corrected  # ADD THIS
                         )
                         
                         send_email_with_attachment(
@@ -1755,13 +1793,14 @@ MANDATORY OUTPUT FORMAT:
                         logging.error(f"Excel export failed: {export_result.get('error')}")
                         clarification_html = build_clarification_email_html(
                             sender_name=sender_name,
-                            results=results[:10],
+                            total_count=total_count,
                             entity=entity,
                             search_term=search_term,
-                            total_count=total_count,
                             query_type=query_type,
                             target_entity=target_entity,
-                            original_query=original_query
+                            original_query=original_query,
+                            closest_match_name=closest_match_name,  # ADD THIS
+                            was_typo=was_typo_corrected  # ADD THIS
                         )
                         send_email_reply(service, email, clarification_html)
                 else:
@@ -2019,7 +2058,7 @@ def build_clarification_email_with_excel(sender_name, total_count, entity, searc
     <style>
         body {{ font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }}
         .content {{ margin: 20px 0; }}
-        .note {{ background-color: #fff3cd; padding: 10px; border-left: 4px solid #ffc107; margin: 15px 0; }}
+        .note {{padding: 10px;margin: 15px 0; }}
         .footer {{ margin-top: 20px; font-size: 0.9em; color: #666; }}
     </style>
 </head>
@@ -2239,8 +2278,36 @@ def generate_final_response_or_trigger_report(**kwargs):
             logging.info(f"Entity type for {email_id}: {entity}")
 
             # Direct routing based on count
-            if count > 10:
-                logging.info(f"Triggering report DAG ({count} results) for {email_id}")
+            # STRICT COUNT-BASED ROUTING
+            logging.info(f"Result count for {email_id}: {count} {entity}")
+
+            if count == 0:
+                # No results - use template
+                logging.info(f"→ Routing to NO RESULTS template")
+                html_content = build_no_results_html(sender_name, entity)
+                send_email_reply(service, email, html_content)
+                mark_message_as_read(service, email_id)
+                continue
+
+            elif count == 1:
+                # Single result - inline format
+                logging.info(f"→ Routing to SINGLE RESULT (inline) template")
+                html_content = build_single_result_html(sender_name, results[0], entity)
+                send_email_reply(service, email, html_content)
+                mark_message_as_read(service, email_id)
+                continue
+
+            elif 2 <= count <= 10:
+                # Multiple but manageable - HTML table
+                logging.info(f"→ Routing to HTML TABLE template ({count} results)")
+                html_content = build_table_html(sender_name, results, entity, count)
+                send_email_reply(service, email, html_content)
+                mark_message_as_read(service, email_id)
+                continue
+
+            else:  # count > 10
+                # Too many - trigger report with Excel
+                logging.info(f"→ Routing to EXCEL REPORT ({count} results)")
                 mark_message_as_read(service, email_id)
                 ti.xcom_push(key="general_query_report", value=[email])
                 trigger_report_dag(**kwargs)
@@ -2937,14 +3004,32 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                 final_properties = list(set(default_props + (properties or [])))
                
                 # Execute search
+                # Execute search - FORCE FETCH ALL RESULTS (no max_results limit)
+                logging.info(f"Executing search for {entity_type} with filters: {filters}")
+
                 if entity_type == "contacts":
-                    search_results = search_contacts(filters=filters, properties=final_properties)
+                    search_results = search_contacts(
+                        filters=filters, 
+                        properties=final_properties,
+                        limit=200,  # Max per page
+                        max_results=None  # No limit - fetch everything
+                    )
                 elif entity_type == "companies":
-                    search_results = search_companies(filters=filters, properties=final_properties)
+                    search_results = search_companies(
+                        filters=filters, 
+                        properties=final_properties,
+                        limit=200,
+                        max_results=None
+                    )
                 elif entity_type == "deals":
-                    search_results = search_deals(filters=filters, properties=final_properties)
-                else:
-                    raise ValueError(f"Invalid entity type: {entity_type}")
+                    search_results = search_deals(
+                        filters=filters, 
+                        properties=final_properties,
+                        limit=200,
+                        max_results=None
+                    )
+
+                logging.info(f"Search completed: {len(search_results.get('results', []))} total {entity_type} found")
                
                 results_data = search_results.get("results", [])
                
