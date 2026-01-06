@@ -203,24 +203,43 @@ def get_task_details(task_id):
         logging.error(f"Failed to get task {task_id}: {e}")
         return None
 
-def update_task_status(task_id, status="COMPLETED"):
-    """Update task status in HubSpot"""
+def update_task_status(task_id, status=None, due_date=None):
+    """Update task status and/or due date in HubSpot"""
     try:
         endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/tasks/{task_id}"
         headers = {
             "Authorization": f"Bearer {HUBSPOT_API_KEY}",
             "Content-Type": "application/json"
         }
-        payload = {
-            "properties": {
-                "hs_task_status": status
-            }
-        }
+        
+        properties = {}
+        
+        # Update status if provided
+        if status:
+            properties["hs_task_status"] = status
+        
+        # Update due date if provided
+        if due_date:
+            # Convert datetime to milliseconds timestamp
+            due_timestamp = int(due_date.timestamp() * 1000)
+            properties["hs_timestamp"] = due_timestamp
+        
+        if not properties:
+            logging.warning(f"No properties to update for task {task_id}")
+            return False
+        
+        payload = {"properties": properties}
         
         response = requests.patch(endpoint, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
         
-        logging.info(f"✓ Updated task {task_id} status to {status}")
+        updates = []
+        if status:
+            updates.append(f"status to {status}")
+        if due_date:
+            updates.append(f"due date to {due_date.strftime('%Y-%m-%d')}")
+        
+        logging.info(f"✓ Updated task {task_id}: {', '.join(updates)}")
         return True
         
     except Exception as e:
@@ -494,12 +513,21 @@ Current Close Date: {deal_details.get('current_closedate', 'Not set')}
     
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     
-    # ENHANCED AI PROMPT with better deal update detection
-    analysis_prompt = f"""Today's date is {today}. Analyze this email reply to determine if the user wants to mark a task as completed and/or create a follow-up task and/or update the associated deal.
+    # ENHANCED AI PROMPT with task due date update detection
+    analysis_prompt = f"""Today's date is {today}. Analyze this email reply to determine if the user wants to:
+1. Mark a task as completed
+2. Create a follow-up task
+3. Update the associated deal
+4. Update the current task's due date
 
 Email content: "{email_content}"
 Deal Context:
 {deal_context}
+
+IMPORTANT TASK DUE DATE RULES:
+- If user says "extend the due date", "postpone to", "move to", "reschedule to" → extract new due date
+- If user mentions a new deadline for THIS task (not a follow-up) → extract that date
+- Examples: "extend to next week", "move this to Friday", "postpone until January 15"
 
 IMPORTANT DEAL UPDATE RULES:
 - If user says "we lost the deal", "lost this deal", or similar → set dealstage_label to "Closed Lost"
@@ -518,6 +546,8 @@ Calculate dates relative to today ({today}):
 Return ONLY valid JSON with NO additional text:
 {{
     "mark_completed": true/false,
+    "update_task_due_date": true/false,
+    "new_task_due_date": "YYYY-MM-DD or null",
     "create_followup": true/false,
     "followup_due_date": "YYYY-MM-DD or null",
     "followup_notes": "string or empty",
@@ -553,13 +583,15 @@ Return ONLY valid JSON with NO additional text:
         "task_id": task_id,
         "email_data": email_data,
         "mark_completed": analysis.get("mark_completed", False),
+        "update_task_due_date": analysis.get("update_task_due_date", False),
+        "new_task_due_date": analysis.get("new_task_due_date"),
         "create_followup": analysis.get("create_followup", False),
         "followup_due_date": followup_due,
         "followup_notes": analysis.get("followup_notes", ""),
         "followup_owner_name": analysis.get("followup_owner_name", ""),
         "update_deal": analysis.get("update_deal", False),
         "deal_updates": analysis.get("deal_updates", {}),
-        "deal_id": deal_id  # Store deal_id in analysis result
+        "deal_id": deal_id
     }
     
     kwargs['ti'].xcom_push(key="task_completion_analysis", value=result)
@@ -568,7 +600,7 @@ Return ONLY valid JSON with NO additional text:
     return result
 
 def process_task_completion(**kwargs):
-    """Process task completion and follow-up creation"""
+    """Process task completion, due date updates, and follow-up creation"""
     ti = kwargs['ti']
     analysis = ti.xcom_pull(key="task_completion_analysis", task_ids="analyze_request")
     
@@ -582,6 +614,8 @@ def process_task_completion(**kwargs):
     results = {
         "task_id": task_id,
         "completed": False,
+        "due_date_updated": False,
+        "new_due_date": None,
         "followup_created": False,
         "followup_task_id": None,
         "deal_updated": False,
@@ -597,12 +631,30 @@ def process_task_completion(**kwargs):
         ti.xcom_push(key="processing_results", value=results)
         return results
     
-    # Mark task as completed if requested
-    if analysis.get("mark_completed"):
-        success = update_task_status(task_id, "COMPLETED")
-        results["completed"] = success
-        if not success:
-            results["error"] = "Failed to mark task as completed"
+    # Prepare task updates (status and/or due date)
+    status_to_set = "COMPLETED" if analysis.get("mark_completed") else None
+    due_date_to_set = None
+    
+    if analysis.get("update_task_due_date"):
+        new_due_str = analysis.get("new_task_due_date")
+        if new_due_str:
+            try:
+                due_date_to_set = datetime.strptime(new_due_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except Exception as e:
+                logging.error(f"Failed to parse due date {new_due_str}: {e}")
+                results["error"] = f"Invalid due date format: {new_due_str}"
+    
+    # Update task (status and/or due date in single call)
+    if status_to_set or due_date_to_set:
+        success = update_task_status(task_id, status=status_to_set, due_date=due_date_to_set)
+        if status_to_set:
+            results["completed"] = success
+        if due_date_to_set:
+            results["due_date_updated"] = success
+            if success:
+                results["new_due_date"] = analysis.get("new_task_due_date")
+        if not success and not results["error"]:
+            results["error"] = "Failed to update task"
     
     # Create follow-up task if requested
     if analysis.get("create_followup"):
@@ -706,6 +758,19 @@ def send_confirmation_email(**kwargs):
     orig_subject = orig_props.get("hs_task_subject", "Task")
     orig_priority = orig_props.get("hs_task_priority", "MEDIUM").title()
     
+    # Task status
+    task_status = "Completed" if results.get("completed") else "In Progress"
+    
+    # Due date section
+    due_date_section = ""
+    if results.get("due_date_updated"):
+        new_due = results.get("new_due_date")
+        try:
+            formatted_due = datetime.strptime(new_due, "%Y-%m-%d").strftime("%B %d, %Y")
+            due_date_section = f"<li><strong>New Due Date:</strong> {formatted_due}</li>"
+        except:
+            due_date_section = f"<li><strong>New Due Date:</strong> {new_due}</li>"
+    
     followup_id = results.get("followup_task_id")
     fp_subject = "Follow-up task"
     fp_due_formatted = "Not specified"
@@ -767,11 +832,12 @@ def send_confirmation_email(**kwargs):
     <p>Hello {sender_name},</p>
     <p>Thank you for your update. Your request has been processed.</p>
     
-    <p><strong>Completed Task:</strong></p>
+    <p><strong>Current Task:</strong></p>
     <ul><li><strong>Task:</strong> {orig_subject}</li>
         <li><strong>ID:</strong> {task_id}</li>
         <li><strong>Priority:</strong> {orig_priority}</li>
-        <li><strong>Status:</strong> Completed</li>
+        <li><strong>Status:</strong> {task_status}</li>
+        {due_date_section}
         <li><strong>Link:</strong> <a href="{HUBSPOT_TASK_UI_URL}/view/all/task/{task_id}">Open Task</a></li>
     </ul>
     
