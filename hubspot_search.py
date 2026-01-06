@@ -2947,9 +2947,11 @@ def compose_confirmation_email(ti, **context):
     # Deal Owner
     if deal_results.get("total", 0) > 0 or len(new_deals) > 0:
         deal_msg_lower = deal_owner_msg.lower()
+        assignment_html.append("""
+        <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Task Owner Assignment:</h4>
+    """)
         if "no deal owner specified" in deal_msg_lower:
             assignment_html.append(f"""
-                <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Owner Assignment:</h4>
                 <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 0;'>
                     <strong>Reason:</strong> Deal owner not specified.
                     <br><strong>Action:</strong> Assigning to default owner '{chosen_deal_owner_name}'.
@@ -2957,7 +2959,6 @@ def compose_confirmation_email(ti, **context):
             """)
         elif "not valid" in deal_msg_lower:
             assignment_html.append(f"""
-                <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Owner Assignment:</h4>
                 <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 0;'>
                     <strong>Reason:</strong> Deal owner not found in available owners.
                     <br><strong>Action:</strong> Assigning to default owner '{chosen_deal_owner_name}'.
@@ -2966,6 +2967,10 @@ def compose_confirmation_email(ti, **context):
 
     # Task Owners
     if len(meaningful_tasks) > 0:
+        # Add the common heading only once
+        assignment_html.append("""
+            <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Task Owner Assignment:</h4>
+        """)
         for task in corrected_tasks:
             task_index = task.get("task_index", 0)
             task_owner_name = task.get("task_owner_name", "Kishore")
@@ -2975,17 +2980,15 @@ def compose_confirmation_email(ti, **context):
             task_msg_lower = task_owner_msg.lower()
             if "no task owner specified" in task_msg_lower:
                 assignment_html.append(f"""
-                    <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Task Owner Assignment:</h4>
-                    <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 0;'>
-                        <strong>Task {task_index}:</strong> {task_details}
-                        <br><strong>Reason:</strong> Task owner not specified.
-                        <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
-                    </p>
-                """)
+                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 10px 0 20px 0;'>
+                    <strong>Task {task_index}:</strong> {task_details}
+                    <br><strong>Reason:</strong> Task owner not specified.
+                    <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
+                </p>
+            """)
             elif "not valid" in task_msg_lower:
                 assignment_html.append(f"""
-                    <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Task Owner Assignment:</h4>
-                    <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 0;'>
+                    <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 10px 0 20px 0;'>
                         <strong>Task {task_index}:</strong> {task_details}
                         <br><strong>Reason:</strong> Task owner not found.
                         <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
