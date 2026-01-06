@@ -55,6 +55,39 @@ def extract_json_from_response(response_text):
         response_text = match.group(1).strip()
     return json.loads(response_text)
 
+def set_project_status(project_id, status, headers):
+    """Helper to update project status via API"""
+    try:
+        url = f"{RFP_API_BASE}/rfp/projects/{project_id}"
+        payload = {"status": status}
+        requests.patch(url, json=payload, headers=headers, timeout=10).raise_for_status()
+        logging.info(f"Project {project_id} status updated to '{status}'")
+    except Exception as e:
+        logging.warning(f"Failed to update project status to '{status}': {e}")
+
+def handle_task_failure(context):
+    """
+    Extracts details from Airflow context to call the existing set_project_status.
+    """
+    dag_run = context.get("dag_run")
+    if not dag_run:
+        return
+
+    conf = dag_run.conf or {}
+    project_id = conf.get("project_id")
+    
+    # Reconstruct headers from conf, just like in your other tasks
+    headers = {
+        "Content-Type": "application/json", 
+        "Accept": "application/json",
+        "WORKSPACE_UUID": conf.get("workspace_uuid", ""),
+        "x-ltai-user-email": conf.get("x-ltai-user-email", "")
+    }
+
+    if project_id:
+        # REUSES YOUR EXISTING FUNCTION
+        set_project_status(project_id, "failed", headers)
+
 # =============================================================================
 # Task 1: Fetch PDF and Extract Text
 # =============================================================================
@@ -67,6 +100,18 @@ def fetch_pdf_from_api(**context):
     
     if not project_id:
         raise ValueError("project_id is required in dag_run.conf")
+        
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    if workspace_uuid:
+        headers["WORKSPACE_UUID"] = workspace_uuid
+    if user_email:
+        headers["x-ltai-user-email"] = user_email
+
+    # Ensure status is 'generating'
+    set_project_status(project_id, "generating", headers)
 
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/rfpfile"
     logging.info(f"Downloading PDF for project_id={project_id}")
@@ -449,7 +494,7 @@ def update_run_id_and_log(**context):
         return
     
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}"
-    payload = {"processing_dag_run_id": dag_run_id}
+    payload = {"processing_dag_run_id": dag_run_id, "status": "review"}
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json"
@@ -488,6 +533,7 @@ with DAG(
     catchup=False,
     tags=["lowtouch", "rfp", "public-pension", "processing"],
     max_active_runs=5,
+    on_failure_callback=handle_task_failure,
     params={
         "project_id": Param(
             type="integer",
