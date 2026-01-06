@@ -575,9 +575,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
                 messages.append({"role": "assistant", "content": item["response"]})
         
         messages.append({"role": "user", "content": prompt})
-
-        response = client.chat(model='hubspot:v6af', messages=messages, stream=stream)
-                
+        response = client.chat(model='hubspot:v6af', messages=messages, stream=stream)        
         # Handle response based on streaming mode
         if stream:
             ai_content = ""
