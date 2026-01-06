@@ -575,8 +575,29 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
                 messages.append({"role": "assistant", "content": item["response"]})
         
         messages.append({"role": "user", "content": prompt})
-        response = client.chat(model='hubspot:v6af', messages=messages, stream=False)
-        ai_content = response.message.content
+        response = client.chat(model='hubspot:v6af', messages=messages, stream=stream)
+
+        # Handle response based on streaming mode
+        if stream:
+            ai_content = ""
+            try:
+                for chunk in response:
+                    if hasattr(chunk, 'message') and hasattr(chunk.message, 'content'):
+                        ai_content += chunk.message.content
+                    else:
+                        logging.error("Chunk lacks expected 'message.content' structure")
+            except Exception as stream_error:
+                # Streaming failed - log it and raise to outer exception handler
+                logging.error(f"Streaming error: {stream_error}")
+                raise  # Re-raise to be caught by outer except block
+        else:
+            if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
+                logging.error("Response lacks expected 'message.content' structure")
+                if expect_json:
+                    return '{"error": "Invalid response format from AI"}'
+                else:
+                    return "<html><body>Invalid response format from AI</body></html>"
+            ai_content = response.message.content
 
         # Clean up markdown code blocks
         ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
