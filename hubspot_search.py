@@ -70,16 +70,22 @@ def decode_email_payload(msg):
         logging.error(f"Error decoding email payload: {e}")
         return ""
 
-def get_ai_response(prompt, conversation_history=None, expect_json=False, model='hubspot:v6af'):
+def get_ai_response(prompt, conversation_history=None, expect_json=False, model='hubspot:v6af', stream=True):
     try:
         client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
         messages = []
         
-
-        if expect_json and model!="hubspot:v7-perplexity":
+        if expect_json and model != "hubspot:v7-perplexity":
+            # Stronger prompt to enforce pure JSON
             messages.append({
                 "role": "system",
-                "content": "You are a JSON-only API. Always respond with valid JSON objects. Never include explanatory text, HTML, or markdown formatting. Only return the requested JSON structure."
+                "content": (
+                    "You are a strict JSON-only API. Respond with ONLY a valid JSON object. "
+                    "Never include any text before or after the JSON. "
+                    "No explanations, no markdown, no code blocks, no HTML, no <think> tags, no thinking steps. "
+                    "Start directly with { and end with }. "
+                    "Ensure the JSON is parsable and complete."
+                )
             })
 
         if conversation_history:
@@ -91,21 +97,76 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, model=
                     messages.append({"role": "assistant", "content": item.get("response", "")})
         
         messages.append({"role": "user", "content": prompt})
-        response = client.chat(model=model, messages=messages, stream=False)
-        ai_content = response.message.content
+        
+        response = client.chat(model=model, messages=messages, stream=stream)
+        
+        # Handle streaming or non-streaming response
+        if stream:
+            ai_content = ""
+            try:
+                for chunk in response:
+                    if hasattr(chunk, 'message') and hasattr(chunk.message, 'content'):
+                        ai_content += chunk.message.content
+                    else:
+                        logging.warning("Chunk lacks expected 'message.content' structure")
+            except Exception as stream_error:
+                logging.error(f"Streaming error: {stream_error}")
+                raise
+        else:
+            if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
+                logging.error("Response lacks expected 'message.content' structure")
+                return handle_json_error(expect_json)
+            ai_content = response.message.content
 
-        ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
+        # === ROBUST CLEANUP & JSON EXTRACTION ===
+        ai_content = ai_content.strip()
 
-        if not expect_json and not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html') and not ai_content.strip().startswith('{'):
-            ai_content = f"<html><body>{ai_content}</body></html>"
+        # Remove markdown code fences
+        ai_content = re.sub(r'```(?:json|html)?\n?', '', ai_content)
+        ai_content = re.sub(r'```', '', ai_content)
+
+        # Remove <think>...</think> tags (common in some models)
+        ai_content = re.sub(r'<think>.*?</think>', '', ai_content, flags=re.DOTALL | re.IGNORECASE)
+        ai_content = re.sub(r'<think>.*', '', ai_content, flags=re.DOTALL | re.IGNORECASE)  # if unclosed
+
+        # If expecting JSON, extract the first valid JSON object
+        if expect_json:
+            # Find the first { ... } block
+            json_match = re.search(r'\{.*\}', ai_content, re.DOTALL)
+            if json_match:
+                ai_content = json_match.group(0)
+            else:
+                # Last resort: try to find any JSON-like structure
+                logging.warning(f"No JSON object found in AI response. Raw: {ai_content[:500]}")
+                return '{"error": "No valid JSON found in response"}'
+
+            # Final validation
+            try:
+                json.loads(ai_content)  # Test if valid
+            except json.JSONDecodeError as e:
+                logging.error(f"Invalid JSON after cleanup: {e}\nContent: {ai_content[:500]}")
+                return '{"error": "Invalid JSON format from AI"}'
+
+        # Add HTML wrapper only if not JSON and not already HTML
+        if not expect_json:
+            if not ai_content.strip().startswith('<!DOCTYPE') and \
+               not ai_content.strip().startswith('<html') and \
+               not ai_content.strip().startswith('{'):
+                ai_content = f"<html><body>{ai_content}</body></html>"
 
         return ai_content.strip()
+
     except Exception as e:
         logging.error(f"Error in get_ai_response: {e}")
-        if expect_json:
-            return f'{{"error": "Error processing AI request: {str(e)}"}}'
-        else:
-            return f"<html><body>Error processing AI request: {str(e)}</body></html>"
+        return handle_json_error(expect_json)
+
+
+def handle_json_error(expect_json):
+    """Helper to return consistent error format"""
+    if expect_json:
+        return '{"error": "Error processing AI request - invalid or empty response"}'
+    else:
+        return "<html><body>Error processing AI request. Please try again later.</body></html>"
 
 def parse_email_addresses(address_string):
     if not address_string:
@@ -196,13 +257,82 @@ def load_context_from_dag_run(ti, **context):
         "latest_message": latest_message
     }
 
+def generate_and_inject_spelling_variants(ti, **context):
+    latest_message = ti.xcom_pull(key="latest_message", default="")
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+
+    recent_context = ""
+    for msg in chat_history[-4:]:  # Last few messages
+        recent_context += f"{msg['role'].upper()}: {msg['content']}\n\n"
+    recent_context += f"USER: {latest_message}"
+
+    variant_prompt = f"""You are a helpful assistant that detects potential spelling mistakes in names mentioned in business emails.
+
+Your task: Extract any contact names, company names, or deal names that might have typos.
+For each, list the original + 3–5 plausible spelling variants (include common misspellings).
+
+Examples:
+- "Neah" → ["neah", "neha", "neeha", "nehha", "nehaa"]
+- "Microsft" → ["microsft", "microsoft", "micrsoft", "microsfot"]
+- "Pryia" → ["pryia", "priya", "priyaa", "priiya"]
+
+Rules:
+- Always include the original spelling first.
+- Only suggest variants if the name looks like a likely typo.
+- Max 5 variants per name.
+- Use lowercase for consistency.
+
+CONVERSATION:
+{recent_context}
+
+Return ONLY valid JSON:
+{{
+    "potential_variants": {{
+        "contacts": [{{"original": "Neah", "variants": ["neah", "neha", "neeha", "nehha"]}}],
+        "companies": [{{"original": "Microsft", "variants": ["microsft", "microsoft", "micrsoft"]}}],
+        "deals": []
+    }},
+    "has_potential_typos": true/false
+}}
+"""
+
+    try:
+        response = get_ai_response(variant_prompt, expect_json=True)
+        logging.info(f"Raw AI response for spelling variants: {response}")
+        variants_data = json.loads(response.strip())
+
+        ti.xcom_push(key="spelling_variants", value=variants_data.get("potential_variants", {}))
+        ti.xcom_push(key="has_potential_typos", value=variants_data.get("has_potential_typos", False))
+
+        logging.info(f"Spelling variants generated and injected: {variants_data}")
+
+    except Exception as e:
+        logging.warning(f"Failed to generate spelling variants: {e}")
+        ti.xcom_push(key="spelling_variants", value={})
+        ti.xcom_push(key="has_potential_typos", value=False)
+
 def analyze_thread_entities(ti, **context):
     """Analyze thread to determine which entities to search and actions to take"""
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
     email_data = ti.xcom_pull(key="email_data", default={})
     thread_id = ti.xcom_pull(key="thread_id", default="unknown")
+    spelling_variants = ti.xcom_pull(key="spelling_variants", default={})
 
+    variants_section = ""
+    if spelling_variants:
+        variants_section = f"""
+                    IMPORTANT: The user may have made spelling mistakes in names.
+                    Here are detected potential typos and suggested variants (use the most likely correct one when deciding entities):
+
+                    CONTACTS: {json.dumps(spelling_variants.get("contacts", []))}
+                    COMPANIES: {json.dumps(spelling_variants.get("companies", []))}
+                    DEALS: {json.dumps(spelling_variants.get("deals", []))}
+
+                    When extracting names for search_contacts, search_companies, or search_deals:
+                    - Prefer the most plausible correct spelling from the variants list.
+                    - But always search using the best match, not just the original typo.
+                    """
     # === Extract sender and headers (same as email_listener) ===
     headers = email_data.get("headers", {})
     sender_raw = headers.get("From", "")
@@ -220,6 +350,9 @@ def analyze_thread_entities(ti, **context):
 
     # === Prompt (same as before) ===
     prompt = f"""You are a HubSpot API assistant. Analyze this latest message to determine which entities (deals, contacts, companies) are mentioned or need to be processed, and whether the user is requesting a summary of a client or deal before their next meeting. 
+
+Variant Spelling Information:
+{variants_section}
 
 LATEST USER MESSAGE:
 {latest_message}
@@ -243,7 +376,7 @@ Analyze the content and determine:
         - User mentions the contact name of a existing contact.
         - User mentions company name or deal name of a existing contact.
         - Always search every single person mentioned — never skip or filter out any individual.
-
+        - **Use spelling variants**: If a name appears to be misspelled and variants are provided above, prefer the most likely correct spelling from the variants when deciding to trigger a search.
     - COMPANIES (search_companies):
         - Set to TRUE if a company/organization name is mentioned.
         - Contact person name is also a trigger for company search.
@@ -251,7 +384,7 @@ Analyze the content and determine:
         - User Mentions the contact name or deal name of a exiting company. 
         - Do not consider the company `lowtouch.ai`.
         - Strictly ignore the previous company of the contacts and consider the current company from contacts email id.
-
+        - **Use spelling variants**: If a company name appears to be misspelled and variants are provided above, prefer the most likely correct spelling from the variants when deciding to trigger a search.
     - DEALS (search_deals):
         - Set to TRUE ONLY if ANY of these conditions are met:
             a) User explicitly mention the name of a existing deal name.The user refers to an existing deal in any way (e.g., “this deal”, “the ABC deal”, “update the opportunity”, “for this pipeline item”).
@@ -262,6 +395,7 @@ Analyze the content and determine:
             f) User states the client/contact is interested in moving forward with a purchase, contract, or agreement
             g) User mentions pricing discussions, proposals sent, quotes provided, or contract negotiations
             h) User indicates a clear buying intent from the client (e.g., "they want to proceed", "ready to sign", "committed to purchase")
+        - **Use spelling variants**: If a deal name appears to be misspelled and variants are provided above, prefer the most likely correct spelling from the variants when deciding to trigger a search.
         - Set to FALSE for:
             - Initial conversations or introductions
             - Exploratory discussions without commitment
@@ -3633,6 +3767,12 @@ with DAG(
         provide_context=True
     )
 
+    generate_variants_task = PythonOperator(
+    task_id="generate_spelling_variants",
+    python_callable=generate_and_inject_spelling_variants,
+    provide_context=True
+    )
+
     analyze_entities_task = PythonOperator(
         task_id="analyze_thread_entities",
         python_callable=analyze_thread_entities,
@@ -3790,7 +3930,7 @@ with DAG(
     )
 
     load_context_task >> analyze_entities_task >> summarize_engagement_task >> summarize_engagement_360_task >> branch_task
-
+    load_context_task >> generate_variants_task >> analyze_entities_task
     # === Summary Path ===
     branch_task >> compose_summary_email_task >> send_summary_email_task >> end_task
 
