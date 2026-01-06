@@ -2948,7 +2948,7 @@ def compose_confirmation_email(ti, **context):
     if deal_results.get("total", 0) > 0 or len(new_deals) > 0:
         deal_msg_lower = deal_owner_msg.lower()
         assignment_html.append("""
-        <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Task Owner Assignment:</h4>
+        <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Owner Assignment:</h4>
     """)
         if "no deal owner specified" in deal_msg_lower:
             assignment_html.append(f"""
