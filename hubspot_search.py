@@ -3236,85 +3236,86 @@ def compose_confirmation_email(ti, **context):
         len(new_contacts) > 0
     )
     
-    assignment_html = []  # Collect all owner assignment details
+    assignment_html = []
 
-    # Contact Owner
+    # === Contact Owner Warnings ===
     if contact_results.get("total", 0) > 0 or len(new_contacts) > 0:
         contact_msg_lower = contact_owner_msg.lower()
         if "no contact owner specified" in contact_msg_lower:
             assignment_html.append(f"""
                 <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Contact Owner Assignment:</h4>
-                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 0;'>
-                    <strong>Reason:</strong> Contact owner not specified.
-                    <br><strong>Action:</strong> Assigning to default owner '{contact_owner_name}'.
+                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 0 0 15px 0;'>
+                    <strong>Reason:</strong> Contact owner not specified.<br>
+                    <strong>Action:</strong> Assigning to default owner '{contact_owner_name}'.
                 </p>
             """)
         elif "not valid" in contact_msg_lower:
             assignment_html.append(f"""
                 <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Contact Owner Assignment:</h4>
-                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 0;'>
-                    <strong>Reason:</strong> Contact owner not found in available owners.
-                    <br><strong>Action:</strong> Assigning to default owner '{contact_owner_name}'.
+                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 0 0 15px 0;'>
+                    <strong>Reason:</strong> Contact owner not found in available owners.<br>
+                    <strong>Action:</strong> Assigning to default owner '{contact_owner_name}'.
                 </p>
             """)
 
-    # Deal Owner
+    # === Deal Owner Warnings ===
     if deal_results.get("total", 0) > 0 or len(new_deals) > 0:
         deal_msg_lower = deal_owner_msg.lower()
-        assignment_html.append("""
-        <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Owner Assignment:</h4>
-    """)
         if "no deal owner specified" in deal_msg_lower:
             assignment_html.append(f"""
-                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 0;'>
-                    <strong>Reason:</strong> Deal owner not specified.
-                    <br><strong>Action:</strong> Assigning to default owner '{chosen_deal_owner_name}'.
+                <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Owner Assignment:</h4>
+                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 0 0 15px 0;'>
+                    <strong>Reason:</strong> Deal owner not specified.<br>
+                    <strong>Action:</strong> Assigning to default owner '{chosen_deal_owner_name}'.
                 </p>
             """)
         elif "not valid" in deal_msg_lower:
             assignment_html.append(f"""
-                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 0;'>
-                    <strong>Reason:</strong> Deal owner not found in available owners.
-                    <br><strong>Action:</strong> Assigning to default owner '{chosen_deal_owner_name}'.
+                <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Owner Assignment:</h4>
+                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 0 0 15px 0;'>
+                    <strong>Reason:</strong> Deal owner not found in available owners.<br>
+                    <strong>Action:</strong> Assigning to default owner '{chosen_deal_owner_name}'.
                 </p>
             """)
 
-    # Task Owners
+    # === Task Owner Warnings ===
     if len(meaningful_tasks) > 0:
-        # Add the common heading only once
-        assignment_html.append("""
-            <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Task Owner Assignment:</h4>
-        """)
+        task_warning_blocks = []
         for task in corrected_tasks:
             task_index = task.get("task_index", 0)
-            task_owner_name = task.get("task_owner_name", "Kishore")
             task_details = task.get("task_details", "Unknown")
+            task_owner_name = task.get("task_owner_name", "Kishore")
             original_task_owner = next((to for to in task_owners if to.get("task_index") == task_index), None)
             task_owner_msg = original_task_owner.get("task_owner_message", "") if original_task_owner else ""
             task_msg_lower = task_owner_msg.lower()
+
             if "no task owner specified" in task_msg_lower:
-                assignment_html.append(f"""
-                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 10px 0 20px 0;'>
-                    <strong>Task {task_index}:</strong> {task_details}
-                    <br><strong>Reason:</strong> Task owner not specified.
-                    <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
-                </p>
-            """)
+                task_warning_blocks.append(f"""
+                    <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 10px 0 20px 0;'>
+                        <strong>Task {task_index}:</strong> {task_details}<br>
+                        <strong>Reason:</strong> Task owner not specified.<br>
+                        <strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
+                    </p>
+                """)
             elif "not valid" in task_msg_lower:
-                assignment_html.append(f"""
+                task_warning_blocks.append(f"""
                     <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 10px 0 20px 0;'>
-                        <strong>Task {task_index}:</strong> {task_details}
-                        <br><strong>Reason:</strong> Task owner not found.
-                        <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
+                        <strong>Task {task_index}:</strong> {task_details}<br>
+                        <strong>Reason:</strong> Task owner not found.<br>
+                        <strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
                     </p>
                 """)
 
-    # Render Owner Assignment section only once if anything to show
+        if task_warning_blocks:  # Only add heading if there are actual warnings
+            assignment_html.append("<h4 style='color: #2c5aa0; margin-bottom: 5px;'>Task Owner Assignment:</h4>")
+            assignment_html.extend(task_warning_blocks)
+
+    # === Render the entire section ONLY if there is at least one warning ===
     if assignment_html:
         has_content_sections = True
         email_content += "<div style='margin-bottom: 15px;'>"
         email_content += "<h3>Owner Assignment Details</h3>"
-        email_content += ''.join(assignment_html)
+        email_content += "".join(assignment_html)
         email_content += "</div>"
 
     # Deal Stage Section
