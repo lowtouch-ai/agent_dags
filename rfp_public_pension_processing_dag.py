@@ -177,14 +177,34 @@ def extract_questions_with_ai(**context):
         raise ValueError("Insufficient text for question extraction")
 
     prompt = f"""
-You are an expert at extracting questions from Public Pension RFPs.
+You are an expert RFP Analyst. Your task is to extract ALL questions from the provided RFP document along with the exact SECTION HEADER they belong to.
 
-Analyze the RFP document and extract ALL questions. Questions are typically numbered (e.g., 1., 2.1, A.3).
+### DEFINITIONS
+- **Question:** Any sentence or bullet point requesting information, confirmation, or a response from the vendor (e.g., "Describe your...", "Provide...", "1. How many...").
+- **Section:** The distinct heading or title under which a group of questions is listed. This is often bolded or numbered (e.g., "1. Qualifications and Experience", "Section A.1: General & Company").
 
-Return ONLY a valid JSON dictionary in this exact format:
-{{"1": "Full question text here", "2": "Another question", "3.1": "Subquestion text"}}
+### INSTRUCTIONS
+1. **Analyze Structure:** Look for headers that introduce a block of questions.
+2. **Extract:** For every question found, extract:
+   - The question text (clean up numbering like "1." or "A." from the start).
+   - The **Exact Section Title** it falls under.
+3. **Consistency:** All questions under the same header MUST have the exact same section string.
+4. **Fallback:** If a question has no clear header, use "General Requirements".
 
-Include question numbers as keys (strings). Do not add explanations, metadata, or extra text.
+### EXAMPLES
+*Document Text:*
+"**3. Technical capabilities**
+ A. Describe your SLA.
+ B. Do you support SSO?"
+
+*Output:*
+{{
+  "3.A": {{"text": "Describe your SLA.", "section": "3. Technical capabilities"}},
+  "3.B": {{"text": "Do you support SSO?", "section": "3. Technical capabilities"}}
+}}
+
+### OUTPUT FORMAT
+Return ONLY a valid JSON dictionary where keys are the question numbers (e.g., "1", "2.1", "A") and values are objects containing "text" and "section".
 
 Document preview: {extracted_text}
 """
@@ -203,12 +223,20 @@ Document preview: {extracted_text}
     questions_with_id = {}
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/questions"
 
-    for idx, (q_num, q_text) in enumerate(questions_dict.items(), start=1):
-        if not isinstance(q_text, str) or not q_text.strip():
+    for idx, (q_num, q_data) in enumerate(questions_dict.items(), start=1):
+        if isinstance(q_data, str):
+            q_text = q_data
+            q_section = "General"
+        else:
+            q_text = q_data.get("text", "")
+            q_section = q_data.get("section", "General")
+
+        if not q_text.strip():
             continue
 
         payload = {
             "questiontext": q_text.strip(),
+            "section": q_section.strip(),
             "questionorder": idx
         }
 
@@ -235,6 +263,7 @@ Document preview: {extracted_text}
 
             questions_with_id[q_num] = {
                 "text": q_text.strip(),
+                "section": q_section.strip(),
                 "id": question_id
             }
             logging.info(f"Created question {q_num} → ID {question_id}")
@@ -257,7 +286,26 @@ def validate_and_fix_questions(**context):
     """Validate extracted questions and add any missing ones"""
     questions_dict = context["ti"].xcom_pull(task_ids="extract_questions_with_ai", key="questions_dict")
     questions_with_id = context["ti"].xcom_pull(task_ids="extract_questions_with_ai", key="questions_with_id")
-    current_keys = sorted(questions_dict.keys(), key=lambda x: (x.split('.')[0], int(x.split('.')[-1]) if '.' in x else 0))
+    def sort_key_generator(key):
+        # 1. Clean the key of trailing dots or whitespace
+        clean_key = key.strip().rstrip('.')
+        
+        # 2. Split by dot OR underscore (handling both '1.1' and 'Section_1')
+        parts = re.split(r'[._]', clean_key)
+        
+        # 3. Primary Sort: Try to parse the *last* part as a number (e.g. '1' in 'Section_1')
+        #    If that fails, try the first part. Fallback to 999999.
+        try:
+            primary = int(parts[-1]) 
+        except ValueError:
+            try:
+                primary = int(parts[0])
+            except ValueError:
+                primary = 999999
+        
+        return (primary, clean_key)
+
+    current_keys = sorted(questions_dict.keys(), key=sort_key_generator)
     conf = context["dag_run"].conf
     project_id = conf["project_id"]
     workspace_uuid = conf['workspace_uuid']
@@ -304,13 +352,13 @@ Response format: Comma-separated missing numbers OR "COMPLETE"
 
     # Extract missing questions
     prompt_missing = f"""
-Extract ONLY these missing questions from the document. Do not touch existing ones.
+Extract ONLY these missing questions from the document. Do not touch existing ones. Determine the section they belong to.
 
 Missing numbers: {', '.join(missing_list)}
 
 Return ONLY a valid JSON object (dict) with these keys and their question text. No other text, explanations, or markdown.
 
-Example: {{"3.3": "What is the deadline?", "5.2": "Describe the process."}}
+Example: {{"3.3": {{"text": "What is the deadline?", "section": "Timeline"}}, "5.2": {{"text": "Describe the process.", "section": "Operations"}}}}
 
 Document preview: {questions_dict}
 """
@@ -327,12 +375,20 @@ Document preview: {questions_dict}
     # Create missing questions in database
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/questions"
 
-    for idx, (q_num, q_text) in enumerate(missing_dict.items(), start=len(questions_dict) + 1):
-        if not isinstance(q_text, str) or not q_text.strip():
+    for idx, (q_num, q_data) in enumerate(missing_dict.items(), start=len(questions_dict) + 1):
+        if isinstance(q_data, str):
+            q_text = q_data
+            q_section = "General"
+        else:
+            q_text = q_data.get("text", "")
+            q_section = q_data.get("section", "General")
+
+        if not q_text.strip():
             continue
 
         payload = {
             "questiontext": q_text.strip(),
+            "section": q_section.strip(),
             "questionorder": idx
         }
 
@@ -359,6 +415,7 @@ Document preview: {questions_dict}
 
             questions_with_id[q_num] = {
                 "text": q_text.strip(),
+                "section": q_section.strip(),
                 "id": question_id
             }
             logging.info(f"Added missing question {q_num} → ID {question_id}")
