@@ -2921,152 +2921,121 @@ def compose_confirmation_email(ti, **context):
         contact_results.get("total", 0) > 0 or
         len(new_contacts) > 0
     )
+    
+    assignment_html = []  # Collect all owner assignment details
 
-    if has_deals_or_tasks_or_contacts:
-        has_content_sections = True
-        
-        
-        
-        # Contact Owner
-        if contact_results.get("total", 0) > 0 or len(new_contacts) > 0:
-            email_content += "<div style='margin-bottom: 15px;'>"
-            email_content += ""
-            
-            contact_msg_lower = contact_owner_msg.lower()
-            
-            if "no contact owner specified" in contact_msg_lower:
-                email_content += "<h3>Owner Assignment Details</h3>"
-                email_content += f"""
-                <h4 style='color: #2c5aa0;'>Contact Owner Assignment:</h4>
-                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
+    # Contact Owner
+    if contact_results.get("total", 0) > 0 or len(new_contacts) > 0:
+        contact_msg_lower = contact_owner_msg.lower()
+        if "no contact owner specified" in contact_msg_lower:
+            assignment_html.append(f"""
+                <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Contact Owner Assignment:</h4>
+                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 0;'>
                     <strong>Reason:</strong> Contact owner not specified.
                     <br><strong>Action:</strong> Assigning to default owner '{contact_owner_name}'.
                 </p>
-                """
-            elif "not valid" in contact_msg_lower:
-                email_content += "<h3>Owner Assignment Details</h3>"
-                email_content += f"""
-                <h4 style='color: #2c5aa0;'>Contact Owner Assignment:</h4>
-                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
+            """)
+        elif "not valid" in contact_msg_lower:
+            assignment_html.append(f"""
+                <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Contact Owner Assignment:</h4>
+                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 0;'>
                     <strong>Reason:</strong> Contact owner not found in available owners.
                     <br><strong>Action:</strong> Assigning to default owner '{contact_owner_name}'.
                 </p>
-                """
-            email_content += "</div>"
-        # Deal Owner
-        if deal_results.get("total", 0) > 0 or len(new_deals) > 0:
-            email_content += "<div style='margin-bottom: 15px;'>"
-            email_content += ""
-            
-            deal_msg_lower = deal_owner_msg.lower()
-            
-            if "no deal owner specified" in deal_msg_lower:
-                email_content += "<h3>Owner Assignment Details</h3>"
-                email_content += f"""
-                <h4 style='color: #2c5aa0;'>Deal Owner Assignment:</h4>
-                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
+            """)
+
+    # Deal Owner
+    if deal_results.get("total", 0) > 0 or len(new_deals) > 0:
+        deal_msg_lower = deal_owner_msg.lower()
+        assignment_html.append("""
+        <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Owner Assignment:</h4>
+    """)
+        if "no deal owner specified" in deal_msg_lower:
+            assignment_html.append(f"""
+                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 0;'>
                     <strong>Reason:</strong> Deal owner not specified.
                     <br><strong>Action:</strong> Assigning to default owner '{chosen_deal_owner_name}'.
                 </p>
-                """
-            elif "not valid" in deal_msg_lower:
-                email_content += "<h3>Owner Assignment Details</h3>"
-                email_content += f"""
-                <h4 style='color: #2c5aa0;'>Deal Owner Assignment:</h4>
-                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
+            """)
+        elif "not valid" in deal_msg_lower:
+            assignment_html.append(f"""
+                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 0;'>
                     <strong>Reason:</strong> Deal owner not found in available owners.
                     <br><strong>Action:</strong> Assigning to default owner '{chosen_deal_owner_name}'.
                 </p>
-                """
-            email_content += "</div>"
+            """)
 
-        # ADD THIS: Deal Stage Validation Section
-        if deal_stage_info.get('deal_stages'):
-            email_content += "<div style='margin-bottom: 15px;'>"
-        has_stage_issues = False
-        for stage_info in deal_stage_info.get('deal_stages', []):
-            original_stage = stage_info.get('original_stage', '')
-            validated_stage = stage_info.get('validated_stage', 'Lead')
-            
-            # Check if there's an actual issue (no stage or invalid stage)
-            if not original_stage or original_stage.strip() == '':
-                has_stage_issues = True
-                break
-            elif validated_stage == 'Lead' and original_stage.lower() != 'lead':
-                has_stage_issues = True
-                break
-        
-        # Only show the section if there are issues
-        if has_stage_issues:
-            email_content += "<br>"
-            email_content += "<h3>Deal Stage Assignment Details</h3>"
-            
-        for stage_info in deal_stage_info.get('deal_stages', []):
-                deal_name = stage_info.get('deal_name', 'Unknown Deal')
-                original_stage = stage_info.get('original_stage', '')
-                validated_stage = stage_info.get('validated_stage', 'Lead')
-                stage_message = stage_info.get('stage_message', '')
-                
-                if not original_stage or original_stage.strip() == '':
-                    # No stage specified
-                    email_content += f"""
-                    <h4 style='color: #2c5aa0;'>Deal Stage for "{deal_name}":</h4>
-                    <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
-                        <strong>Reason:</strong> Deal stage not specified.
-                        <br><strong>Action:</strong> Assigning to default stage 'Lead'.
-                    </p>
-                    """
-                elif validated_stage == 'Lead' and original_stage.lower() != 'lead':
-                    # Invalid stage specified
-                    email_content += f"""
-                    <h4 style='color: #2c5aa0;'>Deal Stage for "{deal_name}":</h4>
-                    <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
-                        <strong>Reason:</strong> Invalid deal stage '{original_stage}' specified.
-                        <br><strong>Valid Stages:</strong> {', '.join(VALID_DEAL_STAGES)}
-                        <br><strong>Action:</strong> Assigning to default stage 'Lead'.
-                    </p>
-                    """
-            # Don't show anything for valid stages
-        
-        email_content += "<br>"
-
-        # Task Owners
-        if len(meaningful_tasks) > 0:
-            email_content += "<div style='margin-bottom: 15px;'>"
-            email_content += ""
-            
-            for task in corrected_tasks:  # Use corrected_tasks instead of task_owners
-                task_index = task.get("task_index", 0)
-                task_owner_name = task.get("task_owner_name", "Kishore")
-                task_details = task.get("task_details", "Unknown")
-                
-                # Find the original message from determine_owner to show what happened
-                original_task_owner = next((to for to in task_owners if to.get("task_index") == task_index), None)
-                task_owner_msg = original_task_owner.get("task_owner_message", "") if original_task_owner else ""
-                
-                task_msg_lower = task_owner_msg.lower()
-                
-                if "no task owner specified" in task_msg_lower:
-                    email_content += "<h3>Owner Assignment Details</h3>"
-                    email_content += f"""
-                    <h4 style='color: #2c5aa0;'>Task Owner Assignment:</h4>
-                    <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8;'>
-                        <strong>Task {task_index}:</strong> {task_details}
-                        <br><strong>Reason:</strong> Task owner not specified.
-                        <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
-                    </p>
-                    """
-                elif "not valid" in task_msg_lower:
-                    email_content += "<h3>Owner Assignment Details</h3>"
-                    email_content += f"""
-                    <h4 style='color: #2c5aa0;'>Task Owner Assignment:</h4>
-                    <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545;'>
+    # Task Owners
+    if len(meaningful_tasks) > 0:
+        # Add the common heading only once
+        assignment_html.append("""
+            <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Task Owner Assignment:</h4>
+        """)
+        for task in corrected_tasks:
+            task_index = task.get("task_index", 0)
+            task_owner_name = task.get("task_owner_name", "Kishore")
+            task_details = task.get("task_details", "Unknown")
+            original_task_owner = next((to for to in task_owners if to.get("task_index") == task_index), None)
+            task_owner_msg = original_task_owner.get("task_owner_message", "") if original_task_owner else ""
+            task_msg_lower = task_owner_msg.lower()
+            if "no task owner specified" in task_msg_lower:
+                assignment_html.append(f"""
+                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 10px 0 20px 0;'>
+                    <strong>Task {task_index}:</strong> {task_details}
+                    <br><strong>Reason:</strong> Task owner not specified.
+                    <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
+                </p>
+            """)
+            elif "not valid" in task_msg_lower:
+                assignment_html.append(f"""
+                    <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 10px 0 20px 0;'>
                         <strong>Task {task_index}:</strong> {task_details}
                         <br><strong>Reason:</strong> Task owner not found.
                         <br><strong>Action:</strong> Assigning to default owner '{task_owner_name}'.
                     </p>
-                    """
-            email_content += "</div>"
+                """)
+
+    # Render Owner Assignment section only once if anything to show
+    if assignment_html:
+        has_content_sections = True
+        email_content += "<div style='margin-bottom: 15px;'>"
+        email_content += "<h3>Owner Assignment Details</h3>"
+        email_content += ''.join(assignment_html)
+        email_content += "</div>"
+
+    # Deal Stage Section
+    stage_html = []
+    has_stage_issues = False
+    for stage_info in deal_stage_info.get('deal_stages', []):
+        deal_name = stage_info.get('deal_name', 'Unknown Deal')
+        original_stage = stage_info.get('original_stage', '')
+        validated_stage = stage_info.get('validated_stage', 'Lead')
+        
+        if not original_stage or original_stage.strip() == '':
+            has_stage_issues = True
+            stage_html.append(f"""
+                <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Stage for "{deal_name}":</h4>
+                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 0;'>
+                    <strong>Reason:</strong> Deal stage not specified.
+                    <br><strong>Action:</strong> Assigning to default stage 'Lead'.
+                </p>
+            """)
+        elif validated_stage == 'Lead' and original_stage.lower() != 'lead':
+            has_stage_issues = True
+            stage_html.append(f"""
+                <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Stage for "{deal_name}":</h4>
+                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 0;'>
+                    <strong>Reason:</strong> Invalid deal stage '{original_stage}' specified.
+                    <br><strong>Valid Stages:</strong> {', '.join(VALID_DEAL_STAGES)}
+                    <br><strong>Action:</strong> Assigning to default stage 'Lead'.
+                </p>
+            """)
+
+    if has_stage_issues:
+        email_content += "<div style='margin-bottom: 15px;'>"
+        email_content += "<h3>Deal Stage Assignment Details</h3>"
+        email_content += ''.join(stage_html)
+        email_content += "</div>"
 
     email_content += """
         <div class="closing">
