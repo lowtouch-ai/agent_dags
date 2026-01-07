@@ -67,6 +67,49 @@ def get_ai_response(prompt, conversation_history=None,headers=None):
         logging.error(f"AI classification failed: {e}")
         raise
 
+def set_project_status(project_id, status, headers):
+    """Helper to update project status via API"""
+    try:
+        url = f"{RFP_API_BASE}/rfp/projects/{project_id}"
+        payload = {"status": status}
+        requests.patch(url, json=payload, headers=headers, timeout=10).raise_for_status()
+        logging.info(f"Project {project_id} status updated to '{status}'")
+    except Exception as e:
+        logging.warning(f"Failed to update project status to '{status}': {e}")
+
+def handle_task_failure(context):
+    """
+    Extracts details from Airflow context to call the existing set_project_status.
+    """
+    dag_run = context.get("dag_run")
+    if not dag_run:
+        return
+
+    conf = dag_run.conf or {}
+    project_id = conf.get("project_id")
+    
+    # Reconstruct headers from conf, just like in your other tasks
+    headers = {
+        "Content-Type": "application/json", 
+        "Accept": "application/json",
+        "WORKSPACE_UUID": conf.get("workspace_uuid", ""),
+        "x-ltai-user-email": conf.get("x-ltai-user-email", "")
+    }
+
+    if project_id:
+        # REUSES YOUR EXISTING FUNCTION
+        set_project_status(project_id, "failed", headers)
+
+def update_project_doc_type(project_id, doc_type, headers):
+    """Helper to update project document_type via API"""
+    try:
+        url = f"{RFP_API_BASE}/rfp/projects/{project_id}"
+        payload = {"document_type_code": doc_type}
+        requests.patch(url, json=payload, headers=headers, timeout=10).raise_for_status()
+        logging.info(f"Project {project_id} document_type updated to '{doc_type}'")
+    except Exception as e:
+        logging.warning(f"Failed to update document_type to '{doc_type}': {e}")
+
 # =============================================================================
 # Task Functions
 # =============================================================================
@@ -78,9 +121,21 @@ def check_fast_path(**context):
     """
     conf = context["dag_run"].conf or {}
     doc_type = conf.get("document_type", "AUTO").strip().upper()
+    project_id = conf.get("project_id")
+
+    # Extract headers for API call
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "WORKSPACE_UUID": conf.get("workspace_uuid", ""),
+        "x-ltai-user-email": conf.get("x-ltai-user-email", "")
+    }
 
     if doc_type != "AUTO" and doc_type in DOCUMENT_TYPE_TO_DAG:
         logging.info(f"Fast-path activated! User provided document_type = {doc_type}")
+        # Update DB with the manually provided type
+        if project_id:
+            update_project_doc_type(project_id, doc_type, headers)
         # Push the document type so map_to_processing_dag can use it
         context["ti"].xcom_push(key="document_type", value=doc_type)
         # Skip to trigger step directly
@@ -102,6 +157,18 @@ def fetch_pdf_and_extract_text(**context):
     
     if not project_id:
         raise ValueError("project_id is required in dag_run.conf")
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    if workspace_uuid:
+        headers["WORKSPACE_UUID"] = workspace_uuid
+    if user_email:
+        headers["x-ltai-user-email"] = user_email
+
+    # Set status to 'generating' immediately
+    set_project_status(project_id, "generating", headers)
 
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/rfpfile"
     logging.info(f"Downloading PDF for project_id={project_id} from {url}")
@@ -169,6 +236,8 @@ def classify_document_with_ai(**context):
     
     if not extracted_text or len(extracted_text.strip()) < 50:
         raise ValueError("Insufficient text extracted for classification")
+    
+    project_id = context["dag_run"].conf.get("project_id") # Ensure project_id is retrieved
 
     # Truncate if too long (Ollama has context limits)
     prompt = f"""
@@ -209,6 +278,10 @@ Answer with only the code:
                     break
             else:
                 raise ValueError(f"Invalid document type returned by AI: {detected_type}")
+        
+        # Update the project in the database with the detected type
+        if project_id:
+            update_project_doc_type(project_id, detected_type, headers)
 
         context["ti"].xcom_push(key="document_type", value=detected_type)
         return detected_type
@@ -306,6 +379,7 @@ with DAG(
     tags=["lowtouch", "rfp", "ai-classifier", "document-routing"],
     max_active_runs=10,
     render_template_as_native_obj=True,
+    on_failure_callback=handle_task_failure,
     params={
         "x-ltai-user-email": Param(
             type="string",
