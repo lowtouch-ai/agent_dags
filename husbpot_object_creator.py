@@ -3375,6 +3375,12 @@ FULL CHAT HISTORY:
 
 LATEST USER MESSAGE:
 {latest_user_message}
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
+
 
 How to create associations: Always and strictly call create_multi_association API/Tool to create association.
 CRITICAL: You MUST call the create_multi_association tool. Do NOT just return JSON text. CALL THE TOOL.

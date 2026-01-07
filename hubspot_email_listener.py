@@ -558,60 +558,147 @@ def mark_message_as_read(service, message_id):
         logging.error(f"Error marking message {message_id} as read: {e}")
         return False
 
-def get_ai_response(prompt, conversation_history=None, expect_json=False, stream=True):
-    try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
-        messages = []
+def get_ai_response(prompt, conversation_history=None, expect_json=False, stream=True, max_retries=3):
+    """
+    Get AI response with robust error handling and retry logic.
+    
+    Args:
+        prompt: The user prompt
+        conversation_history: Previous conversation context
+        expect_json: Whether to expect JSON response
+        stream: Whether to use streaming mode
+        max_retries: Maximum number of retry attempts
+    """
+    
+    for attempt in range(max_retries):
+        try:
+            client = Client(
+                host=OLLAMA_HOST, 
+                headers={'x-ltai-client': 'hubspot-v6af'},
+                timeout=60.0  # Add explicit timeout
+            )
+            messages = []
 
-        if expect_json:
-            messages.append({
-                "role": "system",
-                "content": "You are a JSON-only API. Always respond with valid JSON objects. Never include explanatory text, HTML, or markdown formatting. Only return the requested JSON structure."
-            })
+            if expect_json:
+                messages.append({
+                    "role": "system",
+                    "content": "You are a JSON-only API. Always respond with valid JSON objects. Never include explanatory text, HTML, or markdown formatting. Only return the requested JSON structure."
+                })
 
-        if conversation_history:
-            for item in conversation_history:
-                messages.append({"role": "user", "content": item["prompt"]})
-                messages.append({"role": "assistant", "content": item["response"]})
-        
-        messages.append({"role": "user", "content": prompt})
-        response = client.chat(model='hubspot:v6af', messages=messages, stream=stream)        
-        # Handle response based on streaming mode
-        if stream:
-            ai_content = ""
-            try:
-                for chunk in response:
-                    if hasattr(chunk, 'message') and hasattr(chunk.message, 'content'):
-                        ai_content += chunk.message.content
+            if conversation_history:
+                for item in conversation_history:
+                    messages.append({"role": "user", "content": item["prompt"]})
+                    messages.append({"role": "assistant", "content": item["response"]})
+            
+            messages.append({"role": "user", "content": prompt})
+            
+            # Add retry-specific logging
+            if attempt > 0:
+                logging.info(f"Retry attempt {attempt + 1}/{max_retries}")
+            
+            response = client.chat(
+                model='hubspot:v6af', 
+                messages=messages, 
+                stream=stream,
+                options={
+                    'num_predict': 2048,  # Limit response length to reduce timeout risk
+                }
+            )
+            
+            # Handle response based on streaming mode
+            if stream:
+                ai_content = ""
+                chunk_count = 0
+                last_chunk_time = time.time()
+                
+                try:
+                    for chunk in response:
+                        chunk_count += 1
+                        current_time = time.time()
+                        
+                        # Check for stalled stream (no chunks for 30 seconds)
+                        if current_time - last_chunk_time > 30:
+                            logging.warning(f"Stream stalled after {chunk_count} chunks")
+                            raise TimeoutError("Stream stalled - no chunks received for 30 seconds")
+                        
+                        last_chunk_time = current_time
+                        
+                        if hasattr(chunk, 'message') and hasattr(chunk.message, 'content'):
+                            ai_content += chunk.message.content
+                        else:
+                            logging.warning(f"Chunk {chunk_count} lacks expected structure")
+                    
+                    logging.info(f"Successfully received {chunk_count} chunks")
+                    
+                except (ConnectionError, TimeoutError, Exception) as stream_error:
+                    logging.error(f"Streaming error on attempt {attempt + 1}: {stream_error}")
+                    
+                    # If we got partial content and it's the last attempt, use what we have
+                    if ai_content.strip() and attempt == max_retries - 1:
+                        logging.warning("Using partial response from failed stream")
                     else:
-                        logging.error("Chunk lacks expected 'message.content' structure")
-            except Exception as stream_error:
-                # Streaming failed - log it and raise to outer exception handler
-                logging.error(f"Streaming error: {stream_error}")
-                raise  # Re-raise to be caught by outer except block
-        else:
-            if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
-                logging.error("Response lacks expected 'message.content' structure")
-                if expect_json:
-                    return '{"error": "Invalid response format from AI"}'
-                else:
-                    return "<html><body>Invalid response format from AI</body></html>"
-            ai_content = response.message.content
+                        # Retry with non-streaming mode on next attempt
+                        if attempt < max_retries - 1:
+                            logging.info("Retrying with non-streaming mode")
+                            time.sleep(2 ** attempt)  # Exponential backoff
+                            stream = False  # Switch to non-streaming for retry
+                            continue
+                        raise
+                        
+            else:
+                # Non-streaming mode
+                if not (hasattr(response, 'message') and hasattr(response.message, 'content')):
+                    logging.error("Response lacks expected 'message.content' structure")
+                    if expect_json:
+                        return '{"error": "Invalid response format from AI"}'
+                    else:
+                        return "<html><body>Invalid response format from AI</body></html>"
+                ai_content = response.message.content
+                logging.info("Successfully received non-streaming response")
 
-        # Clean up markdown code blocks
-        ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
+            # Clean up thinking tags
+            ai_content = re.sub(r'<think>.*?</think>\s*', '', ai_content, flags=re.DOTALL)
 
-        # Add HTML wrapper if needed
-        if not expect_json and not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html') and not ai_content.strip().startswith('{'):
-            ai_content = f"<html><body>{ai_content}</body></html>"
+            # Validate JSON if expected
+            if expect_json:
+                # Try to parse to ensure it's valid JSON
+                import json
+                try:
+                    json.loads(ai_content)
+                except json.JSONDecodeError as e:
+                    logging.error(f"Invalid JSON response: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                    return '{"error": "Invalid JSON response from AI"}'
+            
+            # Add HTML wrapper if needed (non-JSON responses)
+            if not expect_json and not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html') and not ai_content.strip().startswith('{'):
+                ai_content = f"<html><body>{ai_content}</body></html>"
 
-        return ai_content.strip()        
-    except Exception as e:
-        logging.error(f"Error in get_ai_response: {e}")
-        if expect_json:
-            return f'{{"error": "Error processing AI request: {str(e)}"}}'
-        else:
-            return f"<html><body>Error processing AI request: {str(e)}</body></html>"
+            return ai_content.strip()
+            
+        except Exception as e:
+            logging.error(f"Error in get_ai_response (attempt {attempt + 1}/{max_retries}): {e}")
+            
+            # If this isn't the last attempt, retry with backoff
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                logging.info(f"Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+                continue
+            
+            # Last attempt failed - return error
+            if expect_json:
+                return f'{{"error": "Error processing AI request after {max_retries} attempts: {str(e)}"}}'
+            else:
+                return f"<html><body>Error processing AI request after {max_retries} attempts: {str(e)}</body></html>"
+    
+    # Should never reach here, but just in case
+    if expect_json:
+        return '{"error": "Maximum retries exceeded"}'
+    else:
+        return "<html><body>Maximum retries exceeded</body></html>"
 
 def search_hubspot_entities(entity_type, filters=None, properties=None, limit=100, sort=None, max_results=None):
     """
@@ -980,10 +1067,16 @@ RETURN ONLY ONE OF THESE FOUR JSONS — NO TEXT BEFORE/AFTER:
         • Latest message contains any of these:
         - "yes", "proceed", "go ahead", "confirmed", "looks good", "perfect"
         - OR moving forward along with corrections/changes ("change amount to $200k", "add Sarah", "owner should be Mike", "close date Dec 31")
-        - Is a casual comment regarding the mentioned meeting minutes in the thread ("Great call yesterday").
+        - Is a casual comment regarding the mentioned meeting minutes in the thread ("Great call yesterday", ).
         - To create a followup task related to the meeting minutes in the thread.
         - Is a reply to the daily task remainder("this task is already completed,change the task status to **COMPLETED**")
         - Update any of the entities created in the converstaion history.(For example, "Change amount to $350k and add Sarah as contact")
+        - # Casual comments definition:
+            These are messages that do not request any action or information, such as:
+            - "Will circle back next week"
+            - "Sounds good"
+            - "Looking forward to our meeting"
+            - Comments for the client company or deal being discussed.
 → {{"task_type": "continuation_dag"}}
 
 # ROUTE TO **report_dag** → ONLY when user explicitly asks for a report.
@@ -996,10 +1089,10 @@ If none of these terms are present, do not trigger report_dag under any circumst
     - “Show me the deal information.”
 → {{"task_type": "report_dag"}}
 
-# ROUTE TO **no_action** → ALL OTHER CASES
+# ROUTE TO **no_action** → Only when user asks any query about hubspot data or just casually talks with the bot
 Includes:
 • Pure greetings: hi, hello, thanks, thank you, good morning, have a great day
-• Questions about how the bot works: "Can you create deals?", "How does this work?",:"What are your capabilities?"
+• Questions about how the bot works: "How does this work?",:"What are your capabilities?"
 • ALL data retrieval requests:
    - "Show me open deals"
    - "Any deals closing this month?"
@@ -1008,6 +1101,7 @@ Includes:
    - "Is there a deal called Pipeline Booster?"
    - "What's the status of deal X?"
 • Blank emails or just "?"
+• You dont have the capability to act on casual comments or chit-chat.
 → {{"task_type": "no_action"}}
 
 EXAMPLES — YOU MUST GET THESE 100% RIGHT
@@ -1028,7 +1122,7 @@ EXAMPLES — YOU MUST GET THESE 100% RIGHT
 │ "Show all deals closing this month"                                │ no_action            │
 │ "Any follow-ups due today?"                                        │ no_action            │
 │ "Can you pull contact details for john@acme.com?"                  │ no_action            │
-│ "Will circle back next week"                                       │ no_action            │
+│ "THis was a great meeting, looking forward to our next steps"      │ continuation_dag     │
 └────────────────────────────────────────────────────────────────────┴──────────────────────┘
 Final instruction: If in doubt → route to **no_action**. Never guess creation**.
 
@@ -1627,7 +1721,28 @@ MANDATORY OUTPUT FORMAT:
             # Get AI response
             ai_response = get_ai_response(prompt=prompt, expect_json=True)
             logging.info(f"AI response for {email_id}: {ai_response}")
-            analysis = json.loads(ai_response) if isinstance(ai_response, str) else ai_response
+
+            # Extract JSON if wrapped in <think> or other tags, or has extra text
+            if isinstance(ai_response, str):
+                # Remove any <think>...</think> blocks and leading/trailing whitespace
+                cleaned = re.sub(r'<think>.*?</think>', '', ai_response, flags=re.DOTALL)
+                cleaned = cleaned.strip()
+                
+                # Find the first { or [ and extract valid JSON from there
+                json_start = cleaned.find('{')
+                json_end = cleaned.rfind('}') + 1
+                if json_start == -1 or json_end == 0:
+                    raise ValueError("No valid JSON found in AI response")
+                
+                json_str = cleaned[json_start:json_end]
+                
+                try:
+                    analysis = json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    logging.error(f"Failed to parse extracted JSON: {json_str}")
+                    raise e
+            else:
+                analysis = ai_response
 
             # HANDLE AMBIGUITY - SEND CLARIFICATION WITH METADATA EMBEDDED IN HTML
             if analysis.get("requires_clarification", False) and analysis.get("is_ambiguous", False):
