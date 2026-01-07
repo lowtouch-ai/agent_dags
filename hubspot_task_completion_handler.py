@@ -246,7 +246,7 @@ def update_task_status(task_id, status=None, due_date=None):
         logging.error(f"Failed to update task {task_id}: {e}")
         return False
 
-def create_followup_task(original_task, due_date=None, owner_name=None):
+def create_followup_task(original_task, due_date=None, task_subject=None, owner_name=None):
     """Create a follow-up task based on original task"""
     try:
         original_props = original_task.get("properties", {})
@@ -258,9 +258,12 @@ def create_followup_task(original_task, due_date=None, owner_name=None):
         # Convert to milliseconds timestamp
         due_timestamp = int(due_date.timestamp() * 1000)
         
-        # Prepare new task properties
-        task_subject = f"Follow-up: {original_props.get('hs_task_subject', 'Task')}"
-        task_body = f"Follow-up task created from completed task.\n\nOriginal task: {original_props.get('hs_task_subject', '')}\nOriginal notes: {original_props.get('hs_task_body', '')}"
+        # Use AI-suggested task subject, or fallback to "N/A"
+        if not task_subject or task_subject.strip() == "":
+            task_subject = "N/A"
+        
+        # FIXED: Task body is now same as task subject
+        task_body = task_subject
         
         owner_id = original_props.get("hubspot_owner_id")
         if owner_name:
@@ -294,7 +297,7 @@ def create_followup_task(original_task, due_date=None, owner_name=None):
         new_task = response.json()
         new_task_id = new_task.get("id")
         
-        logging.info(f"✓ Created follow-up task {new_task_id}")
+        logging.info(f"✓ Created follow-up task {new_task_id} with subject/body: {task_subject}")
         
         # Copy associations from original task
         copy_task_associations(original_task.get("id"), new_task_id)
@@ -497,6 +500,18 @@ def analyze_task_completion_request(**kwargs):
         logging.warning("No task ID found in email headers or thread history")
         return None
 
+    # Get task details for context
+    original_task = get_task_details(task_id)
+    task_context = ""
+    if original_task:
+        task_props = original_task.get("properties", {})
+        task_context = f"""
+Current Task Details:
+- Subject: {task_props.get('hs_task_subject', 'N/A')}
+- Body: {task_props.get('hs_task_body', 'N/A')}
+- Priority: {task_props.get('hs_task_priority', 'N/A')}
+"""
+
     deal_id = get_associated_deal_id(task_id)
     deal_details = get_deal_details(deal_id) if deal_id else None
     
@@ -513,12 +528,14 @@ Current Close Date: {deal_details.get('current_closedate', 'Not set')}
     
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     
-    # ENHANCED AI PROMPT with task due date update detection
+    # FIXED: Simplified AI prompt focused on task subject extraction
     analysis_prompt = f"""Today's date is {today}. Analyze this email reply to determine if the user wants to:
 1. Mark a task as completed
 2. Create a follow-up task
 3. Update the associated deal
 4. Update the current task's due date
+
+{task_context}
 
 Email content: "{email_content}"
 Deal Context:
@@ -528,6 +545,32 @@ IMPORTANT TASK DUE DATE RULES:
 - If user says "extend the due date", "postpone to", "move to", "reschedule to" → extract new due date
 - If user mentions a new deadline for THIS task (not a follow-up) → extract that date
 - Examples: "extend to next week", "move this to Friday", "postpone until January 15"
+
+CRITICAL FOLLOW-UP TASK SUBJECT EXTRACTION RULES:
+Extract the follow-up task subject from the user's email:
+
+1. **Look for task descriptions or actions** the user mentions:
+   - Examples: "schedule a call with the client", "send them the pricing document", "check if they made a decision"
+   - Extract: "Schedule call with client", "Send pricing document", "Check client decision"
+   
+2. **Clean and format the subject**:
+   - Keep it concise (under 100 characters)
+   - Use title case or sentence case
+   - Remove unnecessary words like "please", "can you", etc.
+   - Focus on the ACTION and OBJECT
+
+3. **Multi-line parsing**:
+   - User might say: "this task is done\nCreate a follow-up to send them the updated proposal"
+   - Extract: "Send updated proposal"
+
+4. **Use "N/A" as default**:
+   - User only says: "done", "completed", "task done", "yes", "create a follow-up" with NOTHING else
+   - In these cases: set followup_task_subject to empty string (will default to "N/A")
+
+5. **Important**:
+   - DO NOT invent context that isn't in the user's message
+   - Extract EXACTLY what the user wants done
+   - Be concise and action-oriented
 
 IMPORTANT DEAL UPDATE RULES:
 - If user says "we lost the deal", "lost this deal", or similar → set dealstage_label to "Closed Lost"
@@ -550,7 +593,7 @@ Return ONLY valid JSON with NO additional text:
     "new_task_due_date": "YYYY-MM-DD or null",
     "create_followup": true/false,
     "followup_due_date": "YYYY-MM-DD or null",
-    "followup_notes": "string or empty",
+    "followup_task_subject": "concise action-oriented subject or empty string",
     "followup_owner_name": "name/email or empty",
     "update_deal": true/false,
     "deal_updates": {{
@@ -579,6 +622,12 @@ Return ONLY valid JSON with NO additional text:
     if not followup_due or followup_due.lower() in ["null", "default"]:
         followup_due = (datetime.now(timezone.utc) + timedelta(weeks=2)).strftime("%Y-%m-%d")
     
+    # Get AI-suggested task subject
+    followup_task_subject = analysis.get("followup_task_subject", "")
+    if not followup_task_subject or followup_task_subject.strip() == "":
+        # Fallback: if no subject provided, use "N/A"
+        followup_task_subject = "N/A"
+    
     result = {
         "task_id": task_id,
         "email_data": email_data,
@@ -587,7 +636,7 @@ Return ONLY valid JSON with NO additional text:
         "new_task_due_date": analysis.get("new_task_due_date"),
         "create_followup": analysis.get("create_followup", False),
         "followup_due_date": followup_due,
-        "followup_notes": analysis.get("followup_notes", ""),
+        "followup_task_subject": followup_task_subject,
         "followup_owner_name": analysis.get("followup_owner_name", ""),
         "update_deal": analysis.get("update_deal", False),
         "deal_updates": analysis.get("deal_updates", {}),
@@ -669,9 +718,11 @@ def process_task_completion(**kwargs):
             except:
                 due_date = None
        
+        # FIXED: Pass task_subject instead of followup_notes
         followup_task = create_followup_task(
             original_task, 
             due_date,
+            task_subject=analysis.get("followup_task_subject"),
             owner_name=analysis.get("followup_owner_name") if analysis.get("followup_owner_name") else None
         )
        
@@ -679,7 +730,7 @@ def process_task_completion(**kwargs):
             results["followup_created"] = True
             results["followup_task_id"] = followup_task.get("id")
     
-    # FIXED: Deal Update Logic
+    # Deal Update Logic
     if deal_id and analysis.get("update_deal"):
         updates = analysis.get("deal_updates") or {}
         props = {}
@@ -773,8 +824,9 @@ def send_confirmation_email(**kwargs):
     
     followup_id = results.get("followup_task_id")
     fp_subject = "Follow-up task"
-    fp_due_formatted = "Not specified"
+    fp_due_formatted = None
     if followup_id:
+        # Try to get actual due date from created task
         fp_task = get_task_details(followup_id)
         if fp_task:
             fp_props = fp_task.get("properties", {})
@@ -783,8 +835,25 @@ def send_confirmation_email(**kwargs):
             if fp_ms:
                 try:
                     fp_due_formatted = datetime.fromtimestamp(int(fp_ms)/1000, tz=timezone.utc).strftime("%B %d, %Y")
-                except:
-                    pass
+                    logging.info(f"Retrieved follow-up due date from task: {fp_due_formatted}")
+                except Exception as e:
+                    logging.warning(f"Failed to parse follow-up timestamp: {e}")
+        
+        # Fallback: use the date from analysis if API fetch failed
+        if not fp_due_formatted:
+            due_date_str = analysis.get("followup_due_date", "")
+            if due_date_str and due_date_str != "default":
+                try:
+                    fp_due_formatted = datetime.strptime(due_date_str, "%Y-%m-%d").strftime("%B %d, %Y")
+                    logging.info(f"Using follow-up due date from analysis: {fp_due_formatted}")
+                except Exception as e:
+                    logging.warning(f"Failed to parse analysis due date: {e}")
+            
+            # Final fallback: calculate default (2 weeks from now)
+            if not fp_due_formatted:
+                default_due = datetime.now(timezone.utc) + timedelta(weeks=2)
+                fp_due_formatted = default_due.strftime("%B %d, %Y")
+                logging.info(f"Using default due date (2 weeks): {fp_due_formatted}")
 
     followup_section = ""
     if results.get("followup_created"):
