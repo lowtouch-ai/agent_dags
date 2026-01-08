@@ -17,6 +17,7 @@ from email.mime.multipart import MIMEMultipart
 from googleapiclient.errors import HttpError
 from airflow.models import Variable
 import time
+import html
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from hubspot_email_listener import get_email_thread
@@ -102,16 +103,16 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
 
         # === POST-PROCESSING CLEANUP ===
         raw_content = ai_content  # Keep for debugging
-        ai_content = ai_content.strip()
-
-        # Remove markdown code blocks (```json, ```, etc.)
         ai_content = re.sub(r'```(?:json|html)?\n?', '', ai_content)
         ai_content = re.sub(r'```', '', ai_content)
 
-        # Remove <think>...</think> tags and their content
-        ai_content = re.sub(r'<think>.*?</think>', '', ai_content, flags=re.DOTALL)
+        # NEW: Unescape HTML entities (safe here since we're cleaning anyway)
+        ai_content = html.unescape(ai_content)
 
-        # Remove any leading/trailing whitespace again
+        # Now remove <think> tags (they will be literal after unescaping)
+        ai_content = re.sub(r'<think>.*?</think>', '', ai_content, flags=re.DOTALL | re.IGNORECASE)
+
+        # Remove any leftover stray tags or whitespace
         ai_content = ai_content.strip()
 
         # If expecting JSON, extract and validate
@@ -3375,12 +3376,6 @@ FULL CHAT HISTORY:
 
 LATEST USER MESSAGE:
 {latest_user_message}
-YOU ARE A JSON-ONLY API. 
-DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
-DO NOT USE <think> TAGS.
-DO NOT SAY "invoking" OR "successful".
-IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
-
 
 How to create associations: Always and strictly call create_multi_association API/Tool to create association.
 CRITICAL: You MUST call the create_multi_association tool. Do NOT just return JSON text. CALL THE TOOL.
