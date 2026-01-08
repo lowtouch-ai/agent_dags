@@ -530,8 +530,8 @@ Current Close Date: {deal_details.get('current_closedate', 'Not set')}
     
     # FIXED: Simplified AI prompt focused on task subject extraction
     analysis_prompt = f"""Today's date is {today}. Analyze this email reply to determine if the user wants to:
-1. Mark a task as completed
-2. Create a follow-up task
+1. Mark a task as completed, Whenever user says "done", "completed", "this task is complete", "task done"etc with a clear indication of completion. Note that change the due date does NOT imply completion.
+2. Create a follow-up task along with a due date and optionally subject and owner always means to create followup. Whenever user says "create a follow-up", "new task", "follow-up to", "next task", "another task", etc. Here the user is not meaning to update the existing task but create a new one.
 3. Update the associated deal
 4. Update the current task's due date
 
@@ -546,8 +546,8 @@ IMPORTANT TASK DUE DATE RULES:
 - If user mentions a new deadline for THIS task (not a follow-up) → extract that date
 - Examples: "extend to next week", "move this to Friday", "postpone until January 15"
 
-CRITICAL FOLLOW-UP TASK SUBJECT EXTRACTION RULES:
-Extract the follow-up task subject from the user's email:
+CRITICAL FOLLOW-UP TASK SUBJECT EXTRACTION RULES FOR NEW FOLLOW-UP TASK:
+Extract the follow-up task subject from the user's email to create a new task. Follow these rules strictly:
 
 1. **Look for task descriptions or actions** the user mentions:
    - Examples: "schedule a call with the client", "send them the pricing document", "check if they made a decision"
@@ -563,8 +563,8 @@ Extract the follow-up task subject from the user's email:
    - User might say: "this task is done\nCreate a follow-up to send them the updated proposal"
    - Extract: "Send updated proposal"
 
-4. **Use "N/A" as default**:
-   - User only says: "done", "completed", "task done", "yes", "create a follow-up" with NOTHING else
+4. **Use "N/A" as default task subject**:
+   - User only says: "done", "completed", "task done", "yes", "create a follow-up" with NOTHING else specific as task subject.
    - In these cases: set followup_task_subject to empty string (will default to "N/A")
 
 5. **Important**:
@@ -675,10 +675,42 @@ def process_task_completion(**kwargs):
     
     # Get original task details
     original_task = get_task_details(task_id)
+    
+    # ✅ FIX: Handle missing tasks gracefully instead of exiting
     if not original_task:
-        results["error"] = "Failed to retrieve original task"
-        ti.xcom_push(key="processing_results", value=results)
-        return results
+        logging.warning(f"Task {task_id} not found (404) - likely already deleted. Creating follow-up with defaults.")
+        
+        # Extract task info from the email thread history if available
+        email_data = analysis.get("email_data", {})
+        thread_history = email_data.get("thread_history", [])
+        
+        # Try to find task details from the bot's reminder email
+        task_subject = "Completed Task"
+        task_owner_id = None
+        
+        for msg in thread_history:
+            if msg.get("from_bot"):
+                content = msg.get("content", "")
+                # Extract subject from reminder email
+                subject_match = re.search(r'<li><strong>Task Name:</strong>\s*([^<]+)</li>', content)
+                if subject_match:
+                    task_subject = subject_match.group(1).strip()
+                    logging.info(f"Extracted task subject from email: {task_subject}")
+                break
+        
+        # Create a minimal original task structure
+        original_task = {
+            "id": task_id,
+            "properties": {
+                "hs_task_subject": task_subject,
+                "hs_task_body": "",
+                "hs_task_priority": "MEDIUM",
+                "hubspot_owner_id": task_owner_id
+            }
+        }
+        
+        results["error"] = "Original task not found (404) - proceeding with available data"
+        # Don't return early - continue to create follow-up
     
     # Prepare task updates (status and/or due date)
     status_to_set = "COMPLETED" if analysis.get("mark_completed") else None
@@ -691,19 +723,25 @@ def process_task_completion(**kwargs):
                 due_date_to_set = datetime.strptime(new_due_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
             except Exception as e:
                 logging.error(f"Failed to parse due date {new_due_str}: {e}")
-                results["error"] = f"Invalid due date format: {new_due_str}"
+                if not results["error"]:
+                    results["error"] = f"Invalid due date format: {new_due_str}"
     
-    # Update task (status and/or due date in single call)
-    if status_to_set or due_date_to_set:
-        success = update_task_status(task_id, status=status_to_set, due_date=due_date_to_set)
-        if status_to_set:
-            results["completed"] = success
-        if due_date_to_set:
-            results["due_date_updated"] = success
-            if success:
-                results["new_due_date"] = analysis.get("new_task_due_date")
-        if not success and not results["error"]:
-            results["error"] = "Failed to update task"
+    # Update task (status and/or due date in single call) - only if task exists
+    if original_task.get("id") and (status_to_set or due_date_to_set):
+        # Check if task still exists before trying to update
+        if get_task_details(task_id):  # Verify task still exists
+            success = update_task_status(task_id, status=status_to_set, due_date=due_date_to_set)
+            if status_to_set:
+                results["completed"] = success
+            if due_date_to_set:
+                results["due_date_updated"] = success
+                if success:
+                    results["new_due_date"] = analysis.get("new_task_due_date")
+            if not success and not results["error"]:
+                results["error"] = "Failed to update task"
+        else:
+            logging.warning(f"Skipping task update - task {task_id} no longer exists")
+            results["completed"] = False  # Can't mark as completed if it doesn't exist
     
     # Create follow-up task if requested
     if analysis.get("create_followup"):
@@ -718,7 +756,7 @@ def process_task_completion(**kwargs):
             except:
                 due_date = None
        
-        # FIXED: Pass task_subject instead of followup_notes
+        # Create follow-up task
         followup_task = create_followup_task(
             original_task, 
             due_date,
@@ -729,8 +767,12 @@ def process_task_completion(**kwargs):
         if followup_task:
             results["followup_created"] = True
             results["followup_task_id"] = followup_task.get("id")
+            
+            # Update error message if follow-up was created successfully despite missing original
+            if results["error"] and "not found" in results["error"]:
+                results["error"] = "Original task not found but follow-up created successfully"
     
-    # Deal Update Logic
+    # Deal Update Logic (unchanged)
     if deal_id and analysis.get("update_deal"):
         updates = analysis.get("deal_updates") or {}
         props = {}
@@ -741,7 +783,6 @@ def process_task_completion(**kwargs):
         stage_label = (stage_label_raw or "").strip() if stage_label_raw is not None else ""
         
         if stage_label:
-            # Try multiple normalization strategies
             normalized = stage_label.lower()
             no_space = stage_label.lower().replace(" ", "")
             underscor = stage_label.lower().replace(" ", "_")
