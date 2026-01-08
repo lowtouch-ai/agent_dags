@@ -81,8 +81,7 @@ with DAG(
 
         # --- CONFIGURATION ---
         TOKEN_VAR_NAME = 'IMAGEGUARD_GMAIL_CREDENTIALS'
-        # PASTE YOUR ID HERE ↓
-        SHEET_ID = '12EiTmMl-8nI-cPXfjGgNIHwhqYCXZx3ue7ZhlX7aUbg' 
+        SHEET_ID = Variable.get("IMAGEGUARD_EOL_SHEET_ID")
 
         # 2. Get Token
         token_json = Variable.get(TOKEN_VAR_NAME, default_var=None)
