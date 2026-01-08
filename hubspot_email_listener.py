@@ -94,19 +94,48 @@ def decode_email_payload(msg):
         logging.error(f"Error decoding email payload: {e}")
         return ""
 
-def is_email_whitelisted(sender_email):
-    """Check if sender email is in the whitelist."""
+def is_email_authorized(raw_email: str) -> bool:
+    """
+    Returns True if the full email address is authorized.
+    Authorization = present in EITHER whitelist (full address match only).
+    """
     try:
-        whitelisted = json.loads(Variable.get("ltai.v3.hubspot.email.whitelist", default_var="[]"))
-        # Extract email from "Name <email@domain.com>" format
-        email_match = re.search(r'<(.+?)>', sender_email)
-        clean_email = email_match.group(1).lower() if email_match else sender_email.lower()
+        # Load both whitelists once
+        company_raw = Variable.get("ltai.v3.hubspot.email.whitelist", default_var="[]")
+        external_raw = Variable.get("hubspot.email.whitelist.external", default_var="[]")
         
-        is_allowed = clean_email in [email.lower() for email in whitelisted]
-        logging.info(f"Email validation - Sender: {clean_email}, Whitelisted: {is_allowed}")
-        return is_allowed
+        company_list = json.loads(company_raw)
+        external_list = json.loads(external_raw)
+        
+        # Combine into a single set of lowercase authorized emails
+        authorized_emails = {e.lower() for e in company_list + external_list}
+        
+        # Extract clean email from "Name <email@domain.com>" or plain email
+        match = re.search(r'<([^>]+)>', raw_email)
+        clean_email = (match.group(1) if match else raw_email).strip().lower()
+        
+        # Basic validation (optional but recommended)
+        if '@' not in clean_email or len(clean_email) < 5:
+            logging.warning(f"Invalid email format treated as unauthorized: {raw_email}")
+            return False
+        
+        is_auth = clean_email in authorized_emails
+        
+        logging.info(
+            f"Authorization check — "
+            f"Email: {clean_email} | "
+            f"In company list: {clean_email in {e.lower() for e in company_list}} | "
+            f"In external list: {clean_email in {e.lower() for e in external_list}} | "
+            f"Final: {'AUTHORIZED' if is_auth else 'NOT AUTHORIZED'}"
+        )
+        
+        return is_auth
+        
+    except json.JSONDecodeError as e:
+        logging.error(f"Whitelist JSON parse error: {e} → treating as unauthorized")
+        return False
     except Exception as e:
-        logging.error(f"Error checking whitelist: {e}")
+        logging.error(f"Unexpected error in authorization check: {e}")
         return False
 
 def get_email_thread(service, email_data):
@@ -447,11 +476,56 @@ def fetch_unread_emails(**kwargs):
         headers = {h["name"]: h["value"] for h in msg_data["payload"]["headers"]}
         sender = headers.get("From", "")
         
-        # Validate sender is whitelisted
-        if not is_email_whitelisted(sender):
-            logging.info(f"Sender {sender} not whitelisted, marking message {msg_id} as read and skipping")
+        # === FINAL: AUTHORIZATION CHECK (From + To + CC) ===
+        # EXCLUDE BOT'S OWN ADDRESS ENTIRELY FROM CHECKS
+        recipients = extract_all_recipients({"headers": headers})
+        addresses_to_check = [sender] + recipients["to"] + recipients["cc"]
+        
+        # Clean and deduplicate raw addresses
+        unique_raw_addresses = list(set(a.strip() for a in addresses_to_check if a.strip()))
+        
+        evaluated_clean_emails = []
+        authorized = True
+        
+        for raw_addr in unique_raw_addresses:
+            try:
+                # Extract clean email
+                match = re.search(r'<([^>]+)>', raw_addr)
+                clean_email = (match.group(1).strip() if match else raw_addr.strip()).lower()
+                
+                # Basic malformed check
+                if '@' not in clean_email or '.' not in clean_email.split('@')[-1]:
+                    logging.warning(f"Malformed email treated as unauthorized: {raw_addr}")
+                    authorized = False
+                    evaluated_clean_emails.append(clean_email)
+                    continue
+                
+                # === EXCLUDE BOT'S OWN ADDRESS FROM AUTH CHECK ===
+                if clean_email == HUBSPOT_FROM_ADDRESS.lower():
+                    logging.info(f"Skipping authorization check — this is the bot's own address: {clean_email}")
+                    evaluated_clean_emails.append(clean_email)
+                    continue  # Do not fail authorization because of bot address
+                
+                # === CHECK USER ADDRESSES ONLY ===
+                if not is_email_authorized(raw_addr):
+                    authorized = False
+                
+                evaluated_clean_emails.append(clean_email)
+                
+            except Exception as e:
+                logging.warning(f"Error parsing address {raw_addr}: {e} → treated as unauthorized")
+                authorized = False
+        
+        # === REQUIRED LOGGING (Acceptance Criteria) ===
+        logging.info(f"Evaluated raw addresses: {', '.join(unique_raw_addresses)}")
+        logging.info(f"Cleaned evaluated emails: {', '.join(evaluated_clean_emails)}")
+        logging.info(f"Final authorization decision: {'authorized' if authorized else 'not authorized'}")
+        
+        if not authorized:
+            logging.info(f"Unauthorized email (msg_id={msg_id}) → silently skipping all processing")
             mark_message_as_read(service, msg_id)
-            continue
+            continue  # Stops thread fetch, AI, DAG triggers, etc.
+        # === END AUTHORIZATION CHECK ===
         
         sender = sender.lower()
         timestamp = int(msg_data["internalDate"])
