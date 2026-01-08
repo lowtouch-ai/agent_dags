@@ -15,9 +15,6 @@ from email.mime.text import MIMEText
 import re
 import gspread
 
-# --- Configuration ---
-TOKEN_VAR_NAME = 'AUTOFINIX_GMAIL_CREDENTIALS' 
-
 default_args = {
     'owner': 'devsecops',
     'retries': 1,
