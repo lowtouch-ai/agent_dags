@@ -1069,7 +1069,6 @@ RETURN ONLY ONE OF THESE FOUR JSONS — NO TEXT BEFORE/AFTER:
         - OR moving forward along with corrections/changes ("change amount to $200k", "add Sarah", "owner should be Mike", "close date Dec 31")
         - Is a casual comment regarding the mentioned meeting minutes in the thread ("Great call yesterday", ).
         - To create a followup task related to the meeting minutes in the thread.
-        - Is a reply to the daily task remainder("this task is already completed,change the task status to **COMPLETED**")
         - Update any of the entities created in the converstaion history.(For example, "Change amount to $350k and add Sarah as contact")
         - # Casual comments definition:
             These are messages that do not request any action or information, such as:
