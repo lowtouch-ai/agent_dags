@@ -1520,6 +1520,11 @@ def validate_deals_against_associations(ti, **context):
     contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
     associated_deals = contact_data.get("associated_deals", [])
     
+    contact_results = contact_data.get("contact_results", {})
+    if contact_results.get("total", 0) == 0 and len(associated_deals) == 0:
+        logging.info("No contacts and no associated deals - skipping validation to preserve direct search results")
+        return
+    
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
     owner_info = ti.xcom_pull(key="owner_info", default={})
@@ -1687,6 +1692,294 @@ def refine_contacts_by_associations(ti, **context):
     }
 
     ti.xcom_push(key="contact_info_with_associations", value=refined_contact_info)
+
+def search_deals_directly(ti, **context):
+    """
+    Search for deals directly by name, independent of contact associations.
+    This ensures we find existing deals even when no contacts are specified.
+    """
+    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    if not entity_flags.get("search_deals", True):
+        logging.info(f"Skipping direct deal search: {entity_flags.get('deals_reason', 'Not mentioned')}")
+        ti.xcom_push(key="direct_deal_results", value={"total": 0, "results": []})
+        return
+    
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", default="")
+    
+    # AI extracts deal names from email
+    prompt = f"""Extract ALL deal names explicitly mentioned in this email.
+
+LATEST MESSAGE:
+{latest_message}
+
+RULES:
+- Only extract if there's a clear reference to an existing deal/opportunity
+- Include phrases like "the ABC deal", "our project with XYZ", "opportunity for..."
+- Exclude vague references without specific names
+
+Return ONLY valid JSON:
+{{
+    "deals": [
+        {{"dealName": "..."}}
+    ]
+}}
+"""
+
+    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    
+    try:
+        parsed = json.loads(response.strip())
+        mentioned_deals = parsed.get("deals", [])
+        
+        if not mentioned_deals:
+            logging.info("No deal names extracted for direct search")
+            ti.xcom_push(key="direct_deal_results", value={"total": 0, "results": []})
+            return
+        
+        # Search each deal in HubSpot
+        found_deals = []
+        
+        for deal_ref in mentioned_deals:
+            deal_name = deal_ref.get("dealName", "").strip()
+            if not deal_name:
+                continue
+            
+            # Search HubSpot for deal by name
+            try:
+                endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/deals/search"
+                headers = {
+                    "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+                
+                payload = {
+                    "filterGroups": [{
+                        "filters": [{
+                            "propertyName": "dealname",
+                            "operator": "CONTAINS_TOKEN",
+                            "value": deal_name
+                        }]
+                    }],
+                    "properties": [
+                        "hs_object_id", "dealname", "dealstage", "amount",
+                        "closedate", "hubspot_owner_id"
+                    ],
+                    "limit": 10
+                }
+                
+                response = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+                response.raise_for_status()
+                
+                results = response.json().get("results", [])
+                
+                for deal in results:
+                    props = deal.get("properties", {})
+                    stage_id = props.get("dealstage", "")
+                    stage_label = get_deal_stage_label(stage_id)
+                    
+                    found_deals.append({
+                        "dealId": deal.get("id"),
+                        "dealName": props.get("dealname", ""),
+                        "dealLabelName": stage_label,
+                        "dealAmount": props.get("amount", ""),
+                        "closeDate": props.get("closedate", ""),
+                        "dealOwnerId": props.get("hubspot_owner_id", "")
+                    })
+                
+                logging.info(f"Found {len(results)} deals matching '{deal_name}'")
+                
+            except Exception as e:
+                logging.error(f"Error searching for deal '{deal_name}': {e}")
+                continue
+        
+        result = {
+            "total": len(found_deals),
+            "results": found_deals
+        }
+        
+        ti.xcom_push(key="direct_deal_results", value=result)
+        logging.info(f"Direct deal search completed: {len(found_deals)} deals found")
+        
+    except Exception as e:
+        logging.error(f"Error in direct deal search: {e}")
+        ti.xcom_push(key="direct_deal_results", value={"total": 0, "results": []})
+
+
+def search_companies_directly(ti, **context):
+    """
+    Search for companies directly by name, independent of contact associations.
+    """
+    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    if not entity_flags.get("search_companies", True):
+        logging.info(f"Skipping direct company search: {entity_flags.get('companies_reason', 'Not mentioned')}")
+        ti.xcom_push(key="direct_company_results", value={"total": 0, "results": []})
+        return
+    
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", default="")
+    
+    # AI extracts company names
+    prompt = f"""Extract ALL company names explicitly mentioned in this email.
+
+LATEST MESSAGE:
+{latest_message}
+
+RULES:
+- Only extract formal company/organization names
+- Exclude "lowtouch.ai" and "ecloudcontrol" (internal)
+- Return empty list if no companies mentioned
+
+Return ONLY valid JSON:
+{{
+    "companies": [
+        {{"name": "...", "domain": "..."}}
+    ]
+}}
+"""
+
+    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    
+    try:
+        parsed = json.loads(response.strip())
+        mentioned_companies = parsed.get("companies", [])
+        
+        if not mentioned_companies:
+            logging.info("No company names extracted for direct search")
+            ti.xcom_push(key="direct_company_results", value={"total": 0, "results": []})
+            return
+        
+        # Search each company in HubSpot
+        found_companies = []
+        
+        for company_ref in mentioned_companies:
+            company_name = company_ref.get("name", "").strip()
+            if not company_name:
+                continue
+            
+            # Search HubSpot for company by name
+            try:
+                endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/companies/search"
+                headers = {
+                    "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+                
+                payload = {
+                    "filterGroups": [{
+                        "filters": [{
+                            "propertyName": "name",
+                            "operator": "CONTAINS_TOKEN",
+                            "value": company_name
+                        }]
+                    }],
+                    "properties": [
+                        "hs_object_id", "name", "domain", "address", "city",
+                        "state", "zip", "country", "phone", "description", "type"
+                    ],
+                    "limit": 10
+                }
+                
+                response = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+                response.raise_for_status()
+                
+                results = response.json().get("results", [])
+                
+                for company in results:
+                    props = company.get("properties", {})
+                    found_companies.append({
+                        "companyId": company.get("id"),
+                        "name": props.get("name", ""),
+                        "domain": props.get("domain", ""),
+                        "address": props.get("address", ""),
+                        "city": props.get("city", ""),
+                        "state": props.get("state", ""),
+                        "zip": props.get("zip", ""),
+                        "country": props.get("country", ""),
+                        "phone": props.get("phone", ""),
+                        "description": props.get("description", ""),
+                        "type": props.get("type", "")
+                    })
+                
+                logging.info(f"Found {len(results)} companies matching '{company_name}'")
+                
+            except Exception as e:
+                logging.error(f"Error searching for company '{company_name}': {e}")
+                continue
+        
+        result = {
+            "total": len(found_companies),
+            "results": found_companies
+        }
+        
+        ti.xcom_push(key="direct_company_results", value=result)
+        logging.info(f"Direct company search completed: {len(found_companies)} companies found")
+        
+    except Exception as e:
+        logging.error(f"Error in direct company search: {e}")
+        ti.xcom_push(key="direct_company_results", value={"total": 0, "results": []})
+    
+def merge_search_results(ti, **context):
+    """
+    Merge results from contact-association searches and direct searches.
+    Prioritize direct searches to ensure standalone entities are found.
+    """
+    # Get association-based results
+    contact_info = ti.xcom_pull(key="contact_info_with_associations", default={})
+    company_info = ti.xcom_pull(key="company_info", default={})
+    deal_info = ti.xcom_pull(key="deal_info", default={})
+    
+    # Get direct search results
+    direct_deals = ti.xcom_pull(key="direct_deal_results", default={"total": 0, "results": []})
+    direct_companies = ti.xcom_pull(key="direct_company_results", default={"total": 0, "results": []})
+    
+    # Merge deals (remove duplicates by dealId)
+    all_deals = list(deal_info.get("deal_results", {}).get("results", []))
+    existing_deal_ids = {d.get("dealId") for d in all_deals if d.get("dealId")}
+    
+    for direct_deal in direct_deals.get("results", []):
+        if direct_deal.get("dealId") not in existing_deal_ids:
+            all_deals.append(direct_deal)
+            existing_deal_ids.add(direct_deal.get("dealId"))
+    
+    # Merge companies (remove duplicates by companyId)
+    all_companies = list(company_info.get("company_results", {}).get("results", []))
+    existing_company_ids = {c.get("companyId") for c in all_companies if c.get("companyId")}
+    
+    for direct_company in direct_companies.get("results", []):
+        if direct_company.get("companyId") not in existing_company_ids:
+            all_companies.append(direct_company)
+            existing_company_ids.add(direct_company.get("companyId"))
+    
+    # Create merged results with NEW keys
+    merged_deal_info = {
+        "deal_results": {
+            "total": len(all_deals),
+            "results": all_deals
+        },
+        "new_deals": deal_info.get("new_deals", [])
+    }
+    
+    merged_company_info = {
+        "company_results": {
+            "total": len(all_companies),
+            "results": all_companies
+        },
+        "new_companies": company_info.get("new_companies", []),
+        "partner_status": company_info.get("partner_status", None)
+    }
+    
+    # Push to BOTH original and merged keys to ensure compatibility
+    ti.xcom_push(key="deal_info", value=merged_deal_info)
+    ti.xcom_push(key="company_info", value=merged_company_info)
+    ti.xcom_push(key="merged_deal_info", value=merged_deal_info)  # Additional key
+    ti.xcom_push(key="merged_company_info", value=merged_company_info)  # Additional key
+    
+    logging.info(f"=== MERGED SEARCH RESULTS ===")
+    logging.info(f"Deals: {len(all_deals)} total ({direct_deals.get('total', 0)} from direct search)")
+    logging.info(f"Companies: {len(all_companies)} total ({direct_companies.get('total', 0)} from direct search)")
+    logging.info(f"Deal IDs in merged results: {[d.get('dealId') for d in all_deals]}")
+    logging.info(f"Company IDs in merged results: {[c.get('companyId') for c in all_companies]}")
 
 def parse_notes_tasks_meeting(ti, **context):
     """Parse notes, tasks, and meetings from conversation"""
@@ -2024,20 +2317,41 @@ def compose_validation_error_email(ti, **context):
     """
     validation_result = ti.xcom_pull(key="validation_result", default={})
     email_data = ti.xcom_pull(key="email_data", default={})
+    notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", default={})
     
     errors = validation_result.get("errors", [])
     entity_summary = validation_result.get("entity_summary", {})
     sender_name = validation_result.get("sender_name", "there")
     
-    # Determine the primary entity type that failed due to missing association
-    # We look for the first error (or you can adjust logic if multiple)
-    primary_entity = None
-    for error in errors:
-        entity_type = error.get("entity_type", "")
-        if entity_type in ["Task", "Meeting", "Note", "Deal"]:
-            primary_entity = entity_type
-            break
+    # Determine what the user is actually trying to create
+    has_notes = len(notes_tasks_meeting.get("notes", [])) > 0
+    has_tasks = len(notes_tasks_meeting.get("tasks", [])) > 0
+    has_meeting = bool(notes_tasks_meeting.get("meeting_details", {}))
     
+    # Collect all entity types the user wants to create
+    requested_entities = []
+    if has_notes:
+        requested_entities.append("note")
+    if has_tasks:
+        requested_entities.append("task")
+    if has_meeting:
+        requested_entities.append("meeting")
+    
+    # Determine primary entity from what was actually requested
+    if len(requested_entities) == 1:
+        primary_entity = requested_entities[0].capitalize()
+    elif len(requested_entities) > 1:
+        # Multiple entities - use a generic term
+        primary_entity = "entities"
+    else:
+        # Fallback: check errors list
+        primary_entity = None
+        for error in errors:
+            entity_type = error.get("entity_type", "")
+            if entity_type in ["Tasks", "Meetings", "Notes", "Deals"]:
+                # Convert plural to singular
+                primary_entity = entity_type.rstrip('s')
+                break
     # Default fallback if somehow not detected
     if not primary_entity:
         primary_entity = "Task"  # or raise/log an error
@@ -2368,9 +2682,9 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 def compile_search_results(ti, **context):
     """Compile all search results for confirmation email"""
     owner_info = ti.xcom_pull(key="owner_info")
-    deal_info = ti.xcom_pull(key="deal_info")
+    deal_info = ti.xcom_pull(key="merged_deal_info") or ti.xcom_pull(key="deal_info") or {}
     contact_info = ti.xcom_pull(key="contact_info_with_associations", default={})
-    company_info = ti.xcom_pull(key="company_info")
+    company_info = ti.xcom_pull(key="merged_company_info") or ti.xcom_pull(key="company_info") or {}
     notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting")
     task_threshold_info = ti.xcom_pull(key="task_threshold_info", default={})
     thread_id = ti.xcom_pull(key="thread_id")
@@ -3805,6 +4119,24 @@ with DAG(
         provide_context=True
     )
 
+    search_deals_directly_task = PythonOperator(
+    task_id="search_deals_directly",
+    python_callable=search_deals_directly,
+    provide_context=True
+    )
+
+    search_companies_directly_task = PythonOperator(
+        task_id="search_companies_directly",
+        python_callable=search_companies_directly,
+        provide_context=True
+    )
+
+    merge_results_task = PythonOperator(
+        task_id="merge_search_results",
+        python_callable=merge_search_results,
+        provide_context=True
+    )
+
     parse_notes_tasks_task = PythonOperator(
         task_id="parse_notes_tasks_meeting",
         python_callable=parse_notes_tasks_meeting,
@@ -3908,8 +4240,14 @@ with DAG(
     branch_task >> determine_owner_task >> validate_deal_stage_task
 
     # Correct order: search contacts first (with associations), then validate companies and deals
-    validate_deal_stage_task >> search_contacts_task >> validate_companies_task >> validate_deals_task
+    validate_deal_stage_task >> search_contacts_task
+    validate_deal_stage_task >> search_deals_directly_task
+    validate_deal_stage_task >> search_companies_directly_task
 
+    [search_contacts_task, search_deals_directly_task, search_companies_directly_task] >> merge_results_task
+    merge_results_task >> validate_companies_task >> validate_deals_task
+    merge_results_task >> refine_contacts_task
+    
     validate_companies_task >> refine_contacts_task
     validate_deals_task >> refine_contacts_task
     refine_contacts_task >> parse_notes_tasks_task
