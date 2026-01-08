@@ -248,7 +248,7 @@ with DAG(
         return compliance_report
 
     @task()
-    def prepare_email_alert(report: list):
+    def prepare_eol_alert(report: list):
         """
         Filters for Urgent items (< 45 days, Expired, OR Unknown/Failed Checks)
         """
@@ -271,13 +271,13 @@ with DAG(
             return None
 
         # 2. Construct the Table Data
-        email_table_data = []
+        eol_table_data = []
         for img in critical_images:
             # Logic: If days are negative, it's URGENT. 
             # If we don't know the days (9999), treat it as a WARNING (Manual Review needed)
             urgency = "URGENT" if img['days_remaining'] <= 0 else "WARNING"
             
-            email_table_data.append({
+            eol_table_data.append({
                 "Urgency": urgency,
                 "Image": img['image'],
                 "Base Image": img['base_image'],
@@ -287,14 +287,14 @@ with DAG(
                 "Source": img['source']
             })
 
-        logging.info(f"Generated Alert Table for {len(email_table_data)} images.")
-        return email_table_data
+        logging.info(f"Generated Alert Table for {len(eol_table_data)} images.")
+        return eol_table_data
 
     @task()
     def send_slack_alert(report_data: list):
         """
         Sends a formatted Slack message for items with EOL < 45 days.
-        Uses the filtered data from prepare_email_alert.
+        Uses the filtered data from prepare_eol_alert.
         """
         if not report_data:
             logging.info("No critical items found. Skipping Slack alert.")
@@ -386,7 +386,7 @@ with DAG(
     # Get the filtered list (critical items only)
     # This list ALREADY filters for statuses defined in check_eol_status
     # where CRITICAL_WARN is <= 45 days.
-    critical_data = prepare_email_alert(analyzed_data)
+    critical_data = prepare_eol_alert(analyzed_data)
     
     # Send the Slack Alert (using the same filtered critical data)
     send_slack_alert(critical_data)
