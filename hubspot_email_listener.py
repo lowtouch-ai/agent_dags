@@ -94,19 +94,48 @@ def decode_email_payload(msg):
         logging.error(f"Error decoding email payload: {e}")
         return ""
 
-def is_email_whitelisted(sender_email):
-    """Check if sender email is in the whitelist."""
+def is_email_authorized(raw_email: str) -> bool:
+    """
+    Returns True if the full email address is authorized.
+    Authorization = present in EITHER whitelist (full address match only).
+    """
     try:
-        whitelisted = json.loads(Variable.get("ltai.v3.hubspot.email.whitelist", default_var="[]"))
-        # Extract email from "Name <email@domain.com>" format
-        email_match = re.search(r'<(.+?)>', sender_email)
-        clean_email = email_match.group(1).lower() if email_match else sender_email.lower()
+        # Load both whitelists once
+        company_raw = Variable.get("ltai.v3.hubspot.email.whitelist", default_var="[]")
+        external_raw = Variable.get("hubspot.email.whitelist.external", default_var="[]")
         
-        is_allowed = clean_email in [email.lower() for email in whitelisted]
-        logging.info(f"Email validation - Sender: {clean_email}, Whitelisted: {is_allowed}")
-        return is_allowed
+        company_list = json.loads(company_raw)
+        external_list = json.loads(external_raw)
+        
+        # Combine into a single set of lowercase authorized emails
+        authorized_emails = {e.lower() for e in company_list + external_list}
+        
+        # Extract clean email from "Name <email@domain.com>" or plain email
+        match = re.search(r'<([^>]+)>', raw_email)
+        clean_email = (match.group(1) if match else raw_email).strip().lower()
+        
+        # Basic validation (optional but recommended)
+        if '@' not in clean_email or len(clean_email) < 5:
+            logging.warning(f"Invalid email format treated as unauthorized: {raw_email}")
+            return False
+        
+        is_auth = clean_email in authorized_emails
+        
+        logging.info(
+            f"Authorization check — "
+            f"Email: {clean_email} | "
+            f"In company list: {clean_email in {e.lower() for e in company_list}} | "
+            f"In external list: {clean_email in {e.lower() for e in external_list}} | "
+            f"Final: {'AUTHORIZED' if is_auth else 'NOT AUTHORIZED'}"
+        )
+        
+        return is_auth
+        
+    except json.JSONDecodeError as e:
+        logging.error(f"Whitelist JSON parse error: {e} → treating as unauthorized")
+        return False
     except Exception as e:
-        logging.error(f"Error checking whitelist: {e}")
+        logging.error(f"Unexpected error in authorization check: {e}")
         return False
 
 def get_email_thread(service, email_data):
@@ -447,11 +476,56 @@ def fetch_unread_emails(**kwargs):
         headers = {h["name"]: h["value"] for h in msg_data["payload"]["headers"]}
         sender = headers.get("From", "")
         
-        # Validate sender is whitelisted
-        if not is_email_whitelisted(sender):
-            logging.info(f"Sender {sender} not whitelisted, marking message {msg_id} as read and skipping")
+        # === FINAL: AUTHORIZATION CHECK (From + To + CC) ===
+        # EXCLUDE BOT'S OWN ADDRESS ENTIRELY FROM CHECKS
+        recipients = extract_all_recipients({"headers": headers})
+        addresses_to_check = [sender] + recipients["to"] + recipients["cc"]
+        
+        # Clean and deduplicate raw addresses
+        unique_raw_addresses = list(set(a.strip() for a in addresses_to_check if a.strip()))
+        
+        evaluated_clean_emails = []
+        authorized = True
+        
+        for raw_addr in unique_raw_addresses:
+            try:
+                # Extract clean email
+                match = re.search(r'<([^>]+)>', raw_addr)
+                clean_email = (match.group(1).strip() if match else raw_addr.strip()).lower()
+                
+                # Basic malformed check
+                if '@' not in clean_email or '.' not in clean_email.split('@')[-1]:
+                    logging.warning(f"Malformed email treated as unauthorized: {raw_addr}")
+                    authorized = False
+                    evaluated_clean_emails.append(clean_email)
+                    continue
+                
+                # === EXCLUDE BOT'S OWN ADDRESS FROM AUTH CHECK ===
+                if clean_email == HUBSPOT_FROM_ADDRESS.lower():
+                    logging.info(f"Skipping authorization check — this is the bot's own address: {clean_email}")
+                    evaluated_clean_emails.append(clean_email)
+                    continue  # Do not fail authorization because of bot address
+                
+                # === CHECK USER ADDRESSES ONLY ===
+                if not is_email_authorized(raw_addr):
+                    authorized = False
+                
+                evaluated_clean_emails.append(clean_email)
+                
+            except Exception as e:
+                logging.warning(f"Error parsing address {raw_addr}: {e} → treated as unauthorized")
+                authorized = False
+        
+        # === REQUIRED LOGGING (Acceptance Criteria) ===
+        logging.info(f"Evaluated raw addresses: {', '.join(unique_raw_addresses)}")
+        logging.info(f"Cleaned evaluated emails: {', '.join(evaluated_clean_emails)}")
+        logging.info(f"Final authorization decision: {'authorized' if authorized else 'not authorized'}")
+        
+        if not authorized:
+            logging.info(f"Unauthorized email (msg_id={msg_id}) → silently skipping all processing")
             mark_message_as_read(service, msg_id)
-            continue
+            continue  # Stops thread fetch, AI, DAG triggers, etc.
+        # === END AUTHORIZATION CHECK ===
         
         sender = sender.lower()
         timestamp = int(msg_data["internalDate"])
@@ -617,9 +691,9 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
                         current_time = time.time()
                         
                         # Check for stalled stream (no chunks for 30 seconds)
-                        if current_time - last_chunk_time > 30:
+                        if current_time - last_chunk_time > 120:
                             logging.warning(f"Stream stalled after {chunk_count} chunks")
-                            raise TimeoutError("Stream stalled - no chunks received for 30 seconds")
+                            raise TimeoutError("Stream stalled - no chunks received for 120 seconds")
                         
                         last_chunk_time = current_time
                         
@@ -661,16 +735,15 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
 
             # Validate JSON if expected
             if expect_json:
-                # Try to parse to ensure it's valid JSON
-                import json
                 try:
-                    json.loads(ai_content)
-                except json.JSONDecodeError as e:
-                    logging.error(f"Invalid JSON response: {e}")
+                    parsed = extract_and_parse_json(ai_content)
+                    return json.dumps(parsed)  # return clean stringified JSON
+                except Exception as e:
+                    logging.error(f"Failed to extract/parse JSON: {e}")
                     if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
                         continue
-                    return '{"error": "Invalid JSON response from AI"}'
+                    return '{"error": "Failed to get valid JSON after retries"}'
             
             # Add HTML wrapper if needed (non-JSON responses)
             if not expect_json and not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html') and not ai_content.strip().startswith('{'):
@@ -681,9 +754,13 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
         except Exception as e:
             logging.error(f"Error in get_ai_response (attempt {attempt + 1}/{max_retries}): {e}")
             
-            # If this isn't the last attempt, retry with backoff
             if attempt < max_retries - 1:
-                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                # Custom longer backoff: 30s → 60s → 120s (or adjust to start at 60s)
+                wait_times = 120 # Option: fixed 60s then increase
+                # Alternative for starting exactly at 60s and escalating: [60, 120, 240]
+                
+                wait_time = wait_times[attempt] if attempt < len(wait_times) else 120  # fallback to 120s if more retries
+                
                 logging.info(f"Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
                 continue
@@ -1685,7 +1762,7 @@ MANDATORY OUTPUT FORMAT:
 **If search performed successfully:**
 {{
   "needs_search": true,
-  "results": [...exact results with required fields...],
+  "results": [...exact results with required fields in json format...],
   "result_count": <number>,
   "entity": "contacts|companies|deals|tasks"
 }}
@@ -1696,7 +1773,7 @@ MANDATORY OUTPUT FORMAT:
   "is_ambiguous": true,
   "requires_clarification": true,
   "ambiguous_entity": "contacts|companies|deals",
-  "results": [...all matching entities with ALL required fields...],
+  "results": [...all matching entities with ALL required fields in json format...],
   "result_count": <number>,
   "search_term": "what user searched for",
   "metadata": {{
@@ -1710,11 +1787,13 @@ MANDATORY OUTPUT FORMAT:
 {{
   "needs_search": true,
   "clarification_resolved": true,
-  "results": [...final target entity results with required fields...],
+  "results": [...final target entity results with required fields in json format...],
   "result_count": <number>,
   "entity": "contacts|companies|deals|tasks",
   "clarified_entity_id": "12345"
 }}
+
+Always return valid JSON. No extra text or tables.
 """
 
             # Get AI response
@@ -2629,6 +2708,47 @@ def extract_html_from_response(response):
     
     logging.warning("HTML extraction failed with all methods")
     return None
+
+def extract_and_parse_json(text: str):
+    """
+    Robustly extract and parse JSON from AI response text.
+    Handles: markdown fences, extra text, thinking tags, multiple JSON objects, etc.
+    Returns parsed JSON or raises informative error.
+    """
+    if not text or not text.strip():
+        raise ValueError("Empty response from AI")
+
+    # Step 1: Remove thinking tags
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+    # Step 2: Remove common markdown fences
+    text = re.sub(r'```json\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'```\s*', '', text, flags=re.IGNORECASE)
+
+    # Step 3: Strip any leading/trailing whitespace and text
+    text = text.strip()
+
+    # Step 4: Find the first valid JSON object or array
+    # Look for { ... } or [ ... ]
+    json_match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
+    
+    if not json_match:
+        # Log some context for debugging
+        preview = text[:200].replace('\n', ' ')
+        raise ValueError(f"No JSON object found in AI response. Preview: '{preview}'")
+
+    json_str = json_match.group(1)
+
+    # Step 5: Basic cleanup of common issues inside JSON
+    # Remove trailing commas before } or ] (common LLM mistake)
+    json_str = re.sub(r',\s*}', '}', json_str)
+    json_str = re.sub(r',\s*]', ']', json_str)
+
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        # Final attempt: try to fix unbalanced braces (rare but happens)
+        raise ValueError(f"Invalid JSON after extraction: {e}\nExtracted string preview: {json_str[:300]}")
 
 def get_deal_stage_labels():
     """
