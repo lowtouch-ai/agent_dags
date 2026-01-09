@@ -9,9 +9,6 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 import logging
 from ollama import Client
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 import re
 import gspread
 
@@ -19,15 +16,6 @@ default_args = {
     'owner': 'devsecops',
     'retries': 1,
 }
-
-# SMTP Configuration from Airflow Variables
-SMTP_USER = Variable.get("ltai.v1.imageguard.SMTP_USER")
-SMTP_PASSWORD = Variable.get("ltai.v1.imageguard.SMTP_PASSWORD")
-SMTP_HOST = Variable.get("ltai.v1.imageguard.SMTP_HOST", default_var="mail.authsmtp.com")
-SMTP_PORT = int(Variable.get("ltai.v1.imageguard.SMTP_PORT", default_var="2525"))
-SMTP_SUFFIX = Variable.get("ltai.v1.imageguard.SMTP_FROM_SUFFIX", default_var="via lowtouch.ai <webmaster@ecloudcontrol.com>")
-SENDER_EMAIL = Variable.get("ltai.v1.imageguard.FROM_ADDRESS", default_var=SMTP_USER)
-RECEIVER_EMAIL = Variable.get("ltai.v1.imageguard.TO_ADDRESS", default_var=SENDER_EMAIL)
 
 OLLAMA_HOST = Variable.get("ltai.v1.imageguard.OLLAMA_HOST", "http://agentomatic:8000/")
 
