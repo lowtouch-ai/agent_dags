@@ -189,6 +189,18 @@ def extract_all_recipients(email_data):
         "bcc": bcc_recipients
     }
 
+def get_owner_name_from_id(owner_id, all_owners_table):
+    """Convert owner ID to owner name using the owners table"""
+    if not owner_id or not all_owners_table:
+        return "Kishore"  # Default
+    
+    # Search for matching owner
+    for owner in all_owners_table:
+        if str(owner.get("id", "")) == str(owner_id):
+            return owner.get("name", "Kishore")
+    
+    return "Kishore"
+
 def send_email(service, recipient, subject, body, in_reply_to, references, cc=None, bcc=None):
     try:
         msg = MIMEMultipart()
@@ -674,7 +686,7 @@ Steps:
   - Summarize the details in the bellow format, ensuring clarity and relevance for the selected deal only.
   **Output format** :
     - **Contact**: {{contact_name}}, Email: {{email}}, Company: {{company_name}} in tabular format.
-    - **Deal**: [{{Deal_name}}, Stage: {{Deal_stage}}, Amount: {{Deal_Amount}}, Close Date: {{Deal_close_date}}] in tabular format.
+    - **Deal**: [{{Deal_name}}, Stage: {{Deal_stage}}, Amount: {{Deal_Amount}}, Close Date: {{Deal_close_date}}], Owner: {{Deal_owner_name}} in tabular format.
     - **Company**: {{Company_name}}, Domain: {{email}} in tabular format
     - **Engagements**:Generate a engagement summary based on the notes retrieved, including the discussed things. Ensure the summary is structured, concise yet thorough, and includes at least 5-7 sentences to cover all critical aspects.
       - Display the latest meeting held, if available.
@@ -1149,6 +1161,7 @@ def search_contacts_api(firstname=None, lastname=None, email=None):
         formatted_results = []
         for contact in results:
             props = contact.get("properties", {})
+            owner_id = props.get("hubspot_owner_id", "")
             formatted_results.append({
                 "contactId": contact.get("id"),
                 "firstname": props.get("firstname", ""),
@@ -1157,7 +1170,8 @@ def search_contacts_api(firstname=None, lastname=None, email=None):
                 "phone": props.get("phone", ""),
                 "address": props.get("address", ""),
                 "jobtitle": props.get("jobtitle", ""),
-                "contactOwnerId": props.get("hubspot_owner_id", "")
+                "contactOwnerId": owner_id,
+                "contactOwnerName": ""  # Will be filled later
             })
         
         search_desc = email or f"{firstname or ''} {lastname or ''}".strip()
@@ -1380,7 +1394,10 @@ Return ONLY valid JSON:
                         if deal_details and deal_details not in all_associated_deals:
                             all_associated_deals.append(deal_details)
             else:
-                # Contact not found - propose for creation
+                # Get the correct contact owner from owner_info
+                owner_info = ti.xcom_pull(key="owner_info", default={})
+                contact_owner_name = owner_info.get("contact_owner_name", "Kishore")
+
                 not_found_contacts.append({
                     "firstname": firstname,
                     "lastname": lastname,
@@ -1388,7 +1405,7 @@ Return ONLY valid JSON:
                     "phone": "",
                     "address": "",
                     "jobtitle": "",
-                    "contactOwnerName": "Kishore"  # Default
+                    "contactOwnerName": contact_owner_name  # ✅ CORRECT
                 })
         
         result = {
@@ -1420,6 +1437,17 @@ def validate_companies_against_associations(ti, **context):
     Compare companies mentioned in prompt vs associated companies.
     Always include ALL associated companies as existing, and add unmatched mentioned as new.
     """
+    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    if not entity_flags.get("search_contacts", True):
+        logging.info("Contact search was skipped, so skipping company association validation")
+        # Push empty result
+        ti.xcom_push(key="company_info", value={
+            "company_results": {"total": 0, "results": []},
+            "new_companies": [],
+            "partner_status": None
+        })
+        return
+
     contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
     associated_companies = contact_data.get("associated_companies", [])
     
@@ -1517,6 +1545,16 @@ def validate_deals_against_associations(ti, **context):
     Compare deals mentioned in prompt vs associated deals.
     Always include ALL associated deals as existing, and add unmatched mentioned as new.
     """
+    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    if not entity_flags.get("search_contacts", True):
+        logging.info("Contact search was skipped, so skipping deal association validation")
+        # Push empty result
+        ti.xcom_push(key="deal_info", value={
+            "deal_results": {"total": 0, "results": []},
+            "new_deals": []
+        })
+        return
+
     contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
     associated_deals = contact_data.get("associated_deals", [])
     
@@ -1542,15 +1580,15 @@ Deal Owner: {deal_owner_name}
 RULES:
 - Only extract if explicit deal creation requested OR clear buying signals
 - NOT exploratory conversations
-- Return deal name, stage (default: Lead), amount, close date
+- Return deal name, stage (default: Lead), amount, close date and deal owner name
 
 Return ONLY valid JSON:
 {{
     "deals": [
         {{
             "dealName": "...",
-            "dealLabelName": "Lead",
-            "dealAmount": "5000",
+            "dealLabelName": "...",
+            "dealAmount": "....",
             "closeDate": "YYYY-MM-DD",
             "dealOwnerName": "{deal_owner_name}"
         }}
@@ -1690,6 +1728,22 @@ def refine_contacts_by_associations(ti, **context):
         "associated_companies": associated_companies,
         "associated_deals": associated_deals
     }
+    # === NEW: Add owner names to all contacts ===
+    owner_info = ti.xcom_pull(key="owner_info", default={})
+    all_owners_table = owner_info.get("all_owners_table", [])
+
+    # Fix existing contacts
+    for contact in refined_contacts:
+        if not contact.get("contactOwnerName") and contact.get("contactOwnerId"):
+            contact["contactOwnerName"] = get_owner_name_from_id(
+                contact["contactOwnerId"], 
+                all_owners_table
+            )
+
+    # Fix new contacts (they might already have names, but ensure they're correct)
+    for contact in new_contacts:
+        if not contact.get("contactOwnerName"):
+            contact["contactOwnerName"] = owner_info.get("contact_owner_name", "Kishore")
 
     ti.xcom_push(key="contact_info_with_associations", value=refined_contact_info)
 
@@ -1706,6 +1760,7 @@ def search_deals_directly(ti, **context):
     
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
+    owner_info = ti.xcom_pull(key="owner_info", default={})
     
     # AI extracts deal names from email
     prompt = f"""Extract ALL deal names explicitly mentioned in this email.
@@ -1717,11 +1772,18 @@ RULES:
 - Only extract if there's a clear reference to an existing deal/opportunity
 - Include phrases like "the ABC deal", "our project with XYZ", "opportunity for..."
 - Exclude vague references without specific names
+- search by the deal name extracted using `search_deals`.
 
 Return ONLY valid JSON:
 {{
     "deals": [
-        {{"dealName": "..."}}
+        {{
+            "dealName": "...",
+            "dealLabelName": "...",
+            "dealAmount": "....",
+            "closeDate": "YYYY-MM-DD",
+            "dealOwnerName": "hubspot_owner_name"
+        }}
     ]
 }}
 """
@@ -1742,6 +1804,7 @@ Return ONLY valid JSON:
         
         for deal_ref in mentioned_deals:
             deal_name = deal_ref.get("dealName", "").strip()
+            logging.info(f"Direct deal search for extracted deal name: '{deal_name}'")
             if not deal_name:
                 continue
             
@@ -1769,9 +1832,11 @@ Return ONLY valid JSON:
                 }
                 
                 response = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+                logging.info(f"Searching for deal '{deal_name}' in HubSpot")
                 response.raise_for_status()
                 
                 results = response.json().get("results", [])
+                logging.info(f"HubSpot returned {results} results for deal search '{deal_name}'")
                 
                 for deal in results:
                     props = deal.get("properties", {})
@@ -1933,7 +1998,18 @@ def merge_search_results(ti, **context):
     direct_deals = ti.xcom_pull(key="direct_deal_results", default={"total": 0, "results": []})
     direct_companies = ti.xcom_pull(key="direct_company_results", default={"total": 0, "results": []})
     
-    # Merge deals (remove duplicates by dealId)
+    # Log what we received
+    logging.info(f"=== MERGE INPUT ===")
+    logging.info(f"Association-based company results: {company_info.get('company_results', {}).get('total', 0)} existing")
+    logging.info(f"Association-based new companies: {len(company_info.get('new_companies', []))}")
+    logging.info(f"Direct search companies: {direct_companies.get('total', 0)}")
+    
+    logging.info(f"Association-based deal results: {deal_info.get('deal_results', {}).get('total', 0)} existing")
+    logging.info(f"Association-based new deals: {len(deal_info.get('new_deals', []))}")
+    logging.info(f"Direct search deals: {direct_deals.get('total', 0)}")
+    
+    # ========== MERGE EXISTING DEALS ==========
+    # Start with deals from association search
     all_deals = list(deal_info.get("deal_results", {}).get("results", []))
     existing_deal_ids = {d.get("dealId") for d in all_deals if d.get("dealId")}
     
@@ -1951,13 +2027,33 @@ def merge_search_results(ti, **context):
             all_companies.append(direct_company)
             existing_company_ids.add(direct_company.get("companyId"))
     
-    # Create merged results with NEW keys
+    # ========== PRESERVE NEW ENTITIES FROM VALIDATION ONLY ==========
+    # New entities come ONLY from validation tasks, not direct search
+    new_deals = deal_info.get("new_deals", [])
+    new_companies = company_info.get("new_companies", [])
+
+    owner_info = ti.xcom_pull(key="owner_info", default={})
+    all_owners_table = owner_info.get("all_owners_table", [])
+    deal_owner_name = owner_info.get("deal_owner_name", "Kishore")
+    
+    for deal in all_deals:
+        if not deal.get("dealOwnerName") and deal.get("dealOwnerId"):
+            deal["dealOwnerName"] = get_owner_name_from_id(
+                deal["dealOwnerId"],
+                all_owners_table
+            )
+    
+    for deal in new_deals:
+        if not deal.get("dealOwnerName"):
+            deal["dealOwnerName"] = deal_owner_name
+    
+    # ========== CREATE MERGED RESULTS ==========
     merged_deal_info = {
         "deal_results": {
             "total": len(all_deals),
             "results": all_deals
         },
-        "new_deals": deal_info.get("new_deals", [])
+        "new_deals": new_deals  # From validation only
     }
     
     merged_company_info = {
@@ -1965,7 +2061,7 @@ def merge_search_results(ti, **context):
             "total": len(all_companies),
             "results": all_companies
         },
-        "new_companies": company_info.get("new_companies", []),
+        "new_companies": new_companies,  # From validation only
         "partner_status": company_info.get("partner_status", None)
     }
     
@@ -1976,8 +2072,16 @@ def merge_search_results(ti, **context):
     ti.xcom_push(key="merged_company_info", value=merged_company_info)  # Additional key
     
     logging.info(f"=== MERGED SEARCH RESULTS ===")
-    logging.info(f"Deals: {len(all_deals)} total ({direct_deals.get('total', 0)} from direct search)")
-    logging.info(f"Companies: {len(all_companies)} total ({direct_companies.get('total', 0)} from direct search)")
+    logging.info(f"Existing Deals: {len(all_deals)} total ({direct_deals.get('total', 0)} from direct search)")
+    logging.info(f"New Deals (to create): {len(new_deals)} (from validation only)")
+    logging.info(f"Existing Companies: {len(all_companies)} total ({direct_companies.get('total', 0)} from direct search)")
+    logging.info(f"New Companies (to create): {len(new_companies)} (from validation only)")
+    
+    if new_companies:
+        logging.info(f"New companies to create: {[c.get('name') for c in new_companies]}")
+    if new_deals:
+        logging.info(f"New deals to create: {[d.get('dealName') for d in new_deals]}")
+    
     logging.info(f"Deal IDs in merged results: {[d.get('dealId') for d in all_deals]}")
     logging.info(f"Company IDs in merged results: {[c.get('companyId') for c in all_companies]}")
 
@@ -3228,18 +3332,16 @@ def compose_confirmation_email(ti, **context):
     contact_owner_name = search_results.get("contact_owner_name", "Kishore")
     contact_owner_msg = search_results.get("contact_owner_message", "")
 
-    has_deals_or_tasks_or_contacts = (
-        deal_results.get("total", 0) > 0 or
+    has_new_deals_or_tasks_or_contacts = (
         len(new_deals) > 0 or
         len(meaningful_tasks) > 0 or
-        contact_results.get("total", 0) > 0 or
         len(new_contacts) > 0
     )
     
     assignment_html = []
 
     # === Contact Owner Warnings ===
-    if contact_results.get("total", 0) > 0 or len(new_contacts) > 0:
+    if len(new_contacts) > 0:
         contact_msg_lower = contact_owner_msg.lower()
         if "no contact owner specified" in contact_msg_lower:
             assignment_html.append(f"""
@@ -3259,7 +3361,7 @@ def compose_confirmation_email(ti, **context):
             """)
 
     # === Deal Owner Warnings ===
-    if deal_results.get("total", 0) > 0 or len(new_deals) > 0:
+    if len(new_deals) > 0:
         deal_msg_lower = deal_owner_msg.lower()
         if "no deal owner specified" in deal_msg_lower:
             assignment_html.append(f"""
@@ -3321,30 +3423,33 @@ def compose_confirmation_email(ti, **context):
     # Deal Stage Section
     stage_html = []
     has_stage_issues = False
-    for stage_info in deal_stage_info.get('deal_stages', []):
-        deal_name = stage_info.get('deal_name', 'Unknown Deal')
-        original_stage = stage_info.get('original_stage', '')
-        validated_stage = stage_info.get('validated_stage', 'Lead')
-        
-        if not original_stage or original_stage.strip() == '':
-            has_stage_issues = True
-            stage_html.append(f"""
-                <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Stage for "{deal_name}":</h4>
-                <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 0;'>
-                    <strong>Reason:</strong> Deal stage not specified.
-                    <br><strong>Action:</strong> Assigning to default stage 'Lead'.
-                </p>
-            """)
-        elif validated_stage == 'Lead' and original_stage.lower() != 'lead':
-            has_stage_issues = True
-            stage_html.append(f"""
-                <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Stage for "{deal_name}":</h4>
-                <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 0;'>
-                    <strong>Reason:</strong> Invalid deal stage '{original_stage}' specified.
-                    <br><strong>Valid Stages:</strong> {', '.join(VALID_DEAL_STAGES)}
-                    <br><strong>Action:</strong> Assigning to default stage 'Lead'.
-                </p>
-            """)
+    
+    # FIXED: Only process stage validation for NEW deals
+    if len(new_deals) > 0:
+        for stage_info in deal_stage_info.get('deal_stages', []):
+            deal_name = stage_info.get('deal_name', 'Unknown Deal')
+            original_stage = stage_info.get('original_stage', '')
+            validated_stage = stage_info.get('validated_stage', 'Lead')
+            
+            if not original_stage or original_stage.strip() == '':
+                has_stage_issues = True
+                stage_html.append(f"""
+                    <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Stage for "{deal_name}":</h4>
+                    <p style='background-color: #d1ecf1; padding: 10px; border-left: 4px solid #17a2b8; margin: 0;'>
+                        <strong>Reason:</strong> Deal stage not specified.
+                        <br><strong>Action:</strong> Assigning to default stage 'Lead'.
+                    </p>
+                """)
+            elif validated_stage == 'Lead' and original_stage.lower() != 'lead':
+                has_stage_issues = True
+                stage_html.append(f"""
+                    <h4 style='color: #2c5aa0; margin-bottom: 5px;'>Deal Stage for "{deal_name}":</h4>
+                    <p style='background-color: #f8d7da; padding: 10px; border-left: 4px solid #dc3545; margin: 0;'>
+                        <strong>Reason:</strong> Invalid deal stage '{original_stage}' specified.
+                        <br><strong>Valid Stages:</strong> {', '.join(VALID_DEAL_STAGES)}
+                        <br><strong>Action:</strong> Assigning to default stage 'Lead'.
+                    </p>
+                """)
 
     if has_stage_issues:
         email_content += "<div style='margin-bottom: 15px;'>"
@@ -4241,15 +4346,16 @@ with DAG(
 
     # Correct order: search contacts first (with associations), then validate companies and deals
     validate_deal_stage_task >> search_contacts_task
+    search_contacts_task >> validate_companies_task
+    search_contacts_task >> validate_deals_task
+
     validate_deal_stage_task >> search_deals_directly_task
     validate_deal_stage_task >> search_companies_directly_task
-
-    [search_contacts_task, search_deals_directly_task, search_companies_directly_task] >> merge_results_task
-    merge_results_task >> validate_companies_task >> validate_deals_task
-    merge_results_task >> refine_contacts_task
     
     validate_companies_task >> refine_contacts_task
     validate_deals_task >> refine_contacts_task
+    [validate_companies_task, validate_deals_task, search_deals_directly_task, search_companies_directly_task] >> merge_results_task
+    merge_results_task >> refine_contacts_task
     refine_contacts_task >> parse_notes_tasks_task
 
     # Also allow determine_owner_task to trigger contact search in parallel if needed
