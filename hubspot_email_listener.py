@@ -691,9 +691,9 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
                         current_time = time.time()
                         
                         # Check for stalled stream (no chunks for 30 seconds)
-                        if current_time - last_chunk_time > 30:
+                        if current_time - last_chunk_time > 120:
                             logging.warning(f"Stream stalled after {chunk_count} chunks")
-                            raise TimeoutError("Stream stalled - no chunks received for 30 seconds")
+                            raise TimeoutError("Stream stalled - no chunks received for 120 seconds")
                         
                         last_chunk_time = current_time
                         
@@ -735,16 +735,15 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
 
             # Validate JSON if expected
             if expect_json:
-                # Try to parse to ensure it's valid JSON
-                import json
                 try:
-                    json.loads(ai_content)
-                except json.JSONDecodeError as e:
-                    logging.error(f"Invalid JSON response: {e}")
+                    parsed = extract_and_parse_json(ai_content)
+                    return json.dumps(parsed)  # return clean stringified JSON
+                except Exception as e:
+                    logging.error(f"Failed to extract/parse JSON: {e}")
                     if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
                         continue
-                    return '{"error": "Invalid JSON response from AI"}'
+                    return '{"error": "Failed to get valid JSON after retries"}'
             
             # Add HTML wrapper if needed (non-JSON responses)
             if not expect_json and not ai_content.strip().startswith('<!DOCTYPE') and not ai_content.strip().startswith('<html') and not ai_content.strip().startswith('{'):
@@ -755,9 +754,13 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
         except Exception as e:
             logging.error(f"Error in get_ai_response (attempt {attempt + 1}/{max_retries}): {e}")
             
-            # If this isn't the last attempt, retry with backoff
             if attempt < max_retries - 1:
-                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                # Custom longer backoff: 30s → 60s → 120s (or adjust to start at 60s)
+                wait_times = 120 # Option: fixed 60s then increase
+                # Alternative for starting exactly at 60s and escalating: [60, 120, 240]
+                
+                wait_time = wait_times[attempt] if attempt < len(wait_times) else 120  # fallback to 120s if more retries
+                
                 logging.info(f"Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
                 continue
@@ -1759,7 +1762,7 @@ MANDATORY OUTPUT FORMAT:
 **If search performed successfully:**
 {{
   "needs_search": true,
-  "results": [...exact results with required fields...],
+  "results": [...exact results with required fields in json format...],
   "result_count": <number>,
   "entity": "contacts|companies|deals|tasks"
 }}
@@ -1770,7 +1773,7 @@ MANDATORY OUTPUT FORMAT:
   "is_ambiguous": true,
   "requires_clarification": true,
   "ambiguous_entity": "contacts|companies|deals",
-  "results": [...all matching entities with ALL required fields...],
+  "results": [...all matching entities with ALL required fields in json format...],
   "result_count": <number>,
   "search_term": "what user searched for",
   "metadata": {{
@@ -1784,11 +1787,13 @@ MANDATORY OUTPUT FORMAT:
 {{
   "needs_search": true,
   "clarification_resolved": true,
-  "results": [...final target entity results with required fields...],
+  "results": [...final target entity results with required fields in json format...],
   "result_count": <number>,
   "entity": "contacts|companies|deals|tasks",
   "clarified_entity_id": "12345"
 }}
+
+Always return valid JSON. No extra text or tables.
 """
 
             # Get AI response
@@ -2703,6 +2708,47 @@ def extract_html_from_response(response):
     
     logging.warning("HTML extraction failed with all methods")
     return None
+
+def extract_and_parse_json(text: str):
+    """
+    Robustly extract and parse JSON from AI response text.
+    Handles: markdown fences, extra text, thinking tags, multiple JSON objects, etc.
+    Returns parsed JSON or raises informative error.
+    """
+    if not text or not text.strip():
+        raise ValueError("Empty response from AI")
+
+    # Step 1: Remove thinking tags
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+    # Step 2: Remove common markdown fences
+    text = re.sub(r'```json\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'```\s*', '', text, flags=re.IGNORECASE)
+
+    # Step 3: Strip any leading/trailing whitespace and text
+    text = text.strip()
+
+    # Step 4: Find the first valid JSON object or array
+    # Look for { ... } or [ ... ]
+    json_match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
+    
+    if not json_match:
+        # Log some context for debugging
+        preview = text[:200].replace('\n', ' ')
+        raise ValueError(f"No JSON object found in AI response. Preview: '{preview}'")
+
+    json_str = json_match.group(1)
+
+    # Step 5: Basic cleanup of common issues inside JSON
+    # Remove trailing commas before } or ] (common LLM mistake)
+    json_str = re.sub(r',\s*}', '}', json_str)
+    json_str = re.sub(r',\s*]', ']', json_str)
+
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        # Final attempt: try to fix unbalanced braces (rare but happens)
+        raise ValueError(f"Invalid JSON after extraction: {e}\nExtracted string preview: {json_str[:300]}")
 
 def get_deal_stage_labels():
     """
