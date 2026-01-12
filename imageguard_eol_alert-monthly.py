@@ -68,8 +68,8 @@ with DAG(
     def fetch_inventory_secure():
 
         # --- CONFIGURATION ---
-        TOKEN_VAR_NAME = 'IMAGEGUARD_GMAIL_CREDENTIALS'
-        SHEET_ID = Variable.get("IMAGEGUARD_EOL_SHEET_ID")
+        TOKEN_VAR_NAME = 'ltai.v1.imageguard.GMAIL_CREDENTIALS'
+        SHEET_ID = Variable.get("ltai.v1.imageguard.EOL_SHEET_ID")
 
         # 2. Get Token
         token_json = Variable.get(TOKEN_VAR_NAME, default_var=None)
@@ -288,7 +288,7 @@ with DAG(
             return
 
         # 1. Get Webhook URL
-        webhook_url = Variable.get("SLACK_WEBHOOK_URL")
+        webhook_url = Variable.get("ltai.v1.imageguard.SLACK_WEBHOOK_URL")
         if not webhook_url:
             logging.error("❌ Slack webhook URL not found in Airflow Variables (SLACK_WEBHOOK_URL).")
             return
