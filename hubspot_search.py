@@ -1328,7 +1328,9 @@ LATEST MESSAGE:
 
 RULES:
 - Extract EVERY person mentioned
-- Exclude internal team members and deal owners
+- Exclude internal team members("lowtouch.ai","hybcloud technologies","ccs","cc" and "ecloudcontrol")and deal owners(all the members from **get_all_owners** tool)
+- Exclude the people whose email is retrieved from `get_all_owners` tool matches the domain given in the latest message.
+- If the user doesnt mentions the domain of a contact add the domain with their name and company(For example if the contact david reynolds from northbridge_automation company is mentioned add the domain as david.reynolds@northbridge-automation.io) for all contacts without fail.
 - Handle single names (e.g., "Neha") as firstname only
 - Parse "Neha (Ops)" as firstname="Neha", ignore role
 
@@ -1339,9 +1341,11 @@ Return ONLY valid JSON:
     ]
 }}
 """
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    
+    try: 
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    except Exception as e:
+        raise
+        
     try:
         parsed = json.loads(response.strip())
         extracted_contacts = parsed.get("contacts", [])
@@ -1462,7 +1466,7 @@ LATEST MESSAGE:
 
 RULES:
 - Only extract formal company/organization names
-- Exclude "lowtouch.ai and ecloudcontrol" (internal)
+- Exclude "lowtouch.ai","hybcloud technologies","ccs","cc" and "ecloudcontrol" (internal)
 - Return empty list if no companies mentioned
 
 Return ONLY valid JSON:
@@ -1892,7 +1896,7 @@ LATEST MESSAGE:
 
 RULES:
 - Only extract formal company/organization names
-- Exclude "lowtouch.ai" and "ecloudcontrol" (internal)
+- Exclude "lowtouch.ai","hybcloud technologies","ccs","cc" and "ecloudcontrol" (internal)
 - Return empty list if no companies mentioned
 
 Return ONLY valid JSON:
@@ -2084,6 +2088,356 @@ def merge_search_results(ti, **context):
     
     logging.info(f"Deal IDs in merged results: {[d.get('dealId') for d in all_deals]}")
     logging.info(f"Company IDs in merged results: {[c.get('companyId') for c in all_companies]}")
+
+def validate_associations_against_context(ti, **context):
+    """
+    Validate that all associations (contacts, companies, deals) match the user's actual context.
+    Create new entities when user context differs from existing associations.
+    
+    CRITICAL RULES:
+    1. If user mentions "Contact X works at Company Y", create new contact even if Contact X exists elsewhere
+    2. Only show existing deals/companies if they're explicitly mentioned in user's message
+    3. Match contacts by FULL context (firstname + lastname + company), not just firstname
+    4. Abandon irrelevant associations - don't show everything linked to a contact
+    """
+    
+    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", default="")
+    
+    # Get current results
+    contact_info = ti.xcom_pull(key="contact_info_with_associations", default={})
+    company_info = ti.xcom_pull(key="merged_company_info") or ti.xcom_pull(key="company_info") or {}
+    deal_info = ti.xcom_pull(key="merged_deal_info") or ti.xcom_pull(key="deal_info") or {}
+    
+    existing_contacts = contact_info.get("contact_results", {}).get("results", [])
+    new_contacts = contact_info.get("new_contacts", [])
+    existing_companies = company_info.get("company_results", {}).get("results", [])
+    new_companies = company_info.get("new_companies", [])
+    existing_deals = deal_info.get("deal_results", {}).get("results", [])
+    new_deals = deal_info.get("new_deals", [])
+    
+    # Format existing data for AI prompt
+    existing_contacts_summary = json.dumps([
+        {
+            "firstname": c.get("firstname"),
+            "lastname": c.get("lastname"),
+            "email": c.get("email"),
+            "contactId": c.get("contactId")
+        } for c in existing_contacts
+    ], indent=2)
+    
+    new_contacts_summary = json.dumps([
+        {
+            "firstname": c.get("firstname"),
+            "lastname": c.get("lastname"),
+            "email": c.get("email")
+        } for c in new_contacts
+    ], indent=2)
+    
+    existing_companies_summary = json.dumps([
+        {
+            "name": c.get("name"),
+            "domain": c.get("domain"),
+            "companyId": c.get("companyId")
+        } for c in existing_companies
+    ], indent=2)
+    
+    new_companies_summary = json.dumps([
+        {
+            "name": c.get("name"),
+            "domain": c.get("domain")
+        } for c in new_companies
+    ], indent=2)
+    
+    existing_deals_summary = json.dumps([
+        {
+            "dealName": d.get("dealName"),
+            "dealId": d.get("dealId")
+        } for d in existing_deals
+    ], indent=2)
+    
+    new_deals_summary = json.dumps([
+        {
+            "dealName": d.get("dealName")
+        } for d in new_deals
+    ], indent=2)
+    
+    # AI analyzes user context to extract precise associations
+    prompt = f"""You are a HubSpot context validator. Analyze this email to identify EXACTLY which contacts, companies, and deals the user is referring to, and whether existing associations are relevant.
+
+LATEST USER MESSAGE:
+{latest_message}
+
+CURRENT SEARCH RESULTS:
+
+Existing Contacts Found:
+{existing_contacts_summary}
+
+New Contacts to Create:
+{new_contacts_summary}
+
+Existing Companies Found:
+{existing_companies_summary}
+
+New Companies to Create:
+{new_companies_summary}
+
+Existing Deals Found:
+{existing_deals_summary}
+
+New Deals to Create:
+{new_deals_summary}
+
+YOUR TASK:
+For each contact mentioned in the user's message, determine:
+1. **Full Identity Match**: Does the user provide firstname + lastname + company context?
+2. **Context Match**: If an existing contact is found, does their CURRENT company match what the user stated?
+3. **Association Relevance**: Are the existing deals/companies associated with this contact relevant to user's request?
+
+CRITICAL RULES:
+- If user says about a contact X from a company Y but if there is a same named contact from another company Z, CREATE NEW contact for X and associate with Y
+- Only include existing deals/companies if they're EXPLICITLY mentioned in user's message or clearly relevant to context
+- Match contacts by: (firstname + lastname + company context), NOT just firstname
+- If company context differs, treat as DIFFERENT contact - create new one
+
+EXAMPLES:
+
+Example 1 - Create New Contact (Company Mismatch):
+User: "Meeting with Rahul Mehta from MedAxis Hospitals"
+Existing: Rahul Mehta at TechCorp Solutions
+Action: Dont show existing Rahul. Create NEW contact "Rahul Mehta" for MedAxis.Only show the existing Rahul if it matches the useer's company context.
+
+Example 2 - Use Existing Contact (Perfect Match):
+User: "Follow up with Sarah Collins at HealthBridge Consulting"
+Existing: Sarah Collins at HealthBridge Consulting
+Action: Keep existing Sarah. Only show her HealthBridge associations.
+
+Example 3 - Abandon Irrelevant Associations:
+User: "Deal with MedAxis Hospitals for AI documentation"
+Existing Sarah has deals: [XYZ Corp Deal, ABC Inc Deal]
+Action: Don't show Sarah's other deals - only create/show MedAxis deal.
+
+Return this exact JSON structure:
+{{
+    "validated_contacts": [
+        {{
+            "mentioned_name": "Full Name from user message",
+            "mentioned_company": "Company from user message",
+            "use_existing": true/false,
+            "existing_contact_id": "contact_id or null",
+            "action": "use_existing" or "create_new",
+            "reason": "Why this decision was made",
+            "create_new_details": {{
+                "firstname": "...",
+                "lastname": "...",
+                "company_name": "...",
+                "email": "..."
+            }} or null
+        }}
+    ],
+    "validated_companies": [
+        {{
+            "mentioned_name": "Company from user message",
+            "use_existing": true/false,
+            "existing_company_id": "company_id or null",
+            "action": "use_existing" or "create_new",
+            "reason": "Why this decision was made"
+        }}
+    ],
+    "validated_deals": [
+        {{
+            "mentioned_name": "Deal from user message",
+            "use_existing": true/false,
+            "existing_deal_id": "deal_id or null",
+            "action": "use_existing" or "create_new",
+            "reason": "Why this decision was made"
+        }}
+    ],
+    "irrelevant_associations": {{
+        "contact_ids_to_remove": ["contact_id_1", "contact_id_2"],
+        "company_ids_to_remove": ["company_id_1"],
+        "deal_ids_to_remove": ["deal_id_1"]
+    }}
+}}
+
+RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
+
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response for context validation: {response[:1000]}...")
+        
+        validation_result = json.loads(response.strip())
+        
+        # Process validation results
+        validated_contacts_list = validation_result.get("validated_contacts", [])
+        validated_companies_list = validation_result.get("validated_companies", [])
+        validated_deals_list = validation_result.get("validated_deals", [])
+        irrelevant = validation_result.get("irrelevant_associations", {})
+        
+        # Build new contact list (keeping only relevant existing + adding new ones)
+        final_existing_contacts = []
+        final_new_contacts = list(new_contacts)  # Start with already identified new contacts
+        
+        irrelevant_contact_ids = set(irrelevant.get("contact_ids_to_remove", []))
+        
+        for contact_validation in validated_contacts_list:
+            action = contact_validation.get("action")
+            
+            if action == "use_existing":
+                # Keep this existing contact
+                contact_id = contact_validation.get("existing_contact_id")
+                existing_contact = next((c for c in existing_contacts if c.get("contactId") == contact_id), None)
+                if existing_contact and contact_id not in irrelevant_contact_ids:
+                    final_existing_contacts.append(existing_contact)
+            
+            elif action == "create_new":
+                # Add to new contacts list
+                new_details = contact_validation.get("create_new_details", {})
+                if new_details and new_details.get("firstname"):
+                    # Check if not already in new_contacts
+                    already_exists = any(
+                        nc.get("firstname", "").lower() == new_details.get("firstname", "").lower() and
+                        nc.get("lastname", "").lower() == new_details.get("lastname", "").lower() and
+                        nc.get("email", "").lower() == new_details.get("email", "").lower()
+                        for nc in final_new_contacts
+                    )
+                    if not already_exists:
+                        # Get owner info
+                        owner_info = ti.xcom_pull(key="owner_info", default={})
+                        contact_owner_name = owner_info.get("contact_owner_name", "Kishore")
+                        
+                        final_new_contacts.append({
+                            "firstname": new_details.get("firstname", ""),
+                            "lastname": new_details.get("lastname", ""),
+                            "email": new_details.get("email", ""),
+                            "phone": "",
+                            "address": "",
+                            "jobtitle": "",
+                            "contactOwnerName": contact_owner_name,
+                            "company_context": new_details.get("company_name", "")
+                        })
+                        logging.info(f"✓ Creating new contact: {new_details.get('firstname')} {new_details.get('lastname')} at {new_details.get('company_name')}")
+        
+        # Process companies
+        final_existing_companies = []
+        final_new_companies = list(new_companies)
+        
+        irrelevant_company_ids = set(irrelevant.get("company_ids_to_remove", []))
+        
+        for company_validation in validated_companies_list:
+            action = company_validation.get("action")
+            mentioned_name = company_validation.get("mentioned_name", "")
+            
+            if action == "use_existing":
+                company_id = company_validation.get("existing_company_id")
+                existing_company = next((c for c in existing_companies if c.get("companyId") == company_id), None)
+                if existing_company and company_id not in irrelevant_company_ids:
+                    final_existing_companies.append(existing_company)
+            
+            elif action == "create_new" and mentioned_name:
+                # Check if not already in new_companies
+                already_exists = any(
+                    nc.get("name", "").lower() == mentioned_name.lower()
+                    for nc in final_new_companies
+                )
+                if not already_exists:
+                    final_new_companies.append({
+                        "name": mentioned_name,
+                        "domain": "",
+                        "address": "",
+                        "city": "",
+                        "state": "",
+                        "zip": "",
+                        "country": "",
+                        "phone": "",
+                        "description": "",
+                        "type": "PROSPECT"
+                    })
+                    logging.info(f"✓ Creating new company: {mentioned_name}")
+        
+        # Process deals
+        final_existing_deals = []
+        final_new_deals = list(new_deals)
+        
+        irrelevant_deal_ids = set(irrelevant.get("deal_ids_to_remove", []))
+        
+        for deal_validation in validated_deals_list:
+            action = deal_validation.get("action")
+            mentioned_name = deal_validation.get("mentioned_name", "")
+            
+            if action == "use_existing":
+                deal_id = deal_validation.get("existing_deal_id")
+                existing_deal = next((d for d in existing_deals if d.get("dealId") == deal_id), None)
+                if existing_deal and deal_id not in irrelevant_deal_ids:
+                    final_existing_deals.append(existing_deal)
+                    logging.info(f"✓ Keeping existing deal: {existing_deal.get('dealName')}")
+            
+            elif action == "create_new" and mentioned_name:
+                # Check if not already in new_deals
+                already_exists = any(
+                    nd.get("dealName", "").lower() == mentioned_name.lower()
+                    for nd in final_new_deals
+                )
+                if not already_exists:
+                    owner_info = ti.xcom_pull(key="owner_info", default={})
+                    deal_owner_name = owner_info.get("deal_owner_name", "Kishore")
+                    
+                    final_new_deals.append({
+                        "dealName": mentioned_name,
+                        "dealLabelName": "Lead",
+                        "dealAmount": "",
+                        "closeDate": "",
+                        "dealOwnerName": deal_owner_name
+                    })
+                    logging.info(f"✓ Creating new deal: {mentioned_name}")
+        
+        # Update XCom with validated results
+        validated_contact_info = {
+            "contact_results": {
+                "total": len(final_existing_contacts),
+                "results": final_existing_contacts
+            },
+            "new_contacts": final_new_contacts,
+            "associated_companies": contact_info.get("associated_companies", []),
+            "associated_deals": contact_info.get("associated_deals", [])
+        }
+        
+        validated_company_info = {
+            "company_results": {
+                "total": len(final_existing_companies),
+                "results": final_existing_companies
+            },
+            "new_companies": final_new_companies,
+            "partner_status": company_info.get("partner_status", None)
+        }
+        
+        validated_deal_info = {
+            "deal_results": {
+                "total": len(final_existing_deals),
+                "results": final_existing_deals
+            },
+            "new_deals": final_new_deals
+        }
+        
+        # Push validated results
+        ti.xcom_push(key="contact_info_with_associations", value=validated_contact_info)
+        ti.xcom_push(key="company_info", value=validated_company_info)
+        ti.xcom_push(key="merged_company_info", value=validated_company_info)
+        ti.xcom_push(key="deal_info", value=validated_deal_info)
+        ti.xcom_push(key="merged_deal_info", value=validated_deal_info)
+        
+        logging.info(f"=== CONTEXT VALIDATION COMPLETE ===")
+        logging.info(f"Existing contacts (relevant): {len(final_existing_contacts)}")
+        logging.info(f"New contacts to create: {len(final_new_contacts)}")
+        logging.info(f"Existing companies (relevant): {len(final_existing_companies)}")
+        logging.info(f"New companies to create: {len(final_new_companies)}")
+        logging.info(f"Existing deals (relevant): {len(final_existing_deals)}")
+        logging.info(f"New deals to create: {len(final_new_deals)}")
+        logging.info(f"Removed irrelevant: {len(irrelevant_contact_ids)} contacts, {len(irrelevant_company_ids)} companies, {len(irrelevant_deal_ids)} deals")
+        
+    except Exception as e:
+        logging.error(f"Error in context validation: {e}", exc_info=True)
+        logging.warning("Validation failed - preserving original search results")
 
 def parse_notes_tasks_meeting(ti, **context):
     """Parse notes, tasks, and meetings from conversation"""
@@ -2522,6 +2876,140 @@ def compose_validation_error_email(ti, **context):
     
     <p>Once I have this information, I'll take care of the rest right away.</p>
     <p>If you have any questions, feel free to let me know.</p>
+    
+    <div class="signature">
+        <p><strong>Best regards,</strong><br>
+         The HubSpot Assistant Team<br>
+         <a href="http://lowtouch.ai">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>"""
+    elif primary_entity == "Company":
+        email_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 700px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{ margin-bottom: 20px; }}
+        .section-title {{
+            color: #000;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            font-size: 18px;
+        }}
+        .closing {{margin-top: 30px; }}
+        .signature {{
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid #ddd;
+        }}
+    </style>
+</head>
+<body>
+    <p>Hello {sender_name},</p>
+    <p>Thank you for your request to create a company in HubSpot. I reviewed the request and noticed that the company cannot be completed yet due to a missing required association.</p>
+    
+    <h4 class="section-title">What's needed</h4>
+    <p><li>HubSpot requires every company to be linked to a contact for proper follow-up and ownership.</li><br>
+    Since no contact was specified, the company could not be created.</p>
+    
+    <p><strong>Next steps</strong></p>
+    <p>Please reply to this email with one of the following:</p>
+    <ul>
+        <li>The contact you would like this company associated with (name, email, or other identifying details), or</li>
+        <li>Confirmation to link the company to an existing contact in your HubSpot account</li>
+    </ul>
+    
+    <p>Once I have this information, I'll take care of the rest right away.</p>
+    <p>If you have any questions, feel free to let me know.</p>
+    
+    <div class="signature">
+        <p><strong>Best regards,</strong><br>
+         The HubSpot Assistant Team<br>
+         <a href="http://lowtouch.ai">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>"""
+
+    elif primary_entity == "Meeting":
+        email_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 700px; margin: 0 auto; padding: 20px; }}
+        .section-title {{ color: #000; margin-top: 30px; margin-bottom: 15px; font-size: 18px; }}
+        .signature {{ margin-top: 20px; padding-top: 15px; border-top: 1px solid #ddd; }}
+    </style>
+</head>
+<body>
+    <p>Hello {sender_name},</p>
+    <p>Thank you for your request to create a meeting in HubSpot. I reviewed the request and noticed that the meeting cannot be completed.</p>
+
+    <h4 class="section-title">What's needed</h4>
+    <p>HubSpot requires every meeting to be created only if it has the following details:
+    <ul>
+        <li>Attendees</li>
+        <li>Mode of meeting(offline or online)</li>
+        <li>Start time</li>
+    </ul>
+    Since none of the required details were specified, the meeting could not be created.</p>
+    
+    <p><strong>Next steps</strong></p>
+    <p>Please reply to this email with all the details:</p>
+    <ul>
+        <li>Attendees,mode of meeting and start time of the meeting</li>
+    </ul>
+
+    <p>Once I have this information, I'll take care of the rest right away.</p>
+    <p>If you have any questions or would like guidance on the best association to use, feel free to let me know.</p>
+    
+    <div class="signature">
+        <p><strong>Best regards,</strong><br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>"""
+
+    elif primary_entity == "Note":
+        email_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 700px; margin: 0 auto; padding: 20px; }}
+        .section-title {{ color: #000; margin-top: 30px; margin-bottom: 15px; font-size: 18px; }}
+        .signature {{ margin-top: 20px; padding-top: 15px; border-top: 1px solid #ddd; }}
+    </style>
+</head>
+<body>
+    <p>Hello {sender_name},</p>
+    <p>Thank you for your request to create a note in HubSpot. I reviewed the request and noticed that the note cannot be completed due to a missing required association.</p>
+
+    <h4 class="section-title">What's needed</h4>
+    <p>HubSpot requires every note to be linked to at least one of the following:
+    <ul>
+        <li>A contact</li>
+        <li>A company</li>
+        <li>A deal</li>
+    </ul>
+    Since no association was specified, the note could not be created.</p>
+    
+    <p><strong>Next steps</strong></p>
+    <p>Please reply to this email with one of the following:</p>
+    <ul>
+        <li>The contact, company, or deal you would like this note associated with, or</li>
+        <li>Confirmation to link the note to an existing contact, company, or deal in your HubSpot account</li>
+    </ul>
+
+    <p>Once I have this information, I'll take care of the rest right away.</p>
+    <p>If you have any questions or would like guidance on the best association to use, feel free to let me know.</p>
     
     <div class="signature">
         <p><strong>Best regards,</strong><br>
@@ -4242,6 +4730,12 @@ with DAG(
         provide_context=True
     )
 
+    validate_context_task = PythonOperator(
+        task_id="validate_associations_against_context",
+        python_callable=validate_associations_against_context,
+        provide_context=True
+    )
+
     parse_notes_tasks_task = PythonOperator(
         task_id="parse_notes_tasks_meeting",
         python_callable=parse_notes_tasks_meeting,
@@ -4355,7 +4849,7 @@ with DAG(
     validate_companies_task >> refine_contacts_task
     validate_deals_task >> refine_contacts_task
     [validate_companies_task, validate_deals_task, search_deals_directly_task, search_companies_directly_task] >> merge_results_task
-    merge_results_task >> refine_contacts_task
+    merge_results_task >> validate_context_task >> refine_contacts_task
     refine_contacts_task >> parse_notes_tasks_task
 
     # Also allow determine_owner_task to trigger contact search in parallel if needed
