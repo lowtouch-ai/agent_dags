@@ -1341,9 +1341,11 @@ Return ONLY valid JSON:
     ]
 }}
 """
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    
+    try: 
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    except Exception as e:
+        raise
+        
     try:
         parsed = json.loads(response.strip())
         extracted_contacts = parsed.get("contacts", [])
