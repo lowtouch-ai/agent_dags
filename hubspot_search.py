@@ -1565,7 +1565,7 @@ def validate_deals_against_associations(ti, **context):
         return
 
     contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
-    
+    associated_deals = contact_data.get("associated_deals", [])
     contact_results = contact_data.get("contact_results", {})
     # if contact_results.get("total", 0) == 0 and len(associated_deals) == 0:
     #     logging.info("No contacts and no associated deals - skipping validation to preserve direct search results")
