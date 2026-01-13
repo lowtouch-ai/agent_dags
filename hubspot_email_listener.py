@@ -2005,33 +2005,44 @@ def build_clarification_email_html(sender_name, results, entity, search_term, to
     entity_display = entity.replace("_", " ").title()
     
     # Build table rows
-    table_rows = ""
-    for idx, result in enumerate(results[:10], 1):
-        row_data = ""
-        if entity == "contacts":
-            row_data = f"""
+    if entity == "contacts":
+        header_row = "<th>Row</th><th>Contact ID</th><th>Name</th><th>Email</th><th>Phone</th>"
+        table_rows = ""
+        for idx, result in enumerate(results[:10], 1):
+            name = f"{result.get('Firstname', '')} {result.get('Lastname', '')}".strip() or "N/A"
+            table_rows += f"""
+            <tr>
                 <td>{idx}</td>
-                <td>{result.get('Firstname', 'N/A')} {result.get('Lastname', 'N/A')}</td>
+                <td>{result.get('Contact ID', result.get('id', 'N/A'))}</td>
+                <td>{name}</td>
                 <td>{result.get('Email', 'N/A')}</td>
                 <td>{result.get('Phone', 'N/A')}</td>
-                <td>{result.get('Contact ID', 'N/A')}</td>
-            """
-        elif entity == "companies":
-            row_data = f"""
+            </tr>"""
+    
+    elif entity == "companies":
+        header_row = "<th>Row</th><th>Company ID</th><th>Company Name</th><th>Domain</th>"
+        table_rows = ""
+        for idx, result in enumerate(results[:10], 1):
+            table_rows += f"""
+            <tr>
                 <td>{idx}</td>
+                <td>{result.get('Company Id', result.get('id', 'N/A'))}</td>
                 <td>{result.get('Company Name', result.get('name', 'N/A'))}</td>
                 <td>{result.get('Domain', result.get('domain', 'N/A'))}</td>
-                <td>{result.get('Company Id', result.get('id', 'N/A'))}</td>
-            """
-        elif entity == "deals":
-            row_data = f"""
+            </tr>"""
+    
+    elif entity == "deals":
+        header_row = "<th>Row</th><th>Deal ID</th><th>Deal Name</th><th>Amount</th><th>Stage</th>"
+        table_rows = ""
+        for idx, result in enumerate(results[:10], 1):
+            table_rows += f"""
+            <tr>
                 <td>{idx}</td>
+                <td>{result.get('Deal ID', result.get('id', 'N/A'))}</td>
                 <td>{result.get('Deal Name', result.get('dealname', 'N/A'))}</td>
                 <td>{result.get('Deal Amount', result.get('amount', 'N/A'))}</td>
                 <td>{result.get('Deal Stage', result.get('dealstage', 'N/A'))}</td>
-            """
-        
-        table_rows += f"<tr>{row_data}</tr>"
+            </tr>"""
     
     # Build query type message
     query_type_msg = ""
@@ -2087,7 +2098,12 @@ def build_clarification_email_html(sender_name, results, entity, search_term, to
         </ul>
         
         <table>
-            {table_rows}
+            <thead>
+                <tr>{header_row}</tr>
+            </thead>
+            <tbody>
+                {table_rows}
+            </tbody>
         </table>
         
         {'<p><em>Showing the matches. Reply with identifying information to proceed.</em></p>' if total_count > 10 else ''}
@@ -2172,6 +2188,325 @@ def build_clarification_email_with_excel(sender_name, total_count, entity, searc
 </html>
 """
     return html
+
+def build_no_results_html(sender_name, entity):
+    """Build HTML for when no results are found"""
+    entity_display = entity.replace("_", " ").title()
+    
+    return f"""
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{ margin-bottom: 15px; }}
+        .message {{ margin: 15px 0; }}
+        .closing {{ margin-top: 15px; }}
+        .signature {{ margin-top: 15px; font-weight: bold; }}
+        .company {{ color: #666; font-size: 0.9em; }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+    </div>
+    
+    <div class="message">
+        <p>I didn't find any {entity_display} in HubSpot that match the criteria you shared.</p>
+    </div>
+    
+    <div class="closing">
+        <p>If you need additional information, please don't hesitate to ask.</p>
+    </div>
+    
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>
+"""
+
+def build_single_result_html(sender_name, result, entity):
+    """Build HTML for single result (inline format)"""
+    entity_display = entity.replace("_", " ").title()
+    
+    # Build details list based on entity type
+    details_html = ""
+    
+    if entity == "contacts":
+        contact_id = result.get('Contact ID', result.get('id', 'N/A'))
+        firstname = result.get('Firstname', result.get('firstname', ''))
+        lastname = result.get('Lastname', result.get('lastname', ''))
+        name = f"{firstname} {lastname}".strip() or "N/A"
+        email = result.get('Email', result.get('email', 'N/A'))
+        phone = result.get('Phone', result.get('phone', 'N/A'))
+        job_title = result.get('Job Title', result.get('jobtitle', 'N/A'))
+        owner = result.get('Contact Owner Name', result.get('hubspot_owner_name', 'N/A'))
+        
+        details_html = f"""
+        <ul>
+            <li><strong>Contact ID:</strong> {contact_id}</li>
+            <li><strong>Name:</strong> {name}</li>
+            <li><strong>Email:</strong> {email}</li>
+            <li><strong>Phone:</strong> {phone}</li>
+            <li><strong>Job Title:</strong> {job_title}</li>
+            <li><strong>Contact Owner:</strong> {owner}</li>
+        </ul>
+        """
+    
+    elif entity == "companies":
+        company_id = result.get('Company Id', result.get('id', 'N/A'))
+        company_name = result.get('Company Name', result.get('name', 'N/A'))
+        domain = result.get('Domain', result.get('domain', 'N/A'))
+        phone = result.get('Phone', result.get('phone', 'N/A'))
+        industry = result.get('Industry', result.get('industry', 'N/A'))
+        
+        details_html = f"""
+        <ul>
+            <li><strong>Company ID:</strong> {company_id}</li>
+            <li><strong>Company Name:</strong> {company_name}</li>
+            <li><strong>Domain:</strong> {domain}</li>
+            <li><strong>Phone:</strong> {phone}</li>
+            <li><strong>Industry:</strong> {industry}</li>
+        </ul>
+        """
+    
+    elif entity == "deals":
+        deal_id = result.get('Deal ID', result.get('id', 'N/A'))
+        deal_name = result.get('Deal Name', result.get('dealname', 'N/A'))
+        amount = result.get('Deal Amount', result.get('amount', 'N/A'))
+        stage = result.get('Deal Stage', result.get('dealstage', 'N/A'))
+        owner = result.get('Deal Owner', result.get('hubspot_owner_name', 'N/A'))
+        close_date = result.get('Expected Close Date', result.get('closedate', 'N/A'))
+        
+        details_html = f"""
+        <ul>
+            <li><strong>Deal ID:</strong> {deal_id}</li>
+            <li><strong>Deal Name:</strong> {deal_name}</li>
+            <li><strong>Amount:</strong> {amount}</li>
+            <li><strong>Deal Stage:</strong> {stage}</li>
+            <li><strong>Close Date:</strong> {close_date}</li>
+            <li><strong>Deal Owner:</strong> {owner}</li>
+        </ul>
+        """
+    
+    return f"""
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{ margin-bottom: 15px; }}
+        .message {{ margin: 15px 0; }}
+        .details {{ 
+            margin: 20px 0; 
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-left: 4px solid #ff7a59;
+        }}
+        .details {{{{ margin: 20px 0; padding: 15px; }}}}
+        .details p {{{{ margin: 8px 0; }}}}
+        .closing {{ margin-top: 15px; }}
+        .signature {{ margin-top: 15px; font-weight: bold; }}
+        .company {{ color: #666; font-size: 0.9em; }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+    </div>
+    
+    <div class="message">
+        <p>Here's the {entity_display} that matches your request in HubSpot:</p>
+    </div>
+    
+    <div class="details">
+        {details_html}
+    </div>
+    
+    <div class="closing">
+        <p>If you need additional information, please don't hesitate to ask.</p>
+    </div>
+    
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>
+"""
+
+def build_table_html(sender_name, results, entity, count):
+    """Build HTML table for 2-10 results"""
+    entity_display = entity.replace("_", " ").title()
+    
+    # Build table headers and rows based on entity type
+    if entity == "contacts":
+        headers = ["Contact ID", "Name", "Email", "Phone", "Job Title", "Owner"]
+        rows = ""
+        for r in results:
+            contact_id = r.get('Contact ID', r.get('id', 'N/A'))
+            firstname = r.get('Firstname', r.get('firstname', ''))
+            lastname = r.get('Lastname', r.get('lastname', ''))
+            name = f"{firstname} {lastname}".strip() or "N/A"
+            email = r.get('Email', r.get('email', 'N/A'))
+            phone = r.get('Phone', r.get('phone', 'N/A'))
+            job_title = r.get('Job Title', r.get('jobtitle', 'N/A'))
+            owner = r.get('Contact Owner Name', r.get('hubspot_owner_name', 'N/A'))
+            
+            rows += f"""
+            <tr>
+                <td>{contact_id}</td>
+                <td>{name}</td>
+                <td>{email}</td>
+                <td>{phone}</td>
+                <td>{job_title}</td>
+                <td>{owner}</td>
+            </tr>
+            """
+    
+    elif entity == "companies":
+        headers = ["Company ID", "Company Name", "Domain", "Phone", "Industry"]
+        rows = ""
+        for r in results:
+            company_id = r.get('Company Id', r.get('id', 'N/A'))
+            company_name = r.get('Company Name', r.get('name', 'N/A'))
+            domain = r.get('Domain', r.get('domain', 'N/A'))
+            phone = r.get('Phone', r.get('phone', 'N/A'))
+            industry = r.get('Industry', r.get('industry', 'N/A'))
+            
+            rows += f"""
+            <tr>
+                <td>{company_id}</td>
+                <td>{company_name}</td>
+                <td>{domain}</td>
+                <td>{phone}</td>
+                <td>{industry}</td>
+            </tr>
+            """
+    
+    elif entity == "deals":
+        headers = ["Deal ID", "Deal Name", "Amount", "Stage", "Close Date", "Owner"]
+        rows = ""
+        for r in results:
+            deal_id = r.get('Deal ID', r.get('id', 'N/A'))
+            deal_name = r.get('Deal Name', r.get('dealname', 'N/A'))
+            amount = r.get('Deal Amount', r.get('amount', 'N/A'))
+            stage = r.get('Deal Stage', r.get('dealstage', 'N/A'))
+            close_date = r.get('Expected Close Date', r.get('closedate', 'N/A'))
+            owner = r.get('Deal Owner', r.get('hubspot_owner_name', 'N/A'))
+            
+            # Format amount
+            if amount and amount != 'N/A':
+                try:
+                    amount = f"${int(float(amount)):,}"
+                except:
+                    pass
+            
+            rows += f"""
+            <tr>
+                <td>{deal_id}</td>
+                <td>{deal_name}</td>
+                <td>{amount}</td>
+                <td>{stage}</td>
+                <td>{close_date}</td>
+                <td>{owner}</td>
+            </tr>
+            """
+    else:
+        headers = ["Data"]
+        rows = f"<tr><td>{str(results)}</td></tr>"
+    
+    header_html = "".join([f"<th>{h}</th>" for h in headers])
+    
+    return f"""
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{ margin-bottom: 15px; }}
+        .message {{ margin: 15px 0; }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: #ffffff;
+            border: 1px solid #e0e0e0;
+            font-size: 14px;
+        }}
+        th {{
+            background-color: #f3f6fc;
+            color: #333;
+            padding: 12px;
+            border: 1px solid #d0d7e2;
+            text-align: left;
+            font-weight: bold;
+        }}
+        td {{
+            padding: 10px 12px;
+            border: 1px solid #e0e0e0;
+            text-align: left;
+        }}
+        tr:nth-child(even) {{
+            background-color: #f9f9f9;
+        }}
+        .closing {{ margin-top: 15px; }}
+        .signature {{ margin-top: 15px; font-weight: bold; }}
+        .company {{ color: #666; font-size: 0.9em; }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+    </div>
+    
+    <div class="message">
+        <p>Here's the {entity_display} from HubSpot based on your request:</p>
+    </div>
+    
+    <table>
+        <thead>
+            <tr>{header_html}</tr>
+        </thead>
+        <tbody>
+            {rows}
+        </tbody>
+    </table>
+    
+    <div class="closing">
+        <p>If you need additional information, please don't hesitate to ask.</p>
+    </div>
+    
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>
+"""
 
 def build_response_html(sender_name, results, entity, result_count):
     """Build final response HTML with proper field formatting."""
@@ -3084,6 +3419,14 @@ IMPORTANT RULES:
 
 6. Report title should describe what data is shown (e.g., "Deals Associated with Company XYZ")
 
+7. CRITICAL - Deal Stage Mapping:
+   - When user mentions a deal stage name (like "lead", "qualified", "closed won"), you MUST:
+     a) First call the get_deal_stage_labels() function to get the stage ID mapping
+     b) Find the matching stage ID (e.g., "lead" might be "appointmentscheduled")
+     c) Use the STAGE ID in the filter, not the human-readable name
+   - Example: If user says "lead stage", search for the ID that maps to "Lead"
+   - The stage IDs are already loaded in DEAL_STAGE_LABELS variable
+
 Return ONLY a valid JSON object:
 {{
     "entity_type": "deals|contacts|companies",
@@ -3117,6 +3460,23 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                 properties = analysis_data.get("properties", [])
                 sort = analysis_data.get("sort")
                 report_title = analysis_data.get("report_title", "HubSpot Report")
+
+                # ✅ NOW fix deal stage values
+                if entity_type == "deals" and filters:
+                    DEAL_STAGE_LABELS = get_deal_stage_labels()
+                    LABEL_TO_ID = {v.lower(): k for k, v in DEAL_STAGE_LABELS.items()}
+                    
+                    for filter_obj in filters:
+                        if filter_obj.get("propertyName") == "dealstage":
+                            stage_value = filter_obj.get("value", "").lower()
+                            
+                            if stage_value not in DEAL_STAGE_LABELS:
+                                matching_id = LABEL_TO_ID.get(stage_value)
+                                if matching_id:
+                                    logging.info(f"✓ Converted stage label '{stage_value}' to ID '{matching_id}'")
+                                    filter_obj["value"] = matching_id
+                else:
+                    logging.warning(f"⚠️ Could not find stage ID for label '{stage_value}'")
                
                 # Default properties
                 base_properties = {
