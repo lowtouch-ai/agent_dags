@@ -279,6 +279,7 @@ def generate_and_inject_spelling_variants(ti, **context):
     recent_context += f"USER: {latest_message}"
 
     variant_prompt = f"""You are a helpful assistant that detects potential spelling mistakes in names mentioned in business emails.
+    You cannot create or update any records, your only job is to identify possible typos in names based on the conversation.
 
 Your task: Extract any contact names, company names, or deal names that might have typos.
 For each, list the original + 3–5 plausible spelling variants (include common misspellings).
@@ -361,7 +362,8 @@ def analyze_thread_entities(ti, **context):
         chat_context += f"[{role.upper()}]: {content}\n\n"
 
     # === Prompt (same as before) ===
-    prompt = f"""You are a HubSpot API assistant. Analyze this latest message to determine which entities (deals, contacts, companies) are mentioned or need to be processed, and whether the user is requesting a summary of a client or deal before their next meeting. 
+    prompt = f"""You are a HubSpot API assistant. Analyze this latest message to determine which entities (deals, contacts, companies) are mentioned or need to be processed, and whether the user is requesting a summary of a client or deal before their next meeting.
+    You cannot create or update any records, your only job is to identify and validate the entities based on the conversation.
 
 Variant Spelling Information:
 {variants_section}
@@ -442,7 +444,6 @@ Analyze the content and determine:
         - Set to TRUE ONLY if ALL of these conditions are met:
             a) A meeting has already occurred (past tense)
             b) Specific meeting details are provided for already held meeting only.
-            c) Only create meeting if all the details including Title,Start Time,End Time,Location(Offline or online),Outcome and Attendees are given.Do not create meetings if any of the details are missing.
         - Set to FALSE for:
             - Conversations or calls without formal meeting details
             - Future meeting intentions without confirmed details
@@ -904,6 +905,7 @@ def determine_owner(ti, **context):
     
 
     prompt = f"""You are a HubSpot API assistant. Analyze this conversation to identify deal owner and task owners.
+    **You CANNOT create deal owners or tasks owners in HubSpot.**  
 **SENDER**  
 Name : {sender_name}  
 Email: {sender_email}
@@ -1025,6 +1027,7 @@ def validate_deal_stage(ti, **context):
     ]
     
     prompt = f"""You are a HubSpot Deal Stage Validation Assistant. Your role is to validate deal stages from the conversation.
+    **You cannot create or update deals in HubSpot.**
 
 LATEST USER MESSAGE:
 {latest_message}
@@ -1318,7 +1321,8 @@ def search_contacts_with_associations(ti, **context):
     latest_message = ti.xcom_pull(key="latest_message", default="")
     
     # AI extracts contact names from email
-    prompt = f"""Extract ALL contact names mentioned in this email. For each contact, provide:
+    prompt = f"""Extract ALL contact names mentioned in this email. You cannot create any contact in HubSpot.
+For each contact, provide:
 - firstname
 - lastname (empty string if not provided)
 - email (if mentioned)
@@ -1328,9 +1332,9 @@ LATEST MESSAGE:
 
 RULES:
 - Extract EVERY person mentioned
-- Exclude internal team members("lowtouch.ai","hybcloud technologies","ccs","cc" and "ecloudcontrol")and deal owners(all the members from **get_all_owners** tool)
+- Exclude internal team members("lowtouch.ai","hybcloud technologies","ccs","cc","cloud control","cloudcontrol" and "ecloudcontrol")and deal owners(all the members from **get_all_owners** tool)
 - Exclude the people whose email is retrieved from `get_all_owners` tool matches the domain given in the latest message.
-- If the user doesnt mentions the domain of a contact add the domain with their name and company(For example if the contact david reynolds from northbridge_automation company is mentioned add the domain as david.reynolds@northbridge-automation.io) for all contacts without fail.
+- For new contacts,If the user doesnt mentions the domain of a contact add the domain with their name and company(For example if the contact david reynolds from northbridge_automation company is mentioned add the domain as david.reynolds@northbridge_automation) for all contacts without fail.
 - Handle single names (e.g., "Neha") as firstname only
 - Parse "Neha (Ops)" as firstname="Neha", ignore role
 
@@ -1460,13 +1464,14 @@ def validate_companies_against_associations(ti, **context):
     
     # AI extracts companies mentioned in email
     prompt = f"""Extract ALL company names explicitly mentioned in this email.
+    **You CANNOT create companies in HubSpot.**
 
 LATEST MESSAGE:
 {latest_message}
 
 RULES:
 - Only extract formal company/organization names
-- Exclude "lowtouch.ai","hybcloud technologies","ccs","cc" and "ecloudcontrol" (internal)
+- Exclude "lowtouch.ai","hybcloud technologies","ccs","cc","cloud control","cloudcontrol" and "ecloudcontrol" (internal)
 - Return empty list if no companies mentioned
 
 Return ONLY valid JSON:
@@ -1563,9 +1568,9 @@ def validate_deals_against_associations(ti, **context):
     associated_deals = contact_data.get("associated_deals", [])
     
     contact_results = contact_data.get("contact_results", {})
-    if contact_results.get("total", 0) == 0 and len(associated_deals) == 0:
-        logging.info("No contacts and no associated deals - skipping validation to preserve direct search results")
-        return
+    # if contact_results.get("total", 0) == 0 and len(associated_deals) == 0:
+    #     logging.info("No contacts and no associated deals - skipping validation to preserve direct search results")
+    #     return
     
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
@@ -1575,6 +1580,7 @@ def validate_deals_against_associations(ti, **context):
     
     # AI extracts deals mentioned in email
     prompt = f"""Extract deals mentioned in this email. Only include if there's CLEAR buying intent.
+    **You CANNOT create deals in HubSpot.**  
 
 LATEST MESSAGE:
 {latest_message}
@@ -1585,7 +1591,7 @@ RULES:
 - Only extract if explicit deal creation requested OR clear buying signals
 - NOT exploratory conversations
 - Return deal name, stage (default: Lead), amount, close date and deal owner name
-
+- If close date not mentioned, fetch the current date and set the close date as after 3 months from that date.
 Return ONLY valid JSON:
 {{
     "deals": [
@@ -1601,7 +1607,7 @@ Return ONLY valid JSON:
 """
 
     response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    
+    logging.info(f"Raw AI response for deal validation: {response[:1000]}...")
     try:
         parsed = json.loads(response.strip())
         mentioned_deals = parsed.get("deals", [])
@@ -1633,6 +1639,13 @@ Return ONLY valid JSON:
                     break
             
             if not matched:
+                if not mentioned.get("dealLabelName"):
+                    mentioned["dealLabelName"] = "Lead"
+                if not mentioned.get("dealAmount"):
+                    mentioned["dealAmount"] = "5000"
+                if not mentioned.get("dealOwnerName"):
+                    mentioned["dealOwnerName"] = owner_info.get("deal_owner_name", "Kishore")
+    
                 new_deals.append(mentioned)
         
         result = {
@@ -1768,6 +1781,7 @@ def search_deals_directly(ti, **context):
     
     # AI extracts deal names from email
     prompt = f"""Extract ALL deal names explicitly mentioned in this email.
+    **You CANNOT create deals in HubSpot.**
 
 LATEST MESSAGE:
 {latest_message}
@@ -1896,7 +1910,7 @@ LATEST MESSAGE:
 
 RULES:
 - Only extract formal company/organization names
-- Exclude "lowtouch.ai","hybcloud technologies","ccs","cc" and "ecloudcontrol" (internal)
+- Exclude "lowtouch.ai","hybcloud technologies","ccs","cc","cloud control","cloudcontrol" and "ecloudcontrol" (internal)
 - Return empty list if no companies mentioned
 
 Return ONLY valid JSON:
@@ -2164,6 +2178,7 @@ def validate_associations_against_context(ti, **context):
     
     # AI analyzes user context to extract precise associations
     prompt = f"""You are a HubSpot context validator. Analyze this email to identify EXACTLY which contacts, companies, and deals the user is referring to, and whether existing associations are relevant.
+    You cannot create or update any records, your only job is to identify and validate the contacts, companies, and deals based on the conversation.
 
 LATEST USER MESSAGE:
 {latest_message}
@@ -2384,7 +2399,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
                     
                     final_new_deals.append({
                         "dealName": mentioned_name,
-                        "dealLabelName": "Lead",
+                        "dealLabelName": "",
                         "dealAmount": "",
                         "closeDate": "",
                         "dealOwnerName": deal_owner_name
@@ -2721,11 +2736,17 @@ def validate_entity_creation_rules(ti, **context):
     if new_contacts > 0 and (existing_companies > 0 or new_companies > 0):
         logging.info(f"✓ {new_contacts} new contact(s) will be associated with {existing_companies + new_companies} company/companies")
     
-    # RULE 4: NEW Companies should ideally be associated with contacts
-    # This is a soft validation - only log warning, don't block
+    # RULE 4: NEW Companies MUST be associated with contacts
     if new_companies > 0 and total_contacts == 0:
-        logging.warning(f"⚠ {new_companies} new company/companies being created without any contact association")
-        # Note: We don't add this to validation_errors because companies can exist standalone
+        validation_errors.append({
+            "entity_type": "Companies",
+            "count": new_companies,
+            "issue": f"Creating {new_companies} new company/companies but no contacts are specified (existing or new).",
+            "suggestion": "Please specify at least one contact to associate with the company/companies. You can:\n" +
+                        "  • Mention a contact by name or email\n" +
+                        "  • Include details for a new contact to be created\n" +
+                        "  • Companies must be linked to contacts in HubSpot for proper tracking"
+        })
     
     # Build validation result
     validation_result = {
@@ -3195,7 +3216,7 @@ def check_task_threshold(ti, **context):
 
 
     prompt = f"""You are a HubSpot API assistant. Check task volume thresholds.
-
+    You cannot create or modify tasks.
 LATEST USER MESSAGE:
 {latest_message}
 
