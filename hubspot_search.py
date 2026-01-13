@@ -1771,7 +1771,7 @@ def search_deals_directly(ti, **context):
     contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
     contact_results = contact_data.get("contact_results", {})
     new_contacts = contact_data.get("new_contacts", [])
-    logging.info(f"Contact results before direct deal search: {contact_results}")
+    logging.info(f"Contact results before direct deal search: {contact_results} new contacts: {len(new_contacts)}")
     if contact_results.get("total", 0) > 0 or len(new_contacts) > 0:
         logging.info("No contacts - skipping direct search results")
         return
@@ -4878,8 +4878,8 @@ with DAG(
     search_contacts_task >> validate_companies_task
     search_contacts_task >> validate_deals_task
 
-    validate_deal_stage_task >> search_deals_directly_task
-    validate_deal_stage_task >> search_companies_directly_task
+    validate_deal_stage_task >> search_contacts_task >> search_deals_directly_task
+    validate_deal_stage_task >> search_contacts_task >> search_companies_directly_task
     
     validate_companies_task >> refine_contacts_task
     validate_deals_task >> refine_contacts_task
