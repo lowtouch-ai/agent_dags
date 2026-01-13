@@ -1565,7 +1565,6 @@ def validate_deals_against_associations(ti, **context):
         return
 
     contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
-    associated_deals = contact_data.get("associated_deals", [])
     
     contact_results = contact_data.get("contact_results", {})
     # if contact_results.get("total", 0) == 0 and len(associated_deals) == 0:
@@ -1769,6 +1768,14 @@ def search_deals_directly(ti, **context):
     Search for deals directly by name, independent of contact associations.
     This ensures we find existing deals even when no contacts are specified.
     """
+    contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
+    contact_results = contact_data.get("contact_results", {})
+    new_contacts = contact_data.get("new_contacts", [])
+    logging.info(f"Contact results before direct deal search: {contact_results} new contacts: {len(new_contacts)}")
+    if contact_results.get("total", 0) > 0 or len(new_contacts) > 0:
+        logging.info("No contacts - skipping direct search results")
+        return
+    
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
     if not entity_flags.get("search_deals", True):
         logging.info(f"Skipping direct deal search: {entity_flags.get('deals_reason', 'Not mentioned')}")
@@ -1893,6 +1900,13 @@ def search_companies_directly(ti, **context):
     """
     Search for companies directly by name, independent of contact associations.
     """
+    contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
+    contact_results = contact_data.get("contact_results", {})
+    new_contacts = contact_data.get("new_contacts", [])
+    logging.info(f"Contact results before direct deal search: {contact_results}")
+    if contact_results.get("total", 0) > 0 or len(new_contacts) > 0:
+        logging.info("No company - skipping direct search results")
+        return
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
     if not entity_flags.get("search_companies", True):
         logging.info(f"Skipping direct company search: {entity_flags.get('companies_reason', 'Not mentioned')}")
@@ -4864,8 +4878,8 @@ with DAG(
     search_contacts_task >> validate_companies_task
     search_contacts_task >> validate_deals_task
 
-    validate_deal_stage_task >> search_deals_directly_task
-    validate_deal_stage_task >> search_companies_directly_task
+    validate_deal_stage_task >> search_contacts_task >> search_deals_directly_task
+    validate_deal_stage_task >> search_contacts_task >> search_companies_directly_task
     
     validate_companies_task >> refine_contacts_task
     validate_deals_task >> refine_contacts_task
