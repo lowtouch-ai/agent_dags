@@ -258,9 +258,9 @@ def create_followup_task(original_task, due_date=None, task_subject=None, owner_
         # Convert to milliseconds timestamp
         due_timestamp = int(due_date.timestamp() * 1000)
         
-        # Use AI-suggested task subject, or fallback to "N/A"
+        # Use AI-suggested task subject, or fallback to "Follow-Up"
         if not task_subject or task_subject.strip() == "":
-            task_subject = "N/A"
+            task_subject = "Follow-Up"
         
         # FIXED: Task body is now same as task subject
         task_body = task_subject
@@ -507,9 +507,9 @@ def analyze_task_completion_request(**kwargs):
         task_props = original_task.get("properties", {})
         task_context = f"""
 Current Task Details:
-- Subject: {task_props.get('hs_task_subject', 'N/A')}
-- Body: {task_props.get('hs_task_body', 'N/A')}
-- Priority: {task_props.get('hs_task_priority', 'N/A')}
+- Subject: {task_props.get('hs_task_subject', 'Follow-Up')}
+- Body: {task_props.get('hs_task_body', 'Follow-Up')}
+- Priority: {task_props.get('hs_task_priority', 'Follow-Up')}
 """
 
     deal_id = get_associated_deal_id(task_id)
@@ -563,9 +563,9 @@ Extract the follow-up task subject from the user's email to create a new task. F
    - User might say: "this task is done\nCreate a follow-up to send them the updated proposal"
    - Extract: "Send updated proposal"
 
-4. **Use "N/A" as default task subject**:
+4. **Use "Follow-Up" as default task subject**:
    - User only says: "done", "completed", "task done", "yes", "create a follow-up" with NOTHING else specific as task subject.
-   - In these cases: set followup_task_subject to empty string (will default to "N/A")
+   - In these cases: set followup_task_subject to empty string (will default to "Follow-Up")
 
 5. **Important**:
    - DO NOT invent context that isn't in the user's message
@@ -625,8 +625,8 @@ Return ONLY valid JSON with NO additional text:
     # Get AI-suggested task subject
     followup_task_subject = analysis.get("followup_task_subject", "")
     if not followup_task_subject or followup_task_subject.strip() == "":
-        # Fallback: if no subject provided, use "N/A"
-        followup_task_subject = "N/A"
+        # Fallback: if no subject provided, use "Follow-Up"
+        followup_task_subject = "Follow-Up"
     
     result = {
         "task_id": task_id,
