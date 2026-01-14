@@ -499,7 +499,7 @@ def get_ai_response(prompt, conversation_history=None):
 def overall_summary(ti, **context):
     period = ti.xcom_pull(key="period_this_week")
 
-    # Pull all the beautiful Python-generated markdown sections
+    # Pull sections
     engine_master       = ti.xcom_pull(key="section_engine_master") or "No data"
     windows_wow         = ti.xcom_pull(key="section_windows_wow") or "No data"
     high_cpu_peaks      = ti.xcom_pull(key="section_high_cpu_peaks") or "No data"
@@ -528,8 +528,12 @@ Generate a **Weekly SRE Summary (Current Status)** for: **{period}**.
 {high_disk_peaks}
 
 ### Instructions:
+Section Heading: Weekly SRE Summary
+
 Write a **Summary of Operations for THIS WEEK only**. 
+
 **Do NOT discuss week-over-week comparisons or trends yet.**
+**Do NOT mention the specific date period (e.g., "Dec 25 – Jan 01") in the text, as this is already stated elsewhere.**
 
 1. **System Stability**: Is the system currently stable based on the "This Week" columns?
 2. **Resource Hotspots**: Briefly mention how many VMs hit critical peaks (≥90%) this week.
@@ -551,7 +555,6 @@ def generate_conclusion_section(ti, **context):
     period = ti.xcom_pull(key="period_this_week")
 
     # Pull the comparison tables
-    engine_master = ti.xcom_pull(key="section_engine_master") or "No data"
     windows_wow   = ti.xcom_pull(key="section_windows_wow") or "No data"
 
     prompt = f"""
@@ -559,10 +562,7 @@ You are the SRE Unityfi Agent.
 Review the comparison metrics below for the week of **{period}**.
 
 ### Comparison Data:
-#### 1. Cloud Orbit Metrics
-{engine_master}
-
-#### 2. Windows VM Metrics
+#### 1. Windows VM Metrics
 {windows_wow}
 
 ### Instructions:
@@ -596,13 +596,13 @@ def compile_sre_report(ti, **context):
 
 ---
 
-## 1. Cloud Orbit Metrics (This Week vs Previous Week)
-{ti.xcom_pull(key="section_engine_master") or "No data"}
+## 1. Windows VM – Average Resource Summary (Week-over-Week)
+{ti.xcom_pull(key="section_windows_wow") or "No data"}
 
 ---
 
-## 2. Windows VM – Average Resource Summary (Week-over-Week)
-{ti.xcom_pull(key="section_windows_wow") or "No data"}
+## 2. Cloud Orbit Metrics (This Week vs Previous Week)
+{ti.xcom_pull(key="section_engine_master") or "No data"}
 
 ---
 
