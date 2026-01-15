@@ -839,11 +839,11 @@ def fetch_pod_restart(ti, key, start, end, period_str, date_str):
     # 1. Fetch Namespaces from Airflow Variable
     try:
         namespaces_list = json.loads(
-            Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
+            Variable.get("ltai.v1.sretradeideasprod.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
         )
     except Exception as e:
         logging.warning(
-            "Failed to parse Airflow Variable 'ltai.v1.sretradeideas.pod.namespaces'. "
+            "Failed to parse Airflow Variable 'ltai.v1.sretradeideasprod.pod.namespaces'. "
             "Reason: %s. Falling back to hard-coded default namespaces.", str(e))
         namespaces_list = ["alpha-prod", "tipreprod-prod"]
 
@@ -1614,7 +1614,7 @@ def fetch_pod_data_for_period(namespaces, start, end, period_label):
 def pod_details_today(ti, **context):
     # 1. Get Namespaces & Clean them
     try:
-        raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
+        raw = Variable.get("ltai.v1.sretradeideasprod.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
         namespaces_raw = json.loads(raw)
         # Ensure list and strip whitespace
         namespaces = [str(n).strip() for n in namespaces_raw]
@@ -1674,7 +1674,7 @@ def pod_details_today(ti, **context):
 
 def pod_details_yesterday(ti, **context):
     try:
-        raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
+        raw = Variable.get("ltai.v1.sretradeideasprod.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
         namespaces = json.loads(raw)
     except:
         namespaces = ["alpha-prod", "tipreprod-prod"]
@@ -1698,7 +1698,7 @@ def pod_details_today_vs_yesterday(ti, **context):
     
     # Determine sorting order from Variable, or fallback to alphabetical
     try:
-        raw = Variable.get("ltai.v1.sretradeideas.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
+        raw = Variable.get("ltai.v1.sretradeideasprod.pod.namespaces", default_var='["alpha-prod","tipreprod-prod"]')
         ordered_ns = json.loads(raw)
     except:
         ordered_ns = sorted(list(all_ns))
