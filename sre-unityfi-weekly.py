@@ -112,10 +112,6 @@ def fetch_all_metrics_this_week(ti):
     interval = "7d"
 
     queries = {
-        "engine_cpu_avg": f'avg_over_time((1 - avg by(instance) (rate(node_cpu_seconds_total{{mode="idle"}}[30s])))[7d:]) * 100',
-        "engine_mem_avg": f'avg_over_time((1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))[7d:5m]) * 100',
-        "engine_disk_avg": f'avg_over_time((1 - (node_filesystem_free_bytes{{device="/dev/sdb1",fstype!~"tmpfs|overlay",mountpoint="/var/lib/docker"}} / node_filesystem_size_bytes{{device="/dev/sdb1",fstype!~"tmpfs|overlay",mountpoint="/var/lib/docker"}}))[7d:]) * 100',
-
         "windows_cpu_avg": f'avg_over_time((100 - (avg by(instance) (rate(windows_cpu_time_total{{mode="idle"}}[30s])) * 100))[7d:])',
         "windows_cpu_peak": f'max_over_time((100 - (avg by(instance) (rate(windows_cpu_time_total{{mode="idle"}}[30s])) * 100))[7d:])',
         "windows_mem_avg": f'avg_over_time(((1 - (windows_os_physical_memory_free_bytes / windows_cs_physical_memory_bytes)) * 100)[7d:])',
@@ -155,10 +151,6 @@ def fetch_all_metrics_previous_week(ti):
     interval = "7d"
 
     queries = {  # same as above
-        "engine_cpu_avg": f'avg_over_time((1 - avg by(instance) (rate(node_cpu_seconds_total{{mode="idle"}}[30s])))[7d:]) * 100',
-        "engine_mem_avg": f'avg_over_time((1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))[7d:5m]) * 100',
-        "engine_disk_avg": f'avg_over_time((1 - (node_filesystem_free_bytes{{device="/dev/sdb1",fstype!~"tmpfs|overlay",mountpoint="/var/lib/docker"}} / node_filesystem_size_bytes{{device="/dev/sdb1",fstype!~"tmpfs|overlay",mountpoint="/var/lib/docker"}}))[7d:]) * 100',
-
         "windows_cpu_avg": f'avg_over_time((100 - (avg by(instance) (rate(windows_cpu_time_total{{mode="idle"}}[30s])) * 100))[7d:])',
         "windows_mem_avg": f'avg_over_time(((1 - (windows_os_physical_memory_free_bytes / windows_cs_physical_memory_bytes)) * 100)[7d:])',
     }
@@ -176,61 +168,6 @@ def fetch_all_metrics_previous_week(ti):
     ti.xcom_push(key="period_previous_week", value=period_prev)
 
     return results
-
-def generate_engine_master_comparison(ti, **context):
-    """
-    Pulls this_week and previous_week metrics and generates:
-    Cloud Orbit Metrics
-    Metric         | This week | Previous Week | Difference |
-    ---------------|-----------|---------------|------------|
-    CPU Usage      | 12.45%    | 10.81%        | +1.64%     |
-    Memory Usage   | 68.32%    | 65.19%        | +3.13%     |
-    Disk Usage     | 72.10%    | 70.05%        | +2.05%     |
-    """
-
-    # Pull fetched data
-    this_week_data = json.loads(ti.xcom_pull(key="metrics_this_week"))
-    prev_week_data = json.loads(ti.xcom_pull(key="metrics_previous_week"))
-
-    # Extract engine master values (assuming only one engine-master instance)
-    def get_engine_value(data, key):
-        values = data.get(key, {})
-        if not values:
-            return None
-        # Take first (and only) value
-        return list(values.values())[0]
-
-    # This week
-    cpu_this = get_engine_value(this_week_data, "engine_cpu_avg")
-    mem_this = get_engine_value(this_week_data, "engine_mem_avg")
-    disk_this = get_engine_value(this_week_data, "engine_disk_avg")
-
-    # Previous week
-    cpu_prev = get_engine_value(prev_week_data, "engine_cpu_avg")
-    mem_prev = get_engine_value(prev_week_data, "engine_mem_avg")
-    disk_prev = get_engine_value(prev_week_data, "engine_disk_avg")
-
-    # Helper to format with % and color diff
-    def fmt(val):
-        return f"{val:.2f}%" if val is not None else "N/A"
-
-    def diff(a, b):
-        if a is None or b is None:
-            return "N/A"
-        d = a - b
-        sign = "+" if d > 0 else ""
-        return f"{sign}{d:.2f}%"
-
-    markdown = "### Cloud Orbit Metrics\n\n"
-    markdown += "| Metric         | This Week     | Previous Week | Difference   |\n"
-    markdown += "|----------------|---------------|---------------|--------------|\n"
-    markdown += f"| CPU Usage      | {fmt(cpu_this)} | {fmt(cpu_prev)} | {diff(cpu_this, cpu_prev)} |\n"
-    markdown += f"| Memory Usage   | {fmt(mem_this)} | {fmt(mem_prev)} | {diff(mem_this, mem_prev)} |\n"
-    markdown += f"| Disk Usage     | {fmt(disk_this)} | {fmt(disk_prev)} | {diff(disk_this, disk_prev)} |\n"
-
-    # Push for final report
-    ti.xcom_push(key="section_engine_master", value=markdown)
-    return markdown
 
 def generate_windows_vm_wow_comparison(ti, **context):
     """
@@ -286,10 +223,8 @@ def generate_windows_vm_wow_comparison(ti, **context):
         return f"{sign}{d:.2f}%"
 
     # Build markdown
-    markdown = "### Windows VM – Average Resource Summary\n\n"
-
     # === CPU Table ===
-    markdown += "#### CPU Utilization\n"
+    markdown = "### CPU Utilization\n"
     markdown += "| VM Name       | CPU (%) - This Week | CPU (%) - Previous Week | Difference   |\n"
     markdown += "|---------------|---------------------|-------------------------|--------------|\n"
     for inst in sorted(all_instances):
@@ -300,7 +235,7 @@ def generate_windows_vm_wow_comparison(ti, **context):
     markdown += "\n"
 
     # === Memory Table ===
-    markdown += "#### Memory Utilization\n"
+    markdown += "### Memory Utilization\n"
     markdown += "| VM Name       | Memory (%) - This Week | Memory (%) - Previous Week | Difference   |\n"
     markdown += "|---------------|------------------------|----------------------------|--------------|\n"
     for inst in sorted(all_instances):
@@ -311,7 +246,7 @@ def generate_windows_vm_wow_comparison(ti, **context):
     markdown += "\n"
 
     # === Disk Table ===
-    markdown += "#### Disk Utilization\n"
+    markdown += "### Disk Utilization\n"
     markdown += "| VM Name       | C Disk (%) | D Disk (%) | E Disk (%) | F Disk (%) |\n"
     markdown += "|---------------|------------|------------|------------|------------|\n"
 
@@ -500,7 +435,6 @@ def overall_summary(ti, **context):
     period = ti.xcom_pull(key="period_this_week")
 
     # Pull sections
-    engine_master       = ti.xcom_pull(key="section_engine_master") or "No data"
     windows_wow         = ti.xcom_pull(key="section_windows_wow") or "No data"
     high_cpu_peaks      = ti.xcom_pull(key="section_high_cpu_peaks") or "No data"
     high_memory_peaks   = ti.xcom_pull(key="section_high_memory_peaks") or "No data"
@@ -515,16 +449,14 @@ Generate a **Weekly SRE Summary (Current Status)** for: **{period}**.
 
 #### 1. Windows VMs
 {windows_wow}
-#### 2. Cloud Orbit
-{engine_master}
 
-#### 3. High CPU Peaks (≥90%)
+#### 2. High CPU Peaks (≥90%)
 {high_cpu_peaks}
 
-#### 4. High Memory Peaks (≥90%)
+#### 3. High Memory Peaks (≥90%)
 {high_memory_peaks}
 
-#### 5. High Disk Peaks (≥90%)
+#### 4. High Disk Peaks (≥90%)
 {high_disk_peaks}
 
 ### Instructions:
@@ -601,12 +533,7 @@ def compile_sre_report(ti, **context):
 
 ---
 
-## 2. Cloud Orbit Metrics (This Week vs Previous Week)
-{ti.xcom_pull(key="section_engine_master") or "No data"}
-
----
-
-## 3. Alerting: High Resource Peaks
+## 2. Alerting: High Resource Peaks
 {ti.xcom_pull(key="section_high_cpu_peaks") or "No data"}
 
 {ti.xcom_pull(key="section_high_memory_peaks") or "No data"}
@@ -1063,7 +990,6 @@ with DAG(
     fetch_this = PythonOperator(task_id="fetch_this_week", python_callable=fetch_all_metrics_this_week)
     fetch_prev = PythonOperator(task_id="fetch_previous_week", python_callable=fetch_all_metrics_previous_week)
 
-    gen_engine     = PythonOperator(task_id="gen_engine_master", python_callable=generate_engine_master_comparison)
     gen_windows    = PythonOperator(task_id="gen_windows_wow", python_callable=generate_windows_vm_wow_comparison)
     gen_cpu_peaks  = PythonOperator(task_id="gen_cpu_peaks", python_callable=generate_high_cpu_peaks)
     gen_mem_peaks  = PythonOperator(task_id="gen_mem_peaks", python_callable=generate_high_memory_peaks)
@@ -1077,8 +1003,8 @@ with DAG(
     send_sre_email = PythonOperator(task_id="send_sre_email", python_callable=send_sre_email, provide_context=True)
     
     # Execution order
-    [fetch_this, fetch_prev] >> gen_engine >> gen_windows >> gen_cpu_peaks >> gen_mem_peaks >> gen_disk_peaks
-    [gen_engine, gen_windows, gen_cpu_peaks, gen_mem_peaks, gen_disk_peaks] >> ai_summary
+    [fetch_this, fetch_prev] >> gen_windows >> gen_cpu_peaks >> gen_mem_peaks >> gen_disk_peaks
+    [gen_windows, gen_cpu_peaks, gen_mem_peaks, gen_disk_peaks] >> ai_summary
     ai_summary >> ai_conclusion >> compile_report >> generate_pdf >> convert_to_html >> send_sre_email
 
 
