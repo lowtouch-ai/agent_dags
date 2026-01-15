@@ -12,17 +12,55 @@ from airflow.models import Variable
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from hubspot_email_listener import send_fallback_email_on_failure
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+def clear_retry_tracker_on_success(context):
+    dag_run = context['dag_run']
+    original_run_id = dag_run.conf.get('original_run_id')
+    original_dag_id = dag_run.conf.get('original_dag_id', dag_run.dag_id)
+    
+    if not original_run_id or not dag_run.conf.get('retry_attempt'):
+        return  # Not a retry run
+    
+    tracker_key = f"{original_dag_id}:{original_run_id}"
+    
+    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    
+    if tracker_key in retry_tracker:
+        del retry_tracker[tracker_key]
+        Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
+        logging.info(f"Retry succeeded - cleared tracker for {tracker_key}")
+
+def update_retry_tracker_on_failure(context):
+    dag_run = context['dag_run']
+    original_run_id = dag_run.conf.get('original_run_id')
+    original_dag_id = dag_run.conf.get('original_dag_id', dag_run.dag_id)
+    
+    if not original_run_id or not dag_run.conf.get('retry_attempt'):
+        return  # Not a retry run
+    
+    tracker_key = f"{original_dag_id}:{original_run_id}"
+    
+    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    
+    if tracker_key in retry_tracker:
+        retry_tracker[tracker_key]["status"] = "failed"
+        Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
+        logging.info(f"Retry failed - updated status for {tracker_key}")
 
 default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2025, 1, 1),
     "retry_delay": timedelta(minutes=5),
+    "on_failure_callback": send_fallback_email_on_failure
 }
 
 HUBSPOT_FROM_ADDRESS = Variable.get("ltai.v3.hubspot.from.address")
@@ -77,11 +115,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
         ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
         return ai_content.strip()
     except Exception as e:
-        logging.error(f"Error in get_ai_response: {e}")
-        if expect_json:
-            return f'{{"error": "Error processing AI request: {str(e)}"}}'
-        else:
-            return f"<html><body>Error processing AI request: {str(e)}</body></html>"
+        raise
 
 def extract_json_from_text(text):
     """Extract JSON from text with markdown or other wrappers."""
@@ -603,9 +637,11 @@ Return ONLY valid JSON with NO additional text:
     }}
 }}
 """
-    
-    ai_response = get_ai_response(analysis_prompt, expect_json=True)
-    
+    try:
+        ai_response = get_ai_response(analysis_prompt, expect_json=True)
+    except Exception as e:
+        raise
+
     try:
         analysis = json.loads(ai_response)
     except:
@@ -999,6 +1035,8 @@ with DAG(
     schedule_interval=None,  # Triggered by email listener
     catchup=False,
     tags=["hubspot", "tasks", "deal", "completion"],
+    on_success_callback=clear_retry_tracker_on_success,
+    on_failure_callback=update_retry_tracker_on_failure,
     description="Handle task completion + deal updates via email with dynamic stage mapping"
 ) as dag:
 

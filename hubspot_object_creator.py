@@ -21,6 +21,7 @@ import html
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from hubspot_email_listener import get_email_thread
+from hubspot_email_listener import send_fallback_email_on_failure
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -29,7 +30,42 @@ default_args = {
     "depends_on_past": False,
     "start_date": datetime(2025, 8, 22),
     "retry_delay": timedelta(seconds=15),
+    'on_failure_callback': send_fallback_email_on_failure
 }
+
+def clear_retry_tracker_on_success(context):
+    dag_run = context['dag_run']
+    original_run_id = dag_run.conf.get('original_run_id')
+    original_dag_id = dag_run.conf.get('original_dag_id', dag_run.dag_id)
+    
+    if not original_run_id or not dag_run.conf.get('retry_attempt'):
+        return  # Not a retry run
+    
+    tracker_key = f"{original_dag_id}:{original_run_id}"
+    
+    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    
+    if tracker_key in retry_tracker:
+        del retry_tracker[tracker_key]
+        Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
+        logging.info(f"Retry succeeded - cleared tracker for {tracker_key}")
+
+def update_retry_tracker_on_failure(context):
+    dag_run = context['dag_run']
+    original_run_id = dag_run.conf.get('original_run_id')
+    original_dag_id = dag_run.conf.get('original_dag_id', dag_run.dag_id)
+    
+    if not original_run_id or not dag_run.conf.get('retry_attempt'):
+        return  # Not a retry run
+    
+    tracker_key = f"{original_dag_id}:{original_run_id}"
+    
+    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    
+    if tracker_key in retry_tracker:
+        retry_tracker[tracker_key]["status"] = "failed"
+        Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
+        logging.info(f"Retry failed - updated status for {tracker_key}")
 
 HUBSPOT_FROM_ADDRESS = Variable.get("ltai.v3.hubspot.from.address")
 GMAIL_CREDENTIALS = Variable.get("ltai.v3.hubspot.gmail.credentials")
@@ -262,7 +298,7 @@ def analyze_user_response(ti, **context):
             "tasks_to_execute": ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
         }
         ti.xcom_push(key="analysis_results", value=default_result)
-        return default_result
+        raise ValueError(default_result["error_message"])
     
     # === CRITICAL FIX: Extract sender and recipients BEFORE try block ===
     headers = email_data.get("headers", {})
@@ -300,7 +336,7 @@ def analyze_user_response(ti, **context):
             "tasks_to_execute": ["compose_response_html", "collect_and_save_results", "send_final_email"]
         }
         ti.xcom_push(key="analysis_results", value=default_result)
-        return default_result
+        raise ValueError(default_result["error_message"])
     
     # === Prompt (unchanged) ===
     from datetime import datetime
@@ -448,6 +484,11 @@ CRITICAL REMINDERS:
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response for user analysis: {response[:1000]}...")
+
+    except Exception as e:
+        raise
+
+    try:
         parsed_analysis = json.loads(response)
         user_intent = parsed_analysis.get("user_intent", "PROCEED")
         casual_comments_detected = parsed_analysis.get("casual_comments_detected", False)
@@ -503,161 +544,8 @@ CRITICAL REMINDERS:
         logging.info(f"Tasks to execute: {tasks_to_execute}")
         logging.info(f"Reasoning: {results['reasoning']}")
         
-    except Exception as ai_error:
-        logging.error(f"AI failed in analyze_user_response for thread {thread_id}: {ai_error}", exc_info=True)
-        logging.info("=== INITIATING FALLBACK EMAIL PROCEDURE ===")
-        
-        # === FALLBACK EMAIL - FULLY FIXED ===
-        # Replace the fallback_body section in analyze_user_response function (around line 300)
-
-        fallback_body = f"""
-        <html>
-        <head>
-            <style>
-                body {{
-                    font-family: Arial, sans-serif;
-                    line-height: 1.6;
-                    color: #333;
-                    max-width: 600px;
-                    margin: 0 auto;
-                    padding: 20px;
-                }}
-                .greeting {{
-                    margin-bottom: 15px;
-                }}
-                .message {{
-                    margin: 15px 0;
-                }}
-                .closing {{
-                    margin-top: 15px;
-                }}
-                .signature {{
-                    margin-top: 15px;
-                    font-weight: bold;
-                }}
-                .company {{
-                    color: #666;
-                    font-size: 0.9em;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="greeting">
-                <p>Hello {sender_name},</p>
-            </div>
-            
-            <div class="message">
-                <p>We're currently experiencing a temporary technical issue that may affect your experience with the HubSpot Assistant.</p>
-                
-                <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
-                
-                <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
-            </div>
-            
-            <div class="closing">
-                <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
-            </div>
-            
-            <div class="signature">
-                <p>Best regards,<br>
-                The HubSpot Assistant Team<br>
-                <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
-            </div>
-        </body>
-        </html>
-        """
-        
-        results = {
-            "status": "fallback_sent",
-            "error_message": f"AI analysis failed: {str(ai_error)}",
-            "user_intent": "FALLBACK",
-            "entities_to_create": {},
-            "entities_to_update": {},
-            "selected_entities": {},
-            "reasoning": "Fallback email sent due to AI failure",
-            "tasks_to_execute": [],  # Empty list to skip all downstream tasks
-            "should_determine_owner": False,
-            "should_check_task_threshold": False,
-            "casual_comments_detected": False,
-            "fallback_email_sent": True
-        }
-        
-        try:
-            logging.info("Attempting Gmail authentication for fallback email...")
-            service = authenticate_gmail()
-            if not service:
-                logging.error("CRITICAL: Gmail auth failed during fallback - cannot send error notification")
-            else:
-                logging.info("Gmail authenticated successfully")
-                
-                # === Build threading ===
-                original_message_id = headers.get("Message-ID", "")
-                references = headers.get("References", "")
-                if original_message_id:
-                    references = f"{references} {original_message_id}".strip() if references else original_message_id
-                
-                subject = headers.get("Subject", "No Subject")
-                if not subject.lower().startswith("re:"):
-                    subject = f"Re: {subject}"
-                
-                # === Recipients: reply-all, exclude bot ===
-                primary_recipient = sender_email
-                
-                # Build CC list from To and Cc fields, excluding sender and bot
-                cc_recipients = []
-                for addr in all_recipients["to"] + all_recipients["cc"]:
-                    clean_addr = addr.strip()
-                    if (clean_addr and 
-                        clean_addr.lower() != sender_email.lower() and
-                        HUBSPOT_FROM_ADDRESS.lower() not in clean_addr.lower() and
-                        clean_addr not in cc_recipients):
-                        cc_recipients.append(clean_addr)
-                
-                # BCC recipients (excluding bot)
-                bcc_recipients = []
-                for addr in all_recipients["bcc"]:
-                    clean_addr = addr.strip()
-                    if clean_addr and HUBSPOT_FROM_ADDRESS.lower() not in clean_addr.lower():
-                        bcc_recipients.append(clean_addr)
-                
-                cc_string = ', '.join(cc_recipients) if cc_recipients else None
-                bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
-                
-                logging.info(f"Fallback email recipients:")
-                logging.info(f"  To: {primary_recipient}")
-                logging.info(f"  Cc: {cc_string or 'None'}")
-                logging.info(f"  Bcc: {bcc_string or 'None'}")
-                
-                # === Compose and send ===
-                send_email(
-                service=service,
-                recipient=primary_recipient,
-                subject=subject,
-                body=fallback_body,
-                in_reply_to=original_message_id,
-                references=references,
-                cc=cc_string,
-                bcc=bcc_string
-            )
-
-                # === Mark as read ===
-                try:
-                    original_msg_id = email_data.get("id")
-                    if original_msg_id:
-                        service.users().messages().modify(
-                            userId="me",
-                            id=original_msg_id,
-                            body={"removeLabelIds": ["UNREAD"]}
-                        ).execute()
-                        logging.info(f"✓ Marked original message {original_msg_id} as read")
-                except Exception as read_err:
-                    logging.warning(f"Failed to mark message as read: {read_err}")
-                
-        except Exception as send_error:
-            logging.error(f"CRITICAL: Failed to send fallback email: {send_error}", exc_info=True)
-            logging.error(f"Sender: {sender_email}")
-            logging.error(f"Subject: {subject}")
-            logging.error(f"Recipients - To: {primary_recipient}, Cc: {cc_string}, Bcc: {bcc_string}")
+    except Exception as e:
+        logging.info (f"Failed to parse AI response: {e}")
     
     ti.xcom_push(key="analysis_results", value=results)
     logging.info(f"Analysis completed for thread {thread_id}")
@@ -776,7 +664,10 @@ CRITICAL:
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Validation AI response: {response[:500]}...")
-        
+
+    except Exception as e:
+        raise
+    try:
         validation_result = json.loads(response.strip())
         validation_status = validation_result.get("validation_status", "needs_cleaning")
         validation_messages = validation_result.get("validation_messages", [])
@@ -925,9 +816,10 @@ Return this exact JSON structure:
 }}
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    except Exception as e:
+        raise
     try:
         parsed_json = json.loads(response.strip())
         ti.xcom_push(key="owner_info", value=parsed_json)
@@ -1033,9 +925,10 @@ If no dates found in email, check today's date as default for each owner.
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    except Exception as e:
+        raise
     try:
         parsed_json = json.loads(response.strip())
         warnings = parsed_json.get("warnings", [])
@@ -1204,7 +1097,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response: {response[:1000]}...")
-
+    except Exception as e:
+        raise
+    try:
         parsed = json.loads(response.strip())
         status = parsed.get("status")
 
@@ -1373,7 +1268,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response: {response[:1000]}...")
-
+    except Exception as e:
+        raise
+    try:
         parsed = json.loads(response.strip())
         status = parsed.get("status")
 
@@ -1566,7 +1463,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response: {response[:1000]}...")
-
+    except Exception as e:
+        raise  
+    try:
         parsed = json.loads(response.strip())
         status = parsed.get("status")
 
@@ -1736,7 +1635,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response: {response[:1000]}...")
-
+    except Exception as e:
+        raise
+    try:
         parsed = json.loads(response.strip())
         status = parsed.get("status")
 
@@ -1954,7 +1855,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response: {response[:1000]}...")
-
+    except Exception as e:
+        raise
+    try:
         parsed = json.loads(response.strip())
         status = parsed.get("status")
 
@@ -2150,7 +2053,9 @@ YOU MUST:
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response: {response[:1000]}...")
-
+    except Exception as e:
+        raise
+    try:
         parsed = json.loads(response.strip())
         status = parsed.get("status")
 
@@ -2314,7 +2219,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response: {response[:1000]}...")
-
+    except Exception as e:
+        raise
+    try:
         parsed = json.loads(response.strip())
         status = parsed.get("status")
 
@@ -2473,7 +2380,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response: {response[:1000]}...")
-
+    except Exception as e:
+        raise
+    try:
         parsed = json.loads(response.strip())
         status = parsed.get("status")
 
@@ -2693,6 +2602,9 @@ If error, set status as failure, error message in reason and include individual 
     response = None
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    except Exception as e:
+        raise
+    try:
         parsed = json.loads(response)       
         status = parsed.get("status", "unknown")
         updated_deals = parsed.get("updated_deals", [])
@@ -2841,7 +2753,9 @@ RETURN ONLY CLEAN JSON."""
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response: {response[:1000]}...")
-
+    except Exception as e:
+        raise
+    try:
         parsed = json.loads(response.strip())
         if parsed.get("status") != "success":
             raise Exception(parsed.get("reason", "Status != success"))
@@ -2971,7 +2885,9 @@ RETURN ONLY VALID JSON."""
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response: {response[:1000]}...")
-
+    except Exception as e:
+        raise
+    try:
         parsed = json.loads(response.strip())
         if parsed.get("status") != "success":
             raise Exception(parsed.get("reason", "Status != success"))
@@ -3171,7 +3087,9 @@ RETURN ONLY CLEAN, VALID JSON."""
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response: {response[:1000]}...")
-
+    except Exception as e:
+        raise
+    try:
         parsed = json.loads(response.strip())
         if parsed.get("status") != "success":
             raise Exception(parsed.get("reason", "LLM returned status != success"))
@@ -3471,7 +3389,9 @@ RETURN ONLY CLEAN JSON."""
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response: {response[:1000]}...")
-
+    except Exception as e:
+        raise
+    try:
         parsed = json.loads(response.strip())
         association_requests = parsed.get("association_requests", [])
         ids_from_conversation = parsed.get("ids_from_conversation", {})
@@ -4445,23 +4365,23 @@ def send_final_email(ti, **context):
     raise ValueError("Failed to send final email")
 
 def branch_to_creation_tasks(ti, **context):
-    """Branch to appropriate creation/update tasks"""
-    analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    analysis_results = ti.xcom_pull(key="analysis_results", default=None)
     
-    if not analysis_results or not isinstance(analysis_results, dict):
-        logging.error("Invalid analysis_results")
-        return ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
+    if analysis_results is None:
+        logging.error("No analysis_results found in XCom → upstream probably failed")
+        return ["end_workflow"]   # or raise ValueError() to fail the branch
+
+    if not isinstance(analysis_results, dict):
+        logging.error("analysis_results is not a dict")
+        return ["end_workflow"]
+
     if analysis_results.get("fallback_email_sent", False):
-        logging.info("Fallback email was sent - skipping all downstream tasks")
-        return ["end_workflow"] 
-    tasks_to_execute = analysis_results.get("tasks_to_execute", [])
-    
-    # Ensure mandatory tasks are included
-    mandatory_tasks = ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
-    tasks_to_execute = list(set(tasks_to_execute + mandatory_tasks))
-    
-    logging.info(f"Tasks to execute: {tasks_to_execute}")
-    return tasks_to_execute
+        return ["end_workflow"]
+
+    # normal path
+    tasks = analysis_results.get("tasks_to_execute", [])
+    mandatory = ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
+    return list(set(tasks + mandatory))
 
 # ============================================================================
 # DAG DEFINITION
@@ -4472,7 +4392,9 @@ with DAG(
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
-    tags=["hubspot", "create", "objects"]
+    tags=["hubspot", "create", "objects"],
+    on_success_callback=clear_retry_tracker_on_success,
+    on_failure_callback=update_retry_tracker_on_failure
 ) as dag:
 
     start_task = DummyOperator(task_id="start_workflow")
@@ -4517,7 +4439,6 @@ with DAG(
         task_id="create_contacts",
         python_callable=create_contacts,
         retries=2,
-        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -4525,7 +4446,6 @@ with DAG(
         task_id="create_companies",
         python_callable=create_companies,
         retries=2,
-        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -4533,7 +4453,6 @@ with DAG(
         task_id="create_deals",
         python_callable=create_deals,
         retries=2,
-        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -4541,7 +4460,6 @@ with DAG(
         task_id="create_meetings",
         python_callable=create_meetings,
         retries=2,
-        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -4549,7 +4467,6 @@ with DAG(
         task_id="create_notes",
         python_callable=create_notes,
         retries=2,
-        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -4557,7 +4474,6 @@ with DAG(
         task_id="create_tasks",
         python_callable=create_tasks,
         retries=2,
-        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -4565,7 +4481,6 @@ with DAG(
         task_id="update_contacts",
         python_callable=update_contacts,
         retries=2,
-        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -4573,7 +4488,6 @@ with DAG(
         task_id="update_companies",
         python_callable=update_companies,
         retries=2,
-        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -4581,7 +4495,6 @@ with DAG(
         task_id="update_deals",
         python_callable=update_deals,
         retries=2,
-        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -4589,7 +4502,6 @@ with DAG(
         task_id="update_meetings",
         python_callable=update_meetings,
         retries=2,
-        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -4597,7 +4509,6 @@ with DAG(
         task_id="update_notes",
         python_callable=update_notes,
         retries=2,
-        trigger_rule="all_done",
         provide_context=True
     )
 
@@ -4605,41 +4516,41 @@ with DAG(
         task_id="update_tasks",
         python_callable=update_tasks,
         retries=2,
-        trigger_rule="all_done",
         provide_context=True
+    )
+
+    # New join task to handle branching and skip propagation
+    join_creations = DummyOperator(
+        task_id="join_creations",
+        trigger_rule="one_success"
     )
 
     create_associations_task = PythonOperator(
         task_id="create_associations",
         python_callable=create_associations,
-        provide_context=True,
-        trigger_rule="all_done"
+        provide_context=True
     )
 
     collect_results_task = PythonOperator(
         task_id="collect_and_save_results",
         python_callable=collect_and_save_results,
-        provide_context=True,
-        trigger_rule="all_done"
+        provide_context=True
     )
 
     compose_response_task = PythonOperator(
         task_id="compose_response_html",
         python_callable=compose_response_html,
-        provide_context=True,
-        trigger_rule="all_done"
+        provide_context=True
     )
 
     send_final_email_task = PythonOperator(
         task_id="send_final_email",
         python_callable=send_final_email,
-        provide_context=True,
-        trigger_rule="all_done"
+        provide_context=True
     )
 
     end_task = DummyOperator(
-        task_id="end_workflow",
-        trigger_rule="all_done"
+        task_id="end_workflow"
     )
 
     # Define task dependencies
@@ -4664,8 +4575,14 @@ with DAG(
 
     branch_task >> [task for task in creation_tasks.values()]
 
+    # Route creations and branch through the join
     for task in creation_tasks.values():
-        task >> create_associations_task
-    
-    branch_task >> create_associations_task
-    create_associations_task >> collect_results_task >> compose_response_task >> send_final_email_task >> end_task
+        task >> join_creations
+
+    branch_task >> join_creations
+
+    # Continue the chain after join
+    join_creations >> create_associations_task >> collect_results_task >> compose_response_task >> send_final_email_task >> end_task
+
+    # Add direct path from analyze to end for failure jump
+    analyze_task >> end_task
