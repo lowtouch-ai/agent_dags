@@ -323,8 +323,8 @@ Email: {sender_email}
    - Never regenerate or rephrase note content — copy it verbatim from the confirmed plan
    - Keep everything in the notes as it is without changing the speaker name unless explicitly asked to change it
    - All the entities in the confirmation email should be there at the final email without fail and without any modification unless user explicitly asks for a change
-   - Do not change the **speaker_name** in the notes.Copy th exact note content in the confirmation email exactly as it is in the final mail without fail.
-3. If user says "proceed", "yes", "go ahead", "looks good" → return the entire confirmed plan unchanged
+   - Do not change the **speaker_name** in the notes.Copy the exact note content in the confirmation email exactly as it is in the final mail without fail.
+3. If user says "proceed", "yes", "go ahead", "looks good" → return the entire confirmed plan with all the changes requested by the user.If no changes are mentioned , return the confirmed plan as-is.
 4. Casual comments (e.g. "Great meeting!", "This is exciting") → create ONE new note with that text, BUT still return full confirmed plan
 
 CRITICAL INSTRUCTIONS:
@@ -332,6 +332,9 @@ CRITICAL INSTRUCTIONS:
 - You cannot call any APIs or tools. You should answer based on your knowledge.
 - The bot's previous messages contain tables with entity details (IDs, names, emails, etc.)
 - Parse these tables to extract existing entities and proposed new entities
+- **CRITICAL**: Parse the Notes table and Tasks table from the confirmation email
+- **CRITICAL**: Parse the Meeting Details table from the confirmation email
+- The user's latest message indicates their intent (confirm, modify, select specific, etc.)
 - The user's latest message indicates their intent (confirm, modify, select specific, etc.)
 
 CRITICAL PRESERVATION RULES - NON-NEGOTIABLE:
