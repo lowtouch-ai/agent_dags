@@ -592,6 +592,17 @@ def usage_analyzer(ti, **context):
         (2) A **concrete assumed larger-scale example** (not multipliers), using explicit per-query bytes and slot usage.
 
         ----------------
+        STRICT FORMATTING RULES (CRITICAL)
+        ----------------
+        1. **NO LATEX or MathJax**: Do not use symbols like \\frac, \\times, \\approx, or $$. 
+        2. **Use Plain Text Arithmetic**: 
+           - Use "*" for multiplication (e.g., "100 * 5 = 500").
+           - Use "/" for division (e.g., "100 / 20 = 5").
+           - Use "=" for equals.
+           - Use plain text for units (e.g., "MB", "TiB").
+        3. **Do not put calculations inside code blocks** (no ``` or `). Keep them as standard text lines.
+
+        ----------------
         Billing Logic
         ----------------
         - If billing model is unknown, default to **on-demand** ($6 per **TiB** scanned; 1 TiB = 1024 GiB; 1 GiB = 1024 MiB).  
@@ -680,6 +691,7 @@ def convert_to_html(ti, **context):
     - Start with a greeting like "Hi {sender_name}," or "Hello {sender_name}," .
     - Preserve all structure using only basic HTML tags (<p>, <b>, <h1>-<h3>, <ul>, <li>, <code>, <br>).
     - Do NOT include any inline styles, colors, padding, or CSS.
+    - **CRITICAL: Format calculations as plain text.** - Do NOT use LaTeX (no \\frac, \\times).
     - Convert headings, bullet points, and bold text appropriately.
     - At the end of the email, append exactly:
         Thanks,<br><br>
