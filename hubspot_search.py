@@ -977,101 +977,124 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
     return parsed_json
 
 def search_contacts_api(firstname=None, lastname=None, email=None):
-    """Search contacts in HubSpot using API
-    
-    Search priority:
-    - If email is provided → exact match on email
-    - If both firstname and lastname → exact match on both (AND)
-    - If only firstname → search by firstname using CONTAINS_TOKEN (fuzzy match)
-    - If only lastname → not supported (to avoid irrelevant results)
-    - EXCLUDE deal owners mentioned with "assign to", "owner", or similar assignment language
-    - EXCLUDE internal team members, senders, or system users (e.g., skip "From: John Doe <john@company.com>")
-    - EXCLUDE names that are clearly role/department indicators in parentheses like "(Ops)", "(Finance)", "(IT)"
- 
     """
-    try:
-        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/contacts/search"
-        headers = {
-            "Authorization": f"Bearer {HUBSPOT_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        filters = []
-        
-        # Priority 1: Email exact match (if provided)
-        if email:
-            filters.append({
-                "propertyName": "email",
-                "operator": "CONTAINS_TOKEN",
-                "value": email.strip().lower()  # HubSpot emails are case-insensitive
-            })
-        else:
-            # Priority 2: Both first and last name → require both (AND)
-            if firstname and lastname:
-                filters.extend([
-                    {
-                        "propertyName": "firstname",
-                        "operator": "CONTAINS_TOKEN",
-                        "value": firstname.strip()
-                    },
-                    {
-                        "propertyName": "lastname",
-                        "operator": "CONTAINS_TOKEN",
-                        "value": lastname.strip()
-                    }
-                ])
-            # Priority 3: Only firstname → use CONTAINS_TOKEN for broader match
-            elif firstname:
-                filters.append({
-                    "propertyName": "firstname",
-                    "operator": "CONTAINS_TOKEN",
-                    "value": firstname.strip()
-                })
-            # If only lastname is provided → do nothing (avoid poor results)
-            elif lastname:
-                logging.info("Search by lastname only is not supported. Requires firstname or email.")
-                return {"total": 0, "results": []}
-            else:
-                return {"total": 0, "results": []}
-        
+    Search contacts in HubSpot with fallback logic.
+
+    Priority:
+    1. Email (exact match)
+    2. Firstname + Lastname (AND)
+    3. Firstname only (fallback)
+
+    Lastname-only search is intentionally not supported.
+    """
+
+    endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/contacts/search"
+    headers = {
+        "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    properties = [
+        "hs_object_id", "firstname", "lastname", "email",
+        "phone", "address", "jobtitle", "hubspot_owner_id"
+    ]
+
+    def _execute_search(filters):
+        """Execute a single HubSpot search"""
         payload = {
             "filterGroups": [{"filters": filters}],
-            "properties": [
-                "hs_object_id", "firstname", "lastname", "email", 
-                "phone", "address", "jobtitle", "hubspot_owner_id"
-            ],
+            "properties": properties,
             "sorts": [{"propertyName": "lastmodifieddate", "direction": "DESCENDING"}],
             "limit": 10
         }
-        
+
         response = requests.post(endpoint, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
-        
-        data = response.json()
-        results = data.get("results", [])
-        
-        formatted_results = []
-        for contact in results:
-            props = contact.get("properties", {})
-            owner_id = props.get("hubspot_owner_id", "")
-            formatted_results.append({
-                "contactId": contact.get("id"),
-                "firstname": props.get("firstname", ""),
-                "lastname": props.get("lastname", ""),
-                "email": props.get("email", ""),
-                "phone": props.get("phone", ""),
-                "address": props.get("address", ""),
-                "jobtitle": props.get("jobtitle", ""),
-                "contactOwnerId": owner_id,
-                "contactOwnerName": ""  # Will be filled later
-            })
-        
-        search_desc = email or f"{firstname or ''} {lastname or ''}".strip()
-        logging.info(f"Found {len(formatted_results)} contacts for search: {search_desc}")
-        return {"total": len(formatted_results), "results": formatted_results}
-        
+
+        return response.json().get("results", [])
+
+    try:
+        search_attempts = []
+
+        # Attempt 1: Email (exact match)
+        if email:
+            search_attempts.append([
+                {
+                    "propertyName": "email",
+                    "operator": "EQ",
+                    "value": email.strip().lower()
+                }
+            ])
+
+        # Attempt 2: Firstname + Lastname
+        if firstname and lastname:
+            search_attempts.append([
+                {
+                    "propertyName": "firstname",
+                    "operator": "CONTAINS_TOKEN",
+                    "value": firstname.strip()
+                },
+                {
+                    "propertyName": "lastname",
+                    "operator": "CONTAINS_TOKEN",
+                    "value": lastname.strip()
+                }
+            ])
+
+        # Attempt 3: Firstname only (fallback)
+        if firstname:
+            search_attempts.append([
+                {
+                    "propertyName": "firstname",
+                    "operator": "CONTAINS_TOKEN",
+                    "value": firstname.strip()
+                }
+            ])
+
+        # If nothing valid to search
+        if not search_attempts:
+            logging.info("No valid contact search parameters provided.")
+            return {"total": 0, "results": []}
+
+        # Execute searches in order, stop at first successful result
+        for filters in search_attempts:
+            results = _execute_search(filters)
+
+            if results:
+                formatted_results = []
+                for contact in results:
+                    props = contact.get("properties", {})
+                    formatted_results.append({
+                        "contactId": contact.get("id"),
+                        "firstname": props.get("firstname", ""),
+                        "lastname": props.get("lastname", ""),
+                        "email": props.get("email", ""),
+                        "phone": props.get("phone", ""),
+                        "address": props.get("address", ""),
+                        "jobtitle": props.get("jobtitle", ""),
+                        "contactOwnerId": props.get("hubspot_owner_id", ""),
+                        "contactOwnerName": ""
+                    })
+
+                search_desc = email or f"{firstname or ''} {lastname or ''}".strip()
+                logging.info(
+                    f"Found {len(formatted_results)} contacts for search: {search_desc}"
+                )
+
+                return {
+                    "total": len(formatted_results),
+                    "results": formatted_results
+                }
+
+        # No results from any attempt
+        logging.info("No contacts found after applying all fallback strategies.")
+        return {"total": 0, "results": []}
+
     except requests.exceptions.HTTPError as http_err:
-        logging.error(f"HTTP error during contact search: {http_err} - {response.text}")
+        logging.error(
+            f"HTTP error during contact search: {http_err.response.status_code} - "
+            f"{http_err.response.text}"
+        )
         return {"total": 0, "results": []}
     except Exception as e:
         logging.error(f"Failed to search contacts: {e}")
@@ -1211,7 +1234,7 @@ def search_contacts_with_associations(ti, **context):
     
     # AI extracts contact names from email
     prompt = f"""Extract ALL contact names mentioned in this email. You cannot create any contact in HubSpot.
-For each contact, provide:
+For each contact, parse:
 - firstname
 - lastname (empty string if not provided)
 - email (if mentioned)
@@ -1223,15 +1246,16 @@ RULES:
 - Extract EVERY person mentioned
 - Exclude internal team members("lowtouch.ai","hybcloud technologies","ccs","cc","cloud control","cloudcontrol" and "ecloudcontrol")and deal owners(all the members from **get_all_owners** tool)
 - Exclude the people whose email is retrieved from `get_all_owners` tool matches the domain given in the latest message.
-- For new contacts,If the user doesnt mentions the domain of a contact add the domain with their name and company(For example if the contact david reynolds from northbridge_automation company is mentioned add the domain as david.reynolds@northbridge_automation) for all contacts without fail.
 - Handle single names (e.g., "Neha") as firstname only
 - Parse "Neha (Ops)" as firstname="Neha", ignore role
 
 Return ONLY valid JSON:
 {{
     "contacts": [
-        {{"firstname": "...", "lastname": "...", "email": "..."}}
+        {{"firstname": "...", "lastname": "...", "email": "...", "phone": "...", "Job Title": "...", "Contact Owner": "..."}}
     ]
+    "associated_companies": [],
+    "associated_deals":[]
 }}
 """
     try:
@@ -1240,6 +1264,7 @@ Return ONLY valid JSON:
         raise
     try: 
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"AI response is: {response}")
     except Exception as e:
         raise
         
@@ -1274,7 +1299,7 @@ Return ONLY valid JSON:
                 lastname=lastname if lastname else None,
                 email=email if email else None
             )
-            
+            logging.info(f"search result is :{search_result}")
             if search_result["total"] > 0:
                 # Contact found - get their associations
                 for found_contact in search_result["results"]:
@@ -1285,6 +1310,16 @@ Return ONLY valid JSON:
                     company_ids = get_contact_associations(contact_id, "companies")
                     for company_id in company_ids:
                         company_details = get_company_details(company_id)
+                        if company_details:
+                            # 🔹 OPTION 1: normalize company name upstream
+                                original_name = company_details.get("name", "")
+                                company_details["name"] = (
+                                    original_name
+                                    .lower()
+                                    .replace(" ", "")
+                                    .replace("-", "")
+                            )
+
                         if company_details and company_details not in all_associated_companies:
                             all_associated_companies.append(company_details)
                     
@@ -1294,6 +1329,8 @@ Return ONLY valid JSON:
                         deal_details = get_deal_details(deal_id)
                         if deal_details and deal_details not in all_associated_deals:
                             all_associated_deals.append(deal_details)
+                    logging.info(f"Contact {contact_id} associations fetched: "
+                                 f"{len(company_ids)} companies, {deal_ids} deals")
             else:
                 # Get the correct contact owner from owner_info
                 owner_info = ti.xcom_pull(key="owner_info", default={})
@@ -1306,7 +1343,7 @@ Return ONLY valid JSON:
                     "phone": "",
                     "address": "",
                     "jobtitle": "",
-                    "contactOwnerName": contact_owner_name  # ✅ CORRECT
+                    "contactOwnerName": contact_owner_name  
                 })
         
         result = {
@@ -1370,7 +1407,18 @@ RULES:
 Return ONLY valid JSON:
 {{
     "companies": [
-        {{"name": "...", "domain": "..."}}
+        {{
+            "Name": "...",
+            "domain": "...",
+            "address": "...",
+            "city": "...",
+            "state": "...",
+            "zip": "...",
+            "country": "...",
+            "phone": "...",
+            "description": "...",
+            "type": "..."
+        }}
     ]
 }}
 """
@@ -1384,7 +1432,7 @@ Return ONLY valid JSON:
         
         # Log for debugging
         logging.info(f"Associated companies from contacts: {[c.get('name') for c in associated_companies]}")
-        logging.info(f"Mentioned companies from email: {[c.get('name') for c in mentioned_companies]}")
+        logging.info(f"Mentioned companies from email: {[c.get('Name') for c in mentioned_companies]}")
         
         # Start with ALL associated as existing
         existing_companies = associated_companies.copy()
@@ -1393,7 +1441,7 @@ Return ONLY valid JSON:
         new_companies = []
         
         for mentioned in mentioned_companies:
-            mentioned_name_lower = mentioned.get("name", "").strip().lower()
+            mentioned_name_lower = mentioned.get("Name", "").strip().lower()
             if not mentioned_name_lower:
                 continue
             
@@ -1406,11 +1454,12 @@ Return ONLY valid JSON:
                     assoc_name_lower in mentioned_name_lower
                 ):
                     matched = True
+                    logging.info(f"Matched company: '{mentioned_name_lower}' with '{assoc_name_lower}'")
                     break
             
             if not matched:
                 new_companies.append({
-                    "name": mentioned.get("name", ""),
+                    "name": mentioned.get("Name", ""),
                     "domain": mentioned.get("domain", ""),
                     "address": "",
                     "city": "",
@@ -1419,7 +1468,7 @@ Return ONLY valid JSON:
                     "country": "",
                     "phone": "",
                     "description": "",
-                    "type": "PROSPECT"
+                    "type": ""
                 })
         
         result = {
@@ -1481,10 +1530,24 @@ LATEST MESSAGE:
 Deal Owner: {deal_owner_name}
 
 RULES:
-- Only extract if explicit deal creation requested OR clear buying signals
+- Strictly follow these rules, for new deals, if the deal name is not mentioned by the user :
+   - Extract the Client Name (company or individual being sold to) from the email.
+   - Check if it's a direct deal (no partner) or partner deal (partner or intermediary mentioned).
+   - Direct deal: <Client Name>-<Deal Name>
+   - Partner deal: <Partner Name>-<Client Name>-<Deal Name>
+   - Use the Deal Name from the email if specified; otherwise, create a concise one based on the description (e.g., product or service discussed).
+- If the deal name is mentioned by the user, use that as the deal name without fail.
+- Only extract if explicit deal creation requested OR clear buying signals.Do not create any deals if there is no clear buying intent.
 - NOT exploratory conversations
 - Return deal name, stage (default: Lead), amount, close date and deal owner name
-- If close date not mentioned, fetch the current date and set the close date as after 3 months from that date.
+FOR EACH DEAL, YOU MUST PROVIDE:
+    1. dealName: The name of the deal (required)
+    2. dealLabelName: The stage (default to "Lead" if not specified or invalid)
+    3. dealAmount: The deal value (default to "5000" if not specified)
+    4. closeDate: Expected close date in YYYY-MM-DD format (default to three months from current date if not specified)
+    5. dealOwnerName: {deal_owner_name}
+- ALL fields are REQUIRED for every deal
+
 Return ONLY valid JSON:
 {{
     "deals": [
@@ -1520,19 +1583,26 @@ Return ONLY valid JSON:
         new_deals = []
         
         for mentioned in mentioned_deals:
-            mentioned_name_lower = mentioned.get("dealName", "").strip().lower()
+            mentioned_name = mentioned.get("dealName", "").strip()
+            mentioned_name_lower = mentioned_name.lower()
+            
+            # Skip empty deal names
             if not mentioned_name_lower:
                 continue
             
             matched = False
             for assoc in associated_deals:
-                assoc_name_lower = assoc.get("dealName", "").strip().lower()
-                if assoc_name_lower and (
-                    mentioned_name_lower == assoc_name_lower or
+                assoc_name = assoc.get("dealName", "").strip()
+                assoc_name_lower = assoc_name.lower()
+                if not assoc_name_lower:
+                    continue
+                    
+                # Exact match or substring match
+                if (mentioned_name_lower == assoc_name_lower or
                     mentioned_name_lower in assoc_name_lower or
-                    assoc_name_lower in mentioned_name_lower
-                ):
+                    assoc_name_lower in mentioned_name_lower):
                     matched = True
+                    logging.info(f"Matched deal: '{mentioned_name}' with '{assoc_name}'")
                     break
             
             if not matched:
@@ -1670,7 +1740,7 @@ def search_deals_directly(ti, **context):
     contact_results = contact_data.get("contact_results", {})
     new_contacts = contact_data.get("new_contacts", [])
     logging.info(f"Contact results before direct deal search: {contact_results} new contacts: {len(new_contacts)}")
-    if contact_results.get("total", 0) > 0 or len(new_contacts) > 0:
+    if contact_results.get("total", 0) > 0:
         logging.info("No contacts - skipping direct search results")
         return
     
@@ -1924,7 +1994,7 @@ def merge_search_results(ti, **context):
     # Get association-based results
     contact_info = ti.xcom_pull(key="contact_info_with_associations", default={})
     company_info = ti.xcom_pull(key="company_info", default={})
-    deal_info = ti.xcom_pull(key="deal_info", default={})
+    deal_info = ti.xcom_pull(key="deal_info", default={}, task_ids="validate_deals_against_associations")
     
     # Get direct search results
     direct_deals = ti.xcom_pull(key="direct_deal_results", default={"total": 0, "results": []})
@@ -2133,65 +2203,75 @@ EXAMPLES:
 
 Example 1 - Create New Contact (Company Mismatch):
 User: "Meeting with Rahul Mehta from MedAxis Hospitals"
-Existing: Rahul Mehta at TechCorp Solutions
-Action: Dont show existing Rahul. Create NEW contact "Rahul Mehta" for MedAxis.Only show the existing Rahul if it matches the useer's company context.
+Existing: Rahul Mehta (contactId: 123) at TechCorp Solutions
+Action: Create NEW contact "Rahul Mehta" for MedAxis. Do NOT use contactId 123.
+Reason: Company context doesn't match - existing Rahul is at TechCorp, user mentioned MedAxis.
 
 Example 2 - Use Existing Contact (Perfect Match):
 User: "Follow up with Sarah Collins at HealthBridge Consulting"
-Existing: Sarah Collins at HealthBridge Consulting
-Action: Keep existing Sarah. Only show her HealthBridge associations.
+Existing: Sarah Collins (contactId: 456) at HealthBridge Consulting
+Action: Keep existing Sarah (contactId: 456). Show only HealthBridge associations.
+Reason: Name AND company context both match.
 
-Example 3 - Abandon Irrelevant Associations:
-User: "Deal with MedAxis Hospitals for AI documentation"
-Existing Sarah has deals: [XYZ Corp Deal, ABC Inc Deal]
-Action: Don't show Sarah's other deals - only create/show MedAxis deal.
+Example 3 - Use Existing (No Company Specified):
+User: "Call Sarah Collins tomorrow"
+Existing: Sarah Collins (contactId: 456) at HealthBridge Consulting
+Action: Keep existing Sarah (contactId: 456).
+Reason: User didn't specify company, so existing contact is valid.
+
+Example 4 - Create New (Company Specified, Different):
+User: "Sarah Collins from Acme Corp wants a demo"
+Existing: Sarah Collins (contactId: 456) at HealthBridge Consulting
+Action: Create NEW contact "Sarah Collins" for Acme Corp. Do NOT use contactId 456.
+Reason: User specified Acme Corp, but existing Sarah works at HealthBridge.
 
 Return this exact JSON structure:
-{{
+{{{{
     "validated_contacts": [
-        {{
+        {{{{
             "mentioned_name": "Full Name from user message",
             "mentioned_company": "Company from user message",
             "use_existing": true/false,
             "existing_contact_id": "contact_id or null",
             "action": "use_existing" or "create_new",
             "reason": "Why this decision was made",
-            "create_new_details": {{
+            "create_new_details": {{{{
                 "firstname": "...",
                 "lastname": "...",
                 "company_name": "...",
                 "email": "..."
-            }} or null
-        }}
+            }}}} or null
+        }}}}
     ],
     "validated_companies": [
-        {{
+        {{{{
             "mentioned_name": "Company from user message",
             "use_existing": true/false,
             "existing_company_id": "company_id or null",
             "action": "use_existing" or "create_new",
             "reason": "Why this decision was made"
-        }}
+        }}}}
     ],
     "validated_deals": [
-        {{
+        {{{{
             "mentioned_name": "Deal from user message",
             "use_existing": true/false,
             "existing_deal_id": "deal_id or null",
             "action": "use_existing" or "create_new",
             "reason": "Why this decision was made"
-        }}
+        }}}}
     ],
-    "irrelevant_associations": {{
+    "irrelevant_associations": {{{{
         "contact_ids_to_remove": ["contact_id_1", "contact_id_2"],
         "company_ids_to_remove": ["company_id_1"],
         "deal_ids_to_remove": ["deal_id_1"]
-    }}
-}}
+    }}}}
+}}}}
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
     try:
+        logging.info("prompt:{prompt}")
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response for context validation: {response[:1000]}...")
         
@@ -2209,43 +2289,52 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         
         irrelevant_contact_ids = set(irrelevant.get("contact_ids_to_remove", []))
         
-        for contact_validation in validated_contacts_list:
-            action = contact_validation.get("action")
+        owner_info = ti.xcom_pull(key="owner_info", default={})
+        contact_owner_name = owner_info.get("contact_owner_name", "Kishore")
+        
+        for val in validated_contacts_list:
+            action = val.get("action")
             
             if action == "use_existing":
-                # Keep this existing contact
-                contact_id = contact_validation.get("existing_contact_id")
-                existing_contact = next((c for c in existing_contacts if c.get("contactId") == contact_id), None)
-                if existing_contact and contact_id not in irrelevant_contact_ids:
-                    final_existing_contacts.append(existing_contact)
+                contact_id = val.get("existing_contact_id")
+                if not contact_id:
+                    continue
+                contact = next((c for c in existing_contacts if c.get("contactId") == contact_id), None)
+                if contact and contact_id not in irrelevant_contact_ids:
+                    final_existing_contacts.append(contact)
             
             elif action == "create_new":
-                # Add to new contacts list
-                new_details = contact_validation.get("create_new_details", {})
-                if new_details and new_details.get("firstname"):
-                    # Check if not already in new_contacts
-                    already_exists = any(
-                        nc.get("firstname", "").lower() == new_details.get("firstname", "").lower() and
-                        nc.get("lastname", "").lower() == new_details.get("lastname", "").lower() and
-                        nc.get("email", "").lower() == new_details.get("email", "").lower()
-                        for nc in final_new_contacts
-                    )
-                    if not already_exists:
-                        # Get owner info
-                        owner_info = ti.xcom_pull(key="owner_info", default={})
-                        contact_owner_name = owner_info.get("contact_owner_name", "Kishore")
-                        
-                        final_new_contacts.append({
-                            "firstname": new_details.get("firstname", ""),
-                            "lastname": new_details.get("lastname", ""),
-                            "email": new_details.get("email", ""),
-                            "phone": "",
-                            "address": "",
-                            "jobtitle": "",
-                            "contactOwnerName": contact_owner_name,
-                            "company_context": new_details.get("company_name", "")
-                        })
-                        logging.info(f"✓ Creating new contact: {new_details.get('firstname')} {new_details.get('lastname')} at {new_details.get('company_name')}")
+                details = val.get("create_new_details") or {}
+                firstname = (details.get("firstname") or "").strip()
+                lastname = (details.get("lastname") or "").strip()
+                email = (details.get("email") or "").strip()
+                
+                if not firstname or not lastname:
+                    logging.warning(f"Skipping invalid new contact - missing name: {details}")
+                    continue
+                
+                # Duplicate check using tuple for consistency
+                key = (firstname.lower(), lastname.lower(), email.lower())
+                if any(
+                    (nc.get("firstname","").strip().lower(),
+                     nc.get("lastname","").strip().lower(),
+                     nc.get("email","").strip().lower()) == key
+                    for nc in final_new_contacts
+                ):
+                    logging.info(f"⚠ Skipping duplicate new contact: {firstname} {lastname}")
+                    continue
+                
+                final_new_contacts.append({
+                    "firstname": firstname,
+                    "lastname": lastname,
+                    "email": email,
+                    "phone": "",
+                    "address": "",
+                    "jobtitle": "",
+                    "contactOwnerName": contact_owner_name,
+                    "company_context": details.get("company_name", "")
+                })
+                logging.info(f"✓ Creating new contact: {firstname} {lastname} at {details.get('company_name','')}")
         
         # Process companies
         final_existing_companies = []
@@ -2253,36 +2342,43 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         
         irrelevant_company_ids = set(irrelevant.get("company_ids_to_remove", []))
         
-        for company_validation in validated_companies_list:
-            action = company_validation.get("action")
-            mentioned_name = company_validation.get("mentioned_name", "")
+        for val in validated_companies_list:
+            action = val.get("action")
+            name = (val.get("mentioned_name") or "").strip()
             
+            if not name:
+                continue
+                
             if action == "use_existing":
-                company_id = company_validation.get("existing_company_id")
-                existing_company = next((c for c in existing_companies if c.get("companyId") == company_id), None)
-                if existing_company and company_id not in irrelevant_company_ids:
-                    final_existing_companies.append(existing_company)
+                company_id = val.get("existing_company_id")
+                if not company_id:
+                    continue
+                company = next((c for c in existing_companies if c.get("companyId") == company_id), None)
+                if company and company_id not in irrelevant_company_ids:
+                    final_existing_companies.append(company)
             
-            elif action == "create_new" and mentioned_name:
-                # Check if not already in new_companies
-                already_exists = any(
-                    nc.get("name", "").lower() == mentioned_name.lower()
-                    for nc in final_new_companies
-                )
-                if not already_exists:
-                    final_new_companies.append({
-                        "name": mentioned_name,
-                        "domain": "",
-                        "address": "",
-                        "city": "",
-                        "state": "",
-                        "zip": "",
-                        "country": "",
-                        "phone": "",
-                        "description": "",
-                        "type": "PROSPECT"
-                    })
-                    logging.info(f"✓ Creating new company: {mentioned_name}")
+            elif action == "create_new":
+                name_lower = name.lower()
+                if any(c.get("name","").strip().lower() == name_lower for c in final_existing_companies):
+                    logging.info(f"⚠ Company '{name}' already in existing - skipping")
+                    continue
+                if any(nc.get("name","").strip().lower() == name_lower for nc in final_new_companies):
+                    logging.info(f"⚠ Company '{name}' already in new companies - skipping")
+                    continue
+                
+                final_new_companies.append({
+                    "name": name,
+                    "domain": "",
+                    "address": "",
+                    "city": "",
+                    "state": "",
+                    "zip": "",
+                    "country": "",
+                    "phone": "",
+                    "description": "",
+                    "type": "PROSPECT"
+                })
+                logging.info(f"✓ Creating new company: {name}")
         
         # Process deals
         final_existing_deals = []
@@ -2290,35 +2386,38 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         
         irrelevant_deal_ids = set(irrelevant.get("deal_ids_to_remove", []))
         
-        for deal_validation in validated_deals_list:
-            action = deal_validation.get("action")
-            mentioned_name = deal_validation.get("mentioned_name", "")
+        deal_owner_name = owner_info.get("deal_owner_name", "Kishore")
+        
+        for val in validated_deals_list:
+            action = val.get("action")
+            name = (val.get("mentioned_name") or "").strip()
             
+            if not name:
+                continue
+                
             if action == "use_existing":
-                deal_id = deal_validation.get("existing_deal_id")
-                existing_deal = next((d for d in existing_deals if d.get("dealId") == deal_id), None)
-                if existing_deal and deal_id not in irrelevant_deal_ids:
-                    final_existing_deals.append(existing_deal)
-                    logging.info(f"✓ Keeping existing deal: {existing_deal.get('dealName')}")
+                deal_id = val.get("existing_deal_id")
+                if not deal_id:
+                    continue
+                deal = next((d for d in existing_deals if d.get("dealId") == deal_id), None)
+                if deal and deal_id not in irrelevant_deal_ids:
+                    final_existing_deals.append(deal)
+                    logging.info(f"✓ Keeping existing deal: {deal.get('dealName')}")
             
-            elif action == "create_new" and mentioned_name:
-                # Check if not already in new_deals
-                already_exists = any(
-                    nd.get("dealName", "").lower() == mentioned_name.lower()
-                    for nd in final_new_deals
-                )
-                if not already_exists:
-                    owner_info = ti.xcom_pull(key="owner_info", default={})
-                    deal_owner_name = owner_info.get("deal_owner_name", "Kishore")
-                    
-                    final_new_deals.append({
-                        "dealName": mentioned_name,
-                        "dealLabelName": "",
-                        "dealAmount": "",
-                        "closeDate": "",
-                        "dealOwnerName": deal_owner_name
-                    })
-                    logging.info(f"✓ Creating new deal: {mentioned_name}")
+            elif action == "create_new":
+                name_lower = name.lower()
+                if any(nd.get("dealName","").strip().lower() == name_lower for nd in final_new_deals):
+                    logging.info(f"⚠ Skipping duplicate new deal: {name}")
+                    continue
+                
+                final_new_deals.append({
+                    "dealName": name,
+                    "dealLabelName": "",
+                    "dealAmount": "",
+                    "closeDate": "",
+                    "dealOwnerName": deal_owner_name
+                })
+                logging.info(f"✓ Creating new deal: {name}")
         
         # Update XCom with validated results
         validated_contact_info = {
@@ -2468,6 +2567,7 @@ A. If an existing note already contains any speaker name (speaker context exists
 For meetings (only if meeting parsing is enabled):
 - Extract meeting title, start time, end time, location, outcome, timestamp, attendees, meeting type, and meeting status.
 - If "I" is mentioned for attendees that refers to the email sender name.
+- Do not return empty result if no meeting details are found.
 
 For tasks (only if task parsing is enabled):
 - Identify all tasks and their respective owners from the email content.
@@ -2713,6 +2813,10 @@ def compose_validation_error_email(ti, **context):
     email_data = ti.xcom_pull(key="email_data", default={})
     notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", default={})
     
+    # ✅ GET COMPANY AND DEAL DATA FROM CORRECT SOURCES
+    company_info = ti.xcom_pull(key="company_info", default={})
+    deal_info = ti.xcom_pull(key="deal_info", default={})
+    
     errors = validation_result.get("errors", [])
     entity_summary = validation_result.get("entity_summary", {})
     sender_name = validation_result.get("sender_name", "there")
@@ -2721,34 +2825,72 @@ def compose_validation_error_email(ti, **context):
     has_notes = len(notes_tasks_meeting.get("notes", [])) > 0
     has_tasks = len(notes_tasks_meeting.get("tasks", [])) > 0
     has_meeting = bool(notes_tasks_meeting.get("meeting_details", {}))
-    
+
+    has_company = len(company_info.get("new_companies", [])) > 0 
+    has_deal = len(deal_info.get("new_deals", [])) > 0           
     # Collect all entity types the user wants to create
     requested_entities = []
     if has_notes:
-        requested_entities.append("note")
+        requested_entities.append("Note")
     if has_tasks:
-        requested_entities.append("task")
+        requested_entities.append("Task")
     if has_meeting:
-        requested_entities.append("meeting")
+        requested_entities.append("Meeting")
+    if has_company:
+        requested_entities.append("Company")
+    if has_deal:
+        requested_entities.append("Deal")
     
     # Determine primary entity from what was actually requested
     if len(requested_entities) == 1:
         primary_entity = requested_entities[0].capitalize()
     elif len(requested_entities) > 1:
-        # Multiple entities - use a generic term
+        # ✅ IMPROVED: Prioritize based on validation errors
+        primary_entity = None
+        for error in errors:
+            entity_type = error.get("entity_type", "")
+            if entity_type == "Deals":
+                primary_entity = "Deal"
+                break
+            elif entity_type == "Companies":
+                primary_entity = "Company"
+                break
+            elif entity_type == "Meetings":
+                primary_entity = "Meeting"
+                break
+            elif entity_type == "Notes":
+                primary_entity = "Note"
+                break
+            elif entity_type == "Tasks":
+                primary_entity = "Task"
+                break
+        
+        # If still not found, use first requested entity
+        if not primary_entity:
+            primary_entity = requested_entities[0]
+        else:
+            # ✅ IMPROVED: Fallback based on errors
+            primary_entity = None
+            for error in errors:
+                entity_type = error.get("entity_type", "")
+                if entity_type in ["Tasks", "Meetings", "Notes", "Deals", "Companies"]:
+                    primary_entity = entity_type.rstrip('s')
+                    break
+    
         primary_entity = "entities"
     else:
         # Fallback: check errors list
         primary_entity = None
         for error in errors:
             entity_type = error.get("entity_type", "")
-            if entity_type in ["Tasks", "Meetings", "Notes", "Deals"]:
-                # Convert plural to singular
+            if entity_type in ["Tasks", "Meetings", "Notes", "Deals", "Companies"]:
+
                 primary_entity = entity_type.rstrip('s')
                 break
-    # Default fallback if somehow not detected
-    if not primary_entity:
-        primary_entity = "Task"  # or raise/log an error
+        
+        # Default fallback if somehow not detected
+        if not primary_entity:
+            primary_entity = "Task"  # or raise/log an error
     
     # Build error details HTML (kept but not used in these specific templates)
     error_details_html = ""
@@ -2850,7 +2992,7 @@ def compose_validation_error_email(ti, **context):
 </head>
 <body>
     <p>Hello {sender_name},</p>
-    <p>Thank you for your request to create a company in HubSpot. I reviewed the request and noticed that the company cannot be completed yet due to a missing required association.</p>
+    <p>Thank you for your request to create a company in HubSpot. I reviewed the request and noticed that the company cannot be created due to a missing required association.</p>
     
     <h4 class="section-title">What's needed</h4>
     <p><li>HubSpot requires every company to be linked to a contact for proper follow-up and ownership.</li><br>
@@ -2886,7 +3028,7 @@ def compose_validation_error_email(ti, **context):
 </head>
 <body>
     <p>Hello {sender_name},</p>
-    <p>Thank you for your request to create a meeting in HubSpot. I reviewed the request and noticed that the meeting cannot be completed.</p>
+    <p>Thank you for your request to create a meeting in HubSpot. I reviewed the request and noticed that the creation of meeting cannot be completed.</p>
 
     <h4 class="section-title">What's needed</h4>
     <p>HubSpot requires every meeting to be created only if it has the following details:
@@ -2904,7 +3046,7 @@ def compose_validation_error_email(ti, **context):
     </ul>
 
     <p>Once I have this information, I'll take care of the rest right away.</p>
-    <p>If you have any questions or would like guidance on the best association to use, feel free to let me know.</p>
+    <p>If you have any questions, feel free to let me know.</p>
     
     <div class="signature">
         <p><strong>Best regards,</strong><br>
@@ -2926,7 +3068,7 @@ def compose_validation_error_email(ti, **context):
 </head>
 <body>
     <p>Hello {sender_name},</p>
-    <p>Thank you for your request to create a note in HubSpot. I reviewed the request and noticed that the note cannot be completed due to a missing required association.</p>
+    <p>Thank you for your request to create a note in HubSpot. I reviewed the request and noticed that the note cannot be created due to a missing required association.</p>
 
     <h4 class="section-title">What's needed</h4>
     <p>HubSpot requires every note to be linked to at least one of the following:
@@ -2956,7 +3098,7 @@ def compose_validation_error_email(ti, **context):
 </html>"""
         
     else:
-        # Default (Task, Meeting, Note)
+        # Default (Task)
         email_html = f"""<!DOCTYPE html>
 <html>
 <head>
