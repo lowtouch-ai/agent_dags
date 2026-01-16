@@ -1134,7 +1134,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
                 logging.info(f"Retry attempt {attempt + 1}/{max_retries}")
             
             response = client.chat(
-                model='hubspot:v', 
+                model='hubspot:v6af', 
                 messages=messages, 
                 stream=stream,
                 options={
