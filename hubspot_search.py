@@ -18,16 +18,51 @@ from bs4 import BeautifulSoup
 from airflow.models import Variable
 from airflow.api.common.trigger_dag import trigger_dag
 import requests
-
-
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from hubspot_email_listener import send_fallback_email_on_failure
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+def clear_retry_tracker_on_success(context):
+    dag_run = context['dag_run']
+    original_run_id = dag_run.conf.get('original_run_id')
+    original_dag_id = dag_run.conf.get('original_dag_id', dag_run.dag_id)
+    
+    if not original_run_id or not dag_run.conf.get('retry_attempt'):
+        return  # Not a retry run
+    
+    tracker_key = f"{original_dag_id}:{original_run_id}"
+    
+    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    
+    if tracker_key in retry_tracker:
+        del retry_tracker[tracker_key]
+        Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
+        logging.info(f"Retry succeeded - cleared tracker for {tracker_key}")
+
+def update_retry_tracker_on_failure(context):
+    dag_run = context['dag_run']
+    original_run_id = dag_run.conf.get('original_run_id')
+    original_dag_id = dag_run.conf.get('original_dag_id', dag_run.dag_id)
+    
+    if not original_run_id or not dag_run.conf.get('retry_attempt'):
+        return  # Not a retry run
+    
+    tracker_key = f"{original_dag_id}:{original_run_id}"
+    
+    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    
+    if tracker_key in retry_tracker:
+        retry_tracker[tracker_key]["status"] = "failed"
+        Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
+        logging.info(f"Retry failed - updated status for {tracker_key}")
 
 default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2025, 8, 22),
     "retry_delay": timedelta(seconds=15),
+    'on_failure_callback': send_fallback_email_on_failure
 }
 
 HUBSPOT_FROM_ADDRESS = Variable.get("ltai.v3.hubspot.from.address")
@@ -157,8 +192,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, model=
         return ai_content.strip()
 
     except Exception as e:
-        logging.error(f"Error in get_ai_response: {e}")
-        return handle_json_error(expect_json)
+        raise
 
 
 def handle_json_error(expect_json):
@@ -312,6 +346,9 @@ Return ONLY valid JSON:
     try:
         response = get_ai_response(variant_prompt, expect_json=True)
         logging.info(f"Raw AI response for spelling variants: {response}")
+    except Exception as e:
+        raise
+    try:
         variants_data = json.loads(response.strip())
 
         ti.xcom_push(key="spelling_variants", value=variants_data.get("potential_variants", {}))
@@ -473,10 +510,12 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-        logging.info(f"Prompt is : {prompt}")
-        logging.info(f"Conversation history to AI: {chat_history}")
-        logging.info(f"Raw AI response for entity analysis: {response[:1000]}...")
-
+        logging.debug(f"Prompt is : {prompt}")
+        logging.debug(f"Conversation history to AI: {chat_history}")
+        logging.debug(f"Raw AI response for entity analysis: {response[:1000]}...")
+    except Exception as e:
+        raise
+    try:
         parsed_json = json.loads(response.strip())
         ti.xcom_push(key="entity_search_flags", value=parsed_json)
 
@@ -489,163 +528,9 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         logging.info(f"  - Parse meetings: {parsed_json.get('parse_meetings')} - {parsed_json.get('meetings_reason')}")
         logging.info(f"  - Request summary: {parsed_json.get('request_summary')} - {parsed_json.get('summary_reason')}")
 
-    except Exception as ai_error:
-        logging.warning(f"AI failed in analyze_thread_entities for thread {thread_id}: {ai_error} → Sending fallback email")
+    except Exception as e:
+        logging.warning(f"AI failed in analyze_thread_entities for thread {thread_id}: {e} → Sending fallback email")
 
-        # === FALLBACK EMAIL - FULLY INLINE ===
-        # Replace the fallback_body section in analyze_user_response function (around line 300)
-
-        fallback_body = f"""
-        <html>
-        <head>
-            <style>
-                body {{
-                    font-family: Arial, sans-serif;
-                    line-height: 1.6;
-                    color: #333;
-                    max-width: 600px;
-                    margin: 0 auto;
-                    padding: 20px;
-                }}
-                .greeting {{
-                    margin-bottom: 15px;
-                }}
-                .message {{
-                    margin: 15px 0;
-                }}
-                .closing {{
-                    margin-top: 15px;
-                }}
-                .signature {{
-                    margin-top: 15px;
-                    font-weight: bold;
-                }}
-                .company {{
-                    color: #666;
-                    font-size: 0.9em;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="greeting">
-                <p>Hello {sender_name},</p>
-            </div>
-            
-            <div class="message">
-                <p>We're currently experiencing a temporary technical issue that may affect your experience with the HubSpot Assistant.</p>
-                
-                <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
-                
-                <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
-            </div>
-            
-            <div class="closing">
-                <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
-            </div>
-            
-            <div class="signature">
-                <p>Best regards,<br>
-                The HubSpot Assistant Team<br>
-                <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
-            </div>
-        </body>
-        </html>
-        """
-
-        try:
-            service = authenticate_gmail()
-            if not service:
-                logging.error("Gmail auth failed during fallback")
-                ti.xcom_push(key="entity_search_flags", value={
-                    "search_deals": True, "search_contacts": True, "search_companies": True,
-                    "parse_notes": True, "parse_tasks": True, "parse_meetings": True,
-                    "request_summary": False,
-                    "deals_reason": "AI failed, defaulting to search",
-                    "contacts_reason": "AI failed, defaulting to search",
-                    "companies_reason": "AI failed, defaulting to search",
-                    "notes_reason": "AI failed, defaulting to parse",
-                    "tasks_reason": "AI failed, defaulting to parse",
-                    "meetings_reason": "AI failed, defaulting to parse",
-                    "summary_reason": "AI failed, no summary requested"
-                })
-                return
-
-            # Build threading
-            original_message_id = headers.get("Message-ID", "")
-            references = headers.get("References", "")
-            if original_message_id:
-                references = f"{references} {original_message_id}".strip() if references else original_message_id
-
-            subject = headers.get("Subject", "No Subject")
-            if not subject.lower().startswith("re:"):
-                subject = f"Re: {subject}"
-
-            # Recipients (reply-all)
-            all_recipients = extract_all_recipients(email_data)
-            primary_recipient = sender_email
-
-            cc_recipients = [
-                addr for addr in all_recipients["to"] + all_recipients["cc"]
-                if addr.lower() != sender_email.lower()
-                and HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
-            ]
-            bcc_recipients = [
-                addr for addr in all_recipients["bcc"]
-                if HUBSPOT_FROM_ADDRESS.lower() not in addr.lower()
-            ]
-
-            cc_string = ', '.join(cc_recipients) if cc_recipients else None
-            bcc_string = ', '.join(bcc_recipients) if bcc_recipients else None
-
-            # Compose message
-            msg = MIMEMultipart()
-            msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
-            msg["To"] = primary_recipient
-            if cc_string: msg["Cc"] = cc_string
-            if bcc_string: msg["Bcc"] = bcc_string
-            msg["Subject"] = subject
-            if original_message_id: msg["In-Reply-To"] = original_message_id
-            if references: msg["References"] = references
-            msg.attach(MIMEText(fallback_body, "html"))
-
-            # Send
-            raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
-            service.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
-
-            # === Mark original message as read (inline) ===
-            try:
-                if email_data.get("id"):
-                    service.users().messages().modify(
-                        userId="me",
-                        id=email_data["id"],
-                        body={"removeLabelIds": ["UNREAD"]}
-                    ).execute()
-                    logging.info(f"Marked message {email_data['id']} as read")
-            except Exception as read_err:
-                logging.warning(f"Failed to mark message as read: {read_err}")
-
-            logging.info(f"Fallback technical issue email sent for thread {thread_id}")
-
-        except Exception as send_error:
-            logging.error(f"Failed to send fallback email: {send_error}", exc_info=True)
-
-        # === Default to full search ===
-        ti.xcom_push(key="entity_search_flags", value={
-            "search_deals": True,
-            "search_contacts": True,
-            "search_companies": True,
-            "parse_notes": True,
-            "parse_tasks": True,
-            "parse_meetings": True,
-            "request_summary": False,
-            "deals_reason": "AI failed, defaulting to search",
-            "contacts_reason": "AI failed, defaulting to search",
-            "companies_reason": "AI failed, defaulting to search",
-            "notes_reason": "AI failed, defaulting to parse",
-            "tasks_reason": "AI failed, defaulting to parse",
-            "meetings_reason": "AI failed, defaulting to parse",
-            "summary_reason": "AI failed, no summary requested"
-        })
 
 def summarize_engagement_details(ti, **context):
     """Retrieve and summarize engagement details based on conversation"""
@@ -735,10 +620,11 @@ Guidelines:
 - Ensure summaries and call strategy are tailored to the context in the thread.
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    logging.info(f"Raw AI response for engagement summary: {response[:1000]}...")
-
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response for engagement summary: {response[:1000]}...")
+    except Exception as e:
+        raise
     try:
         parsed_json = json.loads(response.strip())
         ti.xcom_push(key="engagement_summary", value=parsed_json)
@@ -834,6 +720,9 @@ def summarize_engagement_details_360(ti, **context):
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"360 - Raw HubSpot AI response: {response[:1000]}...")
+    except Exception as e:
+        raise
+    try:
         parsed_json = json.loads(response.strip())
 
         # Now: Perplexity-powered external research
@@ -994,11 +883,10 @@ Return this exact JSON structure:
 }}
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    logging.info(f"Prompt is : {prompt}")
-    logging.info(f"Conversation history to AI: {chat_history}")
-    logging.info(f"Raw AI response for owner: {response[:1000]}...")
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    except Exception as e:
+        raise
 
     try:
         parsed_json = json.loads(response.strip())
@@ -1070,10 +958,11 @@ Return this exact JSON structure:
 }}
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    logging.info(f"Raw AI response for deal stage validation: {response[:1000]}...")
-
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response for deal stage validation: {response[:1000]}...")
+    except Exception as e:
+        raise
     try:
         parsed_json = json.loads(response.strip())
         ti.xcom_push(key="deal_stage_info", value=parsed_json)
@@ -1369,6 +1258,10 @@ Return ONLY valid JSON:
     "associated_deals":[]
 }}
 """
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    except Exception as e:
+        raise
     try: 
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"AI response is: {response}")
@@ -1550,10 +1443,10 @@ Return ONLY valid JSON:
     ]
 }}
 """
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    logging.info(f"Raw AI response for company validation: {response[:1000]}...")
-    
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    except Exception as e:
+        raise
     try:
         parsed = json.loads(response.strip())
         mentioned_companies = parsed.get("companies", [])
@@ -1742,6 +1635,10 @@ Return ONLY valid JSON:
     ]
 }}
 """
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    except Exception as e:
+        raise
 
     response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
     logging.info(f"Raw AI response for deal validation: {response[:1000]}...")
@@ -1980,9 +1877,10 @@ Return ONLY valid JSON:
     ]
 }}
 """
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    except Exception as e:
+        raise
     try:
         parsed = json.loads(response.strip())
         mentioned_deals = parsed.get("deals", [])
@@ -2102,9 +2000,10 @@ Return ONLY valid JSON:
     ]
 }}
 """
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+    except Exception as e:
+        raise
     try:
         parsed = json.loads(response.strip())
         mentioned_companies = parsed.get("companies", [])
@@ -2804,10 +2703,11 @@ Guidelines:
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    logging.info(f"Raw AI response for notes/tasks/meeting: {response[:1000]}...")
-
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response for notes/tasks/meeting: {response[:1000]}...")
+    except Exception as e:
+        raise
     try:
         parsed_json = json.loads(response.strip())
         
@@ -3516,10 +3416,11 @@ For dates, use YYYY-MM-DD format.
 If no dates found in email, check today's date as default for each owner.
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    logging.info(f"Raw AI response for task threshold: {response[:1000]}...")
-
+    try:
+        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
+        logging.info(f"Raw AI response for task threshold: {response[:1000]}...")
+    except Exception as e:
+        raise
     try:
         parsed_json = json.loads(response.strip())
         warnings = parsed_json.get("warnings", [])
@@ -4910,7 +4811,9 @@ with DAG(
     schedule_interval=None,
     catchup=False,
     doc_md=readme_content,
-    tags=["hubspot", "search", "entities"]
+    tags=["hubspot", "search", "entities"],
+    on_success_callback=clear_retry_tracker_on_success,
+    on_failure_callback=update_retry_tracker_on_failure
 ) as dag:
 
     load_context_task = PythonOperator(
