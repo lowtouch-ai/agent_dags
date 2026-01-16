@@ -3,6 +3,7 @@ from email import message_from_bytes
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.decorators import task
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from airflow.models import Variable
@@ -28,13 +29,399 @@ from dateutil import parser
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+def send_fallback_email_on_failure(context):
+    """
+    Sends a polite "we're having technical issues" email to the end-user
+    when any task in the main flow fails (especially AI response generation).
+    
+    UPDATED: Track retry attempts and only allow 3 retries with 20-min intervals
+    """
+    dag_run = context.get('dag_run')
+    task_instance = context.get('task_instance')
+    
+    dag_id = dag_run.dag_id
+    run_id = dag_run.run_id
+    task_id = task_instance.task_id
+    execution_date = context.get('execution_date')
+    
+    # ============================================================
+    # STEP 1: Determine if this is a retry or original failure
+    # ============================================================
+    
+    dag_run_conf = dag_run.conf or {}
+    is_retry = dag_run_conf.get("retry_attempt", False)
+    fallback_already_sent = dag_run_conf.get("fallback_email_already_sent", False)
+    
+    # For retry runs, use original_run_id for tracker key
+    # For original failures, use current run_id
+    if is_retry:
+        original_run_id = dag_run_conf.get('original_run_id', run_id)
+        original_dag_id = dag_run_conf.get('original_dag_id', dag_id)
+        tracker_key = f"{original_dag_id}:{original_run_id}"
+        
+        logging.info("=" * 80)
+        logging.info(f"🔄 RETRY RUN FAILED - Attempt failed for {tracker_key}")
+        logging.info("=" * 80)
+    else:
+        # This is the ORIGINAL failure
+        tracker_key = f"{dag_id}:{run_id}"
+        original_run_id = run_id
+        original_dag_id = dag_id
+        
+        logging.info("=" * 80)
+        logging.info(f"❌ ORIGINAL FAILURE - Tracking {tracker_key}")
+        logging.info("=" * 80)
+    
+    # ============================================================
+    # STEP 2: Extract email_data (required for both original and retry)
+    # ============================================================
+    
+    ti = context['ti']
+    email_data = dag_run_conf.get("email_data")
+    
+    if not email_data:
+        # Try XCom as fallback
+        possible_keys = [
+            "unread_emails",
+            "no_action_emails",
+            "llm_search_results",
+            "reply_emails",
+            "report_emails",
+            "email_data"
+        ]
+        
+        for key in possible_keys:
+            data = ti.xcom_pull(key=key)
+            if data:
+                if isinstance(data, list) and len(data) > 0:
+                    email_data = data[0]
+                elif isinstance(data, dict):
+                    email_data = data
+                break
+    
+    if not email_data:
+        logging.warning("Could not find email data in XCom for fallback - skipping email send")
+        
+        # 🔥 STILL TRACK THE FAILURE even without email_data
+        retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+        
+        retry_tracker[tracker_key] = {
+            "status": "failed",
+            "thread_id": "unknown",
+            "failure_time": datetime.now(pytz.timezone("Asia/Kolkata")).isoformat(),
+            "fallback_sent": False,
+            "last_trigger_time": None,
+            "email_data": None,
+            "failed_task_id": task_id,
+            "error": "No email_data available",
+            "retry_count": 0,  # NEW: Track retry attempts
+            "max_retries_reached": False  # NEW: Flag for max retries
+        }
+        
+        Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
+        logging.warning(f"⚠️ Tracked failure WITHOUT email_data: {tracker_key}")
+        return
+    
+    # Extract thread_id
+    thread_id = email_data.get("threadId", email_data.get("thread_id"))
+    
+    if not thread_id:
+        logging.warning("Could not determine thread_id for fallback")
+        thread_id = "unknown"
+    
+    # ============================================================
+    # STEP 3: Check retry count and max retries
+    # ============================================================
+    
+    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    existing_entry = retry_tracker.get(tracker_key, {})
+    current_retry_count = existing_entry.get("retry_count", 0)
+    
+    # NEW: Check if max retries already reached
+    if current_retry_count >= 3:
+        logging.warning(f"⚠️ MAX RETRIES REACHED ({current_retry_count}/3) for {tracker_key}")
+        
+        # Mark as permanently failed
+        retry_tracker[tracker_key] = {
+            "status": "max_retries_exceeded",
+            "thread_id": thread_id,
+            "failure_time": existing_entry.get("failure_time", datetime.now(pytz.timezone("Asia/Kolkata")).isoformat()),
+            "fallback_sent": True,  # Ensure fallback is sent
+            "last_trigger_time": existing_entry.get("last_trigger_time"),
+            "email_data": email_data,
+            "failed_task_id": task_id,
+            "retry_count": current_retry_count,
+            "max_retries_reached": True,
+            "final_failure_time": datetime.now(pytz.timezone("Asia/Kolkata")).isoformat()
+        }
+        Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
+        
+        # Send final fallback email if not already sent
+        if not existing_entry.get("fallback_sent", False):
+            send_email = True
+        else:
+            send_email = False
+            logging.info(f"Final fallback already sent for {thread_id}")
+    else:
+        # Normal flow - check if fallback already sent for this thread
+        send_email = False
+        
+        if is_retry and fallback_already_sent:
+            logging.info(f"Retry run + fallback already sent → SKIP email for thread {thread_id}")
+            send_email = False
+        else:
+            # Check fallback_sent_threads tracker
+            try:
+                fallback_tracker = ti.xcom_pull(
+                    key="fallback_sent_threads",
+                    dag_id=original_dag_id,
+                    include_prior_dates=True
+                ) or {}
+                
+                if thread_id in fallback_tracker:
+                    logging.info(f"Fallback email already sent for thread {thread_id} - skipping duplicate")
+                    send_email = False
+                else:
+                    send_email = True
+            except Exception as e:
+                logging.warning(f"Could not check fallback tracker: {e}")
+                send_email = True  # Send by default if tracker check fails
+    
+    # ============================================================
+    # STEP 4: Send fallback email if needed
+    # ============================================================
+    
+    email_sent = False
+    
+    if send_email:
+        headers = email_data.get("headers", {})
+        sender = headers.get("From", "Unknown <unknown@email.com>")
+        
+        sender_name_match = re.search(r'^([^<]+)', sender)
+        sender_name = sender_name_match.group(1).strip() if sender_name_match else "there"
+        
+        sender_email_match = re.search(r'<(.+?)>', sender)
+        recipient_email = sender_email_match.group(1) if sender_email_match else None
+        
+        if not recipient_email:
+            logging.error("Could not determine recipient email for fallback")
+        else:
+            service = authenticate_gmail()
+            if service:
+                # NEW: Customize message based on retry count
+                if current_retry_count >= 3:
+                    issue_message = "We've attempted to process your request multiple times, but continue to experience technical difficulties."
+                    action_message = "Our team has been notified and will review your request manually. We'll reach out to you directly with the information you need."
+                else:
+                    issue_message = "We're currently experiencing a temporary technical issue that is preventing us from processing your request at this time."
+                    action_message = "Our system will automatically retry your request, and we'll process it as soon as possible."
+                
+                fallback_html = f"""
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{ margin-bottom: 15px; }}
+        .message {{ margin: 15px 0; }}
+        .closing {{ margin-top: 15px; }}
+        .signature {{ margin-top: 15px; font-weight: bold; }}
+        .company {{ color: #666; font-size: 0.9em; }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+    </div>
+   
+    <div class="message">
+        <p>Thank you for your message to the HubSpot Assistant.</p>
+       
+        <p>{issue_message} Our engineering team has been notified and is actively working on a resolution.</p>
+       
+        <p>{action_message}</p>
+    </div>
+   
+    <div class="closing">
+        <p>If this is urgent, please feel free to reach out directly, and we'll assist you manually.</p>
+    </div>
+   
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>
+"""
+                
+                try:
+                    original_message_id = headers.get("Message-ID", "")
+                    references = headers.get("References", "")
+                    if original_message_id and original_message_id not in references:
+                        references = f"{references} {original_message_id}".strip()
+                    
+                    subject = headers.get("Subject", "No Subject")
+                    if not subject.lower().startswith("re:"):
+                        subject = f"Re: {subject}"
+
+                    msg = MIMEMultipart()
+                    msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
+                    msg["To"] = recipient_email
+                    msg["Subject"] = subject
+                    if original_message_id:
+                        msg["In-Reply-To"] = original_message_id
+                        msg["References"] = references
+                    
+                    msg.attach(MIMEText(fallback_html, "html"))
+
+                    raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
+                    service.users().messages().send(
+                        userId="me",
+                        body={"raw": raw_msg}
+                    ).execute()
+
+                    email_sent = True
+                    logging.info(f"✓ Fallback email sent successfully to {recipient_email} for thread {thread_id}")
+                    
+                    # Mark this thread as having received a fallback email
+                    fallback_tracker[thread_id] = {
+                        "timestamp": datetime.now(pytz.timezone("Asia/Kolkata")).isoformat(),
+                        "recipient": recipient_email,
+                        "dag_run_id": run_id,
+                        "retry_count": current_retry_count
+                    }
+                    
+                    ti.xcom_push(key="fallback_sent_threads", value=fallback_tracker)
+                    
+                except Exception as e:
+                    logging.error(f"Failed to send fallback email to {recipient_email}: {e}", exc_info=True)
+    
+    # ============================================================
+    # STEP 5: ALWAYS UPDATE RETRY TRACKER (critical fix)
+    # ============================================================
+    
+    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    
+    # Increment retry count for the next attempt
+    new_retry_count = current_retry_count if is_retry else 0
+    
+    # Update or create tracker entry
+    retry_tracker[tracker_key] = {
+        "status": "max_retries_exceeded" if current_retry_count >= 3 else "failed",
+        "thread_id": thread_id,
+        "failure_time": existing_entry.get("failure_time", datetime.now(pytz.timezone("Asia/Kolkata")).isoformat()),
+        "fallback_sent": email_sent or existing_entry.get("fallback_sent", False),
+        "last_trigger_time": existing_entry.get("last_trigger_time"),
+        "email_data": email_data,
+        "failed_task_id": task_id,
+        "is_retry_failure": is_retry,
+        "retry_count": new_retry_count,  # NEW: Track attempts
+        "max_retries_reached": current_retry_count >= 3  # NEW: Flag
+    }
+    
+    Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
+    
+    if is_retry:
+        logging.info(f"✓ Updated retry_tracker for retry failure: {tracker_key} (attempt {new_retry_count}/3)")
+    else:
+        logging.info(f"✓ Added original failure to retry_tracker: {tracker_key}")
+    
+    # Push failure metadata to XCom for tracking
+    failure_metadata = {
+        "dag_id": dag_id,
+        "run_id": run_id,
+        "task_id": task_id,
+        "execution_date": str(execution_date),
+        "failure_timestamp": datetime.now(pytz.timezone("Asia/Kolkata")).isoformat(),
+        "callback_type": "fallback_email",
+        "thread_id": thread_id,
+        "email_sent": email_sent,
+        "recipient_email": recipient_email if send_email else None,
+        "fallback_already_sent": email_sent,
+        "email_data": email_data,
+        "is_retry_failure": is_retry,
+        "tracker_key": tracker_key,
+        "retry_count": new_retry_count,  # NEW
+        "max_retries_reached": current_retry_count >= 3  # NEW
+    }
+    
+    try:
+        ti.xcom_push(key="failure_metadata", value=failure_metadata)
+        logging.info(f"✓ Pushed failure metadata to XCom: {failure_metadata}")
+    except Exception as e:
+        logging.warning(f"Could not push failure metadata: {e}")
+
+def clear_retry_tracker_on_success(context):
+    dag_run = context['dag_run']
+    original_run_id = dag_run.conf.get('original_run_id')
+    original_dag_id = dag_run.conf.get('original_dag_id', dag_run.dag_id)
+    
+    if not original_run_id or not dag_run.conf.get('retry_attempt'):
+        return  # Not a retry run
+    
+    tracker_key = f"{original_dag_id}:{original_run_id}"
+    
+    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    
+    if tracker_key in retry_tracker:
+        del retry_tracker[tracker_key]
+        Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
+        logging.info(f"Retry succeeded - cleared tracker for {tracker_key}")
+
+def update_retry_tracker_on_failure(context):
+    dag_run = context['dag_run']
+    original_run_id = dag_run.conf.get('original_run_id')
+    original_dag_id = dag_run.conf.get('original_dag_id', dag_run.dag_id)
+    
+    if not original_run_id or not dag_run.conf.get('retry_attempt'):
+        return  # Not a retry run
+    
+    tracker_key = f"{original_dag_id}:{original_run_id}"
+    
+    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    
+    if tracker_key in retry_tracker:
+        retry_tracker[tracker_key]["status"] = "failed"
+        Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
+        logging.info(f"Retry failed - updated status for {tracker_key}")
 
 default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2025, 8, 22),
     "retry_delay": timedelta(seconds=15),
+    'on_failure_callback': send_fallback_email_on_failure,
 }
+
+@task(task_id="handle_retry_if_present")
+def handle_retry_or_normal(**context):
+    conf = context["dag_run"].conf
+    
+    if conf.get("retry_attempt", False):
+        email_data = conf.get("email_data")
+        thread_id = conf.get("thread_id")
+        
+        # Very important: reset fallback flag for this thread!
+        ti = context["ti"]
+        tracker = ti.xcom_pull(key="fallback_sent_threads", include_prior_dates=True) or {}
+        if thread_id in tracker:
+            del tracker[thread_id]  # ← remove so fallback can be sent again if needed
+            ti.xcom_push(key="fallback_sent_threads", value=tracker)
+        
+        # You can also skip fetch_unread_emails completely
+        return {
+            "unread_emails": [email_data],  # ← inject directly!
+            "is_retry": True
+        }
+    
+    return {"is_retry": False}
 
 HUBSPOT_FROM_ADDRESS = Variable.get("ltai.v3.hubspot.from.address")
 GMAIL_CREDENTIALS = Variable.get("ltai.v3.hubspot.gmail.credentials")
@@ -426,25 +813,87 @@ def trigger_task_completion_dag(**kwargs):
     logging.info(f"Triggered task completion handler for {len(task_completion_emails)} emails")
 
 def fetch_unread_emails(**kwargs):
-    """Fetch unread emails and extract full thread history for each."""
+    """
+    Fetch unread emails from Gmail OR use injected data in retry mode.
+    Must run AFTER the 'handle_retry_or_normal' task.
+    """
+    ti = kwargs['ti']
+    dag_run = kwargs['dag_run']
+    
+    # ──────────────────────────────────────────────────────────────
+    # Step 1: Check if this is a retry run
+    # ──────────────────────────────────────────────────────────────
+    if dag_run.conf.get("retry_attempt", False):
+        logging.info("=" * 80)
+        logging.info("🔄 RETRY MODE - Using Stored Email Data from Failure")
+        logging.info("=" * 80)
+        
+        # Get email data from the retry conf (stored during failure)
+        email_data = dag_run.conf.get("email_data")
+        thread_id = dag_run.conf.get("thread_id")
+        
+        if not email_data:
+            logging.error("❌ RETRY FAILED: No email_data in retry conf!")
+            logging.error(f"Available conf keys: {list(dag_run.conf.keys())}")
+            ti.xcom_push(key="unread_emails", value=[])
+            return []
+        
+        logging.info(f"✓ Retrieved stored email data for retry")
+        logging.info(f"  Email ID: {email_data.get('id', 'unknown')}")
+        logging.info(f"  Thread ID: {thread_id or email_data.get('threadId', 'unknown')}")
+        logging.info(f"  Subject: {email_data.get('headers', {}).get('Subject', 'No Subject')}")
+        logging.info(f"  From: {email_data.get('headers', {}).get('From', 'Unknown')}")
+        
+        # Reset fallback flag for this thread
+        tracker = ti.xcom_pull(key="fallback_sent_threads", include_prior_dates=True) or {}
+        if thread_id and thread_id in tracker:
+            logging.info(f"✓ Resetting fallback flag for thread {thread_id}")
+            del tracker[thread_id]
+            ti.xcom_push(key="fallback_sent_threads", value=tracker)
+        
+        # Add retry metadata
+        email_data["is_retry"] = True
+        email_data["retry_count"] = email_data.get("retry_count", 0) + 1
+        email_data["original_failure_task"] = dag_run.conf.get("original_task_id", "unknown")
+        email_data["retry_timestamp"] = dag_run.conf.get("retry_timestamp")
+        
+        injected_emails = [email_data]
+        ti.xcom_push(key="unread_emails", value=injected_emails)
+        
+        logging.info("=" * 80)
+        return injected_emails
+    
+    # ──────────────────────────────────────────────────────────────
+    # Step 2: Normal mode - fetch fresh unread emails from Gmail
+    # ──────────────────────────────────────────────────────────────
+    logging.info("NORMAL MODE → fetching unread emails from Gmail")
+    
     service = authenticate_gmail()
     if not service:
         logging.error("Gmail authentication failed, skipping email fetch.")
-        kwargs['ti'].xcom_push(key="unread_emails", value=[])
+        ti.xcom_push(key="unread_emails", value=[])
         return []
     
     last_checked_timestamp = get_last_checked_timestamp()
-    last_checked_seconds = last_checked_timestamp // 1000 if last_checked_timestamp > 1000000000000 else last_checked_timestamp
+    last_checked_seconds = (
+        last_checked_timestamp // 1000
+        if last_checked_timestamp > 1000000000000
+        else last_checked_timestamp
+    )
     
     query = f"is:unread after:{last_checked_seconds}"
     logging.info(f"Fetching emails with query: {query}")
     
     try:
-        results = service.users().messages().list(userId="me", labelIds=["INBOX"], q=query).execute()
+        results = service.users().messages().list(
+            userId="me",
+            labelIds=["INBOX"],
+            q=query
+        ).execute()
         messages = results.get("messages", [])
     except Exception as e:
         logging.error(f"Error fetching messages: {e}")
-        kwargs['ti'].xcom_push(key="unread_emails", value=[])
+        ti.xcom_push(key="unread_emails", value=[])
         return []
     
     unread_emails = []
@@ -461,13 +910,15 @@ def fetch_unread_emails(**kwargs):
             continue
             
         try:
-            # ⭐ CHANGED: Fetch FULL metadata including To, Cc, Bcc headers
             msg_data = service.users().messages().get(
-                userId="me", 
-                id=msg_id, 
+                userId="me",
+                id=msg_id,
                 format="metadata",
-                metadataHeaders=["From", "To", "Cc", "Bcc", "Subject", "Date", 
-                               "Message-ID", "References", "In-Reply-To", "X-Task-ID", "X-Task-Type"]
+                metadataHeaders=[
+                    "From", "To", "Cc", "Bcc", "Subject", "Date",
+                    "Message-ID", "References", "In-Reply-To",
+                    "X-Task-ID", "X-Task-Type"
+                ]
             ).execute()
         except Exception as e:
             logging.error(f"Error fetching message {msg_id}: {e}")
@@ -554,12 +1005,12 @@ def fetch_unread_emails(**kwargs):
         email_object = {
             "id": msg_id,
             "threadId": thread_id,
-            "headers": headers,  # Now includes To, Cc, Bcc
-            "content": "",  # Will be filled by get_email_thread
+            "headers": headers,
+            "content": "",
             "timestamp": timestamp,
             "internalDate": timestamp
         }
-        
+
         # ⭐ Extract all recipients from this email
         all_recipients = extract_all_recipients(email_object)
         
@@ -594,7 +1045,7 @@ def fetch_unread_emails(**kwargs):
             "thread_history": thread_history,
             "chat_history": chat_history,
             "thread_length": len(thread_history),
-            "all_recipients": all_recipients  # ⭐ Store recipients in email object
+            "all_recipients": all_recipients
         })
         
         logging.info(f"Email {msg_id}: is_reply={is_reply}, thread_length={len(thread_history)}, "
@@ -631,6 +1082,18 @@ def mark_message_as_read(service, message_id):
     except Exception as e:
         logging.error(f"Error marking message {message_id} as read: {e}")
         return False
+    
+    try:
+        # Reuse your existing send function
+        send_email_reply(
+            service=service,
+            email={"headers": headers},  # minimal structure needed
+            html_content=fallback_html
+        )
+        logging.info(f"✓ Fallback email sent to {recipient_email} after task failure")
+        
+    except Exception as e:
+        logging.error(f"Failed to send fallback email to {recipient_email}: {e}")
 
 def get_ai_response(prompt, conversation_history=None, expect_json=False, stream=True, max_retries=3):
     """
@@ -671,7 +1134,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
                 logging.info(f"Retry attempt {attempt + 1}/{max_retries}")
             
             response = client.chat(
-                model='hubspot:v6af', 
+                model='hubspot:v', 
                 messages=messages, 
                 stream=stream,
                 options={
@@ -756,7 +1219,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
             
             if attempt < max_retries - 1:
                 # Custom longer backoff: 30s → 60s → 120s (or adjust to start at 60s)
-                wait_times = 120 # Option: fixed 60s then increase
+                wait_times = [120] # Option: fixed 60s then increase
                 # Alternative for starting exactly at 60s and escalating: [60, 120, 240]
                 
                 wait_time = wait_times[attempt] if attempt < len(wait_times) else 120  # fallback to 120s if more retries
@@ -764,18 +1227,8 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
                 logging.info(f"Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
                 continue
-            
-            # Last attempt failed - return error
-            if expect_json:
-                return f'{{"error": "Error processing AI request after {max_retries} attempts: {str(e)}"}}'
             else:
-                return f"<html><body>Error processing AI request after {max_retries} attempts: {str(e)}</body></html>"
-    
-    # Should never reach here, but just in case
-    if expect_json:
-        return '{"error": "Maximum retries exceeded"}'
-    else:
-        return "<html><body>Maximum retries exceeded</body></html>"
+                raise
 
 def search_hubspot_entities(entity_type, filters=None, properties=None, limit=100, sort=None, max_results=None):
     """
@@ -1939,56 +2392,8 @@ Always return valid JSON. No extra text or tables.
 
         except Exception as e:
             logging.error(f"Task 1 FAILED for {email_id}: {e}", exc_info=True)
-            fallback_html = f"""
-<html>
-<head>
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            max-width: 600px;
-            margin: 0 auto;
-            padding: 20px;
-        }}
-        .greeting {{ margin-bottom: 15px; }}
-        .message {{ margin: 15px 0; }}
-        .closing {{ margin-top: 15px; }}
-        .signature {{ margin-top: 15px; font-weight: bold; }}
-        .company {{ color: #666; font-size: 0.9em; }}
-    </style>
-</head>
-<body>
-    <div class="greeting">
-        <p>Hello {sender_name},</p>
-    </div>
-    
-    <div class="message">
-        <p>We're currently experiencing a temporary technical issue that may affect your experience with the HubSpot Assistant.</p>
-        
-        <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
-        
-        <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
-    </div>
-    
-    <div class="closing">
-        <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
-    </div>
-    
-    <div class="signature">
-        <p>Best regards,<br>
-        The HubSpot Assistant Team<br>
-        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
-    </div>
-</body>
-</html>
-"""
-            try:
-                send_email_reply(service, email, fallback_html)
-                logging.info(f"Sent technical fallback for {email_id}")
-            except Exception as send_err:
-                logging.error(f"Failed to send fallback for {email_id}: {send_err}")
-            finally:
+            raise 
+        finally:
                 mark_message_as_read(service, email_id)
 
     if processed_emails:
@@ -2939,56 +3344,8 @@ INSTRUCTIONS:
 
         except Exception as e:
             logging.warning(f"Task 2 FAILED for {email_id}: {e} → Sending technical fallback")
-            fallback_html = f"""
-    <html>
-    <head>
-        <style>
-            body {{
-                font-family: Arial, sans-serif;
-                line-height: 1.6;
-                color: #333;
-                max-width: 600px;
-                margin: 0 auto;
-                padding: 20px;
-            }}
-            .greeting {{ margin-bottom: 15px; }}
-            .message {{ margin: 15px 0; }}
-            .closing {{ margin-top: 15px; }}
-            .signature {{ margin-top: 15px; font-weight: bold; }}
-            .company {{ color: #666; font-size: 0.9em; }}
-        </style>
-    </head>
-    <body>
-        <div class="greeting">
-            <p>Hello {sender_name},</p>
-        </div>
-        
-        <div class="message">
-            <p>We're currently experiencing a temporary technical issue that may affect your experience with the HubSpot Assistant.</p>
-            
-            <p>Our engineering team has already identified the cause and is actively working on a resolution. We expect regular service to resume shortly, and we'll update you as soon as it's fully restored.</p>
-            
-            <p>In the meantime, your data and configurations remain secure, and no action is required from your side.</p>
-        </div>
-        
-        <div class="closing">
-            <p>Thank you for your patience and understanding — we genuinely appreciate it.</p>
-        </div>
-        
-        <div class="signature">
-            <p>Best regards,<br>
-            The HubSpot Assistant Team<br>
-            <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
-        </div>
-    </body>
-    </html>
-    """
-            try:
-                send_email_reply(service, email, fallback_html)
-                logging.info(f"Sent technical fallback (Task 2 failure) for {email_id}")
-            except Exception as send_err:
-                logging.error(f"Failed to send fallback for {email_id}: {send_err}")
-            finally:
+            raise
+        finally:
                 mark_message_as_read(service, email_id)
 
 
@@ -3979,64 +4336,8 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                 final_response = ai_response
                 log_prefix = "SUCCESS Report"
             else:
-                # Fallback error message (keep your existing fallback)
-                final_response = f"""
-<html>
-<head>
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            max-width: 600px;
-            margin: 0 auto;
-            padding: 20px;
-        }}
-        .greeting {{
-            margin-bottom: 15px;
-        }}
-        .message {{
-            margin: 15px 0;
-        }}
-        .closing {{
-            margin-top: 15px;
-        }}
-        .signature {{
-            margin-top: 15px;
-            font-weight: bold;
-        }}
-        .company {{
-            color: #666;
-            font-size: 0.9em;
-        }}
-    </style>
-</head>
-<body>
-    <div class="greeting">
-        <p>Hello {sender_name},</p>
-    </div>
-   
-    <div class="message">
-        <p>Thank you for requesting a report from the HubSpot Assistant.</p>
-       
-        <p>We're currently experiencing a temporary technical issue that is preventing us from generating your report at this time. Our engineering team has been notified and is actively working on a resolution.</p>
-       
-        <p>Your request has been logged, and we'll process it as soon as the system is back online. We apologize for any inconvenience this may cause.</p>
-    </div>
-   
-    <div class="closing">
-        <p>If this is urgent, please feel free to reach out directly, and we'll assist you manually.</p>
-    </div>
-   
-    <div class="signature">
-        <p>Best regards,<br>
-        The HubSpot Assistant Team<br>
-        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
-    </div>
-</body>
-</html>
-"""
-                log_prefix = "FALLBACK Report"
+                raise
+                
            
             # Build and send email (keep your existing send logic)
             try:
@@ -4108,7 +4409,9 @@ with DAG(
     schedule_interval=timedelta(minutes=1),
     catchup=False,
     doc_md=readme_content,
-    tags=["hubspot", "monitor", "email", "mailbox"]
+    tags=["hubspot", "monitor", "email", "mailbox"],
+    on_success_callback=clear_retry_tracker_on_success,
+    on_failure_callback=update_retry_tracker_on_failure
 ) as dag:
 
     fetch_emails_task = PythonOperator(
