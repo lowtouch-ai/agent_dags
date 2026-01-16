@@ -138,8 +138,8 @@ def send_fallback_email_on_failure(context):
     current_retry_count = existing_entry.get("retry_count", 0)
     
     # NEW: Check if max retries already reached
-    if current_retry_count >= 3:
-        logging.warning(f"⚠️ MAX RETRIES REACHED ({current_retry_count}/3) for {tracker_key}")
+    if current_retry_count >= 2:
+        logging.warning(f"⚠️ MAX RETRIES REACHED ({current_retry_count}/2) for {tracker_key}")
         
         # Mark as permanently failed
         retry_tracker[tracker_key] = {
@@ -209,12 +209,14 @@ def send_fallback_email_on_failure(context):
             service = authenticate_gmail()
             if service:
                 # NEW: Customize message based on retry count
-                if current_retry_count >= 3:
+                if current_retry_count >= 2:
                     issue_message = "We've attempted to process your request multiple times, but continue to experience technical difficulties."
                     action_message = "Our team has been notified and will review your request manually. We'll reach out to you directly with the information you need."
                 else:
-                    issue_message = "We're currently experiencing a temporary technical issue that is preventing us from processing your request at this time."
-                    action_message = "Our system will automatically retry your request, and we'll process it as soon as possible."
+                    issue_message = """We’re currently experiencing a temporary technical issue that may affect your experience with the Hubspot Email Companion. Our engineering team has already identified
+the cause and is actively working on a resolution."""
+                    action_message = """Our system will automatically retry your request within next 40 minutes, and we'll process it as soon as possible. In the meantime, your data and configurations remain
+secure, and no action is required from your side. Thank you for your patience and understanding — we genuinely appreciate it."""
                 
                 fallback_html = f"""
 <html>
@@ -323,7 +325,7 @@ def send_fallback_email_on_failure(context):
         "failed_task_id": task_id,
         "is_retry_failure": is_retry,
         "retry_count": new_retry_count,  # NEW: Track attempts
-        "max_retries_reached": current_retry_count >= 3  # NEW: Flag
+        "max_retries_reached": current_retry_count >= 2,  # NEW: Flag
     }
     
     Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
@@ -349,7 +351,7 @@ def send_fallback_email_on_failure(context):
         "is_retry_failure": is_retry,
         "tracker_key": tracker_key,
         "retry_count": new_retry_count,  # NEW
-        "max_retries_reached": current_retry_count >= 3  # NEW
+        "max_retries_reached": current_retry_count >= 2  # NEW
     }
     
     try:
@@ -357,6 +359,431 @@ def send_fallback_email_on_failure(context):
         logging.info(f"✓ Pushed failure metadata to XCom: {failure_metadata}")
     except Exception as e:
         logging.warning(f"Could not push failure metadata: {e}")
+
+SLACK_WEBHOOK_URL = Variable.get("ltai.v3.hubspot.slack_webhook_url", default_var=None)
+SERVER_NAME = Variable.get("ltai.v3.hubspot.server_name", default_var="UNKNOWN")
+
+def send_hubspot_slack_alert(context):
+    """
+    Send Slack alert for HubSpot DAG failures.
+    Tracks retry attempts and includes detailed error context.
+    
+    INTEGRATION POINTS:
+    - Called on every task failure (via on_failure_callback)
+    - Tracks retry attempt number (1/3, 2/3, 3/3)
+    - Includes email thread ID and sender info
+    - Shows which task failed and why
+    """
+    webhook_url = SLACK_WEBHOOK_URL
+    if not webhook_url:
+        logging.error("❌ Slack webhook URL not found in Airflow Variables")
+        return
+
+    dag_run = context.get("dag_run")
+    task_instance = context.get("task_instance")
+    
+    dag_id = dag_run.dag_id
+    run_id = dag_run.run_id
+    task_id = task_instance.task_id
+    execution_date = context.get("execution_date")
+    
+    # ============================================================
+    # STEP 1: Determine if this is a retry or original failure
+    # ============================================================
+    
+    dag_run_conf = dag_run.conf or {}
+    is_retry = dag_run_conf.get("retry_attempt", False)
+    
+    if is_retry:
+        original_run_id = dag_run_conf.get('original_run_id', run_id)
+        original_dag_id = dag_run_conf.get('original_dag_id', dag_id)
+        tracker_key = f"{original_dag_id}:{original_run_id}"
+        retry_attempt_number = dag_run_conf.get('retry_attempt_number', 0)
+    else:
+        tracker_key = f"{dag_id}:{run_id}"
+        original_run_id = run_id
+        original_dag_id = dag_id
+        retry_attempt_number = 1  # This is the first attempt
+    
+    # ============================================================
+    # STEP 2: Get retry tracker info
+    # ============================================================
+    
+    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    existing_entry = retry_tracker.get(tracker_key, {})
+    current_retry_count = existing_entry.get("retry_count", 0)
+    max_retries_reached = existing_entry.get("max_retries_reached", False)
+    
+    # ============================================================
+    # STEP 3: Extract email context from conf or XCom
+    # ============================================================
+    
+    ti = context['ti']
+    email_data = dag_run_conf.get("email_data")
+    
+    if not email_data:
+        # Try XCom as fallback
+        possible_keys = [
+            "unread_emails",
+            "no_action_emails", 
+            "llm_search_results",
+            "reply_emails",
+            "report_emails",
+            "email_data"
+        ]
+        
+        for key in possible_keys:
+            data = ti.xcom_pull(key=key)
+            if data:
+                if isinstance(data, list) and len(data) > 0:
+                    email_data = data[0]
+                elif isinstance(data, dict):
+                    email_data = data
+                break
+    
+    # Extract thread and sender info
+    thread_id = "unknown"
+    sender_email = "unknown"
+    subject = "No Subject"
+    
+    if email_data:
+        thread_id = email_data.get("threadId", email_data.get("thread_id", "unknown"))
+        headers = email_data.get("headers", {})
+        sender_email = headers.get("From", "unknown")
+        subject = headers.get("Subject", "No Subject")
+    
+    # ============================================================
+    # STEP 4: Pull error message from XCom
+    # ============================================================
+    
+    error_message = ti.xcom_pull(task_ids=task_id, key="error_message")
+    if not error_message:
+        # Try to get from exception
+        try:
+            exception_info = context.get('exception')
+            if exception_info:
+                error_message = str(exception_info)[:500]
+        except:
+            error_message = "No error details available"
+    
+    # ============================================================
+    # STEP 5: Send final failure email to user if this is 3rd attempt
+    # ============================================================
+    
+    if current_retry_count >= 2 and not existing_entry.get("final_fallback_sent", False):
+        # This is the moment when 3rd retry just failed - send final email to user
+        logging.info("🔴 Triggering final failure email to user...")
+        try:
+            send_final_failure_email_to_user(context)
+        except Exception as email_error:
+            logging.error(f"Failed to send final failure email: {email_error}")
+    
+    # ============================================================
+    # STEP 6: Build Slack message with retry context
+    # ============================================================
+    
+    # Determine alert severity and message style
+    if max_retries_reached or current_retry_count >= 2:
+        icon = "🔴"
+        status = "FINAL FAILURE - MAX RETRIES EXCEEDED"
+        color = "#ff0000"
+        retry_text = f"❌ *Retry Attempt {current_retry_count}/2 FAILED*\n⚠️ *No more retry attempts will be made*\n📧 Manual intervention email sent to user"
+    elif is_retry:
+        icon = "🟡"
+        status = f"RETRY FAILURE - Attempt {current_retry_count}/2"
+        color = "#ffa500"
+        retry_text = f"🔄 *Retry Attempt {current_retry_count}/2 Failed*\n⏰ Next retry in 20 minutes"
+    else:
+        icon = "🔴"
+        status = "INITIAL FAILURE"
+        color = "#ff4444"
+        retry_text = "🔄 *Retry Attempt 1/2*\n⏰ Will retry in 20 minutes"
+    
+    # Build detailed message
+    message_text = f"{icon} *HubSpot DAG Failure* - {status}"
+    
+    # Create rich Slack message with blocks
+    slack_payload = {
+        "text": message_text,  # Fallback text
+        "blocks": [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"{icon} HubSpot Task Failed - {SERVER_NAME}",
+                    "emoji": True
+                }
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Status:*\n{status}"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*DAG:*\n`{dag_id}`"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Task:*\n`{task_id}`"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Run ID:*\n`{run_id[:30]}...`"
+                    }
+                ]
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": retry_text
+                }
+            },
+            {
+                "type": "divider"
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Thread ID:*\n`{thread_id[:30]}...`"
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Sender:*\n{sender_email[:50]}"
+                    }
+                ]
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Subject:*\n{subject[:100]}"
+                }
+            }
+        ]
+    }
+    
+    # Add error details if available
+    if error_message and error_message != "No error details available":
+        slack_payload["blocks"].append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Error:*\n```{error_message[:500]}```"
+            }
+        })
+    
+    # Add color attachment for visual distinction
+    slack_payload["attachments"] = [
+        {
+            "color": color,
+            "blocks": []
+        }
+    ]
+    
+    # ============================================================
+    # STEP 7: Send to Slack
+    # ============================================================
+    
+    try:
+        response = requests.post(
+            webhook_url,
+            data=json.dumps(slack_payload),
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        
+        if response.status_code == 200:
+            logging.info(f"✓ Slack alert sent successfully for {tracker_key} (Attempt {current_retry_count}/2)")
+        else:
+            logging.error(f"❌ Slack alert failed: {response.status_code} - {response.text}")
+            
+    except Exception as e:
+        logging.error(f"❌ Failed to send Slack alert: {e}")
+
+def send_final_failure_email_to_user(context):
+    """
+    Send a final "manual intervention required" email to the user
+    when all 3 retry attempts have been exhausted.
+    
+    This is ONLY called after the 3rd failed retry attempt.
+    """
+    dag_run = context.get('dag_run')
+    task_instance = context.get('task_instance')
+    
+    dag_id = dag_run.dag_id
+    run_id = dag_run.run_id
+    task_id = task_instance.task_id
+    
+    # ============================================================
+    # STEP 1: Check if this is the 3rd retry failure
+    # ============================================================
+    
+    dag_run_conf = dag_run.conf or {}
+    is_retry = dag_run_conf.get("retry_attempt", False)
+    
+    if is_retry:
+        original_run_id = dag_run_conf.get('original_run_id', run_id)
+        original_dag_id = dag_run_conf.get('original_dag_id', dag_id)
+        tracker_key = f"{original_dag_id}:{original_run_id}"
+    else:
+        tracker_key = f"{dag_id}:{run_id}"
+    
+    # Get retry tracker
+    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    existing_entry = retry_tracker.get(tracker_key, {})
+    current_retry_count = existing_entry.get("retry_count", 0)
+    
+    # ============================================================
+    # STEP 2: Only proceed if this is the final (3rd) failure
+    # ============================================================
+    
+    if current_retry_count < 2:
+        logging.info(f"Not final failure yet (attempt {current_retry_count}/2) - skipping final email")
+        return
+    
+    logging.info(f"🔴 FINAL FAILURE DETECTED - Sending manual intervention email")
+    
+    # ============================================================
+    # STEP 3: Extract email data
+    # ============================================================
+    
+    ti = context['ti']
+    email_data = dag_run_conf.get("email_data")
+    
+    if not email_data:
+        # Try XCom as fallback
+        possible_keys = [
+            "unread_emails",
+            "no_action_emails",
+            "llm_search_results",
+            "reply_emails",
+            "report_emails",
+            "email_data"
+        ]
+        
+        for key in possible_keys:
+            data = ti.xcom_pull(key=key)
+            if data:
+                if isinstance(data, list) and len(data) > 0:
+                    email_data = data[0]
+                elif isinstance(data, dict):
+                    email_data = data
+                break
+    
+    if not email_data:
+        logging.warning("Could not find email data for final failure email")
+        return
+    
+    # Extract sender info
+    headers = email_data.get("headers", {})
+    sender = headers.get("From", "Unknown <unknown@email.com>")
+    
+    sender_name_match = re.search(r'^([^<]+)', sender)
+    sender_name = sender_name_match.group(1).strip() if sender_name_match else "there"
+    
+    sender_email_match = re.search(r'<(.+?)>', sender)
+    recipient_email = sender_email_match.group(1) if sender_email_match else None
+    
+    if not recipient_email:
+        logging.error("Could not determine recipient email for final failure email")
+        return
+    
+    # ============================================================
+    # STEP 4: Build the "manual intervention" email
+    # ============================================================
+    
+    service = authenticate_gmail()
+    if not service:
+        logging.error("Gmail authentication failed - cannot send final failure email")
+        return
+    
+    final_failure_html = f"""
+<html>
+<head>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .greeting {{ margin-bottom: 15px; }}
+        .message {{ margin: 15px 0; }}
+        .closing {{ margin-top: 15px; }}
+        .signature {{ margin-top: 15px; font-weight: bold; }}
+        .company {{ color: #666; font-size: 0.9em; }}
+    </style>
+</head>
+<body>
+    <div class="greeting">
+        <p>Hello {sender_name},</p>
+    </div>
+   
+    <div class="message">
+        <p>We’re still experiencing a technical issue, and the maximum retry attempts for your request have been exceeded.</p>
+        
+        <p>To avoid further delays, please proceed with the required action manually in your HubSpot account.</p>
+    </div>
+   
+    <div class="closing">
+        <p>If you need assistance, please reply to this email or contact your HubSpot administrator.</p>
+    </div>
+   
+    <div class="signature">
+        <p>Best regards,<br>
+        The HubSpot Assistant Team<br>
+        <a href="http://lowtouch.ai" class="company">lowtouch.ai</a></p>
+    </div>
+</body>
+</html>
+"""
+
+    
+    # Build the message
+    msg = MIMEMultipart()
+    msg["From"] = f"HubSpot via lowtouch.ai <{HUBSPOT_FROM_ADDRESS}>"
+    msg["To"] = recipient_email
+    
+    # Set subject as a reply
+    subject = headers.get("Subject", "Manual Action Required")
+    if not subject.lower().startswith("re:"):
+        subject = f"Re: {subject}"
+    msg["Subject"] = subject
+    
+    # NEW: Add threading headers to keep it in the same thread
+    original_message_id = headers.get("Message-ID", "")
+    references = headers.get("References", "")
+    if original_message_id:
+        msg["In-Reply-To"] = original_message_id
+        if original_message_id not in references:
+            references = f"{references} {original_message_id}".strip()
+        msg["References"] = references
+    
+    msg.attach(MIMEText(final_failure_html, "html"))
+    
+    # Send the email
+    raw_msg = base64.urlsafe_b64encode(msg.as_string().encode("utf-8")).decode("utf-8")
+    try:
+        service.users().messages().send(
+            userId="me",
+            body={"raw": raw_msg}
+        ).execute()
+        logging.info(f"✓ Final failure email sent successfully to {recipient_email} in thread")
+        
+        # Update tracker to mark final fallback as sent
+        existing_entry["final_fallback_sent"] = True
+        retry_tracker[tracker_key] = existing_entry
+        Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
+    except Exception as e:
+        logging.error(f"Failed to send final failure email: {e}", exc_info=True)
 
 def clear_retry_tracker_on_success(context):
     dag_run = context['dag_run']
@@ -397,7 +824,10 @@ default_args = {
     "depends_on_past": False,
     "start_date": datetime(2025, 8, 22),
     "retry_delay": timedelta(seconds=15),
-    'on_failure_callback': send_fallback_email_on_failure,
+    'on_failure_callback': [
+        send_fallback_email_on_failure,  # Sends email to user
+        send_hubspot_slack_alert          # Sends Slack alert to team
+    ]
 }
 
 @task(task_id="handle_retry_if_present")
