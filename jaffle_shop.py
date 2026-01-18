@@ -57,7 +57,7 @@ with DAG(
 ):
     e1 = PythonOperator(task_id = "print_variables",
                         python_callable = print_variable,
-                        provide_context=True,
+                        #provide_context=True,
                        )
 
     seeds_tg = DbtTaskGroup(
