@@ -2,7 +2,7 @@ from pendulum import datetime
 from airflow import DAG
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
-from airflow.operators.email_operator import EmailOperator
+from airflow.operators.email import EmailOperator
 from datetime import datetime, timedelta
 from airflow.models import Variable
 from cosmos import DbtTaskGroup, RenderConfig
