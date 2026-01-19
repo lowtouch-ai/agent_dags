@@ -6,8 +6,9 @@ from airflow.models import Variable, Param
 import logging
 import json
 import requests
-from io import BytesIO
-from pypdf import PdfReader
+import tempfile
+import os
+import pymupdf4llm
 from ollama import Client
 import re
 
@@ -138,16 +139,23 @@ def fetch_pdf_from_api(**context):
         logging.info(f"Downloaded PDF: {len(pdf_bytes):,} bytes")
 
         # Extract text from PDF
-        reader = PdfReader(BytesIO(pdf_bytes))
         text = ""
-        page_count = len(reader.pages)
-        
-        for i, page in enumerate(reader.pages, 1):
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-            if i % 10 == 0 or i == page_count:
-                logging.info(f"Extracted text from {i}/{page_count} pages...")
+        # Create a temporary file to work with pymupdf4llm
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
+            tmp_file.write(pdf_bytes)
+            tmp_path = tmp_file.name
+
+        try:
+            # Convert PDF to Markdown to preserve structure (tables, headers)
+            text = pymupdf4llm.to_markdown(tmp_path, write_images=False)
+            logging.info(f"Converted PDF to Markdown via pymupdf4llm. Length: {len(text):,}")
+        except Exception as e:
+            logging.error(f"pymupdf4llm conversion failed: {e}")
+            raise
+        finally:
+            # Clean up temporary file
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
         if not text.strip():
             text = "[NO_TEXT_EXTRACTED - Likely scanned/image-based PDF]"
