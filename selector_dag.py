@@ -1,8 +1,8 @@
 from datetime import datetime
 from airflow import DAG
-from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.providers.standard.operators.python import PythonOperator, BranchPythonOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.task.trigger_rule import TriggerRule
 from airflow.models import Variable, Param
 import logging
 from ollama import Client
@@ -410,22 +410,19 @@ with DAG(
     # Check if fast-path or full flow
     fast_path_branch = BranchPythonOperator(
         task_id="fast_path_or_full_flow",
-        python_callable=check_fast_path,
-        provide_context=True,
+        python_callable=check_fast_path
     )
     
     # Fetch PDF and extract text
     fetch_pdf = PythonOperator(
         task_id="fetch_pdf_from_api",
-        python_callable=fetch_pdf_and_extract_text,
-        provide_context=True,
+        python_callable=fetch_pdf_and_extract_text
     )
 
     # Classify document using AI
     classify_doc = PythonOperator(
         task_id="classify_document_with_ai",
-        python_callable=classify_document_with_ai,
-        provide_context=True,
+        python_callable=classify_document_with_ai
     )
 
     # Trigger the appropriate processing DAG
@@ -436,7 +433,6 @@ with DAG(
                         "map_doc_type_to_dag }}",
         wait_for_completion=True,
         reset_dag_run=True,
-        execution_date="{{ execution_date }}",
         conf="{{ dag_run.conf }}",
         trigger_rule=TriggerRule.NONE_FAILED,
     )
@@ -451,7 +447,6 @@ with DAG(
     finalize = PythonOperator(
         task_id="log_completion",
         python_callable=update_project_selector_run_id,
-        provide_context=True,
         trigger_rule=TriggerRule.ALL_SUCCESS,
     )
 
