@@ -1,7 +1,7 @@
 from datetime import datetime
 from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.task.trigger_rule import TriggerRule
 from airflow.models import Variable, Param
 import logging
 import json
@@ -758,38 +758,32 @@ with DAG(
 
     fetch_pdf = PythonOperator(
         task_id="fetch_pdf_from_api",
-        python_callable=fetch_pdf_from_api,
-        provide_context=True,
+        python_callable=fetch_pdf_from_api
     )
 
     extract_questions = PythonOperator(
         task_id="extract_questions_with_ai",
-        python_callable=extract_questions_with_ai,
-        provide_context=True,
+        python_callable=extract_questions_with_ai
     )
 
     validate_fix_questions = PythonOperator(
         task_id="validate_and_fix_questions",
-        python_callable=validate_and_fix_questions,
-        provide_context=True,
+        python_callable=validate_and_fix_questions
     )
 
     generate_answers = PythonOperator(
         task_id="generate_answers_with_ai",
-        python_callable=generate_answers_with_ai,
-        provide_context=True,
+        python_callable=generate_answers_with_ai
     )
 
     update_answers = PythonOperator(
         task_id="update_answers_to_database",
-        python_callable=update_answers_to_database,
-        provide_context=True,
+        python_callable=update_answers_to_database
     )
 
     finalize = PythonOperator(
         task_id="log_completion",
         python_callable=update_run_id_and_log,
-        provide_context=True,
         trigger_rule=TriggerRule.ALL_SUCCESS,
     )
 
