@@ -15,7 +15,7 @@ from ollama import Client
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from hubspot_email_listener import send_fallback_email_on_failure
+from hubspot_email_listener import send_fallback_email_on_failure, send_hubspot_slack_alert
 
 # ============================================================================
 # CONFIGURATION
@@ -60,7 +60,10 @@ default_args = {
     "depends_on_past": False,
     "start_date": datetime(2025, 1, 1),
     "retry_delay": timedelta(minutes=5),
-    "on_failure_callback": send_fallback_email_on_failure
+    'on_failure_callback': [
+        send_fallback_email_on_failure,  # Sends email to user
+        send_hubspot_slack_alert          # Sends Slack alert to team
+    ]
 }
 
 HUBSPOT_FROM_ADDRESS = Variable.get("ltai.v3.hubspot.from.address")

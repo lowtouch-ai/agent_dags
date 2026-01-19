@@ -20,7 +20,7 @@ from airflow.api.common.trigger_dag import trigger_dag
 import requests
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from hubspot_email_listener import send_fallback_email_on_failure
+from hubspot_email_listener import send_fallback_email_on_failure, send_hubspot_slack_alert
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 def clear_retry_tracker_on_success(context):
@@ -62,7 +62,10 @@ default_args = {
     "depends_on_past": False,
     "start_date": datetime(2025, 8, 22),
     "retry_delay": timedelta(seconds=15),
-    'on_failure_callback': send_fallback_email_on_failure
+    'on_failure_callback': [
+        send_fallback_email_on_failure,  # Sends email to user
+        send_hubspot_slack_alert          # Sends Slack alert to team
+    ]
 }
 
 HUBSPOT_FROM_ADDRESS = Variable.get("ltai.v3.hubspot.from.address")
