@@ -895,6 +895,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         parsed_json = json.loads(response.strip())
         ti.xcom_push(key="owner_info", value=parsed_json)
         logging.info(f"Owner determined: {parsed_json.get('deal_owner_name')}")
+        return parsed_json
     except Exception as e:
         logging.error(f"Error processing owner AI response: {e}")
         default_owner = {
@@ -905,6 +906,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
             "all_owners_table": []
         }
         ti.xcom_push(key="owner_info", value=default_owner)
+        return default_owner
 
 def validate_deal_stage(ti, **context):
     """Validate deal stage from conversation and assign default if invalid"""
@@ -953,7 +955,7 @@ Return this exact JSON structure:
         {{
             "deal_index": 1,
             "deal_name": "parsed_deal_name",
-            "original_stage": "user_specified_stage_or_empty",
+            "original_stage": "user_specified_valid_stage_or_Lead",
             "validated_stage": "Lead",
             "stage_message": "explanation_message"
         }}
@@ -1242,12 +1244,30 @@ For each contact, parse:
 - lastname (empty string if not provided)
 - email (if mentioned)
 
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
+
 LATEST MESSAGE:
 {latest_message}
 
 RULES:
 - Extract EVERY person mentioned
-- Exclude internal team members(internal team members include members from "lowtouch.ai","hybcloud technologies","ccs","cc","cloud control","cloudcontrol" and "ecloudcontrol")and deal owners(all the members from **get_all_owners** tool)
+- Exclude any person who meets ANY of the following:
+    A. INTERNAL TEAM MEMBER  
+    A person is internal if their email domain or company matches any of:
+    ["lowtouch.ai", "hybcloud technologies", "ccs", "cc", "cloud control", "cloudcontrol", "ecloudcontrol"]
+
+    B. DEAL OWNER  
+    Any user returned by the get_all_owners tool must be excluded.
+    PROCESS:
+    - First identify internal members  
+    - Then identify deal owners  
+    - Remove both groups from results  
+    - Return only external, non-owner participants
+
 - Exclude the people whose email is retrieved from `get_all_owners` tool matches the domain given in the latest message.
 - Handle single names (e.g., "Neha") as firstname only
 - Parse "Neha (Ops)" as firstname="Neha", ignore role
@@ -1419,12 +1439,18 @@ def validate_companies_against_associations(ti, **context):
     prompt = f"""Extract ALL company names explicitly mentioned in this email.
     **You CANNOT create companies in HubSpot.**
 
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
+
 LATEST MESSAGE:
 {latest_message}
 
 RULES:
 - Only extract formal company/organization names
-- Exclude "lowtouch.ai","hybcloud technologies","ccs","cc","cloud control","cloudcontrol" and "ecloudcontrol" (internal)
+- Exclude any company if its name or domain matches: lowtouch.ai, hybcloud technologies, ccs, cc, cloud control, cloudcontrol    ecloudcontrol.These are INTERNAL companies and must not be included in outputs.
 - Return empty list if no companies mentioned
 - **Never create any companies**
 - Only search for companies if it is explicitly mentioned in the email by the user.**Do not** infer or assume any company names from deal name.
@@ -1600,7 +1626,13 @@ def validate_deals_against_associations(ti, **context):
     
     # AI extracts deals mentioned in email
     prompt = f"""Extract deals mentioned in this email. Only include if there's CLEAR buying intent.
-    **You CANNOT create deals in HubSpot.**  
+    **You CANNOT create deals in HubSpot.**
+
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE. 
 
 LATEST MESSAGE:
 {latest_message}
@@ -1859,6 +1891,12 @@ def search_deals_directly(ti, **context):
     prompt = f"""Extract ALL deal names explicitly mentioned in this email.
     **You CANNOT create deals in HubSpot.**
 
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
+
 LATEST MESSAGE:
 {latest_message}
 
@@ -1989,12 +2027,18 @@ def search_companies_directly(ti, **context):
     # AI extracts company names
     prompt = f"""Extract ALL company names explicitly mentioned in this email.
 
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
+
 LATEST MESSAGE:
 {latest_message}
 
 RULES:
 - Only extract formal company/organization names
-- Exclude "lowtouch.ai","hybcloud technologies","ccs","cc","cloud control","cloudcontrol" and "ecloudcontrol" (internal)
+- Exclude any company if its name or domain matches:lowtouch.ai, hybcloud technologies, ccs, cc, cloud control, cloudcontrol, ecloudcontrol.These are INTERNAL companies and must not be included in outputs.
 - Return empty list if no companies mentioned
 - Only search for companies if it is explicitly mentioned in the email by the user.**Do not** infer or assume any company names from deal name.
 
@@ -2265,6 +2309,12 @@ def validate_associations_against_context(ti, **context):
     # AI analyzes user context to extract precise associations
     prompt = f"""You are a HubSpot context validator. Analyze this email to identify EXACTLY which contacts, companies, and deals the user is referring to, and whether existing associations are relevant.
     You cannot create or update any records, your only job is to identify and validate the contacts, companies, and deals based on the conversation.
+
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 
 LATEST USER MESSAGE:
 {latest_message}
@@ -2613,6 +2663,12 @@ def parse_notes_tasks_meeting(ti, **context):
     prompt = f"""You are a HubSpot Conversation Parser. Your role is to **analyze** the email conversation and **extract** only the information explicitly requested.  
 **You CANNOT create notes, tasks, or meetings in HubSpot.**  
 You may only **parse and structure** data that is **clearly present** in the conversation.
+
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 
 ---
 **SENDER**  
@@ -3376,6 +3432,13 @@ def check_task_threshold(ti, **context):
 
     prompt = f"""You are a HubSpot API assistant. Check task volume thresholds.
     You cannot create or modify tasks.
+
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
+
 LATEST USER MESSAGE:
 {latest_message}
 
@@ -3460,11 +3523,24 @@ def compile_search_results(ti, **context):
     company_info = ti.xcom_pull(key="merged_company_info") or ti.xcom_pull(key="company_info") or {}
     notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting")
     task_threshold_info = ti.xcom_pull(key="task_threshold_info", default={})
+    deal_stage_info = ti.xcom_pull(key="deal_stage_info", default={"deal_stages": []})
     thread_id = ti.xcom_pull(key="thread_id")
     email_data = ti.xcom_pull(key="email_data")
     
     logging.info(f"=== COMPILING SEARCH RESULTS ===")
     logging.info(f"Thread ID: {thread_id}")
+    
+    # ✅ FIX: Apply validated stages to new deals BEFORE adding to search_results
+    new_deals = deal_info.get("new_deals", [])
+    validated_stages = {stage['deal_name']: stage['validated_stage'] 
+                       for stage in deal_stage_info.get('deal_stages', [])}
+    
+    for deal in new_deals:
+        deal_name = deal.get("dealName", "")
+        if deal_name in validated_stages:
+            # Apply the validated stage (either user's valid input or default "Lead")
+            deal["dealLabelName"] = validated_stages[deal_name]
+            logging.info(f"Applied validated stage '{validated_stages[deal_name]}' to deal '{deal_name}'")
     
     search_results = {
         "thread_id": thread_id,
@@ -3472,7 +3548,7 @@ def compile_search_results(ti, **context):
         "contact_results": contact_info.get("contact_results", {"total": 0, "results": []}),
         "company_results": company_info.get("company_results", {"total": 0, "results": []}),
         "new_entity_details": {
-            "deals": deal_info.get("new_deals", []),
+            "deals": new_deals,  # Now contains corrected stages
             "contacts": contact_info.get("new_contacts", []),
             "companies": company_info.get("new_companies", []),
             "notes": notes_tasks_meeting.get("notes", []),
