@@ -126,7 +126,7 @@ def check_and_retry_failed_tasks(**context):
                 tracked_count += 1
                 
                 # NEW: Check if max retries reached
-                if entry.get("max_retries_reached", False) or entry.get("retry_count", 0) >= 3:
+                if entry.get("max_retries_reached", False) or entry.get("retry_count", 0) >= 2:
                     logger.warning(f"  ⚠️ MAX RETRIES EXCEEDED - No more retry attempts")
                     max_retries_count += 1
                     
@@ -195,8 +195,8 @@ def check_and_retry_failed_tasks(**context):
                 current_retry_count = entry.get("retry_count", 0)
                 next_retry_count = current_retry_count + 1
                 
-                if next_retry_count > 3:
-                    logger.warning(f"  ❌ Cannot retry - would exceed max attempts (current: {current_retry_count}, max: 3)")
+                if next_retry_count > 2:
+                    logger.warning(f"  ❌ Cannot retry - would exceed max attempts (current: {current_retry_count}, max: 2)")
                     entry["max_retries_reached"] = True
                     entry["status"] = "max_retries_exceeded"
                     retry_tracker[tracker_key] = entry
@@ -244,7 +244,7 @@ def check_and_retry_failed_tasks(**context):
                         conf=retry_conf,
                         execution_date=datetime.now(pytz.utc)
                     )
-                    logger.info(f"  ✓ TRIGGERED RETRY {next_retry_count}/3: {retry_run_id}")
+                    logger.info(f"  ✓ TRIGGERED RETRY {next_retry_count}/2: {retry_run_id}")
                     retry_count += 1
                     retry_summary["total_retries_triggered"] += 1
 
