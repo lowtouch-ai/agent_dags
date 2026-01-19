@@ -1424,6 +1424,7 @@ RULES:
 - Exclude "lowtouch.ai","hybcloud technologies","ccs","cc","cloud control","cloudcontrol" and "ecloudcontrol" (internal)
 - Return empty list if no companies mentioned
 - **Never create any companies**
+- Only search for companies if it is explicitly mentioned in the email by the user.**Do not** infer or assume any company names from deal name.
 
 Return ONLY valid JSON:
 {{
@@ -1992,6 +1993,7 @@ RULES:
 - Only extract formal company/organization names
 - Exclude "lowtouch.ai","hybcloud technologies","ccs","cc","cloud control","cloudcontrol" and "ecloudcontrol" (internal)
 - Return empty list if no companies mentioned
+- Only search for companies if it is explicitly mentioned in the email by the user.**Do not** infer or assume any company names from deal name.
 
 Return ONLY valid JSON:
 {{
