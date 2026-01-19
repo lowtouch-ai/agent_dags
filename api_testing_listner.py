@@ -131,16 +131,20 @@ def fetch_unread_emails(**kwargs):
         headers = {h["name"]: h["value"] for h in msg_data["payload"]["headers"]}
         sender = headers.get("From", "").lower()
         timestamp = int(msg_data["internalDate"])
+        thread_id = msg_data.get("threadId", "")
 
         if "no-reply" in sender or timestamp <= last_checked_timestamp:
             continue
 
         json_attachments = []
+        config_attachment = None  # Track config.yaml separately
 
         if "parts" in msg_data["payload"]:
             for part in msg_data["payload"].get("parts", []):
                 filename = part.get("filename", "")
-                if not filename.lower().endswith((".json")):
+                
+                # Skip if not JSON or YAML file
+                if not filename.lower().endswith((".json", ".yaml", ".yml")):
                     continue
 
                 if not part.get("body", {}).get("attachmentId"):
@@ -152,47 +156,71 @@ def fetch_unread_emails(**kwargs):
                 ).execute()
 
                 file_data = base64.urlsafe_b64decode(att["data"])
-                safe_filename = f"{msg['id']}_{filename}"
-                attachment_path = os.path.join(ATTACHMENT_DIR, safe_filename)
+                
+                # Check if this is a config file
+                is_config = filename.lower() in ["config.yaml", "config.yml"]
+                
+                if is_config:
+                    # Save config to special location: /appz/postman/{thread_id}/config.yaml
+                    config_dir = f"/appz/postman/{thread_id}"
+                    os.makedirs(config_dir, exist_ok=True)
+                    config_path = os.path.join(config_dir, "config.yaml")
+                    
+                    with open(config_path, "wb") as f:
+                        f.write(file_data)
+                    
+                    logging.info(f"Saved config file to: {config_path}")
+                    
+                    config_attachment = {
+                        "filename": "config.yaml",
+                        "path": config_path,
+                        "mime_type": part.get("mimeType", "application/x-yaml"),
+                    }
+                else:
+                    # Save regular JSON attachment
+                    safe_filename = f"{msg['id']}_{filename}"
+                    attachment_path = os.path.join(ATTACHMENT_DIR, safe_filename)
 
-                with open(attachment_path, "wb") as f:
-                    f.write(file_data)
+                    with open(attachment_path, "wb") as f:
+                        f.write(file_data)
 
-                # Optional: try to load & validate JSON early
-                try:
-                    with open(attachment_path, "r", encoding="utf-8") as f:
-                        json.loads(f.read())  # just validate
-                    logging.info(f"Valid JSON attachment: {filename}")
-                except Exception as e:
-                    logging.warning(f"Invalid JSON in {filename}: {e}")
-                    # you can os.remove(attachment_path) here if you want
-                    continue
+                    # Validate JSON
+                    try:
+                        with open(attachment_path, "r", encoding="utf-8") as f:
+                            json.loads(f.read())
+                        logging.info(f"Valid JSON attachment: {filename}")
+                    except Exception as e:
+                        logging.warning(f"Invalid JSON in {filename}: {e}")
+                        continue
 
-                json_attachments.append({
-                    "filename": filename,
-                    "path": attachment_path,
-                    "mime_type": part.get("mimeType", "application/json"),
-                })
+                    json_attachments.append({
+                        "filename": filename,
+                        "path": attachment_path,
+                        "mime_type": part.get("mimeType", "application/json"),
+                    })
 
         if json_attachments:
             email_object = {
                 "id": msg["id"],
-                "threadId": msg_data.get("threadId"),
+                "threadId": thread_id,
                 "headers": headers,
                 "content": msg_data.get("snippet", ""),
                 "timestamp": timestamp,
-                "attachments": json_attachments,           # ← only JSONs now
+                "attachments": json_attachments,
+                "config": config_attachment,  # Add config separately
             }
             processed_emails.append(email_object)
             if timestamp > max_timestamp:
                 max_timestamp = timestamp
-            logging.info(f"Found email with {len(json_attachments)} JSON attachment(s)")
+            
+            config_status = "with config" if config_attachment else "without config"
+            logging.info(f"Found email with {len(json_attachments)} JSON attachment(s) {config_status}")
 
     if processed_emails:
         update_last_checked_timestamp(max_timestamp)
 
     kwargs['ti'].xcom_push(key="emails_with_json", value=processed_emails)
-    return len(processed_emails)  # or return processed_emails
+    return len(processed_emails)   # or return processed_emails
 
 def branch_function(**kwargs):
     ti = kwargs['ti']

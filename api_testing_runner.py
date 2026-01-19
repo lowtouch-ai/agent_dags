@@ -30,6 +30,7 @@ MODEL_NAME = "APITestAgent:3.0"
 def extract_inputs_from_email(*args, **kwargs):
     """
     Extracts API documentation from JSON attachment and email metadata.
+    Also extracts config.yaml if present in attachments.
     Receives email_data from the mailbox monitor DAG.
     """
     ti = kwargs["ti"]
@@ -55,17 +56,28 @@ def extract_inputs_from_email(*args, **kwargs):
         email_content = email_data.get("content", "")
         
         # Extract all recipients (To, Cc, Bcc)
-        all_recipients = extract_all_recipients(email_data)
+        all_recipient = extract_all_recipients(email_data)
         
         logging.info(f"Email from: {sender}")
         logging.info(f"Subject: {subject}")
-        logging.info(f"Recipients - To: {all_recipients['to']}, Cc: {all_recipients['cc']}")
+        logging.info(f"Thread ID: {thread_id}")
+        logging.info(f"Recipients - To: {all_recipient['to']}, Cc: {all_recipient['cc']}")
         
         # Get JSON attachments
         attachments = email_data.get("attachments", [])
         
         if not attachments:
             raise ValueError("No JSON attachments found in email")
+        
+        # Check for config.yaml attachment
+        config_attachment = email_data.get("config")
+        config_path = None
+        
+        if config_attachment:
+            config_path = config_attachment.get("path")
+            logging.info(f"Config file found: {config_path}")
+        else:
+            logging.info("No config.yaml file found in email attachments")
         
         # Load the first JSON attachment (API documentation)
         json_attachment = attachments[0]
@@ -98,7 +110,7 @@ def extract_inputs_from_email(*args, **kwargs):
         If no specific requirements are mentioned, use general best practices.
         """
         
-        parsed_response = get_ai_response(parse_prompt,model=MODEL_NAME)
+        parsed_response = get_ai_response(parse_prompt, model=MODEL_NAME)
         parsed_requirements = extract_json_from_text(parsed_response)
         
         if not parsed_requirements:
@@ -115,11 +127,12 @@ def extract_inputs_from_email(*args, **kwargs):
         ti.xcom_push(key="references", value=references)
         ti.xcom_push(key="thread_id", value=thread_id)
         ti.xcom_push(key="original_email_id", value=email_data.get("id"))
-        ti.xcom_push(key="all_recipients", value=json.dumps(all_recipients))
+        ti.xcom_push(key="all_recipients", value=json.dumps(all_recipient))
         ti.xcom_push(key="api_documentation", value=json.dumps(api_documentation))
         ti.xcom_push(key="test_requirements", value=parsed_requirements.get("test_requirements"))
         ti.xcom_push(key="special_instructions", value=parsed_requirements.get("special_instructions"))
         ti.xcom_push(key="priority_level", value=parsed_requirements.get("priority_level"))
+        ti.xcom_push(key="config_path", value=config_path)  # Store config path
         
         logging.info(f"Successfully extracted inputs from email: {email_data.get('id')}")
         
@@ -127,14 +140,15 @@ def extract_inputs_from_email(*args, **kwargs):
         logging.error(f"Error extracting inputs: {str(e)}", exc_info=True)
         raise
 
-import uuid
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 2: Create and Validate Test Cases
+# MODIFIED: api_test_executor.py - create_and_validate_test_cases function
 # ═══════════════════════════════════════════════════════════════
+
 def create_and_validate_test_cases(*args, **kwargs):
     """
     Creates comprehensive test cases from API documentation and validates them.
+    Uses thread_id as the test session folder instead of UUID.
     Supports retry logic with conversation history.
     """
     ti = kwargs["ti"]
@@ -144,15 +158,24 @@ def create_and_validate_test_cases(*args, **kwargs):
     test_reqs = ti.xcom_pull(key="test_requirements", task_ids="extract_inputs")
     special_instructions = ti.xcom_pull(key="special_instructions", task_ids="extract_inputs")
     priority = ti.xcom_pull(key="priority_level", task_ids="extract_inputs")
+    thread_id = ti.xcom_pull(key="thread_id", task_ids="extract_inputs")
+    config_path = ti.xcom_pull(key="config_path", task_ids="extract_inputs")
     
     # Parse API documentation
     api_docs = json.loads(api_docs_json) if api_docs_json else {}
 
-    # Generate a unique identifier for creating a test session unique per dag run
-    test_session_id = ti.xcom_pull(key="test_session_uuid", task_ids=ti.task_id)
+    # Use thread_id as the test session folder
+    test_session_id = thread_id
     if not test_session_id:
-        test_session_id = str(uuid.uuid4())
-        ti.xcom_push(key="test_session_uuid", value=test_session_id)
+        raise ValueError("Thread ID is missing - cannot create test session folder")
+    
+    # Create the postman directory structure
+    test_dir = f"/appz/postman/{test_session_id}"
+    os.makedirs(test_dir, exist_ok=True)
+    logging.info(f"Using test session folder: {test_dir}")
+    
+    # Store thread_id for use in other tasks
+    ti.xcom_push(key="test_session_id", value=test_session_id)
     
     # Detect retry
     is_retry = ti.try_number > 1
@@ -161,8 +184,6 @@ def create_and_validate_test_cases(*args, **kwargs):
     if is_retry:
         logging.info("Retry detected. Loading history from XCom.")
         history_json = ti.xcom_pull(key="task_history", task_ids=ti.task_id) or []
-        # if not history_json:
-        #     raise ValueError("Retry detected but no history found in XCom")
         if history_json:
             history = json.loads(history_json)
         
@@ -170,150 +191,88 @@ def create_and_validate_test_cases(*args, **kwargs):
             key="generated_test_cases_raw",
             task_ids=ti.task_id
         )
-        # if not test_cases_response:
-        #     raise ValueError("Retry detected but no test cases found in XCom")
-    else:
-        logging.info("First attempt. Generating new test cases.")
-        
-        # Build comprehensive prompt
-        generate_prompt = f"""
-        Create comprehensive API test cases based on the provided documentation. In the folder {test_session_id} in the test.yaml
-        
-        API Documentation:
-        {json.dumps(api_docs, indent=2)}
-        
-        Test Requirements:
-        {test_reqs}
-        
-        Special Instructions:
-        {special_instructions}
-        
-        Priority Level: {priority}
-        
-        Generate test cases covering:
-        1. **Valid Request Scenarios**:
-           - Happy path with valid data
-           - All required and optional parameters
-           - Different data types and formats
-        
-        2. **Invalid Request Scenarios**:
-           - Missing required parameters
-           - Invalid data types
-           - Malformed requests
-           - Boundary value testing
-        
-        
-        4. **Error Handling**:
-           - 400 Bad Request scenarios
-           - 404 Not Found
-           - 500 Internal Server Error
-        
-        5. **Edge Cases**:
-           - Empty values
-           - Null values
-           - Very long strings
-           - Special characters
-           - Concurrent requests
-        
-        Return test cases in this JSON format:
-        {{
-            "test_suite_name": "API Test Suite",
-            "total_test_cases": 0,
-            "test_cases": [
-                {{
-                    "test_id": "TC001",
-                    "test_name": "Test Name",
-                    "category": "valid/invalid/auth/error/edge",
-                    "description": "What this test validates",
-                    "endpoint": "/api/endpoint",
-                    "method": "GET/POST/PUT/DELETE",
-                    "headers": {{}},
-                    "request_body": {{}},
-                    "expected_status": 200,
-                    "expected_response": {{}},
-                    "assertions": ["list of validations to perform"]
-                }}
-            ]
-        }}
-        """
-        
-        test_cases_response = get_ai_response(generate_prompt,model=MODEL_NAME,history=history)
-        history_val = [
-            {"role": "user", "content": generate_prompt},
-            {"role": "assistant", "content": test_cases_response},
-        ]
-        history.append(history_val[0])
-        history.append(history_val[1])
-        ti.xcom_push(key="generated_test_cases_raw", value=test_cases_response)
-        ti.xcom_push(key="task_history", value=json.dumps(history))
     
-    # ───────────────────────────────────────────────
-    # Evaluation
-    # ───────────────────────────────────────────────
-    evaluate_prompt = """
-    Evaluate the test cases you just created in the output folder {test_session_id} in the test.yaml based on:
+    # Build comprehensive prompt
+    config_info = ""
+    if config_path and os.path.exists(config_path):
+        config_info = f"""
     
-    1. **Coverage**: Do they cover all major scenarios (valid, invalid, auth, errors, edge cases)?
-    2. **Completeness**: Are all fields properly filled out?
-    3. **Clarity**: Are test names and descriptions clear?
-    4. **Assertions**: Are expected results well-defined?
-    5. **Quality**: Are the test cases actionable and executable?
-    
-    Provide a coverage score (0-100) for each category and overall.
-    
-    Output strict JSON:
-    {
-        "proceed_to_execution": true | false,
-        "reason": "detailed explanation of decision",
-        "coverage_analysis": {
-            "valid_scenarios": 0-100,
-            "invalid_scenarios": 0-100,
-            "auth_scenarios": 0-100,
-            "error_handling": 0-100,
-            "edge_cases": 0-100,
-            "overall_score": 0-100
-        },
-        "improvements_needed": ["list of specific improvements if not proceeding"]
-    }
+    **Configuration File**: A config.yaml file is available at {config_path}
+    - This file contains base_url and authentication credentials
+    - Use this config file when generating test cases
     """
     
-    evaluation_response = get_ai_response(evaluate_prompt, conversation_history=history, model=MODEL_NAME)
-    decision = extract_json_from_text(evaluation_response)
+    generate_prompt = f"""
+    Create API test cases based on the provided documentation. 
+    Save the test cases in folder: {test_session_id}
+    File name: all // Give only the test file name which will be saved in the folder mentioned above. Do not give full path.
+
     
-    if not decision or "proceed_to_execution" not in decision:
-        raise ValueError(
-            f"Evaluation did not return valid JSON.\nRaw response:\n{evaluation_response}"
-        )
+    API Documentation:
+    {json.dumps(api_docs, indent=2)}
     
-    # Log evaluation results
-    coverage = decision.get("coverage_analysis", {})
-    logging.info(f"Test case evaluation - Overall score: {coverage.get('overall_score', 'N/A')}")
-    logging.info(f"Decision: {'PROCEED' if decision['proceed_to_execution'] else 'RETRY'}")
-    logging.info(f"Reason: {decision.get('reason', 'No reason provided')}")
+    Test Requirements:
+    {test_reqs}
     
-    if decision["proceed_to_execution"] is True:
-        ti.xcom_push(key="test_cases_approved", value=test_cases_response)
-        ti.xcom_push(key="approval_decision", value=json.dumps(decision))
-        return "execute_test_cases"
-    else:
-        # Update history for next retry
-        history.append({"role": "assistant", "content": evaluation_response})
-        ti.xcom_push(key="task_history", value=json.dumps(history))
-        
-        improvements = decision.get("improvements_needed", [])
-        raise ValueError(
-            f"Test cases insufficient (Score: {coverage.get('overall_score', 0)}/100).\n"
-            f"Reason: {decision.get('reason')}\n"
-            f"Improvements needed: {', '.join(improvements)}"
-        )
+    Special Instructions:
+    {special_instructions}
+    
+    Priority Level: {priority}
+    
+    Generate test cases covering:
+    1. **Valid Request Scenarios**:
+        - Happy path with valid data
+        - All required and optional parameters
+        - Different data types and formats
+    
+    2. **Invalid Request Scenarios**:
+        - Missing required parameters
+        - Invalid data types
+        - Malformed requests
+        - Boundary value testing
+    
+    3. **Error Handling**:
+        - 400 Bad Request scenarios
+        - 404 Not Found
+        - 500 Internal Server Error
+    
+    4. **Edge Cases**:
+        - Empty values
+        - Null values
+        - Very long strings
+        - Special characters
+        - Concurrent requests
+    
+    RULES:
+    - For not found cases (e.g., if the address you are searching does not exist), the API will return a 404 error
+    - Example: for GET /users/{{user_id}}, if user_id does not exist, return 404
+    - Strictly ensure one assertion per test case, not multiple assertions
+    - Use exact values from the documentation for expected results
+    - Save files to: test.yaml and output directory: {test_session_id}
+    """
+    
+    test_cases_response = get_ai_response(generate_prompt, model=MODEL_NAME, conversation_history=history)
+    logging.info("Generated test cases response. Response: " + test_cases_response)
+    
+    history_val = [
+        {"prompt": generate_prompt, "response": test_cases_response},
+    ]
+    history.append(history_val[0])
+    ti.xcom_push(key="generated_test_cases_raw", value=test_cases_response)
+    ti.xcom_push(key="task_history", value=json.dumps(history))
+    
+    return "execute_test_cases"
 
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 3: Execute Test Cases
+# MODIFIED: api_test_executor.py - execute_test_cases function
 # ═══════════════════════════════════════════════════════════════
+
 def execute_test_cases(*args, **kwargs):
     """
     Executes the approved test cases and collects detailed results.
+    Uses thread_id folder for test execution.
+    Supports retry logic with conversation history.
     """
     ti = kwargs["ti"]
     
@@ -322,28 +281,48 @@ def execute_test_cases(*args, **kwargs):
         task_ids="create_and_validate_test_cases"
     )
     
-    if not test_cases_json:
-        raise ValueError("No approved test cases found")
+    test_session_id = ti.xcom_pull(key="test_session_id", task_ids="create_and_validate_test_cases")
+    config_path = ti.xcom_pull(key="config_path", task_ids="extract_inputs")
     
-    # Parse test suite
-    test_suite = extract_json_from_text(test_cases_json)
+    if not test_session_id:
+        raise ValueError("Test session ID (thread_id) not found")
     
-    if not test_suite or "test_cases" not in test_suite:
-        raise ValueError("Invalid test suite format")
+    test_folder = test_session_id
+    logging.info(f"Executing tests from folder: /appz/postman/{test_folder}")
     
-    test_cases = test_suite.get("test_cases", [])
-    total_tests = len(test_cases)
+    # Detect retry
+    is_retry = ti.try_number > 1
     
-    logging.info(f"Executing {total_tests} test cases from suite: {test_suite.get('test_suite_name', 'Unknown')}")
+    history = []
+    if is_retry:
+        logging.info("Retry detected in execute_test_cases. Loading history from XCom.")
+        history_json = ti.xcom_pull(key="execution_history", task_ids=ti.task_id) or '[]'
+        history = json.loads(history_json)
+    
+    # Build execution prompt with config file support
+    config_instruction = ""
+    if config_path and os.path.exists(config_path):
+        config_instruction = f"""
+    **Important**: Use the config file at {config_path} for authentication and base URL.
+    Config file parameter: config_file="config.yaml"
+    """
     
     # Execute test cases using AI agent
     execution_prompt = f"""
-    Execute the following API test cases and provide detailed results.
+    Execute the following API test cases:
+    - Folder: {test_folder}
+    - Output directory: {test_folder} (the test cases are in {test_folder}/)
+    - Test file: test.yaml
+    - Base URL: http://connector:8000 (or use config file if available)
+    {config_instruction}
     
-    Test Suite:
-    {json.dumps(test_suite, indent=2)}
+    Use the api_test_runner tool with these parameters:
+    - file_name: "test.yaml" or give all to run all test files in the folder
+    - output_dir: "{test_folder}"
+    - config_file: "config.yaml" (if config file exists)
+    - verbose: True
     
-    For each test case, simulate the API call and validate:
+    For each test case, validate:
     1. Request format and parameters
     2. Expected status code
     3. Response structure
@@ -353,7 +332,7 @@ def execute_test_cases(*args, **kwargs):
     Return results as JSON:
     {{
         "execution_summary": {{
-            "total_tests": {total_tests},
+            "total_tests": 0,
             "executed": 0,
             "passed": 0,
             "failed": 0,
@@ -393,27 +372,93 @@ def execute_test_cases(*args, **kwargs):
     }}
     """
     
-    execution_response = get_ai_response(execution_prompt,model=MODEL_NAME)
-    test_results = extract_json_from_text(execution_response)
+    execution_response = get_ai_response(execution_prompt, model=MODEL_NAME, conversation_history=history)
+    logging.info("Generated execution response. Response: " + execution_response)
     
-    if not test_results or "test_results" not in test_results:
-        raise ValueError("Failed to parse test execution results")
+    # Append to history
+    history.append({"prompt": execution_prompt, "response": execution_response})
+    ti.xcom_push(key="execution_response_raw", value=execution_response)
+    ti.xcom_push(key="execution_history", value=json.dumps(history))
     
-    # Extract summary
-    summary = test_results.get("execution_summary", {})
+    # ───────────────────────────────────────────────
+    # Evaluation of execution results
+    # ───────────────────────────────────────────────
+    evaluate_prompt = f"""
+    Evaluate the test execution results you just generated:
     
-    logging.info(f"Test execution complete:")
-    logging.info(f"  Total: {summary.get('total_tests', 0)}")
-    logging.info(f"  Passed: {summary.get('passed', 0)}")
-    logging.info(f"  Failed: {summary.get('failed', 0)}")
-    logging.info(f"  Errors: {summary.get('errors', 0)}")
-    logging.info(f"  Pass Rate: {summary.get('pass_rate', 0):.2f}%")
+    {execution_response}
     
-    # Store results
-    ti.xcom_push(key="test_results", value=json.dumps(test_results))
-    ti.xcom_push(key="test_summary", value=json.dumps(summary))
-    ti.xcom_push(key="failed_tests", value=json.dumps(test_results.get("failed_tests", [])))
-
+    Based on:
+    1. **Validity**: Is the output valid JSON?
+    2. **Completeness**: Are all test cases executed with proper status, requests, responses, and assertions?
+    3. **Consistency**: Do the summary metrics match the detailed results (e.g., passed/failed counts)?
+    4. **Quality**: Are failure reasons and recommendations provided for failed tests? Are simulations realistic?
+    
+    Provide a score (0-100) for each category and overall.
+    
+    Output strict JSON:
+    {{
+        "proceed_to_reporting": true | false,
+        "reason": "detailed explanation of decision",
+        "analysis": {{
+            "validity": 0-100,
+            "completeness": 0-100,
+            "consistency": 0-100,
+            "quality": 0-100,
+            "overall_score": 0-100
+        }},
+        "improvements_needed": ["list of specific improvements if not proceeding"]
+    }}
+    """
+    
+    logging.info("Evaluating generated execution results for validity and quality. Prompt: " + evaluate_prompt)
+    
+    evaluation_response = get_ai_response(evaluate_prompt, model=MODEL_NAME)
+    decision = extract_json_from_text(evaluation_response)
+    
+    if not decision or "proceed_to_reporting" not in decision:
+        raise ValueError(
+            f"Evaluation did not return valid JSON.\nRaw response:\n{evaluation_response}"
+        )
+    
+    # Log evaluation results
+    analysis = decision.get("analysis", {})
+    logging.info(f"Execution results evaluation - Overall score: {analysis.get('overall_score', 'N/A')}")
+    logging.info(f"Decision: {'PROCEED' if decision['proceed_to_reporting'] else 'RETRY'}")
+    logging.info(f"Reason: {decision.get('reason', 'No reason provided')}")
+    
+    if decision["proceed_to_reporting"] is True:
+        # Parse the execution response
+        test_results = extract_json_from_text(execution_response)
+        logging.info("Parsed test execution results JSON. test_results: " + str(test_results))
+        
+        # Extract summary
+        summary = test_results.get("execution_summary", {})
+        
+        logging.info(f"Test execution complete:")
+        logging.info(f"  Total: {summary.get('total_tests', 0)}")
+        logging.info(f"  Passed: {summary.get('passed', 0)}")
+        logging.info(f"  Failed: {summary.get('failed', 0)}")
+        logging.info(f"  Errors: {summary.get('errors', 0)}")
+        logging.info(f"  Pass Rate: {summary.get('pass_rate', 0):.2f}%")
+        
+        # Store results
+        ti.xcom_push(key="test_results", value=json.dumps(test_results))
+        ti.xcom_push(key="test_summary", value=json.dumps(summary))
+        ti.xcom_push(key="failed_tests", value=json.dumps(test_results.get("failed_tests", [])))
+        
+        ti.xcom_push(key="approval_decision", value=json.dumps(decision))
+    else:
+        # Update history for next retry
+        history.append({"prompt": evaluate_prompt, "response": evaluation_response})
+        ti.xcom_push(key="execution_history", value=json.dumps(history))
+        
+        improvements = decision.get("improvements_needed", [])
+        raise ValueError(
+            f"Execution results insufficient (Score: {analysis.get('overall_score', 0)}/100).\n"
+            f"Reason: {decision.get('reason')}\n"
+            f"Improvements needed: {', '.join(improvements)}"
+        )
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 4: Generate Email Content
@@ -482,12 +527,14 @@ def generate_email_content(*args, **kwargs):
     Return JSON:
     {{
         "subject": "Re: [original subject]",
-        "html_body": "complete HTML email content with inline CSS",
+        "html_body": "complete HTML email content with inline CSS for reason for faliure for each failed test if any",
         "plain_text_summary": "brief plain text version for preview"
     }}
     """
-    
-    email_response = get_ai_response(email_generation_prompt,model=MODEL_NAME)
+    history_json = ti.xcom_pull(key="task_history", task_ids=ti.task_id) or []
+    if history_json:
+        history = json.loads(history_json) 
+    email_response = get_ai_response(email_generation_prompt,model=MODEL_NAME, conversation_history=history_json)
     email_content = extract_json_from_text(email_response)
     
     if not email_content or "subject" not in email_content or "html_body" not in email_content:
@@ -520,14 +567,14 @@ def send_response_email(*args, **kwargs):
     references = ti.xcom_pull(key="references", task_ids="extract_inputs")
     thread_id = ti.xcom_pull(key="thread_id", task_ids="extract_inputs")
     original_email_id = ti.xcom_pull(key="original_email_id", task_ids="extract_inputs")
-    all_recipients_json = ti.xcom_pull(key="all_recipients", task_ids="extract_inputs")
+    all_recipient_json = ti.xcom_pull(key="all_recipient", task_ids="extract_inputs")
     
     if not all([recipient, subject, html_body]):
         raise ValueError("Missing required email information")
     
     # Parse all recipients
-    all_recipients = json.loads(all_recipients_json) if all_recipients_json else {}
-    cc_list = all_recipients.get('cc', [])
+    all_recipient = json.loads(all_recipient_json) if all_recipient_json else {}
+    cc_list = all_recipient.get('cc', [])
     
     try:
         # Authenticate Gmail
@@ -603,7 +650,7 @@ default_args = {
     'email_on_failure': True,
     'email_on_retry': False,
     'retries': 3,
-    'retry_delay': timedelta(minutes=5),
+    'retry_delay': timedelta(seconds=15),
 }
 
 readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'api_test_executor.md')
