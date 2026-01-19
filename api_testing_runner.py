@@ -7,6 +7,7 @@ import os
 import json
 import logging
 from airflow.exceptions import AirflowSkipException
+import re
 
 # Import utility functions
 from agent_dags.utils.email_utils import (
@@ -24,6 +25,7 @@ from agent_dags.utils.agent_utils import (
 GMAIL_FROM_ADDRESS = Variable.get("ltai.api.test.from_address", default_var="")
 GMAIL_CREDENTIALS = Variable.get("ltai.api.test.gmail_credentials", default_var="")
 MODEL_NAME = "APITestAgent:3.0"
+server_host = Variable.get("ltai.server.host", default_var="http://localhost:8080")
 # ═══════════════════════════════════════════════════════════════
 # STEP 1: Extract and Parse Inputs from Email
 # ═══════════════════════════════════════════════════════════════
@@ -104,7 +106,8 @@ def extract_inputs_from_email(*args, **kwargs):
         {{
             "test_requirements": "specific scenarios or cases to test",
             "special_instructions": "any special notes or constraints",
-            "priority_level": "high/medium/low"
+            "priority_level": "high/medium/low",
+            "base_url": "if specified in email or api documentation"
         }}
         
         If no specific requirements are mentioned, use general best practices.
@@ -119,7 +122,7 @@ def extract_inputs_from_email(*args, **kwargs):
                 "special_instructions": "None",
                 "priority_level": "medium"
             }
-        
+        base_url = parsed_requirements.get("base_url", None)
         # Store all data in XCom
         ti.xcom_push(key="sender_email", value=sender)
         ti.xcom_push(key="email_subject", value=subject)
@@ -133,6 +136,7 @@ def extract_inputs_from_email(*args, **kwargs):
         ti.xcom_push(key="special_instructions", value=parsed_requirements.get("special_instructions"))
         ti.xcom_push(key="priority_level", value=parsed_requirements.get("priority_level"))
         ti.xcom_push(key="config_path", value=config_path)  # Store config path
+        ti.xcom_push(key="base_url", value=base_url)
         
         logging.info(f"Successfully extracted inputs from email: {email_data.get('id')}")
         
@@ -206,7 +210,7 @@ def create_and_validate_test_cases(*args, **kwargs):
     Create API test cases based on the provided documentation. 
     Save the test cases in folder: {test_session_id}
     File name: all // Give only the test file name which will be saved in the folder mentioned above. Do not give full path.
-
+    {config_info}
     
     API Documentation:
     {json.dumps(api_docs, indent=2)}
@@ -268,22 +272,20 @@ def create_and_validate_test_cases(*args, **kwargs):
 # MODIFIED: api_test_executor.py - execute_test_cases function
 # ═══════════════════════════════════════════════════════════════
 
-def execute_test_cases(*args, **kwargs):
+def execute_test_cases(**kwargs):
     """
     Executes the approved test cases and collects detailed results.
     Uses thread_id folder for test execution.
     Supports retry logic with conversation history.
     """
     ti = kwargs["ti"]
-    
-    test_cases_json = ti.xcom_pull(
-        key="test_cases_approved",
-        task_ids="create_and_validate_test_cases"
-    )
+
     
     test_session_id = ti.xcom_pull(key="test_session_id", task_ids="create_and_validate_test_cases")
     config_path = ti.xcom_pull(key="config_path", task_ids="extract_inputs")
-    
+    base_url = ti.xcom_pull(key="base_url", task_ids="extract_inputs")
+    if base_url is None:
+        base_url = "http://connector:8000"    
     if not test_session_id:
         raise ValueError("Test session ID (thread_id) not found")
     
@@ -313,7 +315,7 @@ def execute_test_cases(*args, **kwargs):
     - Folder: {test_folder}
     - Output directory: {test_folder} (the test cases are in {test_folder}/)
     - Test file: test.yaml
-    - Base URL: http://connector:8000 (or use config file if available)
+    - Base URL: {base_url}
     {config_instruction}
     
     Use the api_test_runner tool with these parameters:
@@ -340,35 +342,7 @@ def execute_test_cases(*args, **kwargs):
             "skipped": 0,
             "pass_rate": 0.0,
             "execution_time_ms": 0
-        }},
-        "test_results": [
-            {{
-                "test_id": "TC001",
-                "test_name": "Test Name",
-                "status": "PASS/FAIL/ERROR/SKIP",
-                "execution_time_ms": 0,
-                "request": {{}},
-                "actual_response": {{}},
-                "expected_response": {{}},
-                "assertions_checked": [
-                    {{
-                        "assertion": "description",
-                        "result": "pass/fail",
-                        "details": "additional info"
-                    }}
-                ],
-                "error_message": "if status is FAIL or ERROR",
-                "logs": ["execution logs"]
-            }}
-        ],
-        "failed_tests": [
-            {{
-                "test_id": "TC001",
-                "test_name": "Name",
-                "failure_reason": "why it failed",
-                "recommendation": "how to fix"
-            }}
-        ]
+        }}
     }}
     """
     
@@ -465,94 +439,116 @@ def execute_test_cases(*args, **kwargs):
 # ═══════════════════════════════════════════════════════════════
 def generate_email_content(*args, **kwargs):
     """
-    Uses AI to generate a professional HTML email response with test results.
+    Uses AI to generate ONLY the professional HTML email body with test results.
+    Returns pure HTML string (no plain text, no outer JSON).
     """
     ti = kwargs["ti"]
     
-    # Collect all necessary information
-    sender = ti.xcom_pull(key="sender_email", task_ids="extract_inputs")
-    subject = ti.xcom_pull(key="email_subject", task_ids="extract_inputs")
-    test_results = ti.xcom_pull(key="test_results", task_ids="execute_test_cases")
-    test_summary = ti.xcom_pull(key="test_summary", task_ids="execute_test_cases")
-    failed_tests = ti.xcom_pull(key="failed_tests", task_ids="execute_test_cases")
-    api_docs = ti.xcom_pull(key="api_documentation", task_ids="extract_inputs")
+    # Pull required data
+    sender       = ti.xcom_pull(key="sender_email",   task_ids="extract_inputs")
+    subject      = ti.xcom_pull(key="email_subject",  task_ids="extract_inputs")
+    test_results = ti.xcom_pull(key="test_results",   task_ids="execute_test_cases")
+    test_summary = ti.xcom_pull(key="test_summary",   task_ids="execute_test_cases")
+    failed_tests = ti.xcom_pull(key="failed_tests",   task_ids="execute_test_cases")
     
     if not all([test_results, test_summary]):
         raise ValueError("Missing test results or summary")
     
     # Parse JSON strings
-    test_results_obj = json.loads(test_results)
-    summary_obj = json.loads(test_summary)
+    summary_obj    = json.loads(test_summary)
     failed_tests_obj = json.loads(failed_tests) if failed_tests else []
     
-    # Generate professional email content using AI
-    email_generation_prompt = f"""
-    Generate a professional HTML email response for API test execution results.
-    
-    Original Email:
-    - From: {sender}
-    - Subject: {subject}
-    
-    Test Execution Summary:
-    {json.dumps(summary_obj, indent=2)}
-    
-    Failed Tests (if any):
-    {json.dumps(failed_tests_obj, indent=2)}
-    
-    Full Test Results:
-    {test_results}
-    
-    Create an HTML email with:
-    
-    1. **Subject Line**: Start with "Re: " + original subject
-    
-    2. **Email Structure**:
-       - Professional greeting
-       - Executive summary paragraph with key metrics
-       - Visual summary section with color-coded statistics
-       - Detailed results section (expandable/collapsible if many tests)
-       - Failed tests highlighted (if any) with recommendations
-       - Next steps or action items
-       - Closing with offer for questions
-    
-    3. **Styling Requirements**:
-       - Use professional color scheme (green for pass, red for fail, yellow for warnings)
-       - Responsive design (mobile-friendly)
-       - Clear typography and spacing
-       - Tables for test results
-       - Icons or visual indicators for status
-    
-    4. **Tone**: Professional, clear, actionable, positive (even for failures)
-    
-    Return JSON:
-    {{
-        "subject": "Re: [original subject]",
-        "html_body": "complete HTML email content with inline CSS for reason for faliure for each failed test if any",
-        "plain_text_summary": "brief plain text version for preview"
-    }}
-    """
-    history_json = ti.xcom_pull(key="task_history", task_ids=ti.task_id) or []
-    if history_json:
-        history = json.loads(history_json) 
-    email_response = get_ai_response(email_generation_prompt,model=MODEL_NAME, conversation_history=history_json)
-    email_content = extract_json_from_text(email_response)
-    
-    if not email_content or "subject" not in email_content or "html_body" not in email_content:
-        raise ValueError("Failed to generate valid email content")
-    
-    # Store email content
-    ti.xcom_push(key="response_subject", value=email_content["subject"])
-    ti.xcom_push(key="response_html_body", value=email_content["html_body"])
-    ti.xcom_push(key="response_plain_text", value=email_content.get("plain_text_summary", ""))
-    
-    logging.info("Email content generated successfully")
-    logging.info(f"Subject: {email_content['subject']}")
+    # ──────────────────────────────────────────────────────────────
+    # Updated prompt — strict instruction to return ONLY HTML
+    # ──────────────────────────────────────────────────────────────
+    email_generation_prompt = f"""You are an expert at creating clean, professional HTML emails.
+
+Generate **ONLY** the complete HTML email body (including <!DOCTYPE html> ... </html>).
+Do NOT include any JSON, plain text summary, explanations, markdown, or anything outside the HTML.
+Do NOT wrap the output in ```html or any code block.
+
+Requirements:
+
+• Subject line suggestion (as HTML comment at the top): <!-- Subject: Re: {subject} -->
+
+• From: reply to {sender}
+
+• Professional, modern, responsive design
+• Inline CSS only (no external stylesheets)
+• Color scheme: 
+  - Pass: #28a745 (green)
+  - Fail: #dc3545 (red)
+  - Warning/Skip: #ffc107 (yellow)
+• Use simple status icons via emoji or unicode (✓ ✗ ⚠)
+• Executive summary with big numbers at the top
+• Table or cards for detailed results
+• Failed test cases MUST show:
+  - Test name
+  - Failure reason / error message
+  - Link to detailed report: {server_host}/static/postman_reports/xxxx.html
+• Collapsible <details><summary> for long lists of tests (optional but recommended)
+• Professional greeting and closing
+• Mobile-friendly (max-width: 600px container, fluid images/tables)
+
+Current data:
+
+Test Summary:
+{json.dumps(summary_obj, indent=2)}
+
+Failed Tests:
+{json.dumps(failed_tests_obj, indent=2)}
+
+Full Results (raw):
+{test_results}
+
+Output **only** the full HTML document.
+"""
+
+    # Optional: keep minimal history if needed for context/style consistency
+    history_json = ti.xcom_pull(key="task_history", task_ids=ti.task_id) or "[]"
+    history = json.loads(history_json)
+
+    # Get raw AI response
+    raw_response = get_ai_response(
+        email_generation_prompt,
+        model=MODEL_NAME,
+        conversation_history=history
+    )
+    # Remove <think>…</think> block (including newlines around it)
+    cleaned = raw_response.strip()
+    cleaned = re.sub(
+        r'^\s*<think>.*?</think>\s*',      # from start, non-greedy, including surrounding whitespace
+        '',
+        raw_response,
+        flags=re.DOTALL | re.IGNORECASE    # . matches newlines, case-insensitive
+    )
+    # Basic cleaning — remove common unwanted wrappers
+    cleaned = cleaned.removeprefix("```html").removesuffix("```").strip()
+    cleaned = cleaned.removeprefix("```").removesuffix("```").strip()
+
+    # Very basic validation
+    if not cleaned.startswith(("<!DOCTYPE", "<html")):
+        raise ValueError("AI did not return valid HTML — output starts with: " + cleaned[:60])
+
+    html_body = cleaned
+
+    # Push only what downstream tasks need
+    ti.xcom_push(key="response_subject", value=f"Re: {subject}")
+    ti.xcom_push(key="response_html_body", value=html_body)
+    # Optionally still push plain-text version if some mail clients / logs need it
+    # ti.xcom_push(key="response_plain_text", value="...")  # ← remove or keep as needed
+
+    logging.info("Pure HTML email body generated successfully")
+    logging.info(f"Subject will be: Re: {subject}")
+    logging.info(f"HTML length: {len(html_body):,} characters")
+
+    return html_body   # useful if called directly
 
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 5: Send Email Response
 # ═══════════════════════════════════════════════════════════════
-def send_response_email(*args, **kwargs):
+def send_response_email(**kwargs):
     """
     Sends the generated email response maintaining thread continuity.
     Includes all original recipients (To, Cc).
@@ -567,7 +563,9 @@ def send_response_email(*args, **kwargs):
     references = ti.xcom_pull(key="references", task_ids="extract_inputs")
     thread_id = ti.xcom_pull(key="thread_id", task_ids="extract_inputs")
     original_email_id = ti.xcom_pull(key="original_email_id", task_ids="extract_inputs")
-    all_recipient_json = ti.xcom_pull(key="all_recipient", task_ids="extract_inputs")
+    
+    # FIX: Changed from "all_recipient" to "all_recipients" (with 's')
+    all_recipient_json = ti.xcom_pull(key="all_recipients", task_ids="extract_inputs")
     
     if not all([recipient, subject, html_body]):
         raise ValueError("Missing required email information")
@@ -576,6 +574,13 @@ def send_response_email(*args, **kwargs):
     all_recipient = json.loads(all_recipient_json) if all_recipient_json else {}
     cc_list = all_recipient.get('cc', [])
     
+    # Log threading information for debugging
+    logging.info(f"Threading details:")
+    logging.info(f"  Thread ID: {thread_id}")
+    logging.info(f"  In-Reply-To: {message_id}")
+    logging.info(f"  References: {references}")
+    logging.info(f"  CC List: {cc_list}")
+    
     try:
         # Authenticate Gmail
         service = authenticate_gmail(GMAIL_CREDENTIALS, GMAIL_FROM_ADDRESS)
@@ -583,17 +588,30 @@ def send_response_email(*args, **kwargs):
         if not service:
             raise ValueError("Failed to authenticate Gmail service")
         
+        # Build proper References header for threading
+        # References should include both the original References AND the Message-ID we're replying to
+        references_header = references
+        if references and message_id:
+            # Add the message_id to references if not already present
+            if message_id not in references:
+                references_header = f"{references} {message_id}"
+        elif message_id:
+            # If no existing references, use just the message_id
+            references_header = message_id
+        
+        logging.info(f"Final References header: {references_header}")
+        
         # Send email with proper threading
         result = send_email(
             service=service,
             recipient=recipient,
-            subject=subject,
+            subject=subject,  # Should already have "Re: " prefix from generate_email_content
             body=html_body,
-            in_reply_to=message_id,
-            references=references,
+            in_reply_to=message_id,  # CRITICAL: This must be the Message-ID we're replying to
+            references=references_header,  # CRITICAL: Full chain of references
             from_address=GMAIL_FROM_ADDRESS,
             cc=cc_list if cc_list else None,
-            thread_id=thread_id
+            thread_id=thread_id  # Gmail thread ID
         )
         
         if not result:
@@ -605,7 +623,9 @@ def send_response_email(*args, **kwargs):
         
         logging.info(f"Email sent successfully to {recipient}")
         logging.info(f"Thread ID: {thread_id}")
-        logging.info(f"Message ID: {result.get('id')}")
+        logging.info(f"Sent Message ID: {result.get('id')}")
+        if cc_list:
+            logging.info(f"CC'd: {', '.join(cc_list)}")
         
         # Store confirmation
         ti.xcom_push(key="email_sent", value=True)
@@ -620,25 +640,25 @@ def send_response_email(*args, **kwargs):
 # ═══════════════════════════════════════════════════════════════
 # STEP 6: Cleanup Task
 # ═══════════════════════════════════════════════════════════════
-def cleanup_attachments_task(*args, **kwargs):
-    """
-    Cleanup old attachment files to save disk space.
-    """
-    from agent_dags.utils.agent_utils import cleanup_attachments
+# def cleanup_attachments_task(*args, **kwargs):
+#     """
+#     Cleanup old attachment files to save disk space.
+#     """
+#     from agent_dags.utils.agent_utils import cleanup_attachments
     
-    attachment_dir = "/appz/data/attachments/"
-    older_than_days = 7
+#     attachment_dir = "/appz/cache/attachments/"
+#     older_than_days = 7
     
-    try:
-        deleted_count = cleanup_attachments(attachment_dir, older_than_days)
-        logging.info(f"Cleanup completed: {deleted_count} files removed")
+#     try:
+#         deleted_count = cleanup_attachments(attachment_dir, older_than_days)
+#         logging.info(f"Cleanup completed: {deleted_count} files removed")
         
-        kwargs['ti'].xcom_push(key="cleanup_count", value=deleted_count)
+#         kwargs['ti'].xcom_push(key="cleanup_count", value=deleted_count)
         
-    except Exception as e:
-        logging.error(f"Cleanup failed: {str(e)}")
-        # Don't fail the DAG for cleanup errors
-        pass
+#     except Exception as e:
+#         logging.error(f"Cleanup failed: {str(e)}")
+#         # Don't fail the DAG for cleanup errors
+#         pass
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -711,14 +731,14 @@ with DAG(
         doc_md="Sends email response to original sender maintaining thread continuity"
     )
     
-    # Task 6: Cleanup old attachments
-    cleanup_task = PythonOperator(
-        task_id='cleanup_attachments',
-        python_callable=cleanup_attachments_task,
-        provide_context=True,
-        trigger_rule='all_done',  # Run even if previous tasks fail
-        doc_md="Removes old attachment files to free up disk space"
-    )
+    # # Task 6: Cleanup old attachments
+    # cleanup_task = PythonOperator(
+    #     task_id='cleanup_attachments',
+    #     python_callable=cleanup_attachments_task,
+    #     provide_context=True,
+    #     trigger_rule='all_done',  # Run even if previous tasks fail
+    #     doc_md="Removes old attachment files to free up disk space"
+    # )
     
     # Task 7: Success marker
     workflow_complete = DummyOperator(
@@ -727,4 +747,4 @@ with DAG(
     )
     
     # Define task dependencies
-    extract_inputs >> validate_test_cases >> execute_tests >> generate_email >> send_email_task >> cleanup_task >> workflow_complete
+    extract_inputs >> validate_test_cases >> execute_tests >> generate_email >> send_email_task >> workflow_complete
