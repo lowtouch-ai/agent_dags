@@ -1850,6 +1850,20 @@ def generate_spelling_variants_for_prompt(user_content, chat_history=None):
 
     variant_prompt = f"""You are a spelling variant assistant for a HubSpot email assistant.
 
+CRITICAL RULES:
+1. ONLY suggest variants if the name looks OBVIOUSLY misspelled (missing letters, wrong letters)
+2. If a name looks normal, return empty lists - DON'T suggest alternatives
+3. Only suggest variants for garbled text like "Snidhu", "Prya", "Jhon"
+
+Examples of when to suggest variants:
+- "Snidhu" → ["snidhu", "sindhu"] (one letter wrong)
+- "Micrsoft" → ["micrsoft", "microsoft"] (missing letter)
+
+Examples of when NOT to suggest variants:
+- "Sindhu" → [] (already correct)
+- "Priya" → [] (common name)
+- "Microsoft" → [] (known company)
+
 Extract any contact names, company names, or deal names from the latest user message that might have typos.
 For each potentially misspelled name, give 3–5 plausible lowercase variants (include original as first).
 
@@ -1871,6 +1885,12 @@ Return ONLY valid JSON:
         "deals": []
     }},
     "has_potential_typos": true|false
+}}
+
+If names look correct, return:
+{{
+    "potential_variants": {{"contacts": [], "companies": [], "deals": []}},
+    "has_potential_typos": false
 }}
 """
 
@@ -1940,6 +1960,11 @@ def analyze_and_search_with_tools(**kwargs):
             user_content=content,
             chat_history=chat_history  # ← Pass full history
         )
+        if spelling_variants:
+            logging.info(f"SPELLING VARIANTS DETECTED: {json.dumps(spelling_variants, indent=2)}")
+        else:
+            logging.info("No spelling variants detected - names appear correct")
+
         # Check if spelling correction was applied
         was_typo_corrected = False
         closest_match_name = None
@@ -3130,10 +3155,18 @@ def generate_final_response_or_trigger_report(**kwargs):
                 continue
 
             else:  # count > 10
-                # Too many - trigger report with Excel
                 logging.info(f"→ Routing to EXCEL REPORT ({count} results)")
-                mark_message_as_read(service, email_id)
-                ti.xcom_push(key="general_query_report", value=[email])
+                
+                # ✅ PASS THE ALREADY-FOUND RESULTS to report DAG
+                email_with_results = email.copy()
+                email_with_results["pre_analyzed_results"] = {
+                    "results": results,
+                    "entity": entity,
+                    "count": count,
+                    "analysis": analysis  # Pass entire analysis object
+                }
+    
+                ti.xcom_push(key="general_query_report", value=[email_with_results])
                 trigger_report_dag(**kwargs)
                 continue
 

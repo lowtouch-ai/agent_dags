@@ -352,13 +352,14 @@ Name: {sender_name}
 Email: {sender_email}
 
 === GOLDEN RULES - NON-NEGOTIABLE ===
-1. You MUST preserve EVERY entity (contacts, companies, deals, notes, tasks, meetings) from that confirmation email EXACTLY — including content, timestamps, speaker_name, speaker_email, task_index, etc.
+1. You MUST preserve EVERY entity (contacts, companies, deals, notes, tasks, meetings) from that confirmation email EXACTLY — including content, timestamps, speaker_name, speaker_email, task_index, attendees, meeting details, etc.
 2. When the user asks for a modification:
    - Apply ONLY the requested change
    - Keep ALL notes, tasks, meetings unchanged unless explicitly told to remove/modify them
    - Never regenerate or rephrase note content — copy it verbatim from the confirmed plan
    - Keep everything in the notes as it is without changing the speaker name unless explicitly asked to change it
    - All the entities in the confirmation email should be there at the final email without fail and without any modification unless user explicitly asks for a change
+   - **CRITICAL: Meetings must be preserved with ALL fields: meeting_title, start_time, end_time, location, outcome, attendees, meeting_type, meeting_status**
    - Do not change the **speaker_name** in the notes.Copy the exact note content in the confirmation email exactly as it is in the final mail without fail.
 3. If user says "proceed", "yes", "go ahead", "looks good" → return the entire confirmed plan with all the changes requested by the user.If no changes are mentioned , return the confirmed plan as-is.
 4. Casual comments (e.g. "Great meeting!", "This is exciting") → create ONE new note with that text, BUT still return full confirmed plan
@@ -368,25 +369,35 @@ CRITICAL INSTRUCTIONS:
 - You cannot call any APIs or tools. You should answer based on your knowledge.
 - The bot's previous messages contain tables with entity details (IDs, names, emails, etc.)
 - Parse these tables to extract existing entities and proposed new entities
-- **CRITICAL**: Parse the Notes table and Tasks table from the confirmation email
-- **CRITICAL**: Parse the Meeting Details table from the confirmation email
-- The user's latest message indicates their intent (confirm, modify, select specific, etc.)
+- **CRITICAL**: Parse the Notes table from the confirmation email - preserve ALL notes exactly
+- **CRITICAL**: Parse the Tasks table from the confirmation email - preserve ALL tasks exactly  
+- **CRITICAL**: Parse the Meetings table from the confirmation email - preserve ALL meetings with:
+  * meeting_title
+  * start_time (in ISO format: YYYY-MM-DDTHH:MM:SSZ)
+  * end_time (in ISO format: YYYY-MM-DDTHH:MM:SSZ)
+  * location
+  * outcome
+  * timestamp
+  * attendees (list of attendee names/emails)
+  * meeting_type (e.g., "discovery_call", "demo", "follow_up")
+  * meeting_status (e.g., "SCHEDULED", "COMPLETED")
+- **If the confirmation email has a "Meetings Details" table, you MUST extract every row and include it in entities_to_create.meetings**
 - The user's latest message indicates their intent (confirm, modify, select specific, etc.)
 
 CRITICAL PRESERVATION RULES - NON-NEGOTIABLE:
 1. The "Previously Confirmed Plan" above contains EXACTLY what was shown and agreed upon in the last confirmation email.
 2. You MUST preserve 100% of entities from this plan (contacts, companies, deals, notes, tasks, meetings) UNLESS the user explicitly says to remove or skip something.
-3. If the user asks to modify or add a field (e.g. phone, job title, due date), you MUST:
+3. If the user asks to modify or add a field (e.g. phone, job title, due date, meeting time), you MUST:
    - Apply the change to the correct existing/proposed entity
    - Keep ALL other entities and fields exactly as they were from the chat_history.
    - Never remove notes, tasks, or meetings just because the user didn't mention them
 4. Default behavior = INCLUDE EVERYTHING from the previous plan + apply modifications
 
 EXAMPLES:
-* If User says "Please update Vivek's phone to 9898767654",then Keep both companies, keep all notes/tasks, only update phone field on Vivek's contact.
-* If User says "Looks good, proceed",then Return the entire previous plan unchanged.
-* If User says "Skip the task about follow-up call",then Remove ONLY that one task, keep everything else.
-* If User says "This is great feedback!",then Treat as casual comment → create note, BUT still include ALL selected_entities from previous plan.
+* If User says "Please update Vivek's phone to 9898767654", then Keep both companies, keep all notes/tasks/meetings, only update phone field on Vivek's contact.
+* If User says "Looks good, proceed", then Return the entire previous plan unchanged (including ALL meetings).
+* If User says "Skip the task about follow-up call", then Remove ONLY that one task, keep everything else including all meetings.
+* If User says "Change the meeting time to 3 PM", then Update ONLY that meeting's start_time/end_time, preserve all other fields and all other meetings.
 
 YOUR TASK:
 Based on the conversation, and Latest User message identify:
@@ -410,7 +421,7 @@ Based on the conversation, and Latest User message identify:
    - New Deals → dealName, dealLabelName, dealAmount, closeDate, dealOwnerName
    - Notes → note_content, timestamp, note_type, speaker_name, speaker_email
    - Tasks → task_details, task_owner_name, task_owner_id, due_date, priority, task_index
-   - Meetings → meeting_title, start_time, end_time, location, outcome, attendees
+   - **Meetings → meeting_title, start_time, end_time, location, outcome, attendees, meeting_type, meeting_status, timestamp**
 
 4. **Entities to Update**:
    If user wants to modify existing entities, identify which entities and what changes.
@@ -444,12 +455,13 @@ GENERAL RULES:
 - If user mentions specific entities: Select only those entities, but still create all proposed new objects
 - If user says to skip/exclude something: Remove only that item
 - If user wants to modify: Identify the changes needed
-- When generating the final response, you MUST include every single detail exactly as it appears in the confirmation email.This should include notes, tasks, created objects, existing objects, field values, owners, timestamps, and any other metadata.No detail may be skipped, shortened, summarized, or omitted.All items must be reproduced fully and exactly as provided in the confirmation email.If a section exists (such as notes, tasks, created objects, existing objects, or any other entity), you must include it in full in the final output, even if it appears lengthy.Never assume something is optional. Everything in the confirmation email is mandatory and must appear.
+- When generating the final response, you MUST include every single detail exactly as it appears in the confirmation email. This should include notes, tasks, **meetings**, created objects, existing objects, field values, owners, timestamps, and any other metadata. No detail may be skipped, shortened, summarized, or omitted. All items must be reproduced fully and exactly as provided in the confirmation email. If a section exists (such as notes, tasks, meetings, created objects, existing objects, or any other entity), you must include it in full in the final output, even if it appears lengthy. Never assume something is optional. Everything in the confirmation email is mandatory and must appear.
 - For casual comments: Create a note with the comment
 - Current timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 
+
 Return ONLY valid JSON (no markdown, no explanations):
 {{
-     "casual_comments_detected": true|false,
+    "casual_comments_detected": true|false,
     "selected_entities": {{
         "contacts": [{{"contactId": "...", "firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "...", "contactOwnerName": "..."}}],
         "companies": [{{"companyId": "...", "name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
@@ -459,15 +471,25 @@ Return ONLY valid JSON (no markdown, no explanations):
         "contacts": [{{"firstname": "...", "lastname": "...", "email": "...", "phone": "...", "address": "...", "jobtitle": "...", "contactOwnerName": "..."}}],
         "companies": [{{"name": "...", "domain": "...", "address": "...", "city": "...", "state": "...", "zip": "...", "country": "...", "phone": "...", "description": "...", "type": "..."}}],
         "deals": [{{"dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "..."}}],
-        "meetings": [{{"meeting_title": "...", "start_time": "...", "end_time": "...", "location": "...", "outcome": "...", "timestamp": "...", "attendees": [], "meeting_type": "...", "meeting_status": "..."}}],
-        "notes": [{{"note_content": "...", "timestamp": "...", "note_type": "...", ""speaker_name":"PRESERVE_FROM_CONFIRMATION", "speaker_email": "PRESERVE_FROM_CONFIRMATION""}}],
+        "meetings": [{{
+            "meeting_title": "...", 
+            "start_time": "YYYY-MM-DDTHH:MM:SSZ", 
+            "end_time": "YYYY-MM-DDTHH:MM:SSZ", 
+            "location": "...", 
+            "outcome": "...", 
+            "timestamp": "YYYY-MM-DDTHH:MM:SSZ", 
+            "attendees": ["name1", "name2"], 
+            "meeting_type": "discovery_call|demo|follow_up", 
+            "meeting_status": "SCHEDULED|COMPLETED"
+        }}],
+        "notes": [{{"note_content": "...", "timestamp": "...", "note_type": "...", "speaker_name":"PRESERVE_FROM_CONFIRMATION", "speaker_email": "PRESERVE_FROM_CONFIRMATION"}}],
         "tasks": [{{"task_details": "...", "task_owner_name": "...", "task_owner_id": "...", "due_date": "...", "priority": "...", "task_index": 1}}]
     }},
     "entities_to_update": {{
         "contacts": [{{"contactId": "...", "updates": {{"field": "new_value"}}}}],
         "companies": [{{"companyId": "...", "updates": {{"field": "new_value"}}}}],
         "deals": [{{"dealId": "...", "dealName": "...", "dealLabelName": "...", "dealAmount": "...", "closeDate": "...", "dealOwnerName": "...", "updates": {{"field": "new_value"}}}}],
-        "meetings": [],
+        "meetings": [{{"meetingId": "...", "updates": {{"field": "new_value"}}}}],
         "notes": [],
         "tasks": [{{"taskId": "...", "taskbody": "...", "task_owner_name": "...", "task_owner_id": "...", "updates": {{"field": "new_value"}}}}]
     }},
@@ -477,10 +499,12 @@ Return ONLY valid JSON (no markdown, no explanations):
 CRITICAL REMINDERS:
 - Extract entities FROM conversation history tables, NOT by searching
 - Parse HTML tables in bot messages to extract entity details
+- **CRITICAL: If you see a "Meetings Created/Scheduled" or "Meetings" table in the confirmation email, extract EVERY meeting row**
 - For CASUAL_COMMENT intent: Create ONLY a note, no other entities
 - For other intents: Default to including ALL entities if user confirms without specifics
 - Always preserve entity IDs from existing entities
 - Use empty arrays [] for entity types not mentioned
+- **NEVER skip meetings from the confirmation email unless explicitly told to**
 - Current timestamp format: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
 
@@ -608,6 +632,7 @@ VALIDATION RULES:
    - All tasks must have: task_details, task_owner_name, task_owner_id, due_date, priority, task_index
    - All contacts must have at minimum: email or (firstname + lastname)
    - All companies must have: name
+   - All meetings must have :attendees
 
 3. **Check Data Integrity**:
    - Timestamps must be in valid format (YYYY-MM-DD HH:MM:SS)
@@ -659,6 +684,7 @@ Return ONLY this JSON structure:
 
 CRITICAL: 
 - Preserve all valid data exactly as-is
+- Every entities in the confirmation email as well as the user modifications must be present in the final output without fail.
 - Only remove true duplicates or fix clear errors
 - Do not modify entity content unless it's invalid
 - Return valid JSON only, no explanations outside the structure
@@ -1177,6 +1203,54 @@ def create_companies(ti, **context):
     task_instance = context['task_instance']
     current_try = task_instance.try_number
     max_tries = task_instance.max_tries
+    
+    # === Load search results to check for existing companies ===
+    dag_run_conf = context['dag_run'].conf or {}
+    search_results = dag_run_conf.get("search_results", {})
+    
+    # Build set of existing company names (case-insensitive)
+    existing_company_names = set()
+    for company in search_results.get("company_results", {}).get("results", []):
+        company_name = company.get("name", "").strip().lower()
+        if company_name:
+            existing_company_names.add(company_name)
+    
+    # Filter out companies that already exist
+    filtered_companies = []
+    skipped_companies = []
+    for company in to_create_companies:
+        company_name = company.get("name", "").strip().lower()
+        if company_name and company_name in existing_company_names:
+            skipped_companies.append(company)
+            logging.info(f"Skipping company creation - already exists: {company_name}")
+        else:
+            filtered_companies.append(company)
+    
+    logging.info(
+        f"Company creation filter: {len(to_create_companies)} requested → "
+        f"{len(filtered_companies)} to create → {len(skipped_companies)} skipped (duplicates)"
+    )
+    
+    # If nothing left to create, return success
+    if not filtered_companies:
+        logging.info("All requested companies already exist → nothing to create")
+        success_result = {
+            "created_companies": [],
+            "failed_companies": [],
+            "company_creation_status": {"status": "success"},
+            "company_creation_response": {
+                "status": "success",
+                "created_companies": [],
+                "errors": [f"Skipped {len(skipped_companies)} duplicates"]
+            },
+            "company_creation_final_status": "success"
+        }
+        for k, v in success_result.items():
+            ti.xcom_push(key=k, value=v)
+        return []
+    
+    # Use filtered list for creation
+    to_create_companies = filtered_companies
 
     logging.info(f"=== CREATE COMPANIES - Attempt {current_try}/{max_tries} ===")
 
@@ -1347,6 +1421,53 @@ def create_deals(ti, **context):
     task_instance = context['task_instance']
     current_try = task_instance.try_number
     max_tries = task_instance.max_tries
+    
+    dag_run_conf = context['dag_run'].conf or {}
+    search_results = dag_run_conf.get("search_results", {})
+    
+    # Build set of existing deal names (case-insensitive)
+    existing_deal_names = set()
+    for deal in search_results.get("deal_results", {}).get("results", []):
+        deal_name = deal.get("dealName", "").strip().lower()
+        if deal_name:
+            existing_deal_names.add(deal_name)
+    
+    # Filter out deals that already exist
+    filtered_deals = []
+    skipped_deals = []
+    for deal in to_create_deals:
+        deal_name = deal.get("dealName", "").strip().lower()
+        if deal_name and deal_name in existing_deal_names:
+            skipped_deals.append(deal)
+            logging.info(f"Skipping deal creation - already exists: {deal_name}")
+        else:
+            filtered_deals.append(deal)
+    
+    logging.info(
+        f"Deal creation filter: {len(to_create_deals)} requested → "
+        f"{len(filtered_deals)} to create → {len(skipped_deals)} skipped (duplicates)"
+    )
+    
+    # If nothing left to create, return success without creating
+    if not filtered_deals:
+        logging.info("All requested deals already exist → nothing to create")
+        success_result = {
+            "created_deals": [],
+            "failed_deals": [],
+            "deal_creation_status": {"status": "success"},
+            "deal_creation_response": {
+                "status": "success",
+                "created_deals": [],
+                "errors": [f"Skipped {len(skipped_deals)} duplicates"]
+            },
+            "deal_creation_final_status": "success"
+        }
+        for k, v in success_result.items():
+            ti.xcom_push(key=k, value=v)
+        return []
+    
+    # Use filtered list for creation
+    to_create_deals = filtered_deals
 
     logging.info(f"=== CREATE DEALS - Attempt {current_try}/{max_tries} ===")
 
