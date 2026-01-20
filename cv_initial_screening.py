@@ -125,7 +125,22 @@ def analyze_screening_responses(**kwargs):
     
     candidate_responses = response_data.get('body', '')
     
+    # Get original CV content: Prioritize from thread_history in conf, fallback to profile
+    email_data = kwargs['dag_run'].conf.get('email_data', {})
+    thread_history = email_data.get('thread_history', {})
+    original_cv_content = thread_history.get('original_cv_content', '')
+    
+    if not original_cv_content:
+        original_cv_content = candidate_profile.get('original_cv_content', '')
+        if original_cv_content:
+            logging.info("Using CV content from saved profile")
+        else:
+            logging.warning("No original CV content found in history or profile")
+
     prompt = f"""Analyze the candidate's responses to the screening questions and determine if they should proceed to the next round.
+
+## Original Resume (CV) Content:
+{original_cv_content}    
 
 ## Candidate Profile:
 {json.dumps(candidate_profile, indent=2)}
@@ -346,7 +361,7 @@ Output clean HTML for the email body using proper tags (<p>, <h2>, etc.). Make i
 
 
 # Define the DAG
-with DAG(
+with DAG( 
     "screening_response_analysis",
     default_args=default_args,
     schedule_interval=None,  # Triggered by mailbox monitor

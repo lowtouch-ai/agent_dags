@@ -19,6 +19,7 @@ import base64
 
 import sys
 import logging
+from bs4 import BeautifulSoup  
 
 try:
     sys.path.append(os.path.dirname(os.path.realpath(__file__)))
@@ -59,30 +60,49 @@ def extract_message_body(payload):
         str: Extracted message body
     """
     try:
-        # Check for direct body
+        # 1. Direct body
         if "body" in payload and "data" in payload["body"]:
             body_data = payload["body"]["data"]
-            decoded = base64.urlsafe_b64decode(body_data).decode("utf-8", errors="ignore")
-            return decoded
-        
-        # Check for multipart message
+            decoded = base64.urlsafe_b64decode(body_data + "==").decode("utf-8", errors="ignore")
+            return decoded.strip()
+
+        # 2. Multipart - look for text parts
         if "parts" in payload:
-            for part in payload["parts"]:
-                mime_type = part.get("mimeType", "")
-                
-                # Prefer text/plain, fallback to text/html
-                if mime_type == "text/plain":
-                    if "data" in part.get("body", {}):
-                        body_data = part["body"]["data"]
-                        decoded = base64.urlsafe_b64decode(body_data).decode("utf-8", errors="ignore")
-                        return decoded
-                
-                # Recursive check for nested parts
+            plain_body = None
+            html_body = None
+
+            def find_text_parts(part):
+                nonlocal plain_body, html_body
+                mime = part.get("mimeType", "")
+
+                if mime == "text/plain" and "data" in part.get("body", {}):
+                    plain_body = base64.urlsafe_b64decode(
+                        part["body"]["data"] + "=="
+                    ).decode("utf-8", errors="ignore").strip()
+
+                elif mime == "text/html" and "data" in part.get("body", {}):
+                    html_body = base64.urlsafe_b64decode(
+                        part["body"]["data"] + "=="
+                    ).decode("utf-8", errors="ignore")
+
+                # Recurse into nested parts
                 if "parts" in part:
-                    nested_body = extract_message_body(part)
-                    if nested_body:
-                        return nested_body
-        
+                    for subpart in part["parts"]:
+                        find_text_parts(subpart)
+
+            for part in payload["parts"]:
+                find_text_parts(part)
+
+            # Preference order: plain > cleaned HTML
+            if plain_body:
+                return plain_body
+
+            if html_body:
+                # Convert HTML → plain text (removes tags, keeps readable content)
+                soup = BeautifulSoup(html_body, "html.parser")
+                text = soup.get_text(separator="\n", strip=True)
+                return text
+
         return ""
         
     except Exception as e:
@@ -241,36 +261,44 @@ def format_history_for_ai(history_data):
     
     history = history_data.get('history', [])
     
-    # Group user messages with following assistant messages
+    # Group user messages with following assistant messages, skipping empties
     i = 0
     while i < len(history):
         msg = history[i]
-        
+
         if msg['role'] == 'user':
-            # Build user content
-            user_content = msg['content']
+            user_content = msg['content'].strip()
             if msg.get('has_pdf') and msg.get('pdf_content'):
-                user_content += f"\n\n[Attached PDF Content]:\n{msg['pdf_content']}"
-            
-            # Look for assistant response
+                user_content += f"\n\n[Attached PDF Content]:\n{msg['pdf_content']}".strip()
+
+            if not user_content:
+                i += 1
+                continue
+
             assistant_content = ""
             if i + 1 < len(history) and history[i + 1]['role'] == 'assistant':
-                assistant_msg = history[i + 1]
-                assistant_content = assistant_msg['content']
-                if assistant_msg.get('has_pdf') and assistant_msg.get('pdf_content'):
-                    assistant_content += f"\n\n[Attached PDF Content]:\n{assistant_msg['pdf_content']}"
-                i += 2  # Skip both messages
-            else:
-                i += 1
-            
+                ass_msg = history[i + 1]
+                assistant_content = ass_msg['content'].strip()
+                if ass_msg.get('has_pdf') and ass_msg.get('pdf_content'):
+                    assistant_content += f"\n\n[Attached PDF Content]:\n{ass_msg['pdf_content']}".strip()
+                i += 1  # skip the assistant we just processed
+
+            # Always add the pair — even if assistant is empty
+            # But log it clearly
+            if not assistant_content:
+                logging.warning(f"Assistant reply is empty for user message {msg.get('message_id')}")
+
             formatted_history.append({
                 'prompt': user_content,
                 'response': assistant_content
             })
+
         else:
-            # Skip standalone assistant messages
+            logging.debug(f"Skipping standalone assistant {msg.get('message_id')}")
             i += 1
-    
+
+        i += 1
+
     return formatted_history
 
 
@@ -529,7 +557,7 @@ def classify_email_type(**kwargs):
             
             # Build current message with PDF
             current_message_content = build_current_message_with_pdf(thread_data)
-            
+            logging.info(f"current message content: {current_message_content}...")
             logging.info(f"Thread context: {len(conversation_history)} previous messages")
             
             # =====================================================================
@@ -613,21 +641,21 @@ def classify_email_type(**kwargs):
             # BUILD AI CLASSIFICATION PROMPT WITH THREAD CONTEXT
             # =====================================================================
             prompt = f"""
-Analyze this recruitment email with full conversation context.
+                        Analyze this recruitment email with full conversation context.
 
-## Current Message:
-Sender: {sender_email}
-Candidate Email (from CV): {candidate_email or "Not extracted"}
-Search Email Used: {search_email}
-Subject: {subject}
-Has CV Attachment: {has_cv_attachment}
+                        ## Current Message:
+                        Sender: {sender_email}
+                        Candidate Email (from CV): {candidate_email or "Not extracted"}
+                        Search Email Used: {search_email}
+                        Subject: {subject}
+                        Has CV Attachment: {has_cv_attachment}
 
-Content:
-{current_message_content}
+                        Content:
+                        {current_message_content}
 
-## Conversation Context:
-Previous Messages in Thread: {len(conversation_history)}
-"""
+                        ## Conversation Context:
+                        Previous Messages in Thread: {len(conversation_history)}
+                        """
 
             # Add conversation history summary
             if conversation_history:
@@ -660,19 +688,37 @@ Candidate Profile:
 
             prompt += """
 
-## Classification Rules:
-1. NEW_CV_APPLICATION
-   - CV attached in this email OR previous thread message
-   - First-time application or reapplication
+## VERY STRICT CLASSIFICATION RULES — follow exactly:
 
-2. SCREENING_RESPONSE
-   - Existing candidate in system
-   - No new CV in current message
-   - Contains answers to screening questions
+1. NEW_CV_APPLICATION
+   - There is a PDF or image attachment that looks like a resume/CV
+   - OR the current message clearly says "attached my resume/CV" or similar
+   - Usually the first message in thread or re-application
+   → target_dag: "cv_analyse"
+
+2. SCREENING_RESPONSE (most important rule — prioritize this when it matches)
+   - Candidate ALREADY exists in system (candidate_exists = True)
+   - NO new CV/resume attachment in CURRENT message
+   - Current message contains ANSWERS or RESPONSES to numbered questions
+     Examples of screening questions we ask:
+       - work arrangement (remote/hybrid/full-time)
+       - notice period / availability
+       - salary expectations (range)
+       - relocation willingness
+       - why interested in role/company
+       - years of ML/production experience
+       - proficiency in Python/TensorFlow/PyTorch/etc.
+       - NLP/computer vision/big data experience
+       - education (Master's in Statistics?)
+       - certifications
+   - Message often starts with "Here are my answers:", "1. Yes,", "My responses:", or directly numbers 1–10
+   - Usually a direct reply to our previous email in the thread
+   → target_dag: "screening_response_analysis"
 
 3. OTHER
-   - General queries, follow-ups, rejected/hired candidates
-   - No CV and not a screening response
+   - Everything else: general questions, thank you notes, rejections, spam, unrelated follow-ups
+   - Candidate exists but message does NOT contain answers to the above screening questions
+   → target_dag: "none"
 
 ## Return JSON only:
 {
@@ -682,7 +728,7 @@ Candidate Profile:
   "target_dag": "cv_analyse | screening_response_analysis | none"
 }
 """
-
+            logging.info(f"conversation history: {json.dumps(conversation_history)}")
             # =====================================================================
             # AI CLASSIFICATION WITH CONVERSATION HISTORY
             # =====================================================================
@@ -718,7 +764,7 @@ Candidate Profile:
 
             email["extracted_candidate_email"] = candidate_email
             email["search_email"] = search_email
-            email["cv_text_preview"] = cv_text[:500] if cv_text else None
+            email["cv_text_preview"] = cv_text if cv_text else None
             email["thread_history"] = thread_data
             email["conversation_context"] = conversation_history
 

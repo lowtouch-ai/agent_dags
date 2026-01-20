@@ -52,8 +52,9 @@ default_args = {
 
 def extract_cv_content(**kwargs):
     """
-    Extract CV content from email attachments.
+    Extract CV content from email attachments or thread history.
     Retrieves the email data passed from the mailbox monitor DAG.
+    Falls back to thread history if no CV in current email.
     """
     # Get the email data from the triggered DAG configuration
     email_data = kwargs['dag_run'].conf.get('email_data', {})
@@ -67,11 +68,12 @@ def extract_cv_content(**kwargs):
     sender = headers.get('From', 'Unknown')
     subject = headers.get('Subject', 'No Subject')
     attachments = email_data.get('attachments', [])
-    email_content = email_data.get('content','')
+    email_content = email_data.get('content', '')
+    thread_history = email_data.get('thread_history', {})  # Added: full history from listener
     
     logging.info(f"Processing email {email_id} from {sender}")
     logging.info(f"Subject: {subject}")
-    logging.info(f"Found {len(attachments)} attachment(s)")
+    logging.info(f"Found {len(attachments)} attachment(s) in current email")
     
     cv_data = {
         'email_id': email_id,
@@ -80,7 +82,8 @@ def extract_cv_content(**kwargs):
         'attachments': []
     }
     
-    # Process each attachment
+    # Process current attachments first
+    pdf_found = False
     for attachment in attachments:
         filename = attachment.get('filename', '')
         mime_type = attachment.get('mime_type', '')
@@ -103,6 +106,7 @@ def extract_cv_content(**kwargs):
                     'metadata': pdf_metadata,
                     'path': attachment.get('path', '')
                 })
+                pdf_found = True
             else:
                 logging.warning(f"No content extracted from PDF: {filename}")
         
@@ -117,6 +121,41 @@ def extract_cv_content(**kwargs):
                     'base64_content': base64_content,
                     'path': attachment.get('path', '')
                 })
+    
+    # Fallback: If no PDF in current, check thread history
+    if not pdf_found and thread_history:
+        original_cv_content = thread_history.get('original_cv_content', '')
+        original_cv_path = thread_history.get('original_cv_path', '')
+        
+        if original_cv_content:
+            logging.info("No CV in current email; using original CV content from thread history")
+            cv_data['attachments'].append({
+                'filename': 'original_resume.pdf',  # Placeholder name
+                'type': 'pdf',
+                'content': original_cv_content,
+                'metadata': [],  # No metadata available
+                'path': original_cv_path or ''
+            })
+            pdf_found = True
+        else:
+            # Scan history messages for first user PDF
+            history_msgs = thread_history.get('history', [])
+            for msg in history_msgs:
+                if msg.get('role') == 'user' and msg.get('has_pdf') and msg.get('pdf_content'):
+                    logging.info(f"Found CV in historical message {msg.get('message_id')}")
+                    cv_data['attachments'].append({
+                        'filename': 'historical_resume.pdf',
+                        'type': 'pdf',
+                        'content': msg['pdf_content'],
+                        'metadata': [],
+                        'path': msg.get('pdf_path', '')
+                    })
+                    pdf_found = True
+                    break  # Use first found
+    
+    if not pdf_found:
+        logging.warning("No CV PDF found in current email or thread history")
+    
     logging.debug(f"CV Data: {cv_data}")
     
     # Push CV data to XCom for downstream tasks
@@ -408,6 +447,15 @@ def get_the_score_for_cv_analysis(**kwargs):
         # Create the file path
         output_file = output_dir / f"{safe_email}.json"
         
+        # Add original CV content to final_score_data (from first PDF attachment)
+        cv_content = ""
+        attachments = cv_data.get('attachments', [])
+        for att in attachments:
+            if att.get('type') == 'pdf':
+                cv_content = att.get('content', '')
+                break
+        final_score_data['original_cv_content'] = cv_content
+
         # Write the data to file
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(final_score_data, f, indent=2, ensure_ascii=False)
