@@ -504,87 +504,95 @@ def send_hubspot_slack_alert(context):
     
     # Create rich Slack message with blocks
     slack_payload = {
-        "text": message_text,  # Fallback text
-        "blocks": [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"{icon} HubSpot Task Failed - {SERVER_NAME}",
-                    "emoji": True
-                }
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*Status:*\n{status}"
-                    },
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*DAG:*\n`{dag_id}`"
-                    },
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*Task:*\n`{task_id}`"
-                    },
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*Run ID:*\n`{run_id[:30]}...`"
-                    }
-                ]
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": retry_text
-                }
-            },
-            {
-                "type": "divider"
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*Thread ID:*\n`{thread_id[:30]}...`"
-                    },
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*Sender:*\n{sender_email[:50]}"
-                    }
-                ]
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*Subject:*\n{subject[:100]}"
-                }
+    "text": f"HubSpot Task Failed - {SERVER_NAME}",  # fallback plain text
+    "blocks": [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"HubSpot Task Failed - {SERVER_NAME}",
+                "emoji": False
             }
-        ]
-    }
-    
-    # Add error details if available
-    if error_message and error_message != "No error details available":
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Status*\n{status}"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*DAG*\n{dag_id}"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Task*\n{task_id}"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Run ID*\n{run_id}..."
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": retry_text
+            }
+        },
+        {
+            "type": "divider"
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Thread ID*\n{thread_id}..."
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Sender*\n{sender_email}"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Subject*\n{subject}"
+            }
+        }
+    ]
+}
+
+# Add error only if we have meaningful content
+    if error_message and error_message.strip() and error_message != "No error details available":
         slack_payload["blocks"].append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*Error:*\n```{error_message[:500]}```"
+                "text": f"*Error*\n{error_message.strip()[:800]}"
             }
         })
-    
-    # Add color attachment for visual distinction
+
+    # Optional: keep the color bar on the left for visual distinction
     slack_payload["attachments"] = [
         {
-            "color": color,
-            "blocks": []
+            "color": color,          # e.g. "#d0021b" for red/error, "#f5a623" for orange/warning
+            "blocks": []             # empty → just shows the color stripe
         }
-    ]
+    ] 
     
     # ============================================================
     # STEP 7: Send to Slack
