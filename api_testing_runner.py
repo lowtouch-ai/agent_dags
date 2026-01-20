@@ -348,7 +348,8 @@ def execute_test_cases(**kwargs):
             "errors": 0,
             "skipped": 0,
             "pass_rate": 0.0,
-            "execution_time_ms": 0
+            "execution_time_ms": 0,
+            "html_report_path": "{server_host}/static/postman_reports/xxxx.html" //replace xxxx with actual file name
         }}
     }}
     """
@@ -457,7 +458,9 @@ def generate_email_content(*args, **kwargs):
     test_results = ti.xcom_pull(key="test_results",   task_ids="execute_test_cases")
     test_summary = ti.xcom_pull(key="test_summary",   task_ids="execute_test_cases")
     failed_tests = ti.xcom_pull(key="failed_tests",   task_ids="execute_test_cases")
-    
+    response_from_execute_test_cases = ti.xcom_pull(key="execution_response_raw", task_ids="execute_test_cases")
+    test_results_json = extract_json_from_text(response_from_execute_test_cases) or {}
+    html_report_link = test_results_json.get("html_report_path", "")
     if not all([test_results, test_summary]):
         raise ValueError("Missing test results or summary")
     
@@ -492,7 +495,7 @@ Requirements:
 • Failed test cases MUST show:
   - Test name
   - Failure reason / error message
-  - Link to detailed report: {server_host}/static/postman_reports/xxxx.html
+  - Link to detailed report: {html_report_link}
 • Collapsible <details><summary> for long lists of tests (optional but recommended)
 • Professional greeting and closing
 • Mobile-friendly (max-width: 600px container, fluid images/tables)
