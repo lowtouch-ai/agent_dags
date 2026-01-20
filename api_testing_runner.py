@@ -93,14 +93,14 @@ def extract_inputs_from_email(*args, **kwargs):
             api_documentation = json.load(f)
         
         logging.info(f"Loaded API documentation from: {json_path}")
-        logging.info(f"API doc keys: {list(api_documentation.keys())}")
-        
+        logging.info(f"API doc: {api_documentation}")
         # Parse email body for additional requirements using AI
         parse_prompt = f"""
         Extract test requirements and special instructions from this email:
         
         Subject: {subject}
         Body: {email_content}
+        API Documentation : {api_documentation}
         
         Return strict JSON:
         {{
@@ -174,7 +174,7 @@ def create_and_validate_test_cases(*args, **kwargs):
         raise ValueError("Thread ID is missing - cannot create test session folder")
     
     # Create the postman directory structure
-    test_dir = f"/appz/postman/{test_session_id}"
+    test_dir = Variable.get("ltai.test.base_dir", default_var="/appz/pyunit_testing") + f"/{test_session_id}"
     os.makedirs(test_dir, exist_ok=True)
     logging.info(f"Using test session folder: {test_dir}")
     
@@ -253,6 +253,11 @@ def create_and_validate_test_cases(*args, **kwargs):
     - Strictly ensure one assertion per test case, not multiple assertions
     - Use exact values from the documentation for expected results
     - Save files to: test.yaml and output directory: {test_session_id}
+    IMPORTANT:
+    - **Do not create any test case for DELETE endpoints to avoid accidental data loss.**
+    - **Always give preference to Special Instructions over general Test Requirements.**
+    - **Only create test cases for the methods and endpoints mentioned in the API documentation.** for example if the api description contain only GET methods then do not create test cases for POST, PUT or DELETE methods.
+    - Do not create test cases for authentication.
     """
     
     test_cases_response = get_ai_response(generate_prompt, model=MODEL_NAME, conversation_history=history)
@@ -283,14 +288,16 @@ def execute_test_cases(**kwargs):
     
     test_session_id = ti.xcom_pull(key="test_session_id", task_ids="create_and_validate_test_cases")
     config_path = ti.xcom_pull(key="config_path", task_ids="extract_inputs")
+    logging.info(f"Config path for execution: {config_path}")
     base_url = ti.xcom_pull(key="base_url", task_ids="extract_inputs")
+    logging.info(f"Starting test execution for session: {test_session_id} for base_url: {base_url}")
     if base_url is None:
         base_url = "http://connector:8000"    
     if not test_session_id:
         raise ValueError("Test session ID (thread_id) not found")
     
     test_folder = test_session_id
-    logging.info(f"Executing tests from folder: /appz/postman/{test_folder}")
+    logging.info(f"Executing tests from folder: /appz/pyunit_test/{test_folder}")
     
     # Detect retry
     is_retry = ti.try_number > 1
@@ -695,7 +702,7 @@ with DAG(
     extract_inputs = PythonOperator(
         task_id='extract_inputs',
         python_callable=extract_inputs_from_email,
-        provide_context=True,
+        # provide_context=True,
         doc_md="Extracts API documentation from JSON attachment and parses email requirements"
     )
     
@@ -703,7 +710,7 @@ with DAG(
     validate_test_cases = BranchPythonOperator(
         task_id='create_and_validate_test_cases',
         python_callable=create_and_validate_test_cases,
-        provide_context=True,
+        # provide_context=True,
         doc_md="Generates comprehensive test cases and validates coverage before execution"
     )
     
@@ -711,7 +718,7 @@ with DAG(
     execute_tests = PythonOperator(
         task_id='execute_test_cases',
         python_callable=execute_test_cases,
-        provide_context=True,
+        # provide_context=True,
         doc_md="Executes all approved test cases and collects detailed results"
     )
     
@@ -727,7 +734,7 @@ with DAG(
     send_email_task = PythonOperator(
         task_id='send_response_email',
         python_callable=send_response_email,
-        provide_context=True,
+        # provide_context=True,
         doc_md="Sends email response to original sender maintaining thread continuity"
     )
     
