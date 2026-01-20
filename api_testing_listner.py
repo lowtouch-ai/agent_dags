@@ -161,8 +161,8 @@ def fetch_unread_emails(**kwargs):
                 is_config = filename.lower() in ["config.yaml", "config.yml"]
                 
                 if is_config:
-                    # Save config to special location: /appz/postman/{thread_id}/config.yaml
-                    config_dir = f"/appz/postman/{thread_id}"
+                    # Save config to special location: /appz/pyunit_testing/{thread_id}/config.yaml
+                    config_dir = Variable.get("ltai.test.base_dir", default_var="/appz/pyunit_testing/") + f"{thread_id}"
                     os.makedirs(config_dir, exist_ok=True)
                     config_path = os.path.join(config_dir, "config.yaml")
                     
@@ -270,7 +270,7 @@ with open(readme_path, 'r') as file:
 # Define DAG
 with DAG("api_testing_monitor_mailbox",
          default_args=default_args,
-         schedule_interval=timedelta(minutes=1),
+         schedule=timedelta(minutes=1),
          catchup=False,
          doc_md=readme_content,
          tags=["mailbox", "api", "testing", "monitor"]) as dag:
@@ -278,25 +278,25 @@ with DAG("api_testing_monitor_mailbox",
     fetch_emails_task = PythonOperator(
         task_id="fetch_unread_emails",
         python_callable=fetch_unread_emails,
-        provide_context=True
+        # provide_context=True
     )
 
     branch_task = BranchPythonOperator(
         task_id="branch_task",
         python_callable=branch_function,
-        provide_context=True
+        # provide_context=True
     )
 
     trigger_email_response_task = PythonOperator(
         task_id="trigger_email_response_task",
         python_callable=trigger_response_tasks,
-        provide_context=True
+        # provide_context=True
     )
 
     no_email_found_task = PythonOperator(
         task_id="no_email_found_task",
         python_callable=no_email_found,
-        provide_context=True
+        # provide_context=True
     )
 
     # Set task dependencies
