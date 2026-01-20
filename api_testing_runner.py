@@ -1,6 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 from airflow.models import Variable
 from datetime import datetime, timedelta
 import os
@@ -748,7 +748,7 @@ with DAG(
     # )
     
     # Task 7: Success marker
-    workflow_complete = DummyOperator(
+    workflow_complete = EmptyOperator(
         task_id='workflow_complete',
         trigger_rule='all_success'
     )
