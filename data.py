@@ -36,7 +36,7 @@ daily_schedule_utc = "30 2 * * *"
 with DAG(
     'webshop_reset_data',
     default_args=default_args,
-    schedule_interval=daily_schedule_utc,
+    schedule=daily_schedule_utc,
     catchup=False,
     doc_md=readme_content,
     tags=["reset", "webshop", "data"]
