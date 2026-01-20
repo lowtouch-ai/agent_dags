@@ -621,7 +621,8 @@ def send_response_email(**kwargs):
             references=references_header,  # CRITICAL: Full chain of references
             from_address=GMAIL_FROM_ADDRESS,
             cc=cc_list if cc_list else None,
-            thread_id=thread_id  # Gmail thread ID
+            thread_id=thread_id,  # Gmail thread ID
+            agent_name="API Test Agent"
         )
         
         if not result:
