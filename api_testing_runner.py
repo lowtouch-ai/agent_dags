@@ -726,7 +726,7 @@ with DAG(
     generate_email = PythonOperator(
         task_id='generate_email_content',
         python_callable=generate_email_content,
-        provide_context=True,
+        # provide_context=True,
         doc_md="Generates professional HTML email with test results and recommendations"
     )
     
