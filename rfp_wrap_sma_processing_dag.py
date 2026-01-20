@@ -89,6 +89,54 @@ def handle_task_failure(context):
         # REUSES YOUR EXISTING FUNCTION
         set_project_status(project_id, "failed", headers)
 
+def extract_local_context(
+    full_text: str,
+    anchor: str,
+    window: int = 1200
+) -> str:
+    """
+    Extract a bounded context window around the anchor text.
+    """
+    idx = full_text.find(anchor)
+    if idx == -1:
+        return ""
+
+    start = max(0, idx - window)
+    end = min(len(full_text), idx + len(anchor) + window)
+    return full_text[start:end]
+
+def derive_answer_instructions(question_text: str, section: str, local_context: str, headers: dict) -> str:
+    """
+    Derive explicit answer-writing instructions for a question based on its text and section.
+    """
+    prompt = f"""
+You are an expert RFP response advisor.
+
+Determine the exact instructions the respondent must follow when answering the question below.
+
+Question text:
+{question_text}
+
+Section:
+{section}
+
+Nearby RFP context (authoritative):
+{local_context if local_context else "No additional context available."}
+
+Infer the expected answer format, structure, and constraints.
+
+The instruction MUST:
+- Be a single sentence
+- Be no more than 25 words
+- Describe HOW to answer, not WHAT the answer is
+- Specify format requirements (e.g. table, list, Yes/No, attachment) if implied
+
+Return ONLY the instruction sentence.
+Do NOT explain your reasoning.
+"""
+    
+    return get_ai_response(prompt, headers=headers).strip()
+
 # =============================================================================
 # Task 1: Fetch PDF and Extract Text
 # =============================================================================
@@ -270,9 +318,11 @@ Each extracted question MUST be assigned a **single logical section string** tha
     *   `Returnable Schedule 7 – Price`
 4.  If none apply → `"General Requirements"`
 ### Critical Rules:
-   _Prefer_ _descriptive section headings_* over schedule or page titles
-*   Do NOT use page-level headers like:
-    *   :x: `Returnable Schedule 14` if `14.1 Information Security Questionnaire` exists
++ If a numbered subsection (e.g. "1.2 Respondent’s details") exists, you MUST use that subsection and MUST NOT use the enclosing Schedule or Form title.
+   Prefer descriptive section headings over schedule or page titles
+   Do NOT use page-level headers like:
+     ✗ Returnable Schedule 14 if 14.1 Information Security Questionnaire exists
+
    _Use the_ _exact wording_* of the section as written
    _All questions under the same heading MUST use_ _identical section strings_*
 *   Do NOT invent or summarize section names
@@ -387,10 +437,25 @@ Document preview(Pre-extracted RFP content (treat as authoritative source)): {ex
         if not q_text.strip():
             continue
 
+        local_context = extract_local_context(extracted_text, q_num)
+
+        if not local_context:
+            local_context = extract_local_context(
+                extracted_text,
+                q_text[:60]  # stable semantic anchor
+            )
+
+        answer_instructions = derive_answer_instructions(
+            q_text.strip(),
+            q_section.strip(),
+            local_context,
+            headers
+        )
         payload = {
             "questiontext": q_text.strip(),
             "section": q_section.strip(),
-            "questionorder": idx
+            "questionorder": idx,
+            "answer_instructions": answer_instructions
         }
 
         try:
@@ -417,6 +482,7 @@ Document preview(Pre-extracted RFP content (treat as authoritative source)): {ex
             questions_with_id[q_num] = {
                 "text": q_text.strip(),
                 "section": q_section.strip(),
+                "answer_instructions": answer_instructions,
                 "id": question_id
             }
             logging.info(f"Created question {q_num} → ID {question_id}")
@@ -439,6 +505,7 @@ def validate_and_fix_questions(**context):
     """Validate extracted questions and add any missing ones"""
     questions_dict = context["ti"].xcom_pull(task_ids="extract_questions_with_ai", key="questions_dict")
     questions_with_id = context["ti"].xcom_pull(task_ids="extract_questions_with_ai", key="questions_with_id")
+    extracted_text = context["ti"].xcom_pull(task_ids="fetch_pdf_from_api", key="extracted_text")
     def sort_key_generator(key):
         # 1. Clean the key of trailing dots or whitespace
         clean_key = key.strip().rstrip('.')
@@ -539,12 +606,27 @@ Document preview: {questions_dict}
         if not q_text.strip():
             continue
 
+        local_context = extract_local_context(extracted_text, q_num)
+
+        if not local_context:
+            local_context = extract_local_context(
+                extracted_text,
+                q_text[:60]
+            )
+
+        answer_instructions = derive_answer_instructions(
+            q_text.strip(),
+            q_section.strip(),
+            local_context,
+            headers
+        )
+
         payload = {
             "questiontext": q_text.strip(),
             "section": q_section.strip(),
-            "questionorder": idx
+            "questionorder": idx,
+            "answer_instructions": answer_instructions
         }
-
         try:
             headers = {
                 "Content-Type": "application/json",
@@ -569,6 +651,7 @@ Document preview: {questions_dict}
             questions_with_id[q_num] = {
                 "text": q_text.strip(),
                 "section": q_section.strip(),
+                "answer_instructions": answer_instructions,
                 "id": question_id
             }
             logging.info(f"Added missing question {q_num} → ID {question_id}")
@@ -595,12 +678,21 @@ def generate_answers_with_ai(**context):
     
     for q_num, question_data in questions_with_id.items():
         question_text = question_data["text"]
+        answer_instructions = question_data.get(
+            "answer_instructions",
+            "Provide a clear, complete response following standard RFP submission conventions."
+        )
         question_id = question_data["id"]
         
         prompt_answer = f"""
 You are an expert answering Wrap or SMA Program RFP questions for our firm.
 
 Question {q_num}: {question_text}
+
+Answer instructions (MANDATORY):
+{answer_instructions}
+
+Follow the instructions strictly.
 
 Provide a complete, professional answer. Use bullet points if needed. Be concise yet thorough.
 
@@ -635,7 +727,8 @@ Do not add any extra text, markdown, or explanations outside the JSON.
                 "sources_referenced": sources if isinstance(sources, list) else [],
                 "confidence": confidence if confidence else None,
                 "is_sensitive": is_sensitive,
-                "question_num": q_num
+                "question_num": q_num,
+                "answer_instructions": answer_instructions
             }
             logging.info(f"Generated answer for Q{q_num} (ID: {question_id}) with sources and confidence")
             
@@ -673,7 +766,8 @@ def update_answers_to_database(**context):
             "answertext": answer,
             "sources_referenced": answer_data.get("sources_referenced", []),
             "confidence": answer_data.get("confidence"),
-            "is_sensitive": is_sensitive
+            "is_sensitive": is_sensitive,
+            "answer_instructions": answer_data.get("answer_instructions")
         }
         headers = {"Content-Type": "application/json", "Accept": "application/json", "WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
         
