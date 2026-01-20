@@ -177,36 +177,181 @@ def extract_questions_with_ai(**context):
         raise ValueError("Insufficient text for question extraction")
 
     prompt = f"""
-You are an expert RFP Analyst. Your task is to extract ALL questions from the provided RFP document along with the exact SECTION HEADER they belong to.
+You are a **Senior RFP Structuring Analyst** specializing in extracting vendor response requirements from complex government and enterprise RFP documents.
+Your task is to **identify, normalize, and extract EVERY vendor response requirement (“question”) from the provided RFP document**, regardless of how it is phrased or formatted.
+* * *
+## 1. WHAT COUNTS AS A QUESTION (NON-NEGOTIABLE)
+A **question** is **ANY requirement that expects the vendor to provide information, confirmation, data, documentation, or a declaration**, even if:
+   _It is_ _not written as a question_*
+   _It appears as a_ _form field, table, checklist, checkbox, or declaration_*
+   _It is phrased as an_ _instruction or statement_*
+   _It is_ _implicitly requesting information_* (e.g., blank fields, column headers, labels)
+If a vendor would reasonably be expected to respond to it, **it IS a question**.
 
-### DEFINITIONS
-- **Question:** Any sentence or bullet point requesting information, confirmation, or a response from the vendor (e.g., "Describe your...", "Provide...", "1. How many...").
-- **Section:** The distinct heading or title under which a group of questions is listed. This is often bolded or numbered (e.g., "1. Qualifications and Experience", "Section A.1: General & Company").
+### IMPORTANT EXCLUSION RULE
 
-### INSTRUCTIONS
-1. **Analyze Structure:** Look for headers that introduce a block of questions.
-2. **Extract:** For every question found, extract:
-   - The question text (clean up numbering like "1." or "A." from the start).
-   - The **Exact Section Title** it falls under.
-3. **Consistency:** All questions under the same header MUST have the exact same section string.
-4. **Fallback:** If a question has no clear header, use "General Requirements".
+Do NOT extract the following as questions:
+- General procedural rules, policies, or conditions of participation
+- Instructions that explain HOW the RFP process operates (e.g. submission mechanics, evaluation process, probity rules)
+- Obligations that do NOT require the vendor to provide a response, field entry, document, confirmation, or declaration
+- If a requirement cannot be answered with text, a document, a completed field, or a Yes/No response, it MUST NOT be extracted.
 
-### EXAMPLES
-*Document Text:*
-"**3. Technical capabilities**
- A. Describe your SLA.
- B. Do you support SSO?"
+Only extract items where the Respondent is required to:
+- Actively provide information
+- Complete a form, table, or schedule
+- Submit a document or declaration
+- Explicitly confirm or acknowledge something as part of their Proposal response
 
-*Output:*
+* * *
+## 2. QUESTION FORMATS YOU MUST RECOGNISE
+You MUST actively look for and extract questions posed in **all of the following formats**:
+### A. Narrative / Instructional Requests
+Examples:
+*   “Please describe…”
+*   “Provide details of…”
+*   “Demonstrate your ability to…”
+### B. Yes / No Questions (Binary)
+Examples:
+*   “Do you have…?”
+*   “Has your organisation…?”
+### C. Yes / No with Conditional Detail
+Examples:
+*   “If Yes, please provide details…”
+*   “If selected, will your organisation be in a position to…”
+:arrow_right: These MUST be extracted as **two questions**:
+1.  The Yes/No confirmation
+2.  The conditional explanation
+### D. Form Fields / Fill-in-the-Blank Items
+Examples:
+*   “Name of Respondent”
+*   “ACN / ABN”
+*   “Registered office address”
+These are **implicit questions** and MUST be converted into explicit requests:
+> “Provide the Name of Respondent.”
+### E. Tables Requiring Vendor Input
+If a table has:
+*   Column headers
+*   Empty cells
+*   “Respondent to populate”
+:arrow_right: Treat the **entire table as ONE question**, unless the rows clearly represent unrelated requests.
+### F. Checklists / Tick-Box Confirmations
+Examples:
+*   “Please confirm the following documents are attached”
+*   Lists of items with checkboxes
+### G. Declarations / Certifications / Acknowledgements
+Examples:
+*   “The Respondent acknowledges and agrees that…”
+*   Undertakings, signatures, certifications
+These are **mandatory confirmation questions**, even if phrased declaratively.
+* * *
+## 3. SECTION IDENTIFICATION RULES (UPDATED – LOGICAL HEADERS ONLY)
+Each extracted question MUST be assigned a **single logical section string** that reflects the **actual requirement heading**, not the page or schedule container.
+### Section Resolution Priority (STRICT ORDER)
+1.  **Nearest titled subsection with both number and name**
+    Examples:
+    *   `1.2 Respondent’s details`
+    *   `1.3 Disclosure of Conflicts of Interest`
+    *   `14.18 Legal complaints and inquiries`
+2.  **Nearest titled numbered section**
+    Examples:
+    *   `Section 1 – Respondent’s details`
+    *   `Section 3 – Required attachments`
+3.  **Named schedule ONLY if no titled section exists below it**
+    Examples:
+    *   `Returnable Schedule 14`
+    *   `Returnable Schedule 7 – Price`
+4.  If none apply → `"General Requirements"`
+### Critical Rules:
+   _Prefer_ _descriptive section headings_* over schedule or page titles
+*   Do NOT use page-level headers like:
+    *   :x: `Returnable Schedule 14` if `14.1 Information Security Questionnaire` exists
+   _Use the_ _exact wording_* of the section as written
+   _All questions under the same heading MUST use_ _identical section strings_*
+*   Do NOT invent or summarize section names
+* * *
+## 4. HOW TO WRITE THE QUESTION TEXT (CRITICAL)
+The `"text"` field must be written so that:
+> **If this question were given alone to an LLM, the LLM could answer it correctly without seeing the original document.**
+### Normalization Rules:
+*   Convert labels, blanks, and table headers into explicit instructions
+*   Merge bullet points, sub-fields, and table columns into one coherent request
+*   Preserve legal, compliance, and contractual intent
+*   Remove layout artifacts such as “Response”, “Information requested”, or column labels like “Respondent response”
+### Examples:
+**Form fields**
+```
+Name of Respondent
+ACN/ABN
+Registered office address
+```
+:arrow_right:
+```
+Provide the following Respondent details: Name of Respondent, ACN/ABN, and Registered office address.
+```
+**Table**
+```
+Name | Role | Position | Start Date
+[Respondent to populate]
+```
+:arrow_right:
+```
+Provide details of the proposed resources by completing a table including Name, Role, Position, and Available Start Date.
+```
+**Declaration**
+```
+The Respondent acknowledges and agrees that it will comply with privacy legislation.
+```
+:arrow_right:
+```
+Confirm and acknowledge that the Respondent will comply with all applicable privacy legislation, including the Privacy and Personal Information Protection Act and the Health Records and Information Privacy Act.
+```
+* * *
+## 5. QUESTION NUMBERING RULES (UPDATED – CLEAN KEYS)
+   _Use_ _only the document’s numeric or alphanumeric identifiers_*
+    *   :white_check_mark: `1.1`
+    *   :white_check_mark: `1.3.a`
+    *   :white_check_mark: `14.18.b`
+*   :x: Do NOT prefix keys with `"Section"` or other text
+*   If a question is unnumbered but clearly under a numbered section, infer logically:
+    *   Under `Section 2 – Proposal details` → `2.1`, `2.2`
+*   For Yes/No + conditional pairs, use `.a`, `.b`
+Each key in the JSON MUST be unique.
+* * *
+## 6. FINAL OUTPUT FORMAT (UNCHANGED)
+Return **ONLY valid JSON** in the following format:
+```json
 {{
-  "3.A": {{"text": "Describe your SLA.", "section": "3. Technical capabilities"}},
-  "3.B": {{"text": "Do you support SSO?", "section": "3. Technical capabilities"}}
+  "{{Question number}}": {{
+    "section": "{{Exact logical section header this question belongs to}}",
+    "text": "{{A fully self-contained question written as a single, answerable instruction}}"
+  }}
 }}
+```
+### Mandatory Constraints:
+*   :x: Do NOT include any additional fields
+*   :x: Do NOT include explanations outside JSON
+*   :x: Do NOT group unrelated requests
+   _:white_check_mark: Prefer_ _over-extraction_* to missing questions
+*   :white_check_mark: Treat compliance, confirmations, and declarations as first-class questions ONLY when the Respondent is explicitly required to provide a confirmation, declaration, certification, or completed response as part of the Proposal or a Returnable Schedule.
 
-### OUTPUT FORMAT
-Return ONLY a valid JSON dictionary where keys are the question numbers (e.g., "1", "2.1", "A") and values are objects containing "text" and "section".
+* * *
+## 7. FINAL GUIDANCE
+Assume this RFP is **legally binding and evaluation-critical**.
+If a vendor could reasonably be scored, disqualified, or contractually bound based on a response, **it MUST be extracted as a question**.
 
-Document preview: {extracted_text}
+## EXECUTION MODE (CRITICAL)
+
+This is a **pure extraction and transformation task**, not an analysis or explanation task.
+
+You MUST:
+- Perform the extraction silently
+- NOT describe steps, phases, reasoning, or intermediate analysis
+- NOT summarize the document
+- NOT explain what you are doing
+
+Your response MUST consist of the final JSON output only.
+
+Document preview(Pre-extracted RFP content (treat as authoritative source)): {extracted_text}
 """
 
     raw_json = get_ai_response(prompt, headers=headers)

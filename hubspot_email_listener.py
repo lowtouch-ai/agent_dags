@@ -2288,6 +2288,20 @@ def generate_spelling_variants_for_prompt(user_content, chat_history=None):
 
     variant_prompt = f"""You are a spelling variant assistant for a HubSpot email assistant.
 
+CRITICAL RULES:
+1. ONLY suggest variants if the name looks OBVIOUSLY misspelled (missing letters, wrong letters)
+2. If a name looks normal, return empty lists - DON'T suggest alternatives
+3. Only suggest variants for garbled text like "Snidhu", "Prya", "Jhon"
+
+Examples of when to suggest variants:
+- "Snidhu" → ["snidhu", "sindhu"] (one letter wrong)
+- "Micrsoft" → ["micrsoft", "microsoft"] (missing letter)
+
+Examples of when NOT to suggest variants:
+- "Sindhu" → [] (already correct)
+- "Priya" → [] (common name)
+- "Microsoft" → [] (known company)
+
 Extract any contact names, company names, or deal names from the latest user message that might have typos.
 For each potentially misspelled name, give 3–5 plausible lowercase variants (include original as first).
 
@@ -2309,6 +2323,12 @@ Return ONLY valid JSON:
         "deals": []
     }},
     "has_potential_typos": true|false
+}}
+
+If names look correct, return:
+{{
+    "potential_variants": {{"contacts": [], "companies": [], "deals": []}},
+    "has_potential_typos": false
 }}
 """
 
@@ -2378,6 +2398,11 @@ def analyze_and_search_with_tools(**kwargs):
             user_content=content,
             chat_history=chat_history  # ← Pass full history
         )
+        if spelling_variants:
+            logging.info(f"SPELLING VARIANTS DETECTED: {json.dumps(spelling_variants, indent=2)}")
+        else:
+            logging.info("No spelling variants detected - names appear correct")
+
         # Check if spelling correction was applied
         was_typo_corrected = False
         closest_match_name = None
@@ -3568,10 +3593,18 @@ def generate_final_response_or_trigger_report(**kwargs):
                 continue
 
             else:  # count > 10
-                # Too many - trigger report with Excel
                 logging.info(f"→ Routing to EXCEL REPORT ({count} results)")
-                mark_message_as_read(service, email_id)
-                ti.xcom_push(key="general_query_report", value=[email])
+                
+                # ✅ PASS THE ALREADY-FOUND RESULTS to report DAG
+                email_with_results = email.copy()
+                email_with_results["pre_analyzed_results"] = {
+                    "results": results,
+                    "entity": entity,
+                    "count": count,
+                    "analysis": analysis  # Pass entire analysis object
+                }
+    
+                ti.xcom_push(key="general_query_report", value=[email_with_results])
                 trigger_report_dag(**kwargs)
                 continue
 
@@ -4183,6 +4216,7 @@ def trigger_report_dag(**kwargs):
                 analysis_prompt = f"""You are a HubSpot data analyst. Analyze this request and determine what data to search for.
 User request: "{email.get("content", "").strip()}"
 extract the enitites details also use the spelling variants:{spelling_inject_text}
+- Always generate a report whenever the user explicitly requests it using phrases like "create a report", "generate a report", "give the report", "provide the report", "prepare a report", "build a report", or "produce a report", regardless of record count or thresholds.
 IMPORTANT RULES:
 1. For company-related queries (e.g., "deals associated with company XYZ"):
    - Use the "associations.company" property to filter by company id
@@ -4256,23 +4290,131 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                 sort = analysis_data.get("sort")
                 report_title = analysis_data.get("report_title", "HubSpot Report")
 
-                # ✅ NOW fix deal stage values
                 if entity_type == "deals" and filters:
                     DEAL_STAGE_LABELS = get_deal_stage_labels()
                     LABEL_TO_ID = {v.lower(): k for k, v in DEAL_STAGE_LABELS.items()}
                     
+                    logging.info(f"Available deal stages: {DEAL_STAGE_LABELS}")
+                    logging.info(f"Label to ID mapping: {LABEL_TO_ID}")
+                    
                     for filter_obj in filters:
                         if filter_obj.get("propertyName") == "dealstage":
                             stage_value = filter_obj.get("value", "").lower()
+                            logging.info(f"Original stage value from AI: '{stage_value}'")
                             
-                            if stage_value not in DEAL_STAGE_LABELS:
-                                matching_id = LABEL_TO_ID.get(stage_value)
-                                if matching_id:
-                                    logging.info(f"✓ Converted stage label '{stage_value}' to ID '{matching_id}'")
-                                    filter_obj["value"] = matching_id
-                else:
-                    logging.warning(f"⚠️ Could not find stage ID for label '{stage_value}'")
-               
+                            # Check if it's already a valid stage ID
+                            if stage_value in DEAL_STAGE_LABELS:
+                                logging.info(f"✓ '{stage_value}' is already a valid stage ID")
+                            # Try to convert label to ID
+                            elif stage_value in LABEL_TO_ID:
+                                matching_id = LABEL_TO_ID[stage_value]
+                                logging.info(f"✓ Converted stage label '{stage_value}' to ID '{matching_id}'")
+                                filter_obj["value"] = matching_id
+                            else:
+                                # Try partial matching
+                                found = False
+                                for label_lower, stage_id in LABEL_TO_ID.items():
+                                    if stage_value in label_lower or label_lower in stage_value:
+                                        logging.info(f"✓ Partial match: '{stage_value}' matched to '{label_lower}' (ID: {stage_id})")
+                                        filter_obj["value"] = stage_id
+                                        found = True
+                                        break
+                                
+                                if not found:
+                                    logging.warning(f"⚠️ Could not find stage ID for '{stage_value}'")
+                                    logging.warning(f"Available stage labels: {list(LABEL_TO_ID.keys())}")
+                                    logging.warning(f"Available stage IDs: {list(DEAL_STAGE_LABELS.keys())}")
+
+                logging.info(f"Final filters being sent to HubSpot: {filters}")
+
+            # ✅ FIX OWNER FILTERS - Convert owner names to IDs using ALL spelling variants
+                for filter_obj in filters:
+                    if filter_obj.get("propertyName") == "hubspot_owner_id":
+                        owner_value = filter_obj.get("value", "")
+                        
+                        # Check if value looks like a name (not a numeric ID)
+                        if not owner_value.isdigit():
+                            logging.info(f"Owner filter contains name '{owner_value}', resolving to ID...")
+                            
+                            # ✅ BUILD LIST OF ALL VARIANTS TO SEARCH
+                            search_variants = [owner_value.lower().strip()]  # Start with original
+                            
+                            # Add spelling variants if available
+                            if spelling_variants:
+                                for entity_type in ['contacts', 'companies', 'deals']:
+                                    variants_list = spelling_variants.get(entity_type, [])
+                                    for variant_group in variants_list:
+                                        original = variant_group.get('original', '').lower()
+                                        variants = variant_group.get('variants', [])
+                                        
+                                        # If this variant group matches our owner name, add all variants
+                                        if original == owner_value.lower():
+                                            search_variants.extend([v.lower() for v in variants if v.lower() not in search_variants])
+                                            logging.info(f"✅ Added spelling variants for owner '{owner_value}': {variants}")
+                                            break
+                            
+                            logging.info(f"🔍 Searching for owner using variants: {search_variants}")
+                            
+                            try:
+                                # Get all owners from HubSpot
+                                endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/owners"
+                                headers_req = {
+                                    "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+                                    "Content-Type": "application/json"
+                                }
+                                
+                                resp = requests.get(endpoint, headers=headers_req, timeout=30)
+                                resp.raise_for_status()
+                                owners = resp.json().get("results", [])
+                                
+                                # ✅ SEARCH ALL VARIANTS UNTIL WE FIND A MATCH
+                                found_owner_id = None
+                                found_owner_name = None
+                                matched_variant = None
+                                
+                                for search_term in search_variants:
+                                    if found_owner_id:
+                                        break  # Already found a match
+                                    
+                                    for owner in owners:
+                                        first_name = owner.get("firstName", "")
+                                        last_name = owner.get("lastName", "")
+                                        full_name = f"{first_name} {last_name}".strip()
+                                        owner_email = owner.get("email", "")
+                                        current_owner_id = owner.get("id")
+                                        
+                                        # Check if search term matches (case-insensitive)
+                                        if (search_term in full_name.lower() or 
+                                            search_term in first_name.lower() or 
+                                            search_term in last_name.lower() or 
+                                            search_term in owner_email.lower() or
+                                            full_name.lower() == search_term or
+                                            first_name.lower() == search_term or
+                                            last_name.lower() == search_term):
+                                            
+                                            found_owner_id = current_owner_id
+                                            found_owner_name = full_name
+                                            matched_variant = search_term
+                                            logging.info(f"✅ MATCH FOUND using variant '{search_term}'!")
+                                            logging.info(f"   Owner: {full_name} ({owner_email}) → ID: {current_owner_id}")
+                                            break
+                                
+                                if found_owner_id:
+                                    # Update filter with owner ID
+                                    filter_obj["value"] = found_owner_id
+                                    filter_obj["operator"] = "EQ"  # Change to exact match
+                                    logging.info(f"✅ Owner resolved: '{owner_value}' → '{found_owner_name}' (ID: {found_owner_id})")
+                                    logging.info(f"   Matched using variant: '{matched_variant}'")
+                                else:
+                                    logging.warning(f"⚠️ No owner found matching '{owner_value}' or any of its variants: {search_variants}")
+                                    
+                            except Exception as e:
+                                logging.error(f"Failed to resolve owner name '{owner_value}': {e}", exc_info=True)
+                        else:
+                            logging.info(f"✓ Owner filter already contains ID: {owner_value}")
+
+                        logging.info(f"📤 Final filters after owner resolution: {filters}")
+
                 # Default properties
                 base_properties = {
                     "contacts": ['firstname', 'lastname', 'email', 'phone', 'jobtitle', 'address', 'city', 'state', 'country', 'hs_object_id', 'hubspot_owner_id'],

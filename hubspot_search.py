@@ -895,6 +895,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         parsed_json = json.loads(response.strip())
         ti.xcom_push(key="owner_info", value=parsed_json)
         logging.info(f"Owner determined: {parsed_json.get('deal_owner_name')}")
+        return parsed_json
     except Exception as e:
         logging.error(f"Error processing owner AI response: {e}")
         default_owner = {
@@ -905,6 +906,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
             "all_owners_table": []
         }
         ti.xcom_push(key="owner_info", value=default_owner)
+        return default_owner
 
 def validate_deal_stage(ti, **context):
     """Validate deal stage from conversation and assign default if invalid"""
@@ -953,7 +955,7 @@ Return this exact JSON structure:
         {{
             "deal_index": 1,
             "deal_name": "parsed_deal_name",
-            "original_stage": "user_specified_stage_or_empty",
+            "original_stage": "user_specified_valid_stage_or_Lead",
             "validated_stage": "Lead",
             "stage_message": "explanation_message"
         }}
@@ -1242,12 +1244,30 @@ For each contact, parse:
 - lastname (empty string if not provided)
 - email (if mentioned)
 
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
+
 LATEST MESSAGE:
 {latest_message}
 
 RULES:
 - Extract EVERY person mentioned
-- Exclude internal team members("lowtouch.ai","hybcloud technologies","ccs","cc","cloud control","cloudcontrol" and "ecloudcontrol")and deal owners(all the members from **get_all_owners** tool)
+- Exclude any person who meets ANY of the following:
+    A. INTERNAL TEAM MEMBER  
+    A person is internal if their email domain or company matches any of:
+    ["lowtouch.ai", "hybcloud technologies", "ccs", "cc", "cloud control", "cloudcontrol", "ecloudcontrol"]
+
+    B. DEAL OWNER  
+    Any user returned by the get_all_owners tool must be excluded.
+    PROCESS:
+    - First identify internal members  
+    - Then identify deal owners  
+    - Remove both groups from results  
+    - Return only external, non-owner participants
+
 - Exclude the people whose email is retrieved from `get_all_owners` tool matches the domain given in the latest message.
 - Handle single names (e.g., "Neha") as firstname only
 - Parse "Neha (Ops)" as firstname="Neha", ignore role
@@ -1378,6 +1398,26 @@ def validate_companies_against_associations(ti, **context):
     Compare companies mentioned in prompt vs associated companies.
     Always include ALL associated companies as existing, and add unmatched mentioned as new.
     """
+    
+    def normalize_text(text):
+        """
+        Normalize text for comparison by:
+        1. Converting to lowercase
+        2. Removing all types of dashes and special chars
+        3. Removing spaces
+        4. Removing punctuation
+        """
+        import unicodedata
+        
+        if not text:
+            return ""
+        text = text.lower()
+        text = unicodedata.normalize('NFKD', text)
+        text = re.sub(r'[-–—‐‑‒―]', '', text)
+        text = re.sub(r'\s+', '', text)
+        text = re.sub(r'[^\w]', '', text)
+        return text
+    
     entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
     if not entity_flags.get("search_contacts", True):
         logging.info("Contact search was skipped, so skipping company association validation")
@@ -1391,7 +1431,7 @@ def validate_companies_against_associations(ti, **context):
 
     contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
     associated_companies = contact_data.get("associated_companies", [])
-    
+    contact_results = contact_data.get("contact_results", {})
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     latest_message = ti.xcom_pull(key="latest_message", default="")
     
@@ -1399,19 +1439,27 @@ def validate_companies_against_associations(ti, **context):
     prompt = f"""Extract ALL company names explicitly mentioned in this email.
     **You CANNOT create companies in HubSpot.**
 
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
+
 LATEST MESSAGE:
 {latest_message}
 
 RULES:
 - Only extract formal company/organization names
-- Exclude "lowtouch.ai","hybcloud technologies","ccs","cc","cloud control","cloudcontrol" and "ecloudcontrol" (internal)
+- Exclude any company if its name or domain matches: lowtouch.ai, hybcloud technologies, ccs, cc, cloud control, cloudcontrol    ecloudcontrol.These are INTERNAL companies and must not be included in outputs.
 - Return empty list if no companies mentioned
+- **Never create any companies**
+- Only search for companies if it is explicitly mentioned in the email by the user.**Do not** infer or assume any company names from deal name.
 
 Return ONLY valid JSON:
 {{
     "companies": [
         {{
-            "Name": "...",
+            "name": "...",
             "domain": "...",
             "address": "...",
             "city": "...",
@@ -1433,46 +1481,77 @@ Return ONLY valid JSON:
         parsed = json.loads(response.strip())
         mentioned_companies = parsed.get("companies", [])
         
-        # Log for debugging
-        logging.info(f"Associated companies from contacts: {[c.get('name') for c in associated_companies]}")
-        logging.info(f"Mentioned companies from email: {[c.get('Name') for c in mentioned_companies]}")
+        # ✅ FIX 1: Normalize associated companies into a dictionary with improved normalization
+        normalized_associated = {}
+        for assoc in associated_companies:
+            original_name = assoc.get("name", "").strip()
+            if not original_name:
+                continue
+            
+            # Use the new normalize_text function
+            normalized_key = normalize_text(original_name)
+            
+            # If duplicate keys exist, keep the first one
+            if normalized_key not in normalized_associated:
+                normalized_associated[normalized_key] = assoc
+                logging.info(f"Normalized existing company: '{original_name}' → '{normalized_key}'")
+            else:
+                logging.info(f"Duplicate existing company skipped: '{original_name}' (already have '{normalized_associated[normalized_key].get('name')}')")
         
-        # Start with ALL associated as existing
-        existing_companies = associated_companies.copy()
+        logging.info(f"Associated companies found: {len(associated_companies)}")
+        logging.info(f"Unique normalized companies: {len(normalized_associated)}")
+        logging.info(f"Normalized keys: {list(normalized_associated.keys())}")
+        
+        # ✅ FIX 2: Handle BOTH "Name" and "name" from AI response
+        extracted_names = []
+        for company in mentioned_companies:
+            # Try both "Name" (capital) and "name" (lowercase)
+            company_name = company.get("Name") or company.get("name") or ""
+            company_name = company_name.strip()
+            if company_name:
+                extracted_names.append(company_name)
+        
+        logging.info(f"Mentioned companies from email: {extracted_names}")
+        
+        # Start with ALL unique associated companies as existing
+        existing_companies = list(normalized_associated.values())
         
         # Now add unmatched mentioned as new
         new_companies = []
         
         for mentioned in mentioned_companies:
-            mentioned_name_lower = mentioned.get("Name", "").strip().lower()
-            if not mentioned_name_lower:
+            # Handle both "Name" and "name" fields
+            mentioned_name = (mentioned.get("Name") or mentioned.get("name") or "").strip()
+            
+            if not mentioned_name:
+                logging.warning(f"Skipping company with no name: {mentioned}")
                 continue
             
-            matched = False
-            for assoc in associated_companies:
-                assoc_name_lower = assoc.get("name", "").strip().lower()
-                if assoc_name_lower and (
-                    mentioned_name_lower == assoc_name_lower or
-                    mentioned_name_lower in assoc_name_lower or
-                    assoc_name_lower in mentioned_name_lower
-                ):
-                    matched = True
-                    logging.info(f"Matched company: '{mentioned_name_lower}' with '{assoc_name_lower}'")
-                    break
+            # Use the new normalize_text function
+            mentioned_normalized = normalize_text(mentioned_name)
             
-            if not matched:
-                new_companies.append({
-                    "name": mentioned.get("Name", ""),
-                    "domain": mentioned.get("domain", ""),
-                    "address": "",
-                    "city": "",
-                    "state": "",
-                    "zip": "",
-                    "country": "",
-                    "phone": "",
-                    "description": "",
-                    "type": ""
-                })
+            logging.info(f"Checking company: '{mentioned_name}' → normalized: '{mentioned_normalized}'")
+            
+            # Check if already exists
+            if mentioned_normalized in normalized_associated:
+                logging.info(f"✓ EXISTING company matched: '{mentioned_name}' (matches '{normalized_associated[mentioned_normalized].get('name')}')")
+                continue  # Skip - already in existing_companies
+            
+            # ✅ FIX 4: Not found - add to new companies with proper field names
+            new_company = {
+                "name": mentioned_name,  # Use lowercase "name" for consistency
+                "domain": mentioned.get("domain", ""),
+                "address": mentioned.get("address", ""),
+                "city": mentioned.get("city", ""),
+                "state": mentioned.get("state", ""),
+                "zip": mentioned.get("zip", ""),
+                "country": mentioned.get("country", ""),
+                "phone": mentioned.get("phone", ""),
+                "description": mentioned.get("description", ""),
+                "type": mentioned.get("type", "PROSPECT")
+            }
+            new_companies.append(new_company)
+            logging.info(f"✓ NEW company to create: '{mentioned_name}' (normalized: '{mentioned_normalized}')")
         
         result = {
             "company_results": {
@@ -1484,10 +1563,17 @@ Return ONLY valid JSON:
         }
         
         ti.xcom_push(key="company_info", value=result)
-        logging.info(f"Companies: {len(existing_companies)} existing (all associated), {len(new_companies)} new (unmatched mentioned)")
+        logging.info(f"COMPANY VALIDATION SUMMARY:")
+        logging.info(f"  - Existing companies: {len(existing_companies)}")
+        logging.info(f"  - New companies to create: {len(new_companies)}")
+        if existing_companies:
+            logging.info(f"  - Existing: {[c.get('name') for c in existing_companies]}")
+        if new_companies:
+            logging.info(f"  - New: {[c.get('name') for c in new_companies]}")
+        logging.info(f"=" * 60)
         
     except Exception as e:
-        logging.error(f"Error validating companies: {e}")
+        logging.error(f"Error validating companies: {e}", exc_info=True)
         ti.xcom_push(key="company_info", value={
             "company_results": {"total": 0, "results": []},
             "new_companies": [],
@@ -1510,6 +1596,21 @@ def validate_deals_against_associations(ti, **context):
         })
         return
 
+    def normalize_text(text):
+        """Normalize text for comparison"""
+        import unicodedata
+        
+        if not text:
+            return ""
+        
+        text = text.lower()
+        text = unicodedata.normalize('NFKD', text)
+        text = re.sub(r'[-–—‐‑‒―]', '', text)
+        text = re.sub(r'\s+', '', text)
+        text = re.sub(r'[^\w]', '', text)
+        
+        return text
+
     contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
     associated_deals = contact_data.get("associated_deals", [])
     contact_results = contact_data.get("contact_results", {})
@@ -1525,7 +1626,13 @@ def validate_deals_against_associations(ti, **context):
     
     # AI extracts deals mentioned in email
     prompt = f"""Extract deals mentioned in this email. Only include if there's CLEAR buying intent.
-    **You CANNOT create deals in HubSpot.**  
+    **You CANNOT create deals in HubSpot.**
+
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE. 
 
 LATEST MESSAGE:
 {latest_message}
@@ -1575,48 +1682,64 @@ Return ONLY valid JSON:
         parsed = json.loads(response.strip())
         mentioned_deals = parsed.get("deals", [])
         
-        # Log for debugging
-        logging.info(f"Associated deals from contacts: {[d.get('dealName') for d in associated_deals]}")
-        logging.info(f"Mentioned deals from email: {[d.get('dealName') for d in mentioned_deals]}")
+        # ✅ FIX: Use improved normalization
+        normalized_associated = {}
+        for assoc in associated_deals:
+            original_name = assoc.get("dealName", "").strip()
+            if not original_name:
+                continue
+            
+            # Use the new normalize_text function
+            normalized_key = normalize_text(original_name)
+            
+            # If duplicate keys exist, keep the first one
+            if normalized_key not in normalized_associated:
+                normalized_associated[normalized_key] = assoc
+                logging.info(f"Normalized existing deal: '{original_name}' → '{normalized_key}'")
+            else:
+                logging.info(f"Duplicate existing deal skipped: '{original_name}' (already have '{normalized_associated[normalized_key].get('dealName')}')")
         
-        # Start with ALL associated as existing
-        existing_deals = associated_deals.copy()
+        logging.info(f"Associated deals found: {len(associated_deals)}")
+        logging.info(f"Unique normalized deals: {len(normalized_associated)}")
+        logging.info(f"Normalized keys: {list(normalized_associated.keys())}")
+        
+        # Extract deal names for logging
+        extracted_names = [d.get("dealName", "").strip() for d in mentioned_deals if d.get("dealName", "").strip()]
+        logging.info(f"Mentioned deals from email: {extracted_names}")
+        
+        # Start with ALL unique associated deals as existing
+        existing_deals = list(normalized_associated.values())
         
         # Now add unmatched mentioned as new
         new_deals = []
         
         for mentioned in mentioned_deals:
             mentioned_name = mentioned.get("dealName", "").strip()
-            mentioned_name_lower = mentioned_name.lower()
             
-            # Skip empty deal names
-            if not mentioned_name_lower:
+            if not mentioned_name:
+                logging.warning(f"Skipping deal with no name: {mentioned}")
                 continue
             
-            matched = False
-            for assoc in associated_deals:
-                assoc_name = assoc.get("dealName", "").strip()
-                assoc_name_lower = assoc_name.lower()
-                if not assoc_name_lower:
-                    continue
-                    
-                # Exact match or substring match
-                if (mentioned_name_lower == assoc_name_lower or
-                    mentioned_name_lower in assoc_name_lower or
-                    assoc_name_lower in mentioned_name_lower):
-                    matched = True
-                    logging.info(f"Matched deal: '{mentioned_name}' with '{assoc_name}'")
-                    break
+            # Use the new normalize_text function
+            mentioned_normalized = normalize_text(mentioned_name)
             
-            if not matched:
-                if not mentioned.get("dealLabelName"):
-                    mentioned["dealLabelName"] = "Lead"
-                if not mentioned.get("dealAmount"):
-                    mentioned["dealAmount"] = "5000"
-                if not mentioned.get("dealOwnerName"):
-                    mentioned["dealOwnerName"] = owner_info.get("deal_owner_name", "Kishore")
-    
-                new_deals.append(mentioned)
+            logging.info(f"Checking deal: '{mentioned_name}' → normalized: '{mentioned_normalized}'")
+            
+            # Check if already exists
+            if mentioned_normalized in normalized_associated:
+                logging.info(f"✓ EXISTING deal matched: '{mentioned_name}' (matches '{normalized_associated[mentioned_normalized].get('dealName')}')")
+                continue  # Skip - already in existing_deals
+            
+            # Not found - add to new deals with validation
+            if not mentioned.get("dealLabelName"):
+                mentioned["dealLabelName"] = "Lead"
+            if not mentioned.get("dealAmount"):
+                mentioned["dealAmount"] = "5000"
+            if not mentioned.get("dealOwnerName"):
+                mentioned["dealOwnerName"] = deal_owner_name
+            
+            new_deals.append(mentioned)
+            logging.info(f"✓ NEW deal to create: '{mentioned_name}' (normalized: '{mentioned_normalized}')")
         
         result = {
             "deal_results": {
@@ -1627,10 +1750,17 @@ Return ONLY valid JSON:
         }
         
         ti.xcom_push(key="deal_info", value=result)
-        logging.info(f"Deals: {len(existing_deals)} existing (all associated), {len(new_deals)} new (unmatched mentioned)")
+        logging.info(f"DEAL VALIDATION SUMMARY:")
+        logging.info(f"  - Existing deals: {len(existing_deals)}")
+        logging.info(f"  - New deals to create: {len(new_deals)}")
+        if existing_deals:
+            logging.info(f"  - Existing: {[d.get('dealName') for d in existing_deals]}")
+        if new_deals:
+            logging.info(f"  - New: {[d.get('dealName') for d in new_deals]}")
+        logging.info(f"=" * 60)
         
     except Exception as e:
-        logging.error(f"Error validating deals: {e}")
+        logging.error(f"Error validating deals: {e}", exc_info=True)
         ti.xcom_push(key="deal_info", value={
             "deal_results": {"total": 0, "results": []},
             "new_deals": []
@@ -1760,6 +1890,12 @@ def search_deals_directly(ti, **context):
     # AI extracts deal names from email
     prompt = f"""Extract ALL deal names explicitly mentioned in this email.
     **You CANNOT create deals in HubSpot.**
+
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 
 LATEST MESSAGE:
 {latest_message}
@@ -1891,13 +2027,20 @@ def search_companies_directly(ti, **context):
     # AI extracts company names
     prompt = f"""Extract ALL company names explicitly mentioned in this email.
 
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
+
 LATEST MESSAGE:
 {latest_message}
 
 RULES:
 - Only extract formal company/organization names
-- Exclude "lowtouch.ai","hybcloud technologies","ccs","cc","cloud control","cloudcontrol" and "ecloudcontrol" (internal)
+- Exclude any company if its name or domain matches:lowtouch.ai, hybcloud technologies, ccs, cc, cloud control, cloudcontrol, ecloudcontrol.These are INTERNAL companies and must not be included in outputs.
 - Return empty list if no companies mentioned
+- Only search for companies if it is explicitly mentioned in the email by the user.**Do not** infer or assume any company names from deal name.
 
 Return ONLY valid JSON:
 {{
@@ -2166,6 +2309,12 @@ def validate_associations_against_context(ti, **context):
     # AI analyzes user context to extract precise associations
     prompt = f"""You are a HubSpot context validator. Analyze this email to identify EXACTLY which contacts, companies, and deals the user is referring to, and whether existing associations are relevant.
     You cannot create or update any records, your only job is to identify and validate the contacts, companies, and deals based on the conversation.
+
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 
 LATEST USER MESSAGE:
 {latest_message}
@@ -2514,6 +2663,12 @@ def parse_notes_tasks_meeting(ti, **context):
     prompt = f"""You are a HubSpot Conversation Parser. Your role is to **analyze** the email conversation and **extract** only the information explicitly requested.  
 **You CANNOT create notes, tasks, or meetings in HubSpot.**  
 You may only **parse and structure** data that is **clearly present** in the conversation.
+
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 
 ---
 **SENDER**  
@@ -3277,6 +3432,13 @@ def check_task_threshold(ti, **context):
 
     prompt = f"""You are a HubSpot API assistant. Check task volume thresholds.
     You cannot create or modify tasks.
+
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
+
 LATEST USER MESSAGE:
 {latest_message}
 
@@ -3361,11 +3523,24 @@ def compile_search_results(ti, **context):
     company_info = ti.xcom_pull(key="merged_company_info") or ti.xcom_pull(key="company_info") or {}
     notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting")
     task_threshold_info = ti.xcom_pull(key="task_threshold_info", default={})
+    deal_stage_info = ti.xcom_pull(key="deal_stage_info", default={"deal_stages": []})
     thread_id = ti.xcom_pull(key="thread_id")
     email_data = ti.xcom_pull(key="email_data")
     
     logging.info(f"=== COMPILING SEARCH RESULTS ===")
     logging.info(f"Thread ID: {thread_id}")
+    
+    # ✅ FIX: Apply validated stages to new deals BEFORE adding to search_results
+    new_deals = deal_info.get("new_deals", [])
+    validated_stages = {stage['deal_name']: stage['validated_stage'] 
+                       for stage in deal_stage_info.get('deal_stages', [])}
+    
+    for deal in new_deals:
+        deal_name = deal.get("dealName", "")
+        if deal_name in validated_stages:
+            # Apply the validated stage (either user's valid input or default "Lead")
+            deal["dealLabelName"] = validated_stages[deal_name]
+            logging.info(f"Applied validated stage '{validated_stages[deal_name]}' to deal '{deal_name}'")
     
     search_results = {
         "thread_id": thread_id,
@@ -3373,7 +3548,7 @@ def compile_search_results(ti, **context):
         "contact_results": contact_info.get("contact_results", {"total": 0, "results": []}),
         "company_results": company_info.get("company_results", {"total": 0, "results": []}),
         "new_entity_details": {
-            "deals": deal_info.get("new_deals", []),
+            "deals": new_deals,  # Now contains corrected stages
             "contacts": contact_info.get("new_contacts", []),
             "companies": company_info.get("new_companies", []),
             "notes": notes_tasks_meeting.get("notes", []),
