@@ -691,7 +691,7 @@ with DAG(
     'api_test_case_executor',
     default_args=default_args,
     description='Automated API test case generation, execution, and reporting via email',
-    schedule_interval=None,  # Triggered by mailbox monitor
+    schedule=None,  # Triggered by mailbox monitor
     start_date=datetime(2024, 2, 24),
     catchup=False,
     doc_md=readme_content,
