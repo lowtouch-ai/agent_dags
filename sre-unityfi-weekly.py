@@ -980,7 +980,7 @@ def generate_pdf_report_callable(ti=None, **context):
 
 with DAG(
     dag_id="sre-unityfi_weekly",
-    schedule_interval="30 05 * * 4",  # Every Thursday at 11:00 AM IST
+    schedule="30 05 * * 4",  # Every Thursday at 11:00 AM IST
     start_date=datetime(2025, 1, 1),
     catchup=False,
     default_args=default_args,

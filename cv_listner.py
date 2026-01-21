@@ -145,7 +145,7 @@ def log_no_emails(**kwargs):
 with DAG(
     "cv_monitor_mailbox",
     default_args=default_args,
-    schedule_interval=timedelta(minutes=2),  # Check every 2 minutes
+    schedule=timedelta(minutes=2),  # Check every 2 minutes
     catchup=False,
     doc_md="""
     # CV Mailbox Monitor DAG

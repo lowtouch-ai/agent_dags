@@ -454,7 +454,7 @@ with open(readme_path, 'r') as file:
 with DAG(
     "autofinix_check_reminders_due",
     default_args=default_args,
-    schedule_interval=timedelta(minutes=1),
+    schedule=timedelta(minutes=1),
     catchup=False,
     max_active_runs=1,
     doc_md=readme_content,

@@ -29,7 +29,7 @@ with open(readme_path, 'r') as file:
 with DAG(
     "shared_transcribe_message_voice",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     doc_md=readme_content,
     tags=["shared", "message", "voice", "transcribe"],

@@ -873,7 +873,7 @@ def safe_json_loads(text, default=None):
 with DAG(
     "hubspot_daily_task_reminders",
     default_args=default_args,
-    schedule_interval="0 * * * *",
+    schedule="0 * * * *",
     catchup=False,
     tags=["hubspot", "tasks", "reminders", "daily"],
     description="Send daily HubSpot task reminders (one email per task) during business hours"

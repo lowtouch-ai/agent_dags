@@ -1227,7 +1227,7 @@ except FileNotFoundError:
 with DAG(
     "uptime_daily_data_report",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     doc_md=readme_content,
     tags=["uptime", "report", "daily", "ai-insights"],

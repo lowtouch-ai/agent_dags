@@ -153,7 +153,7 @@ def no_files_found(**kwargs):
 with DAG(
     "netexa_dsx_oracle_monitor_github",
     default_args=default_args,
-    schedule_interval=timedelta(minutes=5),
+    schedule=timedelta(minutes=5),
     catchup=False,
     tags=["dsx", "monitor", "github"]
 ) as dag:

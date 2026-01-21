@@ -460,7 +460,7 @@ except FileNotFoundError:
 with DAG(
     "helpdesk_send_message_email",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     doc_md=readme_content,
     tags=["email", "shared", "send", "message", "helpdesk"]

@@ -55,7 +55,7 @@ with DAG(
     'shared_process_file_pdf2vector',
     default_args=default_args,
     description='Processes PDF files to vector format',
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     tags=["shared", "process", "pdf", "vector"],
     max_active_runs=6

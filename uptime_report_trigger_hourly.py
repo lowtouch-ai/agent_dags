@@ -16,7 +16,7 @@ import re
 
 dag = DAG(
     dag_id="uptime_report_trigger_hourly",
-    schedule_interval="0 * * * *",  # hourly
+    schedule="0 * * * *",  # hourly
     start_date=datetime(2025, 2, 18),
     catchup=False,
     max_active_runs=1,

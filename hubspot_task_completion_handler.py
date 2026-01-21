@@ -1035,7 +1035,7 @@ def send_confirmation_email(**kwargs):
 with DAG(
     "hubspot_task_completion_handler",
     default_args=default_args,
-    schedule_interval=None,  # Triggered by email listener
+    schedule=None,  # Triggered by email listener
     catchup=False,
     tags=["hubspot", "tasks", "deal", "completion"],
     on_success_callback=clear_retry_tracker_on_success,

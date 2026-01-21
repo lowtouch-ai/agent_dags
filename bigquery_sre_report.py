@@ -400,7 +400,7 @@ def send_email(ti, **context):
 with DAG(
     "bigquery_monitor",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     tags=["sre", "bigquery", "monitoring", "lowtouch.ai"]
 ) as dag:

@@ -250,7 +250,7 @@ with open(readme_path, 'r') as file:
 # Define DAG
 with DAG("akamai_presales_assess_monitor_mailbox",
          default_args=default_args,
-         schedule_interval=timedelta(minutes=1),
+         schedule=timedelta(minutes=1),
          catchup=False,
          doc_md=readme_content,
          tags=["mailbox", "cloud_assess", "monitor"]) as dag:

@@ -550,7 +550,7 @@ except FileNotFoundError:
 with DAG(
     "autofinix_send_message_email",
     default_args=default_args,
-    schedule_interval=None,  # Triggered externally
+    schedule=None,  # Triggered externally
     catchup=False,
     doc_md=readme_content,
     tags=["autofinix", "send", "email", "response"],

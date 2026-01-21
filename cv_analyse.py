@@ -422,7 +422,7 @@ Use a professional, encouraging tone throughout. Output only clean, valid HTML f
 with DAG(
     "cv_analyse",
     default_args=default_args,
-    schedule_interval=None,  # Triggered by cv_monitor_mailbox DAG
+    schedule=None,  # Triggered by cv_monitor_mailbox DAG
     catchup=False,
     doc_md="""
     # CV Analysis DAG

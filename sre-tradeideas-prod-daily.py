@@ -2366,7 +2366,7 @@ def generate_pdf_report_callable(ti=None, **context):
 with DAG(
     dag_id="sre-tradeideas-prod_daily",
     default_args=default_args,
-    schedule_interval="30 5 * * *",  # 05:30 UTC = 11:00 AM IST
+    schedule="30 5 * * *",  # 05:30 UTC = 11:00 AM IST
     catchup=False,
     tags=["sre", "tradeideas", "daily", "11am-ist"],
     max_active_runs=1,

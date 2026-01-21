@@ -118,7 +118,7 @@ with open(readme_path, 'r') as file:
 
 with DAG("autofinix_monitor_mailbox",
          default_args=default_args,
-         schedule_interval=timedelta(minutes=1),
+         schedule=timedelta(minutes=1),
          catchup=False,
          doc_md=readme_content,
          tags=["mailbox", "autofinix", "monitor"]) as dag:

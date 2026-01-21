@@ -91,7 +91,7 @@ def slack_alert(**context):
 with DAG(
     dag_id='invoflux_run_ui_tests',
     default_args=default_args,
-    schedule_interval='30 14 * * *',  # 14:30 IST
+    schedule='30 14 * * *',  # 14:30 IST
     catchup=False,
     tags=['maven', 'automation', 'invoflux'],
 ) as dag:

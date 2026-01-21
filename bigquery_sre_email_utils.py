@@ -364,7 +364,7 @@ def no_email_found(**kwargs):
 with DAG(
     "bigquery_mailbox_monitor",
     default_args=default_args,
-    schedule_interval="*/1 * * * *",  # Every minute
+    schedule="*/1 * * * *",  # Every minute
     catchup=False,
     tags=["sre", "bigquery", "monitoring", "replies"]
 ) as monitor_dag:
@@ -776,7 +776,7 @@ def response_checker(ti, **context):
 with DAG(
     "bigquery_email_responder",
     default_args=default_args,
-    schedule_interval=None,  # Triggered only
+    schedule=None,  # Triggered only
     catchup=False,
     tags=["sre", "bigquery", "email", "responder"]
 ) as processor_dag:

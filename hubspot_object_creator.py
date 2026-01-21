@@ -4563,7 +4563,7 @@ def branch_to_creation_tasks(ti, **context):
 with DAG(
     "hubspot_create_objects",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     tags=["hubspot", "create", "objects"],
     on_success_callback=clear_retry_tracker_on_success,

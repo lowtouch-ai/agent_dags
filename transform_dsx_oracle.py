@@ -393,7 +393,7 @@ def create_pr(ti, **context):
 with DAG(
     "netexa_dsx_oracle_process_file",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     tags=["dsx", "transformation", "netezza", "oracle"]
 ) as dag:

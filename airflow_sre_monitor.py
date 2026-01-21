@@ -371,7 +371,7 @@ def task8_send_email(ti, **context):
 with DAG(
     "airflow_sre_agent_monitoring",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     tags=["sre", "log_analysis", "airflow", "monitoring"]
 ) as dag:

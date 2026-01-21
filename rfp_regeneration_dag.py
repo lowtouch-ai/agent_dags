@@ -325,7 +325,7 @@ No additional commentary."""
 # -------------------------------
 with DAG(
     dag_id="rfp_regeneration_workflow",
-    schedule_interval=None,
+    schedule=None,
     start_date=datetime(2025, 1, 1),
     catchup=False,
     max_active_runs=1,

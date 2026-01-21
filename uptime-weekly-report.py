@@ -1186,7 +1186,7 @@ except FileNotFoundError:
 with DAG(
     "uptime_weekly_data_report", 
     default_args=default_args, 
-    schedule_interval=None,  # Run every Monday at midnight, 
+    schedule=None,  # Run every Monday at midnight, 
     catchup=False, 
     doc_md=readme_content, 
     tags=["uptime", "report", "weekly", "ai-insights"],

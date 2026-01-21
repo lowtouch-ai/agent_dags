@@ -72,7 +72,7 @@ with open(readme_path, 'r') as file:
 with DAG(
     "shared_send_message_voice",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     doc_md=readme_content,
     tags=["voice", "shared", "send", "message"],

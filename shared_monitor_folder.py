@@ -87,7 +87,7 @@ with DAG(
     'shared_monitor_folder_pdf',
     default_args=default_args,
     description='Monitors UUID folders for PDF files and triggers processing',
-    schedule_interval='* * * * *',
+    schedule='* * * * *',
     start_date=days_ago(1),
     catchup=False,
     tags=["shared", "folder", "monitor", "pdf", "rag"],

@@ -28,7 +28,7 @@ dag = DAG(
     'cv_agent_processing',
     default_args=default_args,
     description='Process one JD and multiple CVs via AgentOmatic and save structured result to Drive CSV',
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
 )
 
