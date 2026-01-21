@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 import base64
 import os
 import re
@@ -4563,166 +4563,144 @@ def branch_to_creation_tasks(ti, **context):
 with DAG(
     "hubspot_create_objects",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     tags=["hubspot", "create", "objects"],
     on_success_callback=clear_retry_tracker_on_success,
     on_failure_callback=update_retry_tracker_on_failure
 ) as dag:
 
-    start_task = DummyOperator(task_id="start_workflow")
+    start_task = EmptyOperator(task_id="start_workflow")
 
     load_context_task = PythonOperator(
         task_id="load_context_from_dag_run",
-        python_callable=load_context_from_dag_run,
-        provide_context=True
+        python_callable=load_context_from_dag_run
     )
 
     analyze_task = PythonOperator(
         task_id="analyze_user_response",
-        python_callable=analyze_user_response,
-        provide_context=True
+        python_callable=analyze_user_response
     )
 
     validate_and_clean_task = PythonOperator(
         task_id="validate_and_clean_analysis",
-        python_callable=validate_and_clean_analysis,
-        provide_context=True
+        python_callable=validate_and_clean_analysis
     )
 
     branch_task = BranchPythonOperator(
         task_id="branch_to_creation_tasks",
-        python_callable=branch_to_creation_tasks,
-        provide_context=True
+        python_callable=branch_to_creation_tasks
     )
 
     determine_owner_task = PythonOperator(
         task_id="determine_owner",
-        python_callable=determine_owner,
-        provide_context=True
+        python_callable=determine_owner
     )
 
     check_task_threshold_task = PythonOperator(
         task_id="check_task_threshold",
-        python_callable=check_task_threshold,
-        provide_context=True
+        python_callable=check_task_threshold
     )
 
     create_contacts_task = PythonOperator(
         task_id="create_contacts",
         python_callable=create_contacts,
-        retries=2,
-        provide_context=True
+        retries=2
     )
 
     create_companies_task = PythonOperator(
         task_id="create_companies",
         python_callable=create_companies,
-        retries=2,
-        provide_context=True
+        retries=2
     )
 
     create_deals_task = PythonOperator(
         task_id="create_deals",
         python_callable=create_deals,
-        retries=2,
-        provide_context=True
+        retries=2
     )
 
     create_meetings_task = PythonOperator(
         task_id="create_meetings",
         python_callable=create_meetings,
-        retries=2,
-        provide_context=True
+        retries=2
     )
 
     create_notes_task = PythonOperator(
         task_id="create_notes",
         python_callable=create_notes,
-        retries=2,
-        provide_context=True
+        retries=2
     )
 
     create_tasks_task = PythonOperator(
         task_id="create_tasks",
         python_callable=create_tasks,
-        retries=2,
-        provide_context=True
+        retries=2
     )
 
     update_contacts_task = PythonOperator(
         task_id="update_contacts",
         python_callable=update_contacts,
-        retries=2,
-        provide_context=True
+        retries=2
     )
 
     update_companies_task = PythonOperator(
         task_id="update_companies",
         python_callable=update_companies,
-        retries=2,
-        provide_context=True
+        retries=2
     )
 
     update_deals_task = PythonOperator(
         task_id="update_deals",
         python_callable=update_deals,
-        retries=2,
-        provide_context=True
+        retries=2
     )
 
     update_meetings_task = PythonOperator(
         task_id="update_meetings",
         python_callable=update_meetings,
-        retries=2,
-        provide_context=True
+        retries=2 
     )
 
     update_notes_task = PythonOperator(
         task_id="update_notes",
         python_callable=update_notes,
-        retries=2,
-        provide_context=True
+        retries=2
     )
 
     update_tasks_task = PythonOperator(
         task_id="update_tasks",
         python_callable=update_tasks,
-        retries=2,
-        provide_context=True
+        retries=2     
     )
 
     # New join task to handle branching and skip propagation
-    join_creations = DummyOperator(
+    join_creations = EmptyOperator(
         task_id="join_creations",
         trigger_rule="one_success"
     )
 
     create_associations_task = PythonOperator(
         task_id="create_associations",
-        python_callable=create_associations,
-        provide_context=True
+        python_callable=create_associations  
     )
 
     collect_results_task = PythonOperator(
         task_id="collect_and_save_results",
-        python_callable=collect_and_save_results,
-        provide_context=True
+        python_callable=collect_and_save_results   
     )
 
     compose_response_task = PythonOperator(
         task_id="compose_response_html",
-        python_callable=compose_response_html,
-        provide_context=True
+        python_callable=compose_response_html    
     )
 
     send_final_email_task = PythonOperator(
         task_id="send_final_email",
-        python_callable=send_final_email,
-        provide_context=True
+        python_callable=send_final_email    
     )
 
-    end_task = DummyOperator(
+    end_task = EmptyOperator(
         task_id="end_workflow"
     )
 
