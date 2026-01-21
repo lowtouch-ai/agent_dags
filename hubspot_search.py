@@ -1,6 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from datetime import datetime, timedelta
 import base64
@@ -5043,7 +5043,7 @@ with DAG(
         python_callable=send_validation_error_email,
     )
 
-    validation_end_task = DummyOperator(
+    validation_end_task = EmptyOperator(
         task_id="validation_end"
     )
 
@@ -5057,7 +5057,7 @@ with DAG(
         python_callable=send_engagement_summary_email,
     )
 
-    end_task = DummyOperator(
+    end_task = EmptyOperator(
         task_id="end_workflow"
     )
 

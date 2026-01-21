@@ -1,7 +1,7 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 from airflow.models import Variable
 from datetime import datetime, timedelta,time
 import json
@@ -478,7 +478,7 @@ with DAG(
         python_callable=evaluate_due_loans_result,
     )
 
-    handle_no_due_loans = DummyOperator(
+    handle_no_due_loans = EmptyOperator(
         task_id="handle_no_due_loans",
     )
 
@@ -510,7 +510,7 @@ with DAG(
         python_callable=update_reminder_status,
     )
 
-    end_task = DummyOperator(
+    end_task = EmptyOperator(
         task_id="end_task",
         trigger_rule="all_done",
     )

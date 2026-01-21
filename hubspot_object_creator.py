@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 import base64
 import os
 import re
@@ -4570,7 +4570,7 @@ with DAG(
     on_failure_callback=update_retry_tracker_on_failure
 ) as dag:
 
-    start_task = DummyOperator(task_id="start_workflow")
+    start_task = EmptyOperator(task_id="start_workflow")
 
     load_context_task = PythonOperator(
         task_id="load_context_from_dag_run",
@@ -4675,7 +4675,7 @@ with DAG(
     )
 
     # New join task to handle branching and skip propagation
-    join_creations = DummyOperator(
+    join_creations = EmptyOperator(
         task_id="join_creations",
         trigger_rule="one_success"
     )
@@ -4700,7 +4700,7 @@ with DAG(
         python_callable=send_final_email,
     )
 
-    end_task = DummyOperator(
+    end_task = EmptyOperator(
         task_id="end_workflow"
     )
 

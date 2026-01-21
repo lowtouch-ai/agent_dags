@@ -1,6 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 from airflow.models import Variable
 from datetime import datetime, timedelta
 import base64
@@ -986,19 +986,19 @@ with DAG(
     # ===== END NEW SECTION =====
     
     # ===== NEW: DUMMY TASKS FOR FLOW MARKERS =====
-    excel_flow_start = DummyOperator(
+    excel_flow_start = EmptyOperator(
         task_id="excel_flow_start"
     )
     
-    cost_comparison_flow_start = DummyOperator(
+    cost_comparison_flow_start = EmptyOperator(
         task_id="cost_comparison_flow_start"
     )
     
-    combined_flow_start = DummyOperator(
+    combined_flow_start = EmptyOperator(
         task_id="combined_flow_start"
     )
     
-    no_attachment_flow = DummyOperator(
+    no_attachment_flow = EmptyOperator(
         task_id="no_attachment_flow"
     )
     

@@ -1,7 +1,7 @@
 from airflow import DAG
 from airflow.models.param import Param
 from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 from airflow.sensors.time_delta import TimeDeltaSensor
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.exceptions import AirflowException
@@ -404,7 +404,7 @@ with DAG(
             provide_context=True,
         )
 
-        skip_recording = DummyOperator(task_id="skip_recording")
+        skip_recording = EmptyOperator(task_id="skip_recording")
 
         # Task Dependencies
         initiate_call_task >> adjust_voicemail_task >> wait_call_status >> check_status_task

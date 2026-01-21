@@ -1,6 +1,6 @@
 from datetime import timedelta
 from airflow import DAG
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.dates import days_ago
 from airflow.decorators import task
@@ -95,9 +95,9 @@ with DAG(
    
 ) as dag:
 
-    start = DummyOperator(task_id='start')
+    start = EmptyOperator(task_id='start')
     check_folder_task = check_and_move_pdf_folder()
-    no_files_found = DummyOperator(task_id='no_files_found')
+    no_files_found = EmptyOperator(task_id='no_files_found')
     
     trigger_processing = TriggerDagRunOperator.partial(
         task_id='trigger_pdf_processing',
@@ -113,7 +113,7 @@ with DAG(
         )
     )
     
-    end = DummyOperator(task_id='end', trigger_rule='all_done')
+    end = EmptyOperator(task_id='end', trigger_rule='all_done')
     
     start >> check_folder_task
     check_folder_task >> [trigger_processing, no_files_found]
