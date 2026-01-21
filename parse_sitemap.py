@@ -1,17 +1,15 @@
 from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.models import Variable
 from datetime import datetime, timedelta
 import requests
 import xml.etree.ElementTree as ET
 import logging
-from airflow.api.common.trigger_dag import trigger_dag as trigger_dag_func
 import json
 
-# Define Airflow Variables with default values
-SITEMAP_URL = Variable.get("lowtouch_sitemap_url", default_var="https://www.lowtouch.ai/sitemap_index.xml")
-UUID = Variable.get("lowtouch_uuid")
+SITEMAP_URL_KEY = "lowtouch_sitemap_url"
+UUID_KEY = "lowtouch_uuid"
 SLACK_WEBHOOK_URL = Variable.get("SLACK_WEBHOOK_URL", default_var=None)
 SERVER_NAME = Variable.get("SERVER", default_var="UNKNOWN")
 
@@ -19,22 +17,19 @@ SERVER_NAME = Variable.get("SERVER", default_var="UNKNOWN")
 def slack_alert(context):
     webhook_url = SLACK_WEBHOOK_URL
     if not webhook_url:
-        logging.error("Slack webhook URL not found in Airflow Variables")
+        logging.error("Slack webhook URL not found")
         return
 
-    dag_id = context.get("dag_run").dag_id
+    # In Airflow 3, use context.get() safely
+    dag_id = context.get("dag").dag_id
     task_id = context.get("task_instance").task_id
-    run_id = context.get("dag_run").run_id
+    run_id = context.get("run_id")
 
-    # Pull extra info from XCom
     ti = context.get("task_instance")
     failed_url = ti.xcom_pull(task_ids=task_id, key="failed_url")
     error_message = ti.xcom_pull(task_ids=task_id, key="error_message")
 
-    if failed_url and error_message:
-        extra_info = f"\n*Failed URL:* {failed_url}\n*Error:* {error_message}"
-    else:
-        extra_info = ""
+    extra_info = f"\n*Failed URL:* {failed_url}\n*Error:* {error_message}" if failed_url else ""
 
     message = {
         "text": (
@@ -57,152 +52,122 @@ def slack_alert(context):
     except Exception as e:
         logging.error(f"Failed to send Slack alert: {e}")
 
-
-# Parent DAG
+# --- Parent DAG ---
 default_args = {
     'owner': 'airflow',
-    'depends_on_past': False,
-    'email_on_failure': False,
-    'email_on_retry': False,
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
-    'on_failure_callback': slack_alert,  # Added Slack alert
+    'on_failure_callback': slack_alert,
 }
 
 with DAG(
     'lowtouch_sitemap_parser',
     default_args=default_args,
     description='Parse lowtouch.ai sitemap and trigger HTML processing',
-    schedule_interval='0 23 * * *',  # Daily at 11 PM UTC
+    schedule='0 23 * * *',
     start_date=datetime(2025, 4, 16),
     catchup=False,
     tags=['lowtouch', 'sitemap','agentvector','parse'],
 ) as parent_dag:
 
     def parse_sitemap():
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        # Fetch variables INSIDE the task to avoid DB access errors
+        sitemap_url = Variable.get(SITEMAP_URL_KEY, default_var="https://www.lowtouch.ai/sitemap_index.xml")
+        uuid = Variable.get(UUID_KEY)
         
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        trigger_configs = []
+
         try:
-            # Fetch parent sitemap
-            response = requests.get(SITEMAP_URL, headers=headers)
+            # 1. Fetch Parent Sitemap
+            response = requests.get(sitemap_url, headers=headers)
             response.raise_for_status()
             root = ET.fromstring(response.content)
-            
-            # Namespace for sitemap XML
             ns = {'sitemap': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
             
-            # Collect all URLs from child sitemaps
-            all_urls = []
+            # 2. Loop through child sitemaps
             for sitemap in root.findall('sitemap:sitemap', ns):
-                child_sitemap_url = sitemap.find('sitemap:loc', ns).text
-                logging.info(f"Processing child sitemap: {child_sitemap_url}")
+                child_url = sitemap.find('sitemap:loc', ns).text
+                logging.info(f"Processing child sitemap: {child_url}")
                 
-                # Fetch child sitemap
-                child_response = requests.get(child_sitemap_url, headers=headers)
-                child_response.raise_for_status()
-                child_root = ET.fromstring(child_response.content)
+                child_resp = requests.get(child_url, headers=headers)
+                if child_resp.status_code != 200: 
+                    continue
+                    
+                child_root = ET.fromstring(child_resp.content)
                 
-                # Extract URLs from child sitemap
+                # 3. Build a list of configs (Dicts) instead of triggering immediately
                 for url in child_root.findall('sitemap:url', ns):
                     loc = url.find('sitemap:loc', ns).text
                     if loc.endswith('.html') or loc.endswith('/'):
-                        all_urls.append(loc)
+                        trigger_configs.append({'url': loc, 'uuid': uuid})
             
-            logging.info(f"Found {len(all_urls)} URLs to process")
-            return {'urls': all_urls, 'uuid': UUID}
+            logging.info(f"Generated {len(trigger_configs)} configurations for dynamic mapping.")
+            return trigger_configs # This list is passed to the next task
         
         except Exception as e:
-            logging.error(f"Failed to parse sitemap: {e}")
+            logging.error(f"Sitemap parsing failed: {e}")
             raise
 
+    # Step 1: Parse sitemap and return list
     parse_task = PythonOperator(
         task_id='parse_sitemap',
         python_callable=parse_sitemap,
     )
 
-    def trigger_child_dags(ti):
-        data = ti.xcom_pull(task_ids='parse_sitemap')
-        urls = data['urls']
-        uuid = data['uuid']
-        parent_run_id = ti.dag_run.run_id
-        
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        
-        for i, url in enumerate(urls):
-            try:
-                # Check if URL is valid (status 200)
-                head_response = requests.head(url, headers=headers, allow_redirects=True)
-                if head_response.status_code != 200:
-                    logging.warning(f"Skipping invalid URL: {url} (status: {head_response.status_code})")
-                    continue
-            except Exception as e:
-                logging.error(f"Failed to check URL {url}: {e}")
-                continue
-            
-            # Generate unique run_id for each child DAG run
-            child_run_id = f"triggered__{parent_run_id}_{i}"
-            logging.info(f"Triggering lowtouch_html_to_vector for URL: {url} with run_id: {child_run_id}")
-            
-            # Trigger the child DAG
-            trigger_dag_func(
-                dag_id='lowtouch_html_to_vector',
-                run_id=child_run_id,
-                conf={'url': url, 'uuid': uuid},
-                replace_microseconds=False,
-            )
-
-    trigger_task = PythonOperator(
+    # Step 2: Dynamically Trigger DAGs (Airflow 3 Native)
+    # This operator runs on the Scheduler, so it is allowed to trigger DAGs.
+    trigger_task = TriggerDagRunOperator.partial(
         task_id='trigger_child_dags',
-        python_callable=trigger_child_dags,
-        trigger_rule=TriggerRule.ALL_SUCCESS,
+        trigger_dag_id='lowtouch_html_to_vector',
+        reset_dag_run=True, # Allows re-running for the same execution date
+        wait_for_completion=False,
+        poke_interval=30
+    ).expand(
+        conf=parse_task.output # Maps over the list returned by parse_task
     )
 
-    parse_task >> trigger_task
-
-# Child DAG
+# --- Child DAG ---
 with DAG(
     'lowtouch_html_to_vector',
     default_args=default_args,
-    description='Process individual lowtouch.ai HTML page',
-    schedule_interval=None,  # Triggered by parent DAG
+    schedule=None,
     start_date=datetime(2025, 4, 16),
     catchup=False,
-    max_active_runs=10,  # Limit concurrent runs
-    concurrency=10,      # Limit concurrent tasks
-    tags=['lowtouch', 'agentvector', 'load', 'html'],
+    max_active_runs=10,
+    max_active_tasks=10, # FIX: Replaced 'concurrency'
+    tags=['lowtouch', 'agentvector'],
 ) as child_dag:
 
     def upload_html_to_agentvector(**context):
         try:
+            # Pull config from the triggered run
             conf = context['dag_run'].conf
             url = conf.get('url')
             uuid = conf.get('uuid')
             
-            if not url or not uuid:
-                raise ValueError("Missing 'url' or 'uuid' in DAG run configuration")
-                
+            if not url:
+                raise ValueError("No URL provided in DAG run configuration")
+
+            logging.info(f"Processing URL: {url}")
+            
             agentvector_url = f'http://vector:8000/vector/html/{uuid}/{url}'
             headers = {'User-Agent': 'Mozilla/5.0'}
             
-            # Call agentvector API to process HTML
             response = requests.post(agentvector_url, headers=headers)
             response.raise_for_status()
-            logging.info(f"Successfully uploaded {url} to agentvector. Response: {response.text}")
+            logging.info(f"Success: {response.text}")
         
         except Exception as e:
-            logging.error(f"Failed to process HTML {url}: {e}")
-
-            # Push extra info into XCom for Slack
+            logging.error(f"Failed to process {url}: {e}")
+            
+            # Push to XCom for Slack Alert
             ti = context["ti"]
             ti.xcom_push(key="failed_url", value=url)
             ti.xcom_push(key="error_message", value=str(e))
-
             raise
 
     upload_task = PythonOperator(
         task_id='upload_html',
         python_callable=upload_html_to_agentvector,
-        provide_context=True,
     )
-
-    upload_task
