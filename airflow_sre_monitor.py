@@ -379,49 +379,41 @@ with DAG(
     t1 = PythonOperator(
         task_id="identify_auth_errors",
         python_callable=task1_identify_auth_errors,
-        provide_context=True
     )
     
     t2 = PythonOperator(
         task_id="count_import_errors",
         python_callable=task2_count_import_errors,
-        provide_context=True
     )
     
     t3 = PythonOperator(
         task_id="detailed_import_errors",
         python_callable=task3_detailed_import_errors,
-        provide_context=True
     )
     
     t4 = PythonOperator(
         task_id="comprehensive_errors",
         python_callable=task4_comprehensive_errors,
-        provide_context=True
     )
 
     t5 = PythonOperator(
         task_id="resource_utilization",
         python_callable=task5_resource_utilization,
-        provide_context=True
     )
 
     t6 = PythonOperator(
         task_id="observability_monitoring",
         python_callable=task6_observability_monitoring,
-        provide_context=True
     )
 
     t7 = PythonOperator(
         task_id="compose_email",
         python_callable=task7_compose_email,
-        provide_context=True
     )
 
     t8 = PythonOperator(
         task_id="send_email",
         python_callable=task8_send_email,
-        provide_context=True
     )
 
     t1 >> t2 >> t3 >> t4 >> t5 >> t6 >> t7 >> t8

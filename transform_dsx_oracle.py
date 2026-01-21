@@ -401,13 +401,11 @@ with DAG(
     transform_task = PythonOperator(
         task_id="transform_dsx_file",
         python_callable=transform_dsx_file,
-        provide_context=True
     )
     
     create_pr_task = PythonOperator(
         task_id="create_pr",
         python_callable=create_pr,
-        provide_context=True
     )
     
     transform_task >> create_pr_task

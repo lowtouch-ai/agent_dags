@@ -4575,121 +4575,103 @@ with DAG(
     load_context_task = PythonOperator(
         task_id="load_context_from_dag_run",
         python_callable=load_context_from_dag_run,
-        provide_context=True
     )
 
     analyze_task = PythonOperator(
         task_id="analyze_user_response",
         python_callable=analyze_user_response,
-        provide_context=True
     )
 
     validate_and_clean_task = PythonOperator(
         task_id="validate_and_clean_analysis",
         python_callable=validate_and_clean_analysis,
-        provide_context=True
     )
 
     branch_task = BranchPythonOperator(
         task_id="branch_to_creation_tasks",
         python_callable=branch_to_creation_tasks,
-        provide_context=True
     )
 
     determine_owner_task = PythonOperator(
         task_id="determine_owner",
         python_callable=determine_owner,
-        provide_context=True
     )
 
     check_task_threshold_task = PythonOperator(
         task_id="check_task_threshold",
         python_callable=check_task_threshold,
-        provide_context=True
     )
 
     create_contacts_task = PythonOperator(
         task_id="create_contacts",
         python_callable=create_contacts,
         retries=2,
-        provide_context=True
     )
 
     create_companies_task = PythonOperator(
         task_id="create_companies",
         python_callable=create_companies,
         retries=2,
-        provide_context=True
     )
 
     create_deals_task = PythonOperator(
         task_id="create_deals",
         python_callable=create_deals,
         retries=2,
-        provide_context=True
     )
 
     create_meetings_task = PythonOperator(
         task_id="create_meetings",
         python_callable=create_meetings,
         retries=2,
-        provide_context=True
     )
 
     create_notes_task = PythonOperator(
         task_id="create_notes",
         python_callable=create_notes,
         retries=2,
-        provide_context=True
     )
 
     create_tasks_task = PythonOperator(
         task_id="create_tasks",
         python_callable=create_tasks,
         retries=2,
-        provide_context=True
     )
 
     update_contacts_task = PythonOperator(
         task_id="update_contacts",
         python_callable=update_contacts,
         retries=2,
-        provide_context=True
     )
 
     update_companies_task = PythonOperator(
         task_id="update_companies",
         python_callable=update_companies,
         retries=2,
-        provide_context=True
     )
 
     update_deals_task = PythonOperator(
         task_id="update_deals",
         python_callable=update_deals,
         retries=2,
-        provide_context=True
     )
 
     update_meetings_task = PythonOperator(
         task_id="update_meetings",
         python_callable=update_meetings,
         retries=2,
-        provide_context=True
     )
 
     update_notes_task = PythonOperator(
         task_id="update_notes",
         python_callable=update_notes,
         retries=2,
-        provide_context=True
     )
 
     update_tasks_task = PythonOperator(
         task_id="update_tasks",
         python_callable=update_tasks,
         retries=2,
-        provide_context=True
     )
 
     # New join task to handle branching and skip propagation
@@ -4701,25 +4683,21 @@ with DAG(
     create_associations_task = PythonOperator(
         task_id="create_associations",
         python_callable=create_associations,
-        provide_context=True
     )
 
     collect_results_task = PythonOperator(
         task_id="collect_and_save_results",
         python_callable=collect_and_save_results,
-        provide_context=True
     )
 
     compose_response_task = PythonOperator(
         task_id="compose_response_html",
         python_callable=compose_response_html,
-        provide_context=True
     )
 
     send_final_email_task = PythonOperator(
         task_id="send_final_email",
         python_callable=send_final_email,
-        provide_context=True
     )
 
     end_task = DummyOperator(

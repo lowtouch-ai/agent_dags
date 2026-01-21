@@ -501,26 +501,22 @@ with DAG(
     task_1 = PythonOperator(
         task_id="step_1_process_email",
         python_callable=step_1_process_email,
-        provide_context=True
     )
     
     task_2 = PythonOperator(
         task_id="step_2_create_vendor_bill",
         python_callable=step_2_create_vendor_bill,
-        provide_context=True
     )
     
     task_3 = PythonOperator(
         task_id="step_3_compose_email",
         python_callable=step_3_compose_email,
-        provide_context=True
     )
     
     
     task_4 = PythonOperator(
         task_id="step_4_send_email",
         python_callable=step_4_send_email,
-        provide_context=True
     )
     
     task_1 >> task_2 >> task_3 >> task_4 

@@ -346,7 +346,6 @@ with DAG(
         initiate_call_task = PythonOperator(
             task_id="initiate_call",
             python_callable=initiate_call,
-            provide_context=True
         )
 
         adjust_voicemail_task = PythonOperator(
@@ -375,7 +374,6 @@ with DAG(
         branch_recording_task = BranchPythonOperator(
             task_id="branch_recording_logic",
             python_callable=branch_recording_logic,
-            provide_context=True
         )
 
         fetch_recording_task = PythonOperator(
@@ -389,7 +387,6 @@ with DAG(
         prepare_transcription_task = PythonOperator(
             task_id="prepare_transcription_trigger",
             python_callable=prepare_transcription_trigger,
-            provide_context=True
         )
 
         trigger_transcription_task = TriggerDagRunOperator(

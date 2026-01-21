@@ -176,28 +176,24 @@ with DAG(
     fetch_emails_task = PythonOperator(
         task_id='fetch_cv_emails',
         python_callable=fetch_cv_emails,
-        provide_context=True
     )
     
     # Task 2: Branch based on email presence
     branch_task = BranchPythonOperator(
         task_id='check_for_emails',
         python_callable=check_for_emails,
-        provide_context=True
     )
     
     # Task 3a: Trigger CV analysis for each email
     trigger_analysis_task = PythonOperator(
         task_id='trigger_cv_analysis',
         python_callable=trigger_cv_analysis_tasks,
-        provide_context=True
     )
     
     # Task 3b: Log no emails found
     no_emails_task = PythonOperator(
         task_id='no_emails_found',
         python_callable=log_no_emails,
-        provide_context=True
     )
     
     # Set task dependencies

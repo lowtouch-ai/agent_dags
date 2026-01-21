@@ -1248,43 +1248,36 @@ with DAG(
     anomaly_detection_task = PythonOperator(
         task_id="step_2a_anomaly_detection",
         python_callable=step_2a_anomaly_detection,
-        provide_context=True
     )
     
     rca_task = PythonOperator(
         task_id="step_2b_rca",
         python_callable=step_2b_rca,
-        provide_context=True
     )
     
     comparative_analysis_task = PythonOperator(
         task_id="step_2c_comparative_analysis",
         python_callable=step_2c_comparative_analysis,
-        provide_context=True
     )
     
     combine_analysis_task = PythonOperator(
         task_id="step_2f_combine_analysis",
         python_callable=step_2f_combine_analysis,
-        provide_context=True
     )
     
     generate_plot_task = PythonOperator(
         task_id="step_3_generate_plot",
         python_callable=step_3_generate_plot,
-        provide_context=True
     )
     
     compose_email_task = PythonOperator(
         task_id="step_4_compose_email",
         python_callable=step_4_compose_email,
-        provide_context=True
     )
     
     send_report_email_task = PythonOperator(
         task_id="step_5_send_report_email",
         python_callable=step_5_send_report_email,
-        provide_context=True
     )
     
     # Set up task dependencies serially for analysis steps

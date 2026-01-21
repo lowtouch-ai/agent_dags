@@ -372,25 +372,21 @@ with DAG(
     fetch_emails_task = PythonOperator(
         task_id="fetch_reply_emails",
         python_callable=fetch_reply_emails,
-        provide_context=True
     )
 
     branch_task = BranchPythonOperator(
         task_id="branch_task",
         python_callable=branch_function,
-        provide_context=True
     )
 
     trigger_reply_response_task = PythonOperator(
         task_id="trigger_reply_response_task",
         python_callable=trigger_response_tasks,
-        provide_context=True
     )
 
     no_email_found_task = PythonOperator(
         task_id="no_email_found_task",
         python_callable=no_email_found,
-        provide_context=True
     )
 
     # Task dependencies
@@ -784,31 +780,26 @@ with DAG(
     categorize = PythonOperator(
         task_id="categorize_prompt",
         python_callable=categorize_prompt,
-        provide_context=True
     )
     
     branch = BranchPythonOperator(
         task_id="branch_on_category",
         python_callable=branch_on_category,
-        provide_context=True
     )
     
     t1 = PythonOperator(
         task_id="ask_for_details",
         python_callable=ask_for_details,
-        provide_context=True
     )
     
     t2 = PythonOperator(
         task_id="usage_analyzer",
         python_callable=usage_analyzer,
-        provide_context=True
     )
     
     t3 = PythonOperator(
         task_id="non_relevant_question",
         python_callable=non_relevant_question,
-        provide_context=True
     )
     
     # t4 = PythonOperator(

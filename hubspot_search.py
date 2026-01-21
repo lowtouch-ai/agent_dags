@@ -4900,25 +4900,21 @@ with DAG(
     load_context_task = PythonOperator(
         task_id="load_context_from_dag_run",
         python_callable=load_context_from_dag_run,
-        provide_context=True
     )
 
     generate_variants_task = PythonOperator(
     task_id="generate_spelling_variants",
     python_callable=generate_and_inject_spelling_variants,
-    provide_context=True
     )
 
     analyze_entities_task = PythonOperator(
         task_id="analyze_thread_entities",
         python_callable=analyze_thread_entities,
-        provide_context=True
     )
 
     summarize_engagement_task = PythonOperator(
         task_id="summarize_engagement_details",
         python_callable=summarize_engagement_details,
-        provide_context=True
     )
 
     summarize_engagement_360_task = PythonOperator(
@@ -4930,20 +4926,17 @@ with DAG(
     branch_task = BranchPythonOperator(
         task_id="decide_workflow_path",
         python_callable=decide_workflow_path,
-        provide_context=True
     )
 
     determine_owner_task = PythonOperator(
         task_id="determine_owner",
         python_callable=determine_owner,
-        provide_context=True
     )
     
     # ADD THIS NEW TASK
     validate_deal_stage_task = PythonOperator(
         task_id="validate_deal_stage",
         python_callable=validate_deal_stage,
-        provide_context=True
     )
 
     search_contacts_task = PythonOperator(
@@ -4956,117 +4949,98 @@ with DAG(
     validate_companies_task = PythonOperator(
         task_id="validate_companies_against_associations",
         python_callable=validate_companies_against_associations,
-        provide_context=True
     )
 
     validate_deals_task = PythonOperator(
         task_id="validate_deals_against_associations",
         python_callable=validate_deals_against_associations,
-        provide_context=True
     )
 
     refine_contacts_task = PythonOperator(
         task_id="refine_contacts_by_associations",
         python_callable=refine_contacts_by_associations,
-        provide_context=True
     )
 
     search_deals_directly_task = PythonOperator(
     task_id="search_deals_directly",
     python_callable=search_deals_directly,
-    provide_context=True
     )
 
     search_companies_directly_task = PythonOperator(
         task_id="search_companies_directly",
         python_callable=search_companies_directly,
-        provide_context=True
     )
 
     merge_results_task = PythonOperator(
         task_id="merge_search_results",
         python_callable=merge_search_results,
-        provide_context=True
     )
 
     validate_context_task = PythonOperator(
         task_id="validate_associations_against_context",
         python_callable=validate_associations_against_context,
-        provide_context=True
     )
 
     parse_notes_tasks_task = PythonOperator(
         task_id="parse_notes_tasks_meeting",
         python_callable=parse_notes_tasks_meeting,
-        provide_context=True
     )
 
     check_threshold_task = PythonOperator(
         task_id="check_task_threshold",
         python_callable=check_task_threshold,
-        provide_context=True
     )
 
     validate_rules_task = PythonOperator(
         task_id="validate_entity_creation_rules",
         python_callable=validate_entity_creation_rules,
-        provide_context=True
     )
 
     validation_branch_task = BranchPythonOperator(
         task_id="decide_validation_path",
         python_callable=decide_validation_path,
-        provide_context=True
     )
 
     compile_task = PythonOperator(
         task_id="compile_search_results",
         python_callable=compile_search_results,
-        provide_context=True
     )
 
     # NEW: Branch to check if any action is needed
     check_action_branch_task = BranchPythonOperator(
         task_id="check_if_action_needed",
         python_callable=check_if_action_needed,
-        provide_context=True
     )
 
     compose_email_task = PythonOperator(
         task_id="compose_confirmation_email",
         python_callable=compose_confirmation_email,
-        provide_context=True
     )
 
     send_email_task = PythonOperator(
         task_id="send_confirmation_email",
         python_callable=send_confirmation_email,
-        provide_context=True
     )
 
     # NEW: No-action acknowledgment tasks
     compose_no_action_task = PythonOperator(
         task_id="compose_no_action_email",
         python_callable=compose_no_action_email,
-        provide_context=True
     )
 
     send_no_action_task = PythonOperator(
         task_id="send_no_action_email",
         python_callable=send_no_action_email,
-        provide_context=True
     )
 
     compose_validation_error_task = PythonOperator(
         task_id="compose_validation_error_email",
         python_callable=compose_validation_error_email,
-        provide_context=True
     )
 
     send_validation_error_task = PythonOperator(
         task_id="send_validation_error_email",
         python_callable=send_validation_error_email,
-        provide_context=True
     )
 
     validation_end_task = DummyOperator(
@@ -5076,13 +5050,11 @@ with DAG(
     compose_summary_email_task = PythonOperator(
         task_id="compose_engagement_summary_email",
         python_callable=compose_engagement_summary_email,
-        provide_context=True
     )
 
     send_summary_email_task = PythonOperator(
         task_id="send_engagement_summary_email",
         python_callable=send_engagement_summary_email,
-        provide_context=True
     )
 
     end_task = DummyOperator(

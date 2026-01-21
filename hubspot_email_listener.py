@@ -4997,31 +4997,26 @@ with DAG(
     fetch_emails_task = PythonOperator(
         task_id="fetch_unread_emails",
         python_callable=fetch_unread_emails,
-        provide_context=True
     )
 
     branch_task = BranchPythonOperator(
         task_id="branch_task",
         python_callable=branch_function,
-        provide_context=True
     )
 
     trigger_meeting_minutes_task = PythonOperator(
         task_id="trigger_meeting_minutes",
         python_callable=trigger_meeting_minutes,
-        provide_context=True
     )
 
     trigger_continuation_task = PythonOperator(
         task_id="trigger_continuation_dag",
         python_callable=trigger_continuation_dag,
-        provide_context=True
     )
 
     decide_and_search = PythonOperator(
         task_id='analyze_and_search_with_tools',
         python_callable=analyze_and_search_with_tools,
-        provide_context=True # Important: allows **kwargs with ti
     )
     
     # === NEW TASK 2: Format response or trigger report ===
@@ -5034,19 +5029,16 @@ with DAG(
     trigger_report_task = PythonOperator(
         task_id="trigger_report_dag",
         python_callable=trigger_report_dag,
-        provide_context=True
     )
 
     trigger_task_completion_task = PythonOperator(
         task_id="trigger_task_completion",
         python_callable=trigger_task_completion_dag,
-        provide_context=True
     )
 
     no_email_found_task = PythonOperator(
         task_id="no_email_found_task",
         python_callable=no_email_found,
-        provide_context=True
     )
 
     fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, decide_and_search, trigger_report_task, trigger_task_completion_task, no_email_found_task]

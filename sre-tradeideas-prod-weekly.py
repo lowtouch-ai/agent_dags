@@ -2418,21 +2418,18 @@ with DAG(
     t_pod_thisweek = PythonOperator(
         task_id="pod_details_thisweek",
         python_callable=pod_details_thisweek,
-        provide_context=True
     )
 
     # Pod Tasks - Last Week
     t_pod_lastweek = PythonOperator(
         task_id="pod_details_lastweek",
         python_callable=pod_details_lastweek,
-        provide_context=True
     )
 
     # Pod Tasks - Comparison
     t_pod_comparison = PythonOperator(
         task_id="pod_details_thisweek_vs_lastweek",
         python_callable=pod_details_thisweek_vs_lastweek,
-        provide_context=True
     )
 
     # Final tasks
