@@ -1136,7 +1136,12 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         status = parsed.get("status")
 
         if status != "success":
-            raise Exception(parsed.get("reason", "LLM returned status != success"))
+            # This is an API failure - AI successfully reported it
+            api_error = parsed.get("reason", "HubSpot API error")
+            errors = parsed.get("errors", [])
+            
+            logging.warning(f"HubSpot API reported error: {api_error}")
+            logging.warning(f"Detailed errors: {errors}")
 
         created_contacts = parsed.get("created_contacts", [])
         errors = parsed.get("errors", [])
@@ -1355,7 +1360,12 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         status = parsed.get("status")
 
         if status != "success":
-            raise Exception(parsed.get("reason", "LLM returned status != success"))
+            # This is an API failure - AI successfully reported it
+            api_error = parsed.get("reason", "HubSpot API error")
+            errors = parsed.get("errors", [])
+            
+            logging.warning(f"HubSpot API reported error: {api_error}")
+            logging.warning(f"Detailed errors: {errors}")
 
         created_companies = parsed.get("created_companies", [])
         errors = parsed.get("errors", [])
@@ -1597,8 +1607,13 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         status = parsed.get("status")
 
         if status != "success":
-            raise Exception(parsed.get("reason", "LLM returned status != success"))
-
+            # This is an API failure - AI successfully reported it
+            api_error = parsed.get("reason", "HubSpot API error")
+            errors = parsed.get("errors", [])
+            
+            logging.warning(f"HubSpot API reported error: {api_error}")
+            logging.warning(f"Detailed errors: {errors}")
+        
         created_deals = parsed.get("created_deals", [])
         errors = parsed.get("errors", [])
 
@@ -1769,7 +1784,12 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         status = parsed.get("status")
 
         if status != "success":
-            raise Exception(parsed.get("reason", "LLM returned status != success"))
+            # This is an API failure - AI successfully reported it
+            api_error = parsed.get("reason", "HubSpot API error")
+            errors = parsed.get("errors", [])
+            
+            logging.warning(f"HubSpot API reported error: {api_error}")
+            logging.warning(f"Detailed errors: {errors}")
 
         created_meetings = parsed.get("created_meetings", [])
         errors = parsed.get("errors", [])
@@ -1989,8 +2009,13 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         status = parsed.get("status")
 
         if status != "success":
-            raise Exception(parsed.get("reason", "LLM returned status != success"))
-
+            # This is an API failure - AI successfully reported it
+            api_error = parsed.get("reason", "HubSpot API error")
+            errors = parsed.get("errors", [])
+            
+            logging.warning(f"HubSpot API reported error: {api_error}")
+            logging.warning(f"Detailed errors: {errors}")
+        
         created_notes = parsed.get("created_notes", [])
         errors = parsed.get("errors", [])
 
@@ -2187,8 +2212,13 @@ YOU MUST:
         status = parsed.get("status")
 
         if status != "success":
-            raise Exception(parsed.get("reason", "LLM returned status != success"))
-
+            # This is an API failure - AI successfully reported it
+            api_error = parsed.get("reason", "HubSpot API error")
+            errors = parsed.get("errors", [])
+            
+            logging.warning(f"HubSpot API reported error: {api_error}")
+            logging.warning(f"Detailed errors: {errors}")
+        
         created_tasks = parsed.get("created_tasks", [])
         errors = parsed.get("errors", [])
 
@@ -2353,8 +2383,13 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         status = parsed.get("status")
 
         if status != "success":
-            raise Exception(parsed.get("reason", "LLM returned status != success"))
-
+            # This is an API failure - AI successfully reported it
+            api_error = parsed.get("reason", "HubSpot API error")
+            errors = parsed.get("errors", [])
+            
+            logging.warning(f"HubSpot API reported error: {api_error}")
+            logging.warning(f"Detailed errors: {errors}")
+        
         updated_contacts = parsed.get("updated_contacts", [])
         errors = parsed.get("errors", [])
 
@@ -2514,7 +2549,12 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         status = parsed.get("status")
 
         if status != "success":
-            raise Exception(parsed.get("reason", "LLM returned status != success"))
+            # This is an API failure - AI successfully reported it
+            api_error = parsed.get("reason", "HubSpot API error")
+            errors = parsed.get("errors", [])
+            
+            logging.warning(f"HubSpot API reported error: {api_error}")
+            logging.warning(f"Detailed errors: {errors}")
 
         updated_companies = parsed.get("updated_companies", [])
         errors = parsed.get("errors", [])
@@ -3415,6 +3455,12 @@ def create_associations(ti, **context):
 
     # === Base Prompt ===
     base_prompt = f"""You are a HubSpot API assistant responsible for creating associations between entities using create_multi_association tool.
+    You do not have the capability to create,update or search the entities, You can only call create_multi_associations tool.
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 
 FULL CHAT HISTORY:
 {conversation_context}
@@ -3515,7 +3561,7 @@ RETURN ONLY CLEAN JSON."""
     response = None
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-        logging.info(f"Raw AI response: {response[:1000]}...")
+        logging.info(f"Raw AI response: {response}...")
     except Exception as e:
         raise
     try:
