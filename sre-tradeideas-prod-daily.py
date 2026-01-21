@@ -2373,44 +2373,44 @@ with DAG(
 ) as dag:
 
    # Static Tasks - renumbered sequentially
-    t1 = PythonOperator(task_id="node_cpu_today", python_callable=node_cpu_today, provide_context=True)
-    t2 = PythonOperator(task_id="node_memory_today", python_callable=node_memory_today, provide_context=True)
-    t3 = PythonOperator(task_id="node_disk_today", python_callable=node_disk_today, provide_context=True)
-    t4 = PythonOperator(task_id="node_readiness_check", python_callable=fetch_node_readiness, provide_context=True)
-    t5 = PythonOperator(task_id="pod_restart_today", python_callable=pod_restart_today, provide_context=True)
-    t6 = PythonOperator(task_id="mysql_health_today", python_callable=mysql_health_today, provide_context=True)
-    t7 = PythonOperator(task_id="kubernetes_version_check", python_callable=kubernetes_version_check, provide_context=True)
-    t7_1 = PythonOperator(task_id="kubernetes_eol_and_next_version", python_callable=kubernetes_eol_and_next_version, provide_context=True)
-    t8 = PythonOperator(task_id="microk8s_expiry_check", python_callable=fetch_microk8s_expiry, provide_context=True)
-    t9 = PythonOperator(task_id="lke_pvc_storage_details", python_callable=lke_pvc_storage_details, provide_context=True)
+    t1 = PythonOperator(task_id="node_cpu_today", python_callable=node_cpu_today)
+    t2 = PythonOperator(task_id="node_memory_today", python_callable=node_memory_today)
+    t3 = PythonOperator(task_id="node_disk_today", python_callable=node_disk_today)
+    t4 = PythonOperator(task_id="node_readiness_check", python_callable=fetch_node_readiness)
+    t5 = PythonOperator(task_id="pod_restart_today", python_callable=pod_restart_today)
+    t6 = PythonOperator(task_id="mysql_health_today", python_callable=mysql_health_today)
+    t7 = PythonOperator(task_id="kubernetes_version_check", python_callable=kubernetes_version_check)
+    t7_1 = PythonOperator(task_id="kubernetes_eol_and_next_version", python_callable=kubernetes_eol_and_next_version)
+    t8 = PythonOperator(task_id="microk8s_expiry_check", python_callable=fetch_microk8s_expiry)
+    t9 = PythonOperator(task_id="lke_pvc_storage_details", python_callable=lke_pvc_storage_details)
     
-    t10 = PythonOperator(task_id="node_cpu_yesterday", python_callable=node_cpu_yesterday, provide_context=True)
-    t11 = PythonOperator(task_id="node_memory_yesterday", python_callable=node_memory_yesterday, provide_context=True)
-    t12 = PythonOperator(task_id="node_disk_yesterday", python_callable=node_disk_yesterday, provide_context=True)
-    t13 = PythonOperator(task_id="lke_pvc_storage_details_yesterday", python_callable=lke_pvc_storage_details_yesterday, provide_context=True)
-    t14 = PythonOperator(task_id="mysql_health_yesterday", python_callable=mysql_health_yesterday, provide_context=True)
+    t10 = PythonOperator(task_id="node_cpu_yesterday", python_callable=node_cpu_yesterday)
+    t11 = PythonOperator(task_id="node_memory_yesterday", python_callable=node_memory_yesterday)
+    t12 = PythonOperator(task_id="node_disk_yesterday", python_callable=node_disk_yesterday)
+    t13 = PythonOperator(task_id="lke_pvc_storage_details_yesterday", python_callable=lke_pvc_storage_details_yesterday)
+    t14 = PythonOperator(task_id="mysql_health_yesterday", python_callable=mysql_health_yesterday)
     
-    t15 = PythonOperator(task_id="node_cpu_today_vs_yesterday", python_callable=node_cpu_today_vs_yesterday, provide_context=True)
-    t16 = PythonOperator(task_id="node_memory_today_vs_yesterday", python_callable=node_memory_today_vs_yesterday, provide_context=True)
-    t17 = PythonOperator(task_id="node_disk_today_vs_yesterday", python_callable=node_disk_today_vs_yesterday, provide_context=True)
-    t18 = PythonOperator(task_id="lke_pvc_today_vs_yesterday", python_callable=lke_pvc_today_vs_yesterday, provide_context=True)
-    t19 = PythonOperator(task_id="mysql_health_today_vs_yesterday", python_callable=mysql_health_today_vs_yesterday, provide_context=True)
+    t15 = PythonOperator(task_id="node_cpu_today_vs_yesterday", python_callable=node_cpu_today_vs_yesterday)
+    t16 = PythonOperator(task_id="node_memory_today_vs_yesterday", python_callable=node_memory_today_vs_yesterday)
+    t17 = PythonOperator(task_id="node_disk_today_vs_yesterday", python_callable=node_disk_today_vs_yesterday)
+    t18 = PythonOperator(task_id="lke_pvc_today_vs_yesterday", python_callable=lke_pvc_today_vs_yesterday)
+    t19 = PythonOperator(task_id="mysql_health_today_vs_yesterday", python_callable=mysql_health_today_vs_yesterday)
 
     # Pod Tasks - Today
-    t_pod_today = PythonOperator(task_id="pod_details_today", python_callable=pod_details_today, provide_context=True)
+    t_pod_today = PythonOperator(task_id="pod_details_today", python_callable=pod_details_today)
 
     # Pod Tasks - Yesterday
-    t_pod_yesterday = PythonOperator(task_id="pod_details_yesterday", python_callable=pod_details_yesterday, provide_context=True)
+    t_pod_yesterday = PythonOperator(task_id="pod_details_yesterday", python_callable=pod_details_yesterday)
 
     # Pod Tasks - Comparison
-    t_pod_comparison = PythonOperator(task_id="pod_details_today_vs_yesterday", python_callable=pod_details_today_vs_yesterday, provide_context=True)
+    t_pod_comparison = PythonOperator(task_id="pod_details_today_vs_yesterday", python_callable=pod_details_today_vs_yesterday)
 
     
-    t20 = PythonOperator(task_id="overall_summary", python_callable=overall_summary, provide_context=True)
-    t21 = PythonOperator(task_id="compile_sre_report", python_callable=compile_sre_report, provide_context=True)
-    t21_1 = PythonOperator(task_id="generate_pdf", python_callable=generate_pdf_report_callable, provide_context=True)
-    t22 = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html, provide_context=True)
-    t23 = PythonOperator(task_id="send_sre_email", python_callable=send_sre_email, provide_context=True)
+    t20 = PythonOperator(task_id="overall_summary", python_callable=overall_summary)
+    t21 = PythonOperator(task_id="compile_sre_report", python_callable=compile_sre_report)
+    t21_1 = PythonOperator(task_id="generate_pdf", python_callable=generate_pdf_report_callable)
+    t22 = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html)
+    t23 = PythonOperator(task_id="send_sre_email", python_callable=send_sre_email)
     
     
 

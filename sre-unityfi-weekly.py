@@ -998,9 +998,9 @@ with DAG(
     ai_summary     = PythonOperator(task_id="ai_summary", python_callable=overall_summary)
     ai_conclusion  = PythonOperator(task_id="ai_conclusion", python_callable=generate_conclusion_section)
     compile_report = PythonOperator(task_id="compile_report", python_callable=compile_sre_report)
-    generate_pdf = PythonOperator(task_id="generate_pdf", python_callable=generate_pdf_report_callable, provide_context=True)
-    convert_to_html = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html, provide_context=True)
-    send_sre_email = PythonOperator(task_id="send_sre_email", python_callable=send_sre_email, provide_context=True)
+    generate_pdf = PythonOperator(task_id="generate_pdf", python_callable=generate_pdf_report_callable)
+    convert_to_html = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html)
+    send_sre_email = PythonOperator(task_id="send_sre_email", python_callable=send_sre_email)
     
     # Execution order
     [fetch_this, fetch_prev] >> gen_windows >> gen_cpu_peaks >> gen_mem_peaks >> gen_disk_peaks

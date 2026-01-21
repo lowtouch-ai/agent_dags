@@ -805,7 +805,6 @@ with DAG(
     # t4 = PythonOperator(
     #     task_id="check_memory_usage",
     #     python_callable=check_memory_usage,
-    #     provide_context=True
     # )
     
     t5 = PythonOperator(
