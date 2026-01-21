@@ -125,6 +125,5 @@ def trigger_uptime_reports(**context):
 trigger_task = PythonOperator(
     task_id="trigger_client_reports",
     python_callable=trigger_uptime_reports,
-    provide_context=True,
     dag=dag,
 )

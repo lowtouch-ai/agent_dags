@@ -141,5 +141,4 @@ with DAG(
     transcribe_task = PythonOperator(
         task_id="transcribe_audio",
         python_callable=transcribe_audio,
-        provide_context=True,
     )

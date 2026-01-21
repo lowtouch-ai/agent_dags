@@ -4920,7 +4920,6 @@ with DAG(
     summarize_engagement_360_task = PythonOperator(
     task_id="summarize_engagement_details_360",
     python_callable=summarize_engagement_details_360,
-    provide_context=True,
     )
 
     branch_task = BranchPythonOperator(
@@ -4942,7 +4941,6 @@ with DAG(
     search_contacts_task = PythonOperator(
         task_id="search_contacts_with_associations",
         python_callable=search_contacts_with_associations,
-        provide_context=True,
         retries=2
     )
 

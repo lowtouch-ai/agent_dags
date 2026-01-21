@@ -202,7 +202,6 @@ with DAG(
     upload_task = PythonOperator(
         task_id='upload_html',
         python_callable=upload_html_to_agentvector,
-        provide_context=True,
     )
 
     upload_task

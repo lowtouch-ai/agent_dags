@@ -1033,7 +1033,6 @@ with DAG(
     task_3 = PythonOperator(
         task_id="step_3_convert_to_html",
         python_callable=step_3_convert_to_html,
-        provide_context=True,
         trigger_rule="none_failed_min_one_success"  # Allow task to run from either flow
     )
 

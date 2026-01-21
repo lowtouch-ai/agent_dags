@@ -351,7 +351,6 @@ with DAG(
         adjust_voicemail_task = PythonOperator(
         task_id="adjust_voicemail_message",
         python_callable=adjust_voicemail_message,
-        provide_context=True,
         retries=10,  # Increase to 5 retries
         retry_delay=timedelta(seconds=5)  # Increase to 5 seconds
         )
@@ -366,7 +365,6 @@ with DAG(
         check_status_task = PythonOperator(
             task_id="check_call_status",
             python_callable=check_call_status,
-            provide_context=True,
             retries=50,
             retry_delay=timedelta(seconds=5)
         )
@@ -379,7 +377,6 @@ with DAG(
         fetch_recording_task = PythonOperator(
             task_id="fetch_and_save_recording",
             python_callable=fetch_and_save_recording,
-            provide_context=True,
             retries=10,
             retry_delay=timedelta(seconds=10)
         )
@@ -401,7 +398,6 @@ with DAG(
         fetch_transcription_task = PythonOperator(
             task_id="fetch_transcription",
             python_callable=fetch_transcription,
-            provide_context=True,
         )
 
         skip_recording = EmptyOperator(task_id="skip_recording")

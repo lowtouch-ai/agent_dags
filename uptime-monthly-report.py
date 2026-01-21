@@ -1236,13 +1236,11 @@ with DAG(
     init_config = PythonOperator(
         task_id="init_dynamic_config",
         python_callable=init_dynamic_config,
-        provide_context=True,
     )
 
     fetch_data_task = PythonOperator(
         task_id="step_1_fetch_data",
         python_callable=step_1_fetch_data,
-        provide_context=True,
         retry_delay=timedelta(minutes=15),
         on_failure_callback=slack_alert  # Call slack_alert on final failure (after retries)
     )

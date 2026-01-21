@@ -64,5 +64,4 @@ with DAG(
     process_task = PythonOperator(
         task_id='process_pdf_to_vector',
         python_callable=process_pdf_file,
-        provide_context=True,
     )

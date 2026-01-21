@@ -368,13 +368,11 @@ with DAG(
     generate_and_improve = PythonOperator(
         task_id="generate_and_improve",
         python_callable=generate_with_quality_loop,
-        provide_context=True,
     )
 
     finalize = PythonOperator(
         task_id="format_final_response",
         python_callable=format_final_response,
-        provide_context=True,
     )
 
     # Simple linear flow

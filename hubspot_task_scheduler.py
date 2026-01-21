@@ -882,31 +882,26 @@ with DAG(
     get_owners = PythonOperator(
         task_id="get_all_task_owners",
         python_callable=get_all_task_owners,
-        provide_context=True,
     )
 
     check_window = BranchPythonOperator(
         task_id="check_delivery_window",
         python_callable=check_delivery_window,
-        provide_context=True,
     )
 
     collect_tasks = PythonOperator(
         task_id="collect_due_tasks",
         python_callable=collect_due_tasks,
-        provide_context=True,
     )
 
     send_reminders = PythonOperator(
         task_id="send_spaced_reminders",
         python_callable=send_spaced_reminders,
-        provide_context=True,
     )
 
     skip_collection = PythonOperator(
         task_id="skip_task_collection",
         python_callable=skip_task_collection,
-        provide_context=True,
     )
 
     get_owners >> check_window

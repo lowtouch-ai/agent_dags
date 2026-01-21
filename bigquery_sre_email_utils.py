@@ -811,21 +811,18 @@ with DAG(
     t5 = PythonOperator(
         task_id="response_checker",
         python_callable=response_checker,  # Modified version
-        provide_context=True,
         trigger_rule='one_success'
     )
     
     t6 = PythonOperator(
         task_id="convert_to_html",
         python_callable=convert_to_html,
-        provide_context=True,
         trigger_rule='one_success'
     )
     
     t7 = PythonOperator(
         task_id="send_reply",
         python_callable=send_reply,
-        provide_context=True,
         trigger_rule='one_success'
     )
     

@@ -5023,7 +5023,6 @@ with DAG(
     generate_response = PythonOperator(
         task_id='generate_final_response_or_trigger_report',
         python_callable=generate_final_response_or_trigger_report,
-        provide_context=True,
     )
 
     trigger_report_task = PythonOperator(

@@ -1,83 +1,65 @@
 #!/usr/bin/env python3
 """
 Airflow 3.0 migration helper:
-- Replaces 'from airflow.operators.empty import EmptyOperator' → 'from airflow.operators.empty import EmptyOperator'
-- Also handles 'from airflow.operators.empty import EmptyOperator...' (older style)
-- Replaces all occurrences of 'EmptyOperator(' → 'EmptyOperator(' in the code
-- Skips this script file itself
+Deletes entire lines containing provide_context=True / true / 1
+(with optional trailing comma and/or comment)
 """
 
-import re
 from pathlib import Path
+import re
+
+# Improved pattern: allows optional trailing comma
+LINE_ONLY_PATTERN = re.compile(
+    r'^\s*provide_context\s*=\s*(?:True|true|1)\s*,?\s*(?:#.*)?$',
+    re.IGNORECASE
+)
 
 def fix_file(filepath: Path) -> bool:
-    """Process one file. Returns True if any change was made."""
-    original_content = filepath.read_text(encoding="utf-8")
-    content = original_content
+    original_lines = filepath.read_text(encoding="utf-8").splitlines(keepends=True)
+    new_lines = []
+    changed = False
 
-    # Step 1: Fix import statements
-    # Catch common variations
-    content = re.sub(
-        r"(from\s+airflow\.operators\.)(dummy|dummy_operator)(\s+import\s+(DummyOperator|EmptyOperator|\*)?)",
-        r"from airflow.operators.empty import EmptyOperator",
-        content,
-        flags=re.IGNORECASE | re.MULTILINE
-    )
+    for line in original_lines:
+        stripped_for_match = line.rstrip()   # remove trailing newline/spaces only for matching
+        if LINE_ONLY_PATTERN.match(stripped_for_match):
+            changed = True
+            continue  # skip (delete) this line
+        new_lines.append(line)
 
-    # Also catch wildcard or aliased imports (rare, but safe)
-    content = re.sub(
-        r"from\s+airflow\.operators\.dummy\s+import\s+.*DummyOperator.*",
-        r"from airflow.operators.empty import EmptyOperator",
-        content,
-        flags=re.MULTILINE
-    )
-
-    # Step 2: Replace class name usages (EmptyOperator( → EmptyOperator()
-    # This is simple string replace – safe in most cases since it's followed by (
-    content = content.replace("EmptyOperator(", "EmptyOperator(")
-
-    # Optional: also replace standalone DummyOperator if used in type hints / variables (less common)
-    # content = content.replace("DummyOperator", "EmptyOperator")
-
-    if content == original_content:
+    if not changed:
         return False
 
-    filepath.write_text(content, encoding="utf-8")
+    new_content = ''.join(new_lines)
+    filepath.write_text(new_content, encoding="utf-8")
     return True
 
 
 def main():
-    print("Airflow 3.0: Replacing DummyOperator → EmptyOperator")
-    print("Scanning current directory + subdirectories for .py files...\n")
+    print("Airflow 3.0 – Deleting full lines with provide_context=True (comma-aware)")
+    print("Scanning .py files...\n")
+
+    python_files = sorted(p for p in Path(".").rglob("*.py") if p.is_file())
 
     changed_files = []
 
-    for filepath in sorted(Path(".").rglob("*.py")):
-        if filepath.is_file() and "fix_dummy_to_empty" in filepath.name.lower():
-            print(f"  [SKIP] This script: {filepath}")
+    for path in python_files:
+        name_lower = path.name.lower()
+        if "migrate" in name_lower or "fix" in name_lower or "remove" in name_lower:
+            print(f"  [SKIP] {path}")
             continue
 
-        print(f"Checking → {filepath}")
+        print(f"Checking: {path}")
 
-        if fix_file(filepath):
-            changed_files.append(filepath)
-            print(f"  [MODIFIED] {filepath}")
+        if fix_file(path):
+            changed_files.append(path)
+            print(f"  [MODIFIED] {path}")
 
     print("\n" + "═" * 70)
     if changed_files:
-        print(f"Modified {len(changed_files)} file(s):")
-        for f in changed_files:
-            print(f"  • {f}")
-        print("\nReview changes:")
-        print("  git diff")
-        print("Then:")
-        print("  git commit -m 'Migrate DummyOperator to EmptyOperator for Airflow 3 compatibility'")
+        print(f"Modified {len(changed_files)} file(s)")
+        print("Review changes with: git diff")
     else:
-        print("No DummyOperator imports or usages found → nothing changed.")
-
-    print("\nAfter commit:")
-    print("• Restart Airflow scheduler / webserver or wait for DAG folder re-parse")
-    print("• Test DAG parsing → ready for next error?")
+        print("No matching lines found")
 
 
 if __name__ == "__main__":
