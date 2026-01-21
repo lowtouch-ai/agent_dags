@@ -451,7 +451,13 @@ def generate_email_content(*args, **kwargs):
     Returns pure HTML string (no plain text, no outer JSON).
     """
     ti = kwargs["ti"]
-    
+    output_dir = ti.xcom_pull(key="test_session_id", task_ids="create_and_validate_test_cases")
+    postman_collection_prompt = f"Generate the postman collection for the the output directory {output_dir} and provide in the json format {{postman_collection_url: {server_host}/static/postman_reports/xxx.json (postman_url form the output directory)}}"
+    postman_collection_response = get_ai_response(postman_collection_prompt, model=MODEL_NAME)
+    logging.info("Postman collection response: " + postman_collection_response)
+    postman_collection_json = extract_json_from_text(postman_collection_response) or {}
+    postman_collection_url = postman_collection_json.get("postman_collection_url", "")
+    ti.xcom_push(key="postman_collection_url", value=postman_collection_url)
     # Pull required data
     sender       = ti.xcom_pull(key="sender_email",   task_ids="extract_inputs")
     subject      = ti.xcom_pull(key="email_subject",  task_ids="extract_inputs")
@@ -496,6 +502,7 @@ Requirements:
   - Test name
   - Failure reason / error message
   - Link to detailed report: {html_report_link}
+  - Link to Postman collection: {postman_collection_url}
 • Collapsible <details><summary> for long lists of tests (optional but recommended)
 • Professional greeting and closing
 • Mobile-friendly (max-width: 600px container, fluid images/tables)
@@ -510,6 +517,9 @@ Failed Tests:
 
 Full Results (raw):
 {test_results}
+Always include the following links in the email body:   
+- Full HTML Report: {html_report_link}
+- Postman Collection: {postman_collection_url}
 
 Output **only** the full HTML document.
 """
