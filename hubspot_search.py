@@ -486,11 +486,11 @@ Analyze the content and determine:
 
     - MEETINGS (parse_meetings):
         - Set to TRUE ONLY if ALL of these conditions are met:
-            a) A meeting has already occurred(past tense) and the latest user message is a meeting summary.
+            a) A meeting has already occurred(past tense) and the latest user message is a meeting summary that includes meeting details.
             b) Specific meeting details are provided for already held meeting only.
-            c) Whenever the text includes attendees details 
+            c) Whenever the text includes attendees details
         - Set to FALSE for:
-            - Conversations or calls without formal meeting details example attendees.
+            - If the meeting is yet to be scheduled.
             - Future meeting intentions without confirmed details
 
 
