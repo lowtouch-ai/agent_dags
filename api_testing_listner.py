@@ -332,7 +332,7 @@ with DAG("api_testing_monitor_mailbox",
         python_callable=branch_function,
     )
 
-    trigger_test_runner_task = PythonOperator(
+    trigger_test_runner = PythonOperator(
         task_id="trigger_test_runner_task",
         python_callable=trigger_response_tasks,
     )
@@ -344,4 +344,4 @@ with DAG("api_testing_monitor_mailbox",
 
     # Set task dependencies
     fetch_emails_task >> branch_task
-    branch_task >> [trigger_test_runner_task, no_email_found_task]
+    branch_task >> [trigger_test_runner, no_email_found_task]
