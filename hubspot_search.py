@@ -484,10 +484,10 @@ Analyze the content and determine:
         - Set to TRUE ONLY if ALL of these conditions are met:
             a) A meeting has already occurred (past tense)
             b) Specific meeting details are provided for already held meeting only.
+            c) Whenever the text includes attendees details 
         - Set to FALSE for:
-            - Conversations or calls without formal meeting details
+            - Conversations or calls without formal meeting details example attendees.
             - Future meeting intentions without confirmed details
-            - Past meetings without time/date information
 
 
 Return this exact JSON structure:
