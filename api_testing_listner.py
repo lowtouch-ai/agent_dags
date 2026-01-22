@@ -264,7 +264,7 @@ def branch_function(**kwargs):
     
     if emails and len(emails) > 0:
         logging.info(f"Found {len(emails)} email(s) with JSON attachments → triggering response")
-        return "trigger_test_runner_task"
+        return "trigger_test_runner"
     else:
         logging.info("No emails with JSON attachments found")
         return "no_email_found_task"
