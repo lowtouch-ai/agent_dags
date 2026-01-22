@@ -785,7 +785,7 @@ def determine_owner(ti, **context):
     entities_to_create = analysis_results.get("entities_to_create", {})
     tasks_to_create = entities_to_create.get("tasks", [])
 
-    prompt = f"""You are a HubSpot API assistant. Analyze this conversation to identify deal owner and task owners.
+    prompt = f"""You are a HubSpot API assistant. Analyze this conversation to identify deal owner and task owners. You do not have any capability to call any hubspot tools. you can only make the decision.
 YOU ARE A JSON-ONLY API. 
 DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
 DO NOT USE <think> TAGS.
@@ -1049,7 +1049,7 @@ def create_contacts(ti, **context):
         contact.setdefault("contactOwnerId", contact_owner_id)
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create contacts in HubSpot.
+    base_prompt = f"""Your role is to only Create contacts in HubSpot by using the tool `create_contact`. You cannot call any other tools other than `create_contact`
 YOU ARE A JSON-ONLY API. 
 DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
 DO NOT USE <think> TAGS.
@@ -1233,7 +1233,7 @@ def create_companies(ti, **context):
         return []
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create companies in HubSpot.
+    base_prompt = f"""Your role is to only Create companies in HubSpot by using the tool `create_company`. You cannot call any other tools other than `create_company`.
 YOU ARE A JSON-ONLY API. 
 DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
 DO NOT USE <think> TAGS.
@@ -1245,7 +1245,6 @@ Company Details to Create:
 Steps:
 1. For each company, invoke create_company tool with the provided properties
 2. Return the created company ID and all properties
-
 Return ONLY this JSON structure (no other text):
 {{
     "status": "success|failure",
@@ -1422,7 +1421,7 @@ def create_deals(ti, **context):
         deal.setdefault("dealOwnerId", deal_owner_id)
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create deals in HubSpot.
+    base_prompt = f"""Your role is to only Create deals in HubSpot by using the tool `create_deal`. You cannot call any other tools other than `create_deal`.
 YOU ARE A JSON-ONLY API. 
 DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
 DO NOT USE <think> TAGS.
@@ -1619,7 +1618,7 @@ def create_meetings(ti, **context):
         return []
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create meetings in HubSpot.
+    base_prompt = f"""Your role is to only Create meetings in HubSpot by using the tool `create_meeting`. You cannot call any other tools other than `create_meeting`.
 YOU ARE A JSON-ONLY API. 
 DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
 DO NOT USE <think> TAGS.
@@ -1791,7 +1790,7 @@ def create_notes(ti, **context):
     current_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""You are a HubSpot Note Creation Assistant. Your role is to **create notes in HubSpot** using the provided note details.  
+    base_prompt = f"""You are a HubSpot Note Creation Assistant. Your role is to **create notes in HubSpot** using the provided note details by calling the `create_note` API. You cannot call any other tools other than `create_note`.  
 **You MUST invoke the `create_notes` API for every note in the input.**  
 No parsing of user intent — assume all input notes are confirmed and ready to create.
 YOU ARE A JSON-ONLY API. 
@@ -2031,7 +2030,7 @@ def create_tasks(ti, **context):
     logging.info(f"Tasks prepared with owners: {json.dumps(to_create_tasks, indent=2)}")
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create tasks in HubSpot.
+    base_prompt = f"""Your role is to only Create tasks in HubSpot by using the tool `create_task`. You cannot call any other tools other than `create_task`.
 YOU ARE A JSON-ONLY API. 
 DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
 DO NOT USE <think> TAGS.
@@ -2236,7 +2235,7 @@ def update_contacts(ti, **context):
         return []
 
     # === Base Prompt ===
-    base_prompt = f"""Update contacts in HubSpot.
+    base_prompt = f"""Your role is to only Update contacts in HubSpot by using the tool `update_contact`. You cannot call any other tools other than `update_contact`.
 YOU ARE A JSON-ONLY API. 
 DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
 DO NOT USE <think> TAGS.
@@ -2399,7 +2398,7 @@ def update_companies(ti, **context):
         return []
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Update the following companies in HubSpot.
+    base_prompt = f"""Your role is to only Update the following companies in HubSpot using the tool `update_company`. You cannot call any other tools other than `update_company`.
 YOU ARE A JSON-ONLY API. 
 DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
 DO NOT USE <think> TAGS.
@@ -2647,7 +2646,8 @@ If error, set status as failure, error message in reason and include individual 
         # This is the initial attempt - use initial prompt
         logging.info(f"INITIAL ATTEMPT - Using initial prompt (attempt {current_try_number}/{max_tries})")
         
-        prompt = f"""Update deals: {json.dumps(to_update, indent=2)}
+        prompt = f""" Your role is to only Update the following deals in HubSpot using the tool `update_deal`. You cannot call any other tools other than `update_deal`.
+Update deals: {json.dumps(to_update, indent=2)}
 YOU ARE A JSON-ONLY API. 
 DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
 DO NOT USE <think> TAGS.
@@ -2794,7 +2794,7 @@ def update_meetings(ti, **context):
         return []
 
     # === Base Prompt ===
-    base_prompt = f"""Update the following meetings in HubSpot.
+    base_prompt = f"""Your role is to only Update the following meetings in HubSpot using the tool `update_meeting`. You cannot call any other tools other than `update_meeting`.
 YOU ARE A JSON-ONLY API. 
 DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
 DO NOT USE <think> TAGS.
@@ -2937,7 +2937,7 @@ def update_notes(ti, **context):
             ti.xcom_push(key=k, value=v)
         return []
 
-    base_prompt = f"""Update the following notes in HubSpot.
+    base_prompt = f"""Your role is to only Update the following notes in HubSpot using the tool `update_note`. You cannot call any other tools other than `update_note`.
 YOU ARE A JSON-ONLY API. 
 DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
 DO NOT USE <think> TAGS.
@@ -3110,7 +3110,7 @@ def update_tasks(ti, **context):
             task_update["task_owner_name"] = original.get("task_owner_name", DEFAULT_OWNER_NAME)
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Update tasks in HubSpot.
+    base_prompt = f"""Your role is to only Update tasks in HubSpot using the tool `update_task`. You cannot call any other tools other than `update_task`.
 YOU ARE A JSON-ONLY API. 
 DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
 DO NOT USE <think> TAGS.
