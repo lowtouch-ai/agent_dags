@@ -333,7 +333,7 @@ with DAG("api_testing_monitor_mailbox",
     )
 
     trigger_test_runner = PythonOperator(
-        task_id="trigger_test_runner_task",
+        task_id="trigger_test_runner",
         python_callable=trigger_response_tasks,
     )
 
