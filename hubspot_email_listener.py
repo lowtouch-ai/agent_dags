@@ -2012,13 +2012,18 @@ def branch_function(**kwargs):
     # Enhanced routing prompt with REPORT INTENT capability
     prompt = f"""You are an extremely strict, zero-tolerance email router for a HubSpot AI agent.
 You have exactly 4 possible outputs. You must pick ONE and only.
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Emails (with full thread context):
 {email_details}
 RETURN ONLY ONE OF THESE FOUR JSONS — NO TEXT BEFORE/AFTER:
-{{"task_type": "search_dag"}}
-{{"task_type": "continuation_dag"}}
-{{"task_type": "report_dag"}}
-{{"task_type": "no_action"}}
+{{"task_type": "search_dag", "reason": "<REASON>"}}
+{{"task_type": "continuation_dag", "reason": "<REASON>"}}
+{{"task_type": "report_dag", "reason": "<REASON>"}}
+{{"task_type": "no_action", "reason": "<REASON>"}}
 # RULES — MEMORIZE AND OBEY 100%
 # ROUTE TO **search_dag** → FIRST-TIME ACTION (use only in these 8 cases):
     1. User wants to CREATE anything new → deal, contact, company, task, meeting, note, call log. Exclude the situation when the user is replying to a confirmation template.
@@ -2047,7 +2052,7 @@ RETURN ONLY ONE OF THESE FOUR JSONS — NO TEXT BEFORE/AFTER:
 → {{"task_type": "continuation_dag"}}
 
 # ROUTE TO **report_dag** → ONLY when user explicitly asks for a report.
-- Route to report_dag only when the user's prompt explicitly includes one of the following phrases: "generate report", "create report", "send report", "export", "quarterly report", or "deal report".
+- Route to report_dag only when the user's prompt explicitly includes the phrases like: "report", "generate report", "create report", "send report", "export", "quarterly report", "get me the report" or "deal report".
 If none of these terms are present, do not trigger report_dag under any circumstances.”
 - Do NOT route to report_dag when:
 - The user requests details, information, summary, 360 view, overview, or insights without using the word “report”.
@@ -2069,6 +2074,7 @@ Includes:
    - "What's the status of deal X?"
 • Blank emails or just "?"
 • You dont have the capability to act on casual comments or chit-chat.
+• You dont have the capability to act on when the user explicitly uses the key word report.
 → {{"task_type": "no_action"}}
 
 EXAMPLES — YOU MUST GET THESE 100% RIGHT
@@ -2083,13 +2089,14 @@ EXAMPLES — YOU MUST GET THESE 100% RIGHT
 │ "Change amount to $350k and add Sarah as contact"                  │ continuation_dag     │
 │ "Looks good, just change close date to Dec 20"                     │ continuation_dag     │
 │ "Generate quarterly sales report"                                  │ report_dag           │
-│ "Send me a pipeline report"                                        │ report_dag           │
+│ "ge me the report of all the deals with deal stage X"              │ report_dag           │
 │ "Hi there!"                                                        │ no_action            │
 │ "Thanks!"                                                          │ no_action            │
 │ "Show all deals closing this month"                                │ no_action            │
 │ "Any follow-ups due today?"                                        │ no_action            │
 │ "Can you pull contact details for john@acme.com?"                  │ no_action            │
 │ "THis was a great meeting, looking forward to our next steps"      │ continuation_dag     │
+│ "Get me the report of all deals or deals associated with X"        │ report_dag           │
 └────────────────────────────────────────────────────────────────────┴──────────────────────┘
 Final instruction: If in doubt → route to **no_action**. Never guess creation**.
 
@@ -4220,13 +4227,16 @@ extract the enitites details also use the spelling variants:{spelling_inject_tex
 IMPORTANT RULES:
 1. For company-related queries (e.g., "deals associated with company XYZ"):
    - Use the "associations.company" property to filter by company id
-   - Parse the company name and search the company using search_company tool and get the id for the filters.
+   - Parse the company name and used the company id for the filters. You can get the company id by using the tool `search_companies` to help you find the company id.
+   - Never use company name instead, always use company id.
    - Operator should be CONTAINS_TOKEN for partial matches
    - Example: {{"propertyName": "associations.company", "operator": "CONTAINS_TOKEN", "value": "123"}}
 
 2. For contact-related queries (e.g., "deals for contact John Doe"):
    - Use the "associations.contact" property to filter by contact id
-   -  Parse the contact name and search the contact using search_contact tool and get the id for the filters. ALways use
+   - Parse the contact name and use the contact id for the filters. You can get the contact id by using the tool `search_contacts` to help you find the contact id.
+   - Never use contact name instead, always use contact id.
+   - example : contact name parsed abc, use the tool `search_contacts` to find the contact id 123.
    - Example: {{"propertyName": "associations.contact", "operator": "CONTAINS_TOKEN", "value": "123"}}
 
 3. For date ranges:
