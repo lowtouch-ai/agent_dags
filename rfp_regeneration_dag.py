@@ -6,7 +6,7 @@ import yaml
 import logging
 import requests
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import PythonOperator
 from airflow.exceptions import AirflowException
 from airflow.models import Variable
 from ollama import Client
@@ -325,7 +325,7 @@ No additional commentary."""
 # -------------------------------
 with DAG(
     dag_id="rfp_regeneration_workflow",
-    schedule_interval=None,
+    schedule=None,
     start_date=datetime(2025, 1, 1),
     catchup=False,
     max_active_runs=1,
@@ -367,14 +367,12 @@ with DAG(
 
     generate_and_improve = PythonOperator(
         task_id="generate_and_improve",
-        python_callable=generate_with_quality_loop,
-        provide_context=True,
+        python_callable=generate_with_quality_loop
     )
 
     finalize = PythonOperator(
         task_id="format_final_response",
-        python_callable=format_final_response,
-        provide_context=True,
+        python_callable=format_final_response
     )
 
     # Simple linear flow

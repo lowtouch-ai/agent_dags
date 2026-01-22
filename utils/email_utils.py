@@ -52,7 +52,7 @@ def authenticate_gmail(credentials_json, expected_email):
    
     
 def send_email(service, recipient, subject, body, in_reply_to, references, 
-               from_address, cc=None, bcc=None, thread_id=None):
+               from_address, cc=None, bcc=None, thread_id=None, agent_name="Recruitment Agent"):
     """
     Send email reply maintaining proper thread continuity with CC and BCC support.
     Uses multipart/alternative for better HTML rendering compatibility.
@@ -74,7 +74,7 @@ def send_email(service, recipient, subject, body, in_reply_to, references,
         
         # Create multipart/alternative message for text/plain + text/html
         msg = MIMEMultipart('alternative')
-        msg["From"] = f"Recruitment Agent via lowtouch.ai <{from_address}>"
+        msg["From"] = f"{agent_name} via lowtouch.ai <{from_address}>"
         msg["To"] = recipient
         
         # Add CC recipients if provided
