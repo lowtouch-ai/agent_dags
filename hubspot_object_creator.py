@@ -513,7 +513,7 @@ CRITICAL REMINDERS:
 
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-        logging.info(f"Raw AI response for user analysis: {response[:1000]}...")
+        logging.info(f"Raw AI response for user analysis: {response}...")
 
     except Exception as e:
         raise
@@ -985,11 +985,11 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
 
 def create_contacts(ti, **context):
-    """Create new contacts in HubSpot with full retry logic.
-    Now safely skips contacts that already exist (detected by email from search results)."""
+    """Create new contacts in HubSpot with full retry logic."""
     
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_contacts = analysis_results.get("entities_to_create", {}).get("contacts", [])
+    logging.info(f"Contacts to create (pre-filter): {to_create_contacts}")
     chat_history = ti.xcom_pull(key="chat_history", default=[])
     owner_info = ti.xcom_pull(key="owner_info", default={})
 
@@ -999,38 +999,16 @@ def create_contacts(ti, **context):
     max_tries = task_instance.max_tries
 
     logging.info(f"=== CREATE CONTACTS - Attempt {current_try}/{max_tries} ===")
+    logging.info(f"Contacts to create: {len(to_create_contacts)}")
 
-    # === Load search results to know which contacts already exist ===
-    # search_results comes from the search DAG and is passed in dag_run.conf
-    dag_run_conf = context['dag_run'].conf or {}
-    search_results = dag_run_conf.get("search_results", {})
+    previous_status = ti.xcom_pull(key="contact_creation_status")
+    previous_response = ti.xcom_pull(key="contact_creation_response")
+    is_retry = current_try > 1
 
-    # Build a set of existing contact emails (case-insensitive)
-    existing_contact_emails = set()
-    for contact in search_results.get("contact_results", {}).get("results", []):
-        email = contact.get("email", "").strip().lower()
-        if email:
-            existing_contact_emails.add(email)
-
-    # === FILTER: Remove contacts whose email already exists ===
-    filtered_contacts = []
-    skipped_contacts = []
-    for contact in to_create_contacts:
-        email = contact.get("email", "").strip().lower()
-        if email and email in existing_contact_emails:
-            skipped_contacts.append(contact)
-            logging.info(f"Skipping contact creation - already exists: {email}")
-        else:
-            filtered_contacts.append(contact)
-
-    logging.info(
-        f"Contact creation filter: {len(to_create_contacts)} requested → "
-        f"{len(filtered_contacts)} to create → {len(skipped_contacts)} skipped (duplicates)"
-    )
-
-    # If nothing left to create → success (no error)
-    if not filtered_contacts:
-        logging.info("All requested contacts already exist → nothing to create")
+    # REMOVED: All filtration logic - trust analyze_user_response decision
+    
+    if not to_create_contacts:
+        logging.info("No contacts to create")
         success_result = {
             "created_contacts": [],
             "failed_contacts": [],
@@ -1038,7 +1016,7 @@ def create_contacts(ti, **context):
             "contact_creation_response": {
                 "status": "success",
                 "created_contacts": [],
-                "errors": [f"Skipped {len(skipped_contacts)} duplicates"]
+                "errors": []
             },
             "contact_creation_final_status": "success"
         }
@@ -1049,7 +1027,7 @@ def create_contacts(ti, **context):
     # Inject owner info
     contact_owner_id = owner_info.get("contact_owner_id", DEFAULT_OWNER_ID)
     contact_owner_name = owner_info.get("contact_owner_name", DEFAULT_OWNER_NAME)
-    for contact in filtered_contacts:
+    for contact in to_create_contacts:
         contact.setdefault("contactOwnerName", contact_owner_name)
         contact.setdefault("contactOwnerId", contact_owner_id)
 
@@ -1057,7 +1035,7 @@ def create_contacts(ti, **context):
     base_prompt = f"""Create contacts in HubSpot.
 
 Contact Details to Create:
-{json.dumps(filtered_contacts, indent=2)}
+{json.dumps(to_create_contacts, indent=2)}
 
 Contact Owner: {contact_owner_name} (ID: {contact_owner_id})
 
@@ -1109,7 +1087,7 @@ This is retry attempt {current_try} of {max_tries}.
 Please fix the issue and correctly create the contacts.
 
 Contacts to Create:
-{json.dumps(filtered_contacts, indent=2)}
+{json.dumps(to_create_contacts, indent=2)}
 
 {base_prompt}
 
@@ -1158,7 +1136,7 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         for k, v in result.items():
             ti.xcom_push(key=k, value=v)
 
-        logging.info(f"SUCCESS: Created {len(created_contacts)} contacts (skipped {len(skipped_contacts)} duplicates) on attempt {current_try}")
+        logging.info(f"SUCCESS: Created {len(created_contacts)} contacts on attempt {current_try}")
         return created_contacts
 
     except json.JSONDecodeError as e:
@@ -1180,7 +1158,6 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
                 "email": c.get("email", ""),
                 "error": error_msg
             }
-            for c in filtered_contacts
         ]
 
         fallback = {
@@ -1202,7 +1179,7 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
             raise  # Trigger retry
 
 def create_companies(ti, **context):
-    """Create new companies in HubSpot with full retry support and clean error handling"""
+    """Create new companies in HubSpot with full retry support"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_companies = analysis_results.get("entities_to_create", {}).get("companies", [])
     chat_history = ti.xcom_pull(key="chat_history", default=[])
@@ -1211,60 +1188,15 @@ def create_companies(ti, **context):
     task_instance = context['task_instance']
     current_try = task_instance.try_number
     max_tries = task_instance.max_tries
-    
-    # === Load search results to check for existing companies ===
-    dag_run_conf = context['dag_run'].conf or {}
-    search_results = dag_run_conf.get("search_results", {})
-    
-    # Build set of existing company names (case-insensitive)
-    existing_company_names = set()
-    for company in search_results.get("company_results", {}).get("results", []):
-        company_name = company.get("name", "").strip().lower()
-        if company_name:
-            existing_company_names.add(company_name)
-    
-    # Filter out companies that already exist
-    filtered_companies = []
-    skipped_companies = []
-    for company in to_create_companies:
-        company_name = company.get("name", "").strip().lower()
-        if company_name and company_name in existing_company_names:
-            skipped_companies.append(company)
-            logging.info(f"Skipping company creation - already exists: {company_name}")
-        else:
-            filtered_companies.append(company)
-    
-    logging.info(
-        f"Company creation filter: {len(to_create_companies)} requested → "
-        f"{len(filtered_companies)} to create → {len(skipped_companies)} skipped (duplicates)"
-    )
-    
-    # If nothing left to create, return success
-    if not filtered_companies:
-        logging.info("All requested companies already exist → nothing to create")
-        success_result = {
-            "created_companies": [],
-            "failed_companies": [],
-            "company_creation_status": {"status": "success"},
-            "company_creation_response": {
-                "status": "success",
-                "created_companies": [],
-                "errors": [f"Skipped {len(skipped_companies)} duplicates"]
-            },
-            "company_creation_final_status": "success"
-        }
-        for k, v in success_result.items():
-            ti.xcom_push(key=k, value=v)
-        return []
-    
-    # Use filtered list for creation
-    to_create_companies = filtered_companies
 
     logging.info(f"=== CREATE COMPANIES - Attempt {current_try}/{max_tries} ===")
+    logging.info(f"Companies to create: {len(to_create_companies)}")
 
     previous_status = ti.xcom_pull(key="company_creation_status")
     previous_response = ti.xcom_pull(key="company_creation_response")
     is_retry = current_try > 1
+    
+    # REMOVED: All filtration logic - trust analyze_user_response decision
 
     if not to_create_companies:
         logging.info("No companies to create")
@@ -1424,7 +1356,7 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
             raise
 
 def create_deals(ti, **context):
-    """Create new deals in HubSpot with full retry logic and clean error handling"""
+    """Create new deals in HubSpot with full retry logic"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_deals = analysis_results.get("entities_to_create", {}).get("deals", [])
     chat_history = ti.xcom_pull(key="chat_history", default=[])
@@ -1434,59 +1366,15 @@ def create_deals(ti, **context):
     task_instance = context['task_instance']
     current_try = task_instance.try_number
     max_tries = task_instance.max_tries
-    
-    dag_run_conf = context['dag_run'].conf or {}
-    search_results = dag_run_conf.get("search_results", {})
-    
-    # Build set of existing deal names (case-insensitive)
-    existing_deal_names = set()
-    for deal in search_results.get("deal_results", {}).get("results", []):
-        deal_name = deal.get("dealName", "").strip().lower()
-        if deal_name:
-            existing_deal_names.add(deal_name)
-    
-    # Filter out deals that already exist
-    filtered_deals = []
-    skipped_deals = []
-    for deal in to_create_deals:
-        deal_name = deal.get("dealName", "").strip().lower()
-        if deal_name and deal_name in existing_deal_names:
-            skipped_deals.append(deal)
-            logging.info(f"Skipping deal creation - already exists: {deal_name}")
-        else:
-            filtered_deals.append(deal)
-    
-    logging.info(
-        f"Deal creation filter: {len(to_create_deals)} requested → "
-        f"{len(filtered_deals)} to create → {len(skipped_deals)} skipped (duplicates)"
-    )
-    
-    # If nothing left to create, return success without creating
-    if not filtered_deals:
-        logging.info("All requested deals already exist → nothing to create")
-        success_result = {
-            "created_deals": [],
-            "failed_deals": [],
-            "deal_creation_status": {"status": "success"},
-            "deal_creation_response": {
-                "status": "success",
-                "created_deals": [],
-                "errors": [f"Skipped {len(skipped_deals)} duplicates"]
-            },
-            "deal_creation_final_status": "success"
-        }
-        for k, v in success_result.items():
-            ti.xcom_push(key=k, value=v)
-        return []
-    
-    # Use filtered list for creation
-    to_create_deals = filtered_deals
 
     logging.info(f"=== CREATE DEALS - Attempt {current_try}/{max_tries} ===")
+    logging.info(f"Deals to create: {len(to_create_deals)}")
 
     previous_status = ti.xcom_pull(key="deal_creation_status")
     previous_response = ti.xcom_pull(key="deal_creation_response")
     is_retry = current_try > 1
+    
+    # REMOVED: All filtration logic - trust analyze_user_response decision
 
     if not to_create_deals:
         logging.info("No deals to create")
@@ -3566,6 +3454,19 @@ RETURN ONLY CLEAN JSON."""
         raise
     try:
         parsed = json.loads(response.strip())
+        
+        # === CRITICAL FIX: Check for AI-reported failure ===
+        status = parsed.get("status", "unknown")
+        ai_errors = parsed.get("errors", [])
+        ai_error = parsed.get("error")
+        reason = parsed.get("reason", "")
+        
+        # If AI explicitly reports failure, treat it as an error
+        if status == "failure" or ai_errors or ai_error:
+            error_msg = reason or ai_error or "; ".join(ai_errors) or "AI reported failure"
+            logging.error(f"AI reported association failure: {error_msg}")
+            raise Exception(error_msg)
+        
         association_requests = parsed.get("association_requests", [])
         ids_from_conversation = parsed.get("ids_from_conversation", {})
 
@@ -3621,25 +3522,37 @@ RETURN ONLY CLEAN JSON."""
         raise Exception(error_msg)
 
     except Exception as e:
-        error_msg = str(e) or "Unknown errorError"
+        error_msg = str(e) or "Unknown error during association creation"
+        
         is_final = current_try >= max_tries
+        
         status_type = "final_failure" if is_final else "failure"
-
+        reason_dict = {"status": status_type, "reason": error_msg}
+        
         fallback = {
             "associations_created": [],
             "extracted_conversation_ids": {},
-            "association_creation_status": {"status": status_type, "reason": error_msg},
+            "association_creation_status": reason_dict,
             "association_creation_response": {"raw_response": response} if response else None
         }
+    
         for k, v in fallback.items():
-                       ti.xcom_push(key=k, value=v)
-
+            ti.xcom_push(key=k, value=v)
+        
+        logging.error(f"Association creation failed (attempt {current_try}/{max_tries}): {error_msg}")
+        
         if is_final:
-            logging.error(f"FINAL FAILURE: create_associations failed after {max_tries} attempts")
-            raise
+            # ────────────────────────────────────────────────
+            # Do NOT raise → task will be marked SUCCESS
+            # Downstream tasks can read "association_creation_status"
+            # and decide what to do (notify, skip, mark as partial, etc.)
+            # ────────────────────────────────────────────────
+            logging.warning("MAX RETRIES REACHED → marking task as SUCCESS but with failure status in XCom")
+            return {"status": "final_failure", "reason": error_msg, "associations": []}
         else:
-            logging.warning(f"create_associations failed → retrying ({current_try}/{max_tries})")
-            raise
+            # Still in retry window → let Airflow retry
+            logging.warning(f"Retrying association creation ({current_try}/{max_tries})")
+            raise   # ← keeps original retry behavior
 
 def collect_and_save_results(ti, **context):
     """Collect all results for final email"""
@@ -4538,23 +4451,30 @@ def send_final_email(ti, **context):
     raise ValueError("Failed to send final email")
 
 def branch_to_creation_tasks(ti, **context):
-    analysis_results = ti.xcom_pull(key="analysis_results", default=None)
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
     
-    if analysis_results is None:
-        logging.error("No analysis_results found in XCom → upstream probably failed")
-        return ["end_workflow"]   # or raise ValueError() to fail the branch
-
-    if not isinstance(analysis_results, dict):
-        logging.error("analysis_results is not a dict")
-        return ["end_workflow"]
-
     if analysis_results.get("fallback_email_sent", False):
         return ["end_workflow"]
-
-    # normal path
-    tasks = analysis_results.get("tasks_to_execute", [])
-    mandatory = ["create_associations", "compose_response_html", "collect_and_save_results", "send_final_email"]
-    return list(set(tasks + mandatory))
+    
+    tasks_to_run = analysis_results.get("tasks_to_execute", [])
+    
+    # Only return actual optional creation/update tasks
+    # Do NOT include mandatory tasks like create_associations here
+    optional_tasks = [
+        t for t in tasks_to_run
+        if t in [
+            "determine_owner", "check_task_threshold",
+            "create_contacts", "create_companies", "create_deals",
+            "create_meetings", "create_notes", "create_tasks",
+            "update_contacts", "update_companies", "update_deals",
+            "update_meetings", "update_notes", "update_tasks"
+        ]
+    ]
+    
+    if not optional_tasks:
+        return ["join_creations"]           # ← critical: direct path when nothing to create
+    
+    return optional_tasks
 
 # ============================================================================
 # DAG DEFINITION
@@ -4695,13 +4615,14 @@ with DAG(
     # New join task to handle branching and skip propagation
     join_creations = DummyOperator(
         task_id="join_creations",
-        trigger_rule="one_success"
+        trigger_rule="none_failed_min_one_success"
     )
 
     create_associations_task = PythonOperator(
         task_id="create_associations",
         python_callable=create_associations,
-        provide_context=True
+        provide_context=True,
+        retries=2
     )
 
     collect_results_task = PythonOperator(
@@ -4746,13 +4667,11 @@ with DAG(
         "update_tasks": update_tasks_task
     }
 
-    branch_task >> [task for task in creation_tasks.values()]
+    branch_task >> [t for t in creation_tasks.values()]
 
     # Route creations and branch through the join
     for task in creation_tasks.values():
         task >> join_creations
-
-    branch_task >> join_creations
 
     # Continue the chain after join
     join_creations >> create_associations_task >> collect_results_task >> compose_response_task >> send_final_email_task >> end_task
