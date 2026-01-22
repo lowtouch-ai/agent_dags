@@ -11,6 +11,7 @@ import os
 import pymupdf4llm
 from ollama import Client
 import re
+import time
 
 # =============================================================================
 # Configuration
@@ -709,33 +710,49 @@ IMPORTANT: Respond with ONLY a valid JSON object in this exact format:
 Do not add any extra text, markdown, or explanations outside the JSON.
 """
         
-        try:
-            response_str = get_ai_response(prompt_answer, headers=headers).strip()
-            response_data = extract_json_from_response(response_str)
-            
-            answer = response_data.get("answer", "").strip()
-            sources = response_data.get("sources_referenced", [])
-            confidence = response_data.get("confidence")
-            is_sensitive = response_data.get("is_sensitive", False)
-            
-            if not answer:
-                logging.warning(f"Empty answer received for Q{q_num}, skipping")
-                continue
-            
-            answers_dict[question_id] = {
-                "answer": answer,
-                "sources_referenced": sources if isinstance(sources, list) else [],
-                "confidence": confidence if confidence else None,
-                "is_sensitive": is_sensitive,
-                "question_num": q_num,
-                "answer_instructions": answer_instructions
-            }
-            logging.info(f"Generated answer for Q{q_num} (ID: {question_id}) with sources and confidence")
-            
-        except json.JSONDecodeError as e:
-            logging.error(f"Failed to parse JSON response for Q{q_num}: {e}. Raw response: '{response_str}'")
-        except Exception as e:
-            logging.error(f"Failed to generate answer for Q{q_num}: {e}")
+        # Initialize variables before the retry loop
+        answer = None
+        sources = []
+        confidence = None
+        is_sensitive = False
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response_str = get_ai_response(prompt_answer, headers=headers).strip()
+                response_data = extract_json_from_response(response_str)
+                
+                raw_answer = response_data.get("answer", "")
+                if isinstance(raw_answer, list):
+                    answer = "\n".join(str(item) for item in raw_answer).strip()
+                else:
+                    answer = str(raw_answer).strip()
+                sources = response_data.get("sources_referenced", [])
+                confidence = response_data.get("confidence")
+                is_sensitive = response_data.get("is_sensitive", False)
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 5 * (attempt + 1)
+                    logging.warning(f"Attempt {attempt + 1} failed for Q{q_num}: {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logging.error(f"All {max_retries} attempts failed for Q{q_num}: {e}")
+
+        # Check if we got a valid answer after retries
+        if not answer:
+            logging.warning(f"Empty answer or failed generation for Q{q_num}, skipping.")
+            continue
+        
+        answers_dict[question_id] = {
+            "answer": answer,
+            "sources_referenced": sources if isinstance(sources, list) else [],
+            "confidence": confidence if confidence else None,
+            "is_sensitive": is_sensitive,
+            "question_num": q_num,
+            "answer_instructions": answer_instructions
+        }
+        logging.info(f"Generated answer for Q{q_num} (ID: {question_id}) with sources and confidence")
     
     context["ti"].xcom_push(key="answers_dict", value=answers_dict)
     logging.info(f"Generated {len(answers_dict)}/{len(questions_with_id)} answers")
