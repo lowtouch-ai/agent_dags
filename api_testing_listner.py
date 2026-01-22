@@ -108,6 +108,7 @@ def image_to_base64(image_path: str) -> str:
 
 
 def fetch_unread_emails(**kwargs):
+    """Fetch unread emails and process JSON, PDF, and YAML attachments."""
     service = authenticate_gmail()
     last_checked_timestamp = get_last_checked_timestamp()
     query = f"is:unread after:{last_checked_timestamp // 1000}"
@@ -137,14 +138,20 @@ def fetch_unread_emails(**kwargs):
             continue
 
         json_attachments = []
-        config_attachment = None  # Track config.yaml separately
+        pdf_attachments = []
+        config_attachment = None
 
         if "parts" in msg_data["payload"]:
             for part in msg_data["payload"].get("parts", []):
                 filename = part.get("filename", "")
                 
-                # Skip if not JSON or YAML file
-                if not filename.lower().endswith((".json", ".yaml", ".yml")):
+                # Check file type
+                is_json = filename.lower().endswith(".json")
+                is_pdf = filename.lower().endswith(".pdf")
+                is_yaml = filename.lower().endswith((".yaml", ".yml"))
+                
+                # Skip if not a supported file type
+                if not (is_json or is_pdf or is_yaml):
                     continue
 
                 if not part.get("body", {}).get("attachmentId"):
@@ -157,11 +164,8 @@ def fetch_unread_emails(**kwargs):
 
                 file_data = base64.urlsafe_b64decode(att["data"])
                 
-                # Check if this is a config file
-                is_config = filename.lower() in ["config.yaml", "config.yml"]
-                
-                if is_config:
-                    # Save config to special location: /appz/pyunit_testing/{thread_id}/config.yaml
+                # Handle config files
+                if is_yaml and filename.lower() in ["config.yaml", "config.yml"]:
                     config_dir = Variable.get("ltai.test.base_dir", default_var="/appz/pyunit_testing/") + f"{thread_id}"
                     os.makedirs(config_dir, exist_ok=True)
                     config_path = os.path.join(config_dir, "config.yaml")
@@ -176,8 +180,9 @@ def fetch_unread_emails(**kwargs):
                         "path": config_path,
                         "mime_type": part.get("mimeType", "application/x-yaml"),
                     }
-                else:
-                    # Save regular JSON attachment
+                
+                # Handle JSON files (Postman collections)
+                elif is_json:
                     safe_filename = f"{msg['id']}_{filename}"
                     attachment_path = os.path.join(ATTACHMENT_DIR, safe_filename)
 
@@ -187,18 +192,42 @@ def fetch_unread_emails(**kwargs):
                     # Validate JSON
                     try:
                         with open(attachment_path, "r", encoding="utf-8") as f:
-                            json.loads(f.read())
+                            json_content = json.loads(f.read())
                         logging.info(f"Valid JSON attachment: {filename}")
+                        
+                        json_attachments.append({
+                            "filename": filename,
+                            "path": attachment_path,
+                            "mime_type": part.get("mimeType", "application/json"),
+                            "size": len(file_data)
+                        })
                     except Exception as e:
                         logging.warning(f"Invalid JSON in {filename}: {e}")
                         continue
+                
+                # Handle PDF files
+                elif is_pdf:
+                    safe_filename = f"{msg['id']}_{filename}"
+                    attachment_path = os.path.join(ATTACHMENT_DIR, safe_filename)
 
-                    json_attachments.append({
+                    with open(attachment_path, "wb") as f:
+                        f.write(file_data)
+                    
+                    logging.info(f"Saved PDF attachment: {filename}")
+                    
+                    # Extract PDF content
+                    pdf_content = pdf_to_markdown(attachment_path)
+                    
+                    pdf_attachments.append({
                         "filename": filename,
                         "path": attachment_path,
-                        "mime_type": part.get("mimeType", "application/json"),
+                        "mime_type": part.get("mimeType", "application/pdf"),
+                        "size": len(file_data),
+                        "extracted_content": pdf_content.get("content", ""),
+                        "metadata": pdf_content.get("metadata", {})
                     })
 
+        # Only process emails that have at least one JSON file (Postman collection required)
         if json_attachments:
             email_object = {
                 "id": msg["id"],
@@ -206,62 +235,80 @@ def fetch_unread_emails(**kwargs):
                 "headers": headers,
                 "content": msg_data.get("snippet", ""),
                 "timestamp": timestamp,
-                "attachments": json_attachments,
-                "config": config_attachment,  # Add config separately
+                "json_attachments": json_attachments,
+                "pdf_attachments": pdf_attachments,
+                "config": config_attachment,
+                "has_pdf": len(pdf_attachments) > 0
             }
             processed_emails.append(email_object)
             if timestamp > max_timestamp:
                 max_timestamp = timestamp
             
-            config_status = "with config" if config_attachment else "without config"
-            logging.info(f"Found email with {len(json_attachments)} JSON attachment(s) {config_status}")
+            status_parts = [
+                f"{len(json_attachments)} JSON file(s)",
+                f"{len(pdf_attachments)} PDF file(s)" if pdf_attachments else "no PDFs",
+                "with config" if config_attachment else "without config"
+            ]
+            logging.info(f"Processed email with {', '.join(status_parts)}")
 
     if processed_emails:
         update_last_checked_timestamp(max_timestamp)
 
-    kwargs['ti'].xcom_push(key="emails_with_json", value=processed_emails)
-    return len(processed_emails)   # or return processed_emails
+    kwargs['ti'].xcom_push(key="emails_with_attachments", value=processed_emails)
+    return len(processed_emails)
 
 def branch_function(**kwargs):
+    """Branch based on whether emails with JSON attachments were found."""
     ti = kwargs['ti']
-    emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="emails_with_json")
+    emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="emails_with_attachments")
     
     if emails and len(emails) > 0:
         logging.info(f"Found {len(emails)} email(s) with JSON attachments → triggering response")
-        return "trigger_email_response_task"
+        return "trigger_test_runner_task"
     else:
         logging.info("No emails with JSON attachments found")
         return "no_email_found_task"
 
 def trigger_response_tasks(**kwargs):
+    """Trigger the test case runner DAG for each email with attachments."""
     ti = kwargs['ti']
-    emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="emails_with_json")
+    emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="emails_with_attachments")
     
     if not emails:
-        logging.info("No emails with JSON in XCom → nothing to trigger")
+        logging.info("No emails with attachments in XCom → nothing to trigger")
         return
 
     for email in emails:
-        # You can choose better task_id if you want
-        task_id = f"trigger_api_doc_{email['id'].replace('-','_')}"
+        task_id = f"trigger_test_runner_{email['id'].replace('-','_')}"
         
-        logging.info(f"Triggering invoflux_send_message_email for email {email['id']} "
-                     f"with {len(email['attachments'])} JSON file(s)")
+        # Prepare configuration for the test runner
+        conf_data = {
+            "email_id": email['id'],
+            "thread_id": email['threadId'],
+            "json_files": email['json_attachments'],
+            "pdf_files": email['pdf_attachments'],
+            "config_file": email.get('config'),
+            "has_pdf": email.get('has_pdf', False),
+            "email_headers": email['headers'],
+            "email_content": email['content']
+        }
+        
+        logging.info(
+            f"Triggering api_test_case_executor for email {email['id']} with "
+            f"{len(email['json_attachments'])} JSON file(s) and "
+            f"{len(email['pdf_attachments'])} PDF file(s)"
+        )
 
         TriggerDagRunOperator(
             task_id=task_id,
             trigger_dag_id="api_test_case_executor",
-            conf={
-                "email_data": email,
-                # Optional: pass first JSON path explicitly if downstream expects it
-                "main_json_path": email["attachments"][0]["path"] if email["attachments"] else None
-            },
-            wait_for_completion=False,   # usually you want fire-and-forget
+            conf=conf_data,
+            wait_for_completion=False,
         ).execute(context=kwargs)
 
 def no_email_found(**kwargs):
     """Log when no emails are found."""
-    logging.info("No new emails found to process.")
+    logging.info("No new emails with JSON attachments found to process.")
 
 readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'mailbox_monitor.md')
 with open(readme_path, 'r') as file:
@@ -278,27 +325,23 @@ with DAG("api_testing_monitor_mailbox",
     fetch_emails_task = PythonOperator(
         task_id="fetch_unread_emails",
         python_callable=fetch_unread_emails,
-        # provide_context=True
     )
 
     branch_task = BranchPythonOperator(
         task_id="branch_task",
         python_callable=branch_function,
-        # provide_context=True
     )
 
-    trigger_email_response_task = PythonOperator(
-        task_id="trigger_email_response_task",
+    trigger_test_runner_task = PythonOperator(
+        task_id="trigger_test_runner_task",
         python_callable=trigger_response_tasks,
-        # provide_context=True
     )
 
     no_email_found_task = PythonOperator(
         task_id="no_email_found_task",
         python_callable=no_email_found,
-        # provide_context=True
     )
 
     # Set task dependencies
     fetch_emails_task >> branch_task
-    branch_task >> [trigger_email_response_task, no_email_found_task]
+    branch_task >> [trigger_test_runner_task, no_email_found_task]
