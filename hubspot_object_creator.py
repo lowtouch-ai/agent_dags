@@ -344,6 +344,11 @@ def analyze_user_response(ti, **context):
     # === Prompt (unchanged) ===
     from datetime import datetime
     prompt = f"""You are a HubSpot assistant analyzing an email conversation to understand what actions to take.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 CONVERSATION HISTORY:
 {chat_history}
 
@@ -608,7 +613,11 @@ def validate_and_clean_analysis(ti, **context):
     
     # Build validation prompt for AI agent
     prompt = f"""You are a validation assistant for HubSpot operations. Your job is to verify and clean the analysis results.
-
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 LATEST USER MESSAGE:
 {latest_user_message}
 
@@ -777,7 +786,11 @@ def determine_owner(ti, **context):
     tasks_to_create = entities_to_create.get("tasks", [])
 
     prompt = f"""You are a HubSpot API assistant. Analyze this conversation to identify deal owner and task owners.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 LATEST USER MESSAGE:
 {latest_user_message}
 
@@ -910,7 +923,11 @@ def check_task_threshold(ti, **context):
         })
 
     prompt = f"""You are a HubSpot API assistant. Check task volume thresholds.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 LATEST USER MESSAGE:
 {latest_user_message}
 
@@ -1033,7 +1050,11 @@ def create_contacts(ti, **context):
 
     # === Base Prompt (shared) ===
     base_prompt = f"""Create contacts in HubSpot.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Contact Details to Create:
 {json.dumps(to_create_contacts, indent=2)}
 
@@ -1213,7 +1234,11 @@ def create_companies(ti, **context):
 
     # === Base Prompt (shared) ===
     base_prompt = f"""Create companies in HubSpot.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Company Details to Create:
 {json.dumps(to_create_companies, indent=2)}
 
@@ -1398,7 +1423,11 @@ def create_deals(ti, **context):
 
     # === Base Prompt (shared) ===
     base_prompt = f"""Create deals in HubSpot.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Deal Details to Create:
 {json.dumps(to_create_deals, indent=2)}
 
@@ -1591,7 +1620,11 @@ def create_meetings(ti, **context):
 
     # === Base Prompt (shared) ===
     base_prompt = f"""Create meetings in HubSpot.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Meeting Details to Create:
 {json.dumps(to_create_meetings, indent=2)}
 
@@ -1761,7 +1794,11 @@ def create_notes(ti, **context):
     base_prompt = f"""You are a HubSpot Note Creation Assistant. Your role is to **create notes in HubSpot** using the provided note details.  
 **You MUST invoke the `create_notes` API for every note in the input.**  
 No parsing of user intent — assume all input notes are confirmed and ready to create.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 ---
 Current UTC Time: {current_utc}
 NOTES TO CREATE:
@@ -1995,7 +2032,11 @@ def create_tasks(ti, **context):
 
     # === Base Prompt (shared) ===
     base_prompt = f"""Create tasks in HubSpot.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Task Details to Create (with assigned owners):
 {json.dumps(to_create_tasks, indent=2)}
 
@@ -2196,7 +2237,11 @@ def update_contacts(ti, **context):
 
     # === Base Prompt ===
     base_prompt = f"""Update contacts in HubSpot.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Contacts to Update:
 {json.dumps(to_update, indent=2)}
 
@@ -2355,7 +2400,11 @@ def update_companies(ti, **context):
 
     # === Base Prompt (shared) ===
     base_prompt = f"""Update the following companies in HubSpot.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Companies to Update:
 {json.dumps(to_update, indent=2)}
 
@@ -2599,6 +2648,11 @@ If error, set status as failure, error message in reason and include individual 
         logging.info(f"INITIAL ATTEMPT - Using initial prompt (attempt {current_try_number}/{max_tries})")
         
         prompt = f"""Update deals: {json.dumps(to_update, indent=2)}
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
@@ -2741,7 +2795,11 @@ def update_meetings(ti, **context):
 
     # === Base Prompt ===
     base_prompt = f"""Update the following meetings in HubSpot.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Meetings to Update:
 {json.dumps(to_update, indent=2)}
 
@@ -2880,7 +2938,11 @@ def update_notes(ti, **context):
         return []
 
     base_prompt = f"""Update the following notes in HubSpot.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Notes to Update:
 {json.dumps(to_update, indent=2)}
 
@@ -3049,7 +3111,11 @@ def update_tasks(ti, **context):
 
     # === Base Prompt (shared) ===
     base_prompt = f"""Update tasks in HubSpot.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Tasks to update: {json.dumps(to_update, indent=2)}
 Current task details: {json.dumps(task_details_map, indent=2)}
 

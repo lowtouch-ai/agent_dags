@@ -404,7 +404,11 @@ def analyze_thread_entities(ti, **context):
     # === Prompt (same as before) ===
     prompt = f"""You are a HubSpot API assistant. Analyze this latest message to determine which entities (deals, contacts, companies) are mentioned or need to be processed, and whether the user is requesting a summary of a client or deal before their next meeting.
     You cannot create or update any records, your only job is to identify and validate the entities based on the conversation.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Variant Spelling Information:
 {variants_section}
 
@@ -482,7 +486,7 @@ Analyze the content and determine:
 
     - MEETINGS (parse_meetings):
         - Set to TRUE ONLY if ALL of these conditions are met:
-            a) A meeting has already occurred (past tense)
+            a) A meeting has already occurred(past tense) and the latest user message is a meeting summary.
             b) Specific meeting details are provided for already held meeting only.
             c) Whenever the text includes attendees details 
         - Set to FALSE for:
@@ -556,7 +560,11 @@ def summarize_engagement_details(ti, **context):
     conversation_context += f"[USER - LATEST]: {latest_message}\n"
 
     prompt = f"""You are a HubSpot API assistant. Summarize engagement details based on the provided email thread content. Parse the contact name, deal ID (if specified), company name, and other relevant details directly from the conversation context.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 FULL CONVERSATION:
 {conversation_context}
 
@@ -654,7 +662,11 @@ def summarize_engagement_details_360(ti, **context):
 
     # First: Get structured HubSpot data (same as before, but minimal + 360 fields)
     prompt = f"""You are a HubSpot expert assistant. Extract and summarize key CRM data from this email thread for a Deal 360 view.
-
+            YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
                 FULL CONVERSATION:
                 {conversation_context}
 
@@ -798,6 +810,11 @@ def determine_owner(ti, **context):
 
     prompt = f"""You are a HubSpot API assistant. Analyze this conversation to identify deal owner and task owners.
     **You CANNOT create deal owners or tasks owners in HubSpot.**  
+    YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 **SENDER**  
 Name : {sender_name}  
 Email: {sender_email}
@@ -921,7 +938,11 @@ def validate_deal_stage(ti, **context):
     
     prompt = f"""You are a HubSpot Deal Stage Validation Assistant. Your role is to validate deal stages from the conversation.
     **You cannot create or update deals in HubSpot.**
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 LATEST USER MESSAGE:
 {latest_message}
 
