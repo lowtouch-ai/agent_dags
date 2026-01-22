@@ -1983,7 +1983,7 @@ Return ONLY valid JSON:
                 response.raise_for_status()
                 
                 results = response.json().get("results", [])
-                logging.info(f"HubSpot returned {results} results for deal search '{deal_name}'")
+                logging.info(f"HubSpot returned {len(results)} results for deal search '{deal_name}'")
                 
                 for deal in results:
                     props = deal.get("properties", {})
