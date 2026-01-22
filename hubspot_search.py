@@ -281,8 +281,6 @@ def load_context_from_dag_run(ti, **context):
     
     email_data = dag_run_conf.get("email_data", {})
     chat_history = dag_run_conf.get("chat_history", [])
-    logging.info(f"chat history:{chat_history}")
-    logging.info(f"dag run config:{dag_run_conf}")
     thread_history = dag_run_conf.get("thread_history", [])
     
     thread_id = email_data.get("threadId", "unknown")
@@ -311,14 +309,12 @@ def load_context_from_dag_run(ti, **context):
 def generate_and_inject_spelling_variants(ti, **context):
     latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run",default="")
     chat_history = ti.xcom_pull(key="chat_history",  task_ids = "load_context_from_dag_run", default=[])
-    logging.info(f"chat hsitory:{chat_history}")
 
     recent_context = ""
     if chat_history is not None: 
         for msg in chat_history[-4:]:  # Last few messages
             recent_context += f"{msg['role'].upper()}: {msg['content']}\n\n"
     recent_context += f"USER: {latest_message}"
-    logging.info(f"recent context:{recent_context}")
 
     variant_prompt = f"""You are a helpful assistant that detects potential spelling mistakes in names mentioned in business emails.
     You cannot create or update any records, your only job is to identify possible typos in names based on the conversation.
@@ -1439,10 +1435,8 @@ def validate_companies_against_associations(ti, **context):
         return
 
     contact_data = ti.xcom_pull(key="contact_info_with_associations",task_ids = "search_contacts_with_associations", default={})
-    logging.info(f"contact data:{contact_data}")
     associated_companies = contact_data.get("associated_companies", [])
     contact_results = contact_data.get("contact_results", {})
-    logging.info(f"contact_results:{contact_results}")
     chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
     latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run", default = "")
     
@@ -1623,10 +1617,8 @@ def validate_deals_against_associations(ti, **context):
         return text
 
     contact_data = ti.xcom_pull(key="contact_info_with_associations",task_ids = "search_contacts_with_associations", default={})
-    logging.info(f"contact data : {contact_data}")
     associated_deals = contact_data.get("associated_deals", [])
     contact_results = contact_data.get("contact_results", {})
-    logging.info(f"contact_results:{contact_results}")
     # if contact_results.get("total", 0) == 0 and len(associated_deals) == 0:
     #     logging.info("No contacts and no associated deals - skipping validation to preserve direct search results")
     #     return
