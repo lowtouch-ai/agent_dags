@@ -1032,7 +1032,7 @@ def search_contacts_api(firstname=None, lastname=None, email=None):
             ])
 
         # Attempt 2: Firstname + Lastname
-        if firstname and lastname:
+        elif firstname and lastname:
             search_attempts.append([
                 {
                     "propertyName": "firstname",
@@ -1047,7 +1047,7 @@ def search_contacts_api(firstname=None, lastname=None, email=None):
             ])
 
         # Attempt 3: Firstname only (fallback)
-        if firstname:
+        elif firstname:
             search_attempts.append([
                 {
                     "propertyName": "firstname",
