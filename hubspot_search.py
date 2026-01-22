@@ -440,13 +440,13 @@ Analyze the content and determine:
         - Always search every single person mentioned — never skip or filter out any individual.
         - **Use spelling variants**: If a name appears to be misspelled and variants are provided above, prefer the most likely correct spelling from the variants when deciding to trigger a search.
     - COMPANIES (search_companies):
-    - Set to TRUE ONLY if the user explicitly asks about a company OR mentions a company outside of a deal name context.
-    - **CRITICAL RULE**: If a company name appears ONLY within a deal name (e.g., "GreenField Systems – QA Automation PoC"), DO NOT trigger company search.
-    - Examples of when to search companies:
-            - "Tell me about GreenField Systems"
-            - "Add a new company called Acme Corp"
-            - "What deals do we have with Microsoft?"
-    - Do not consider the company `lowtouch.ai`.
+        - Set to TRUE if a company/organization name is mentioned.
+        - Contact person name is also a trigger for company search.
+        - This includes formal company names, business names, or organizational references
+        - User Mentions the contact name or deal name of a exiting company. 
+        - Do not consider the company `lowtouch.ai`.
+        - Strictly ignore the previous company of the contacts and consider the current company from contacts email id.
+        - **Use spelling variants**: If a company name appears to be misspelled and variants are provided above, prefer the most likely correct spelling from the variants when deciding to trigger a search.
     - DEALS (search_deals):
         - Set to TRUE ONLY if ANY of these conditions are met:
             a) User explicitly mention the name of a existing deal name.The user refers to an existing deal in any way (e.g., “this deal”, “the ABC deal”, “update the opportunity”, “for this pipeline item”).
@@ -1324,7 +1324,6 @@ Return ONLY valid JSON:
             firstname = contact.get("firstname", "").strip()
             lastname = contact.get("lastname", "").strip()
             email = contact.get("email", "").strip()
-            logging.info(f"first_name:{firstname} and last_name is:{lastname}")
             # Search contact
             search_result = search_contacts_api(
                 firstname=firstname if firstname else None,
@@ -1439,10 +1438,8 @@ def validate_companies_against_associations(ti, **context):
         return
 
     contact_data = ti.xcom_pull(key="contact_info_with_associations",task_ids = "search_contacts_with_associations", default={})
-    logging.info(f"contact data:{contact_data}")
     associated_companies = contact_data.get("associated_companies", [])
     contact_results = contact_data.get("contact_results", {})
-    logging.info(f"contact_results:{contact_results}")
     chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
     latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run", default = "")
     
@@ -1790,7 +1787,6 @@ def refine_contacts_by_associations(ti, **context):
     - Otherwise, prioritize contacts linked to relevant companies/deals.
     """
     contact_info = ti.xcom_pull(key="contact_info_with_associations",task_ids = "search_contacts_with_associations", default={})
-    logging.info(f"contact_info:{contact_info}")
     company_info = ti.xcom_pull(key="company_info",task_ids = "validate_companies_against_associations", default={})
     deal_info = ti.xcom_pull(key="deal_info",task_ids = "validate_deals_against_associations", default={})
 
