@@ -73,6 +73,8 @@ GMAIL_CREDENTIALS = Variable.get("ltai.v3.hubspot.gmail.credentials")
 OLLAMA_HOST = Variable.get("ltai.v3.hubspot.ollama.host","http://agentomatic:8000")
 HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")
 HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
+DEFAULT_OWNER_ID = Variable.get("ltai.v3.hubspot.default.owner.id")
+DEFAULT_OWNER_NAME = Variable.get("ltai.v3.hubspot.default.owner.name")
 TASK_THRESHOLD = 15
 def authenticate_gmail():
     try:
@@ -229,14 +231,14 @@ def extract_all_recipients(email_data):
 def get_owner_name_from_id(owner_id, all_owners_table):
     """Convert owner ID to owner name using the owners table"""
     if not owner_id or not all_owners_table:
-        return "Kishore"  # Default
+        return DEFAULT_OWNER_NAME
     
     # Search for matching owner
     for owner in all_owners_table:
         if str(owner.get("id", "")) == str(owner_id):
-            return owner.get("name", "Kishore")
+            return DEFAULT_OWNER_NAME
     
-    return "Kishore"
+    return DEFAULT_OWNER_NAME
 
 def send_email(service, recipient, subject, body, in_reply_to, references, cc=None, bcc=None):
     try:
@@ -307,8 +309,8 @@ def load_context_from_dag_run(ti, **context):
     }
 
 def generate_and_inject_spelling_variants(ti, **context):
-    latest_message = ti.xcom_pull(key="latest_message", default="")
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run",default="")
+    chat_history = ti.xcom_pull(key="chat_history",  task_ids = "load_context_from_dag_run", default=[])
 
     recent_context = ""
     for msg in chat_history[-4:]:  # Last few messages
@@ -317,6 +319,9 @@ def generate_and_inject_spelling_variants(ti, **context):
 
     variant_prompt = f"""You are a helpful assistant that detects potential spelling mistakes in names mentioned in business emails.
     You cannot create or update any records, your only job is to identify possible typos in names based on the conversation.
+
+latest user message:
+{latest_message}
 
 Your task: Extract any contact names, company names, or deal names that might have typos.
 For each, list the original + 3–5 plausible spelling variants (include common misspellings).
@@ -347,7 +352,7 @@ Return ONLY valid JSON:
 """
 
     try:
-        response = get_ai_response(variant_prompt, expect_json=True)
+        response = get_ai_response(variant_prompt,conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response for spelling variants: {response}")
     except Exception as e:
         raise
@@ -366,11 +371,11 @@ Return ONLY valid JSON:
 
 def analyze_thread_entities(ti, **context):
     """Analyze thread to determine which entities to search and actions to take"""
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
-    email_data = ti.xcom_pull(key="email_data", default={})
-    thread_id = ti.xcom_pull(key="thread_id", default="unknown")
-    spelling_variants = ti.xcom_pull(key="spelling_variants", default={})
+    chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run" ,default="")
+    email_data = ti.xcom_pull(key="email_data", task_ids = "load_context_from_dag_run", default={})
+    thread_id = ti.xcom_pull(key="thread_id", task_ids = "load_context_from_dag_run",default="unknown")
+    spelling_variants = ti.xcom_pull(key="spelling_variants",  task_ids = "generate_spelling_variants",default={})
 
     variants_section = ""
     if spelling_variants:
@@ -547,9 +552,9 @@ def summarize_engagement_details(ti, **context):
         ti.xcom_push(key="engagement_summary", value={})
         return
     
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
-    email_data = ti.xcom_pull(key="email_data", default={})
+    chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
+    latest_message = ti.xcom_pull(key="latest_message",  task_ids = "load_context_from_dag_run", default="")
+    email_data = ti.xcom_pull(key="email_data", task_ids = "load_context_from_dag_run", default={})
 
     conversation_context = ""
     for msg in chat_history:
@@ -646,14 +651,14 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
 def summarize_engagement_details_360(ti, **context):
     """Generate enhanced Deal 360 view using Perplexity-powered web research"""
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids="analyze_thread_entities", default={})
     if not entity_flags.get("request_summary_360", False):
         logging.info("No 360 summary requested, skipping")
         return
 
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
-    email_data = ti.xcom_pull(key="email_data", default={})
+    chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run", default="")
+    email_data = ti.xcom_pull(key="email_data", task_ids = "load_context_from_dag_run", default={})
 
     conversation_context = ""
     for msg in chat_history:
@@ -796,9 +801,9 @@ IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 
 def determine_owner(ti, **context):
     """Determine deal owner and task owners from conversation"""
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
-    email_data = ti.xcom_pull(key="email_data", default={})
+    chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
+    latest_message = ti.xcom_pull(key="latest_message",  task_ids = "load_context_from_dag_run", default="")
+    email_data = ti.xcom_pull(key="email_data",  task_ids = "load_context_from_dag_run", default={})
     headers      = email_data.get("headers", {})
     sender_raw   = headers.get("From", "")                # e.g. "John Doe <john@acme.com>"
     # Parse a clean name and e-mail (fallback to raw string if parsing fails)
@@ -823,7 +828,7 @@ LATEST USER MESSAGE:
 
 IMPORTANT: You must respond with ONLY a valid JSON object. No HTML, no explanations, no markdown formatting.
 
-DEFAULT OWNER: Kishore (ID: 71346067)
+DEFAULT OWNER: {DEFAULT_OWNER_NAME}
 
 Steps:
 1. Parse the Deal Owner and Task Owners and contact Owners from the conversation.
@@ -916,8 +921,8 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
     except Exception as e:
         logging.error(f"Error processing owner AI response: {e}")
         default_owner = {
-            "deal_owner_id": "71346067",
-            "deal_owner_name": "Kishore",
+            "deal_owner_id": {DEFAULT_OWNER_ID},
+            "deal_owner_name": {DEFAULT_OWNER_NAME},
             "deal_owner_message": f"Error occurred: {str(e)}, so assigning to default owner Kishore.",
             "task_owners": [],
             "all_owners_table": []
@@ -927,8 +932,8 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
 def validate_deal_stage(ti, **context):
     """Validate deal stage from conversation and assign default if invalid"""
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
+    chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run", default="")
     
     # Valid deal stages
     VALID_DEAL_STAGES = [
@@ -1243,7 +1248,7 @@ def search_contacts_with_associations(ti, **context):
     Step 1: Search contacts from email
     Step 2: Get their associated companies and deals
     """
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids="analyze_thread_entities", default={})
     if not entity_flags.get("search_contacts", True):
         logging.info(f"Skipping contacts search: {entity_flags.get('contacts_reason', 'Not mentioned')}")
         default_result = {
@@ -1255,8 +1260,8 @@ def search_contacts_with_associations(ti, **context):
         ti.xcom_push(key="contact_info_with_associations", value=default_result)
         return
 
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
+    chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run",default=[])
+    latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run", default="")
     
     # AI extracts contact names from email
     prompt = f"""Extract ALL contact names mentioned in this email. You cannot create any contact in HubSpot.
@@ -1377,8 +1382,8 @@ Return ONLY valid JSON:
                                  f"{len(company_ids)} companies, {deal_ids} deals")
             else:
                 # Get the correct contact owner from owner_info
-                owner_info = ti.xcom_pull(key="owner_info", default={})
-                contact_owner_name = owner_info.get("contact_owner_name", "Kishore")
+                owner_info = ti.xcom_pull(key="owner_info", task_ids = "determine_owner",default={})
+                contact_owner_name = owner_info.get("contact_owner_name", DEFAULT_OWNER_NAME)
 
                 not_found_contacts.append({
                     "firstname": firstname,
@@ -1439,7 +1444,7 @@ def validate_companies_against_associations(ti, **context):
         text = re.sub(r'[^\w]', '', text)
         return text
     
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids= "analyze_thread_entities", default={})
     if not entity_flags.get("search_contacts", True):
         logging.info("Contact search was skipped, so skipping company association validation")
         # Push empty result
@@ -1450,11 +1455,11 @@ def validate_companies_against_associations(ti, **context):
         })
         return
 
-    contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
+    contact_data = ti.xcom_pull(key="contact_info_with_associations",task_ids = "search_contacts_with_associations", default={})
     associated_companies = contact_data.get("associated_companies", [])
     contact_results = contact_data.get("contact_results", {})
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
+    chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run", default = "")
     
     # AI extracts companies mentioned in email
     prompt = f"""Extract ALL company names explicitly mentioned in this email.
@@ -1607,7 +1612,7 @@ def validate_deals_against_associations(ti, **context):
     Compare deals mentioned in prompt vs associated deals.
     Always include ALL associated deals as existing, and add unmatched mentioned as new.
     """
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids= "analyze_thread_entities", default={})
     if not entity_flags.get("search_contacts", True):
         logging.info("Contact search was skipped, so skipping deal association validation")
         # Push empty result
@@ -1632,18 +1637,18 @@ def validate_deals_against_associations(ti, **context):
         
         return text
 
-    contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
+    contact_data = ti.xcom_pull(key="contact_info_with_associations",task_ids = "search_contacts_with_associations", default={})
     associated_deals = contact_data.get("associated_deals", [])
     contact_results = contact_data.get("contact_results", {})
     # if contact_results.get("total", 0) == 0 and len(associated_deals) == 0:
     #     logging.info("No contacts and no associated deals - skipping validation to preserve direct search results")
     #     return
     
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
-    owner_info = ti.xcom_pull(key="owner_info", default={})
+    chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run", default="")
+    owner_info = ti.xcom_pull(key="owner_info",task_ids = "determine_owner", default={})
     
-    deal_owner_name = owner_info.get('deal_owner_name', 'Kishore')
+    deal_owner_name = owner_info.get('deal_owner_name', DEFAULT_OWNER_NAME)
     
     # AI extracts deals mentioned in email
     prompt = f"""Extract deals mentioned in this email. Only include if there's CLEAR buying intent.
@@ -1797,9 +1802,9 @@ def refine_contacts_by_associations(ti, **context):
       Only new_contacts should proceed downstream.
     - Otherwise, prioritize contacts linked to relevant companies/deals.
     """
-    contact_info = ti.xcom_pull(key="contact_info_with_associations", default={})
-    company_info = ti.xcom_pull(key="company_info", default={})
-    deal_info = ti.xcom_pull(key="deal_info", default={})
+    contact_info = ti.xcom_pull(key="contact_info_with_associations",task_ids = "search_contacts_with_associations", default={})
+    company_info = ti.xcom_pull(key="company_info",task_ids = "validate_companies_against_associations", default={})
+    deal_info = ti.xcom_pull(key="deal_info",task_ids = "validate_deals_against_associations", default={})
 
     original_contacts = contact_info.get("contact_results", {}).get("results", [])
     if not original_contacts:
@@ -1867,7 +1872,7 @@ def refine_contacts_by_associations(ti, **context):
         "associated_deals": associated_deals
     }
     # === NEW: Add owner names to all contacts ===
-    owner_info = ti.xcom_pull(key="owner_info", default={})
+    owner_info = ti.xcom_pull(key="owner_info",task_ids = "determine_owner", default={})
     all_owners_table = owner_info.get("all_owners_table", [])
 
     # Fix existing contacts
@@ -1881,7 +1886,7 @@ def refine_contacts_by_associations(ti, **context):
     # Fix new contacts (they might already have names, but ensure they're correct)
     for contact in new_contacts:
         if not contact.get("contactOwnerName"):
-            contact["contactOwnerName"] = owner_info.get("contact_owner_name", "Kishore")
+            contact["contactOwnerName"] = owner_info.get("contact_owner_name", DEFAULT_OWNER_NAME)
 
     ti.xcom_push(key="contact_info_with_associations", value=refined_contact_info)
 
@@ -1890,7 +1895,7 @@ def search_deals_directly(ti, **context):
     Search for deals directly by name, independent of contact associations.
     This ensures we find existing deals even when no contacts are specified.
     """
-    contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
+    contact_data = ti.xcom_pull(key="contact_info_with_associations", task_ids="search_contacts_with_associations", default={})
     contact_results = contact_data.get("contact_results", {})
     new_contacts = contact_data.get("new_contacts", [])
     logging.info(f"Contact results before direct deal search: {contact_results} new contacts: {len(new_contacts)}")
@@ -1898,15 +1903,15 @@ def search_deals_directly(ti, **context):
         logging.info("No contacts - skipping direct search results")
         return
     
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags",task_ids = "analyze_thread_entities", default={})
     if not entity_flags.get("search_deals", True):
         logging.info(f"Skipping direct deal search: {entity_flags.get('deals_reason', 'Not mentioned')}")
         ti.xcom_push(key="direct_deal_results", value={"total": 0, "results": []})
         return
     
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
-    owner_info = ti.xcom_pull(key="owner_info", default={})
+    chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run", default="")
+    owner_info = ti.xcom_pull(key="owner_info", task_ids = "determine_owner", default={})
     
     # AI extracts deal names from email
     prompt = f"""Extract ALL deal names explicitly mentioned in this email.
@@ -2029,21 +2034,21 @@ def search_companies_directly(ti, **context):
     """
     Search for companies directly by name, independent of contact associations.
     """
-    contact_data = ti.xcom_pull(key="contact_info_with_associations", default={})
+    contact_data = ti.xcom_pull(key="contact_info_with_associations", task_ids="search_contacts_with_associations", default={})
     contact_results = contact_data.get("contact_results", {})
     new_contacts = contact_data.get("new_contacts", [])
     logging.info(f"Contact results before direct deal search: {contact_results}")
     if contact_results.get("total", 0) > 0 or len(new_contacts) > 0:
         logging.info("No company - skipping direct search results")
         return
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids="analyze_thread_entities", default={})
     if not entity_flags.get("search_companies", True):
         logging.info(f"Skipping direct company search: {entity_flags.get('companies_reason', 'Not mentioned')}")
         ti.xcom_push(key="direct_company_results", value={"total": 0, "results": []})
         return
     
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
+    chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
+    latest_message = ti.xcom_pull(key="latest_message",  task_ids = "load_context_from_dag_run", default="")
     
     # AI extracts company names
     prompt = f"""Extract ALL company names explicitly mentioned in this email.
@@ -2159,13 +2164,13 @@ def merge_search_results(ti, **context):
     Prioritize direct searches to ensure standalone entities are found.
     """
     # Get association-based results
-    contact_info = ti.xcom_pull(key="contact_info_with_associations", default={})
-    company_info = ti.xcom_pull(key="company_info", default={})
-    deal_info = ti.xcom_pull(key="deal_info", default={}, task_ids="validate_deals_against_associations")
+    contact_info = ti.xcom_pull(key="contact_info_with_associations",task_ids="refine_contacts_by_associations", default={})
+    company_info = ti.xcom_pull(key="company_info", task_ids="validate_companies_against_associations", default={})
+    deal_info = ti.xcom_pull(key="deal_info", task_ids="validate_deals_against_associations",default={})
     
     # Get direct search results
-    direct_deals = ti.xcom_pull(key="direct_deal_results", default={"total": 0, "results": []})
-    direct_companies = ti.xcom_pull(key="direct_company_results", default={"total": 0, "results": []})
+    direct_deals = ti.xcom_pull(key="direct_deal_results", task_ids="search_deals_directly", default={"total": 0, "results": []}) or {"total": 0, "results": []}
+    direct_companies = ti.xcom_pull(key="direct_company_results", task_ids="search_companies_directly", default={"total": 0, "results": []}) or {"total": 0, "results": []}
     
     # Log what we received
     logging.info(f"=== MERGE INPUT ===")
@@ -2201,9 +2206,9 @@ def merge_search_results(ti, **context):
     new_deals = deal_info.get("new_deals", [])
     new_companies = company_info.get("new_companies", [])
 
-    owner_info = ti.xcom_pull(key="owner_info", default={})
+    owner_info = ti.xcom_pull(key="owner_info", task_ids = "determine_owner",default={})
     all_owners_table = owner_info.get("all_owners_table", [])
-    deal_owner_name = owner_info.get("deal_owner_name", "Kishore")
+    deal_owner_name = owner_info.get("deal_owner_name", DEFAULT_OWNER_NAME)
     
     for deal in all_deals:
         if not deal.get("dealOwnerName") and deal.get("dealOwnerId"):
@@ -2270,9 +2275,9 @@ def validate_associations_against_context(ti, **context):
     latest_message = ti.xcom_pull(key="latest_message", default="")
     
     # Get current results
-    contact_info = ti.xcom_pull(key="contact_info_with_associations", default={})
-    company_info = ti.xcom_pull(key="merged_company_info") or ti.xcom_pull(key="company_info") or {}
-    deal_info = ti.xcom_pull(key="merged_deal_info") or ti.xcom_pull(key="deal_info") or {}
+    contact_info = ti.xcom_pull(key="contact_info_with_associations", task_ids="search_contacts_with_associations", default={})
+    company_info = ti.xcom_pull(key="merged_company_info",task_ids ="merge_search_results" ) or ti.xcom_pull(key="company_info",task_ids ="merge_search_results") or {}
+    deal_info = ti.xcom_pull(key="merged_deal_info",task_ids ="merge_search_results") or ti.xcom_pull(key="deal_info",task_ids ="merge_search_results") or {}
     
     existing_contacts = contact_info.get("contact_results", {}).get("results", [])
     new_contacts = contact_info.get("new_contacts", [])
@@ -2462,8 +2467,8 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         
         irrelevant_contact_ids = set(irrelevant.get("contact_ids_to_remove", []))
         
-        owner_info = ti.xcom_pull(key="owner_info", default={})
-        contact_owner_name = owner_info.get("contact_owner_name", "Kishore")
+        owner_info = ti.xcom_pull(key="owner_info", task_ids = "determine_owner",default={})
+        contact_owner_name = owner_info.get("contact_owner_name", DEFAULT_OWNER_NAME)
         
         for val in validated_contacts_list:
             action = val.get("action")
@@ -2559,7 +2564,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         
         irrelevant_deal_ids = set(irrelevant.get("deal_ids_to_remove", []))
         
-        deal_owner_name = owner_info.get("deal_owner_name", "Kishore")
+        deal_owner_name = owner_info.get("deal_owner_name", DEFAULT_OWNER_NAME)
         
         for val in validated_deals_list:
             action = val.get("action")
@@ -2642,8 +2647,8 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
 def parse_notes_tasks_meeting(ti, **context):
     """Parse notes, tasks, and meetings from conversation"""
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
-    email_data = ti.xcom_pull(key="email_data", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids="analyze_thread_entities", default={})
+    email_data = ti.xcom_pull(key="email_data", task_ids = "load_context_from_dag_run", default={})
     headers      = email_data.get("headers", {})
     sender_raw   = headers.get("From", "")                # e.g. "John Doe <john@acme.com>"
     # Parse a clean name and e-mail (fallback to raw string if parsing fails)
@@ -2665,13 +2670,13 @@ def parse_notes_tasks_meeting(ti, **context):
         })
         return
     
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
-    owner_info = ti.xcom_pull(key="owner_info", default={})
+    chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run", default="")
+    owner_info = ti.xcom_pull(key="owner_info", task_ids = "determine_owner", default={})
     
     task_owners = owner_info.get('task_owners', [])
-    default_task_owner_id = "71346067"
-    default_task_owner_name = "Kishore"
+    default_task_owner_id = {DEFAULT_OWNER_ID}
+    default_task_owner_name = {DEFAULT_OWNER_NAME}
     
     parsing_instructions = []
     if should_parse_notes:
@@ -2838,12 +2843,12 @@ def validate_entity_creation_rules(ti, **context):
     
     CRITICAL FIX: Check BOTH existing AND new entities when validating associations.
     """
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
-    contact_info = ti.xcom_pull(key="contact_info_with_associations", default={})
-    company_info = ti.xcom_pull(key="company_info", default={})
-    deal_info = ti.xcom_pull(key="deal_info", default={})
-    notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", default={})
-    email_data = ti.xcom_pull(key="email_data", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids="analyze_thread_entities", default={})
+    contact_info = ti.xcom_pull(key="contact_info_with_associations",task_ids = "validate_associations_against_context", default={})
+    company_info = ti.xcom_pull(key="company_info", task_ids="validate_associations_against_context", default={})
+    deal_info = ti.xcom_pull(key="deal_info",task_ids = "validate_associations_against_context", default={})
+    notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", task_ids = "parse_notes_tasks_meeting",default={})
+    email_data = ti.xcom_pull(key="email_data", task_ids = "load_context_from_dag_run", default={})
     
     # Extract sender info
     headers = email_data.get("headers", {})
@@ -2988,13 +2993,13 @@ def compose_validation_error_email(ti, **context):
     """
     Compose a polite email explaining why entities cannot be created.
     """
-    validation_result = ti.xcom_pull(key="validation_result", default={})
-    email_data = ti.xcom_pull(key="email_data", default={})
-    notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", default={})
+    validation_result = ti.xcom_pull(key="validation_result",task_ids = "validate_entity_creation_rules", default={})
+    email_data = ti.xcom_pull(key="email_data", task_ids = "load_context_from_dag_run", default={})
+    notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", task_ids = "parse_notes_tasks_meeting", default={})
     
     # ✅ GET COMPANY AND DEAL DATA FROM CORRECT SOURCES
-    company_info = ti.xcom_pull(key="company_info", default={})
-    deal_info = ti.xcom_pull(key="deal_info", default={})
+    company_info = ti.xcom_pull(key="company_info", task_ids="validate_companies_against_associations", default={})
+    deal_info = ti.xcom_pull(key="deal_info",task_ids = "validate_deals_against_associations", default={})
     
     errors = validation_result.get("errors", [])
     entity_summary = validation_result.get("entity_summary", {})
@@ -3328,8 +3333,8 @@ def send_validation_error_email(ti, **context):
     """
     Send the validation error email to the user with proper threading.
     """
-    email_data = ti.xcom_pull(key="email_data", default={})
-    validation_error_email = ti.xcom_pull(key="validation_error_email")
+    email_data = ti.xcom_pull(key="email_data",  task_ids = "load_context_from_dag_run", default={})
+    validation_error_email = ti.xcom_pull(key="validation_error_email", task_ids = "compose_validation_error_email")
     
     service = authenticate_gmail()
     if not service:
@@ -3405,7 +3410,7 @@ def decide_validation_path(ti, **context):
     """
     Branch task to decide whether to proceed with entity creation or send validation error.
     """
-    validation_result = ti.xcom_pull(key="validation_result", default={})
+    validation_result = ti.xcom_pull(key="validation_result", task_ids = "validate_entity_creation_rules", default={})
     
     is_valid = validation_result.get("is_valid", False)
     
@@ -3418,7 +3423,7 @@ def decide_validation_path(ti, **context):
 
 def check_task_threshold(ti, **context):
     """Check if task volume exceeds threshold"""
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids="analyze_thread_entities", default={})
     if not entity_flags.get("parse_tasks", True):
         logging.info(f"Skipping task threshold check")
         ti.xcom_push(key="task_warnings", value=[])
@@ -3433,11 +3438,11 @@ def check_task_threshold(ti, **context):
         })
         return []
     
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_message = ti.xcom_pull(key="latest_message", default="")
+    chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
+    latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run", default="")
     
     # Get CORRECTED tasks from parse_notes_tasks_meeting
-    notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", default={})
+    notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", task_ids = "parse_notes_tasks_meeting", default={})
     corrected_tasks = notes_tasks_meeting.get('tasks', [])
     
     # Build task owner mapping from CORRECTED tasks
@@ -3446,8 +3451,8 @@ def check_task_threshold(ti, **context):
         task_owner_mapping.append({
             'task_details': task.get('task_details', ''),
             'due_date': task.get('due_date', ''),
-            'task_owner_id': task.get('task_owner_id', '71346067'),
-            'task_owner_name': task.get('task_owner_name', 'Kishore')
+            'task_owner_id': task.get('task_owner_id', ''),
+            'task_owner_name': task.get('task_owner_name', '')
         })
 
 
@@ -3538,15 +3543,15 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
 def compile_search_results(ti, **context):
     """Compile all search results for confirmation email"""
-    owner_info = ti.xcom_pull(key="owner_info")
-    deal_info = ti.xcom_pull(key="merged_deal_info") or ti.xcom_pull(key="deal_info") or {}
-    contact_info = ti.xcom_pull(key="contact_info_with_associations", default={})
-    company_info = ti.xcom_pull(key="merged_company_info") or ti.xcom_pull(key="company_info") or {}
-    notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting")
-    task_threshold_info = ti.xcom_pull(key="task_threshold_info", default={})
-    deal_stage_info = ti.xcom_pull(key="deal_stage_info", default={"deal_stages": []})
-    thread_id = ti.xcom_pull(key="thread_id")
-    email_data = ti.xcom_pull(key="email_data")
+    owner_info = ti.xcom_pull(key="owner_info", task_ids = "determine_owner", default={})
+    deal_info = ti.xcom_pull(key="merged_deal_info",task_ids ="validate_associations_against_context") or ti.xcom_pull(key="deal_info",task_ids = "validate_deals_against_associations") or {}
+    contact_info = ti.xcom_pull(key="contact_info_with_associations",task_ids = "refine_contacts_by_associations", default={})
+    company_info = ti.xcom_pull(key="merged_company_info",task_ids ="validate_associations_against_context") or ti.xcom_pull(key="company_info",task_ids = "validate_companies_against_associations") or {}
+    notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", task_ids="parse_notes_tasks_meeting", default={})
+    task_threshold_info = ti.xcom_pull(key="task_threshold_info",task_ids ="check_task_threshold", default={})
+    deal_stage_info = ti.xcom_pull(key="deal_stage_info", task_ids = "validate_deal_stage", default={"deal_stages": []})
+    thread_id = ti.xcom_pull(key="thread_id", task_ids="load_context_from_dag_run")
+    email_data = ti.xcom_pull(key="email_data", task_ids="load_context_from_dag_run", default={})
     
     logging.info(f"=== COMPILING SEARCH RESULTS ===")
     logging.info(f"Thread ID: {thread_id}")
@@ -3576,11 +3581,11 @@ def compile_search_results(ti, **context):
             "tasks": notes_tasks_meeting.get("tasks", []),
             "meeting_details": notes_tasks_meeting.get("meeting_details", {})
         },
-        "contact_owner_id": owner_info.get("contact_owner_id", "71346067"),
-        "contact_owner_name": owner_info.get("contact_owner_name", "Kishore"),
+        "contact_owner_id": owner_info.get("contact_owner_id", ""),
+        "contact_owner_name": owner_info.get("contact_owner_name", ""),
         "contact_owner_message": owner_info.get("contact_owner_message", ""),
-        "deal_owner_id": owner_info.get("deal_owner_id", "71346067"),
-        "deal_owner_name": owner_info.get("deal_owner_name", "Kishore"),
+        "deal_owner_id": owner_info.get("deal_owner_id", ""),
+        "deal_owner_name": owner_info.get("deal_owner_name", ""),
         "deal_owner_message": owner_info.get("deal_owner_message", ""),
         "task_owners": owner_info.get("task_owners", []),
         "all_owners_table": owner_info.get("all_owners_table", []),
@@ -3618,12 +3623,12 @@ def compile_search_results(ti, **context):
 
 def compose_confirmation_email(ti, **context):
     """Compose confirmation email with search results"""
-    search_results = ti.xcom_pull(key="search_results")
-    email_data = ti.xcom_pull(key="email_data")
-    confirmation_needed = ti.xcom_pull(key="confirmation_needed", default=False)
-    engagement_summary = ti.xcom_pull(key="engagement_summary", default={})
-    notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting", default={})
-    deal_stage_info = ti.xcom_pull(key="deal_stage_info", default={"deal_stages": []})  # This is already correct
+    search_results = ti.xcom_pull(key="search_results",task_ids = "compile_search_results")
+    email_data = ti.xcom_pull(key="email_data",task_ids = "load_context_from_dag_run")
+    confirmation_needed = ti.xcom_pull(key="confirmation_needed", task_ids="compile_search_results", default=False)
+    engagement_summary = ti.xcom_pull(key="engagement_summary", task_ids = "summarize_engagement_details", default={})
+    notes_tasks_meeting = ti.xcom_pull(key="notes_tasks_meeting",  task_ids = "parse_notes_tasks_meeting", default={})
+    deal_stage_info = ti.xcom_pull(key="deal_stage_info", task_ids="validate_deal_stage", default={"deal_stages": []})   # This is already correct
     corrected_tasks = notes_tasks_meeting.get("tasks", [])
     
     if not confirmation_needed:
@@ -3995,7 +4000,7 @@ def compose_confirmation_email(ti, **context):
         """
         for date_info in dates_checked:
             date_str = date_info.get("date", "")
-            owner_name = date_info.get("owner_name", "Kishore")
+            owner_name = date_info.get("owner_name", DEFAULT_OWNER_NAME)
             
             exceeds = "Exceeds" if date_info.get("exceeds_threshold") else "Within Limit"
             email_content += f"""
@@ -4091,11 +4096,11 @@ def compose_confirmation_email(ti, **context):
     # Owner Assignment Section
     task_owners = search_results.get("task_owners", [])
     all_owners = search_results.get("all_owners_table", [])
-    chosen_deal_owner_name = search_results.get("deal_owner_name", "Kishore")
-    chosen_deal_owner_id = search_results.get("deal_owner_id", "71346067")
+    chosen_deal_owner_name = search_results.get("deal_owner_name",DEFAULT_OWNER_NAME)
+    chosen_deal_owner_id = search_results.get("deal_owner_id",DEFAULT_OWNER_ID)
     deal_owner_msg = search_results.get("deal_owner_message", "")
-    contact_owner_id = search_results.get("contact_owner_id", "71346067")
-    contact_owner_name = search_results.get("contact_owner_name", "Kishore")
+    contact_owner_id = search_results.get("contact_owner_id",DEFAULT_OWNER_ID)
+    contact_owner_name = search_results.get("contact_owner_name")
     contact_owner_msg = search_results.get("contact_owner_message", "")
 
     has_new_deals_or_tasks_or_contacts = (
@@ -4152,7 +4157,7 @@ def compose_confirmation_email(ti, **context):
         for task in corrected_tasks:
             task_index = task.get("task_index", 0)
             task_details = task.get("task_details", "Unknown")
-            task_owner_name = task.get("task_owner_name", "Kishore")
+            task_owner_name = task.get("task_owner_name", {DEFAULT_OWNER_NAME})
             original_task_owner = next((to for to in task_owners if to.get("task_index") == task_index), None)
             task_owner_msg = original_task_owner.get("task_owner_message", "") if original_task_owner else ""
             task_msg_lower = task_owner_msg.lower()
@@ -4238,9 +4243,9 @@ def compose_confirmation_email(ti, **context):
 
 def send_confirmation_email(ti, **context):
     """Send confirmation email to all recipients"""
-    email_data = ti.xcom_pull(key="email_data")
-    confirmation_email = ti.xcom_pull(key="confirmation_email")
-    confirmation_needed = ti.xcom_pull(key="confirmation_needed", default=False)
+    email_data = ti.xcom_pull(key="email_data", task_ids = "load_context_from_dag_run")
+    confirmation_email = ti.xcom_pull(key="confirmation_email", task_ids = "compose_confirmation_email")
+    confirmation_needed = ti.xcom_pull(key="confirmation_needed", task_ids="compile_search_results", default=False)
     
     if not confirmation_needed:
         return "No confirmation email needed"
@@ -4309,7 +4314,7 @@ def check_if_action_needed(ti, **context):
     Check if any entities were found or proposed.
     If nothing to do, send a polite acknowledgment email.
     """
-    search_results = ti.xcom_pull(key="search_results", default={})
+    search_results = ti.xcom_pull(key="search_results", task_ids = "compile_search_results", default={})
     
     # Check if confirmation is actually needed
     confirmation_needed = search_results.get("confirmation_needed", False)
@@ -4328,10 +4333,10 @@ def compose_no_action_email(ti, **context):
     """
     Compose a polite email when no entities were found or created.
     """
-    email_data = ti.xcom_pull(key="email_data", default={})
-    latest_message = ti.xcom_pull(key="latest_message", default="")
-    search_results = ti.xcom_pull(key="search_results", default={})
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    email_data = ti.xcom_pull(key="email_data", task_ids = "load_context_from_dag_run", default={})
+    latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run", default="")
+    search_results = ti.xcom_pull(key="search_results", task_ids = "compile_search_results", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids="analyze_thread_entities", default={})
     
     # Extract sender info
     headers = email_data.get("headers", {})
@@ -4436,8 +4441,8 @@ def send_no_action_email(ti, **context):
     """
     Send the no-action acknowledgment email.
     """
-    email_data = ti.xcom_pull(key="email_data", default={})
-    no_action_email = ti.xcom_pull(key="no_action_email")
+    email_data = ti.xcom_pull(key="email_data", task_ids = "load_context_from_dag_run", default={})
+    no_action_email = ti.xcom_pull(key="no_action_email", task_ids = "compose_no_action_email")
     
     service = authenticate_gmail()
     if not service:
@@ -4512,9 +4517,9 @@ def send_no_action_email(ti, **context):
 
 def compose_engagement_summary_email(ti, **context):
     """Compose a dedicated email for engagement summary with conditional sections"""
-    engagement_summary = ti.xcom_pull(key="engagement_summary", default={})
-    email_data = ti.xcom_pull(key="email_data")
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    engagement_summary = ti.xcom_pull(key="engagement_summary",  task_ids="summarize_engagement_details_360", default={})
+    email_data = ti.xcom_pull(key="email_data",  task_ids = "load_context_from_dag_run", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags",  task_ids="analyze_thread_entities", default={})
     
     # Check if summary was requested
     if not entity_flags.get("request_summary",False) and not entity_flags.get("request_summary_360", False):
@@ -4808,14 +4813,14 @@ def compose_engagement_summary_email(ti, **context):
 
 def send_engagement_summary_email(ti, **context):
     """Send the engagement summary email with multi-recipient support"""
-    summary_email_needed = ti.xcom_pull(key="summary_email_needed", default=False)
+    summary_email_needed = ti.xcom_pull(key="summary_email_needed", task_ids="compose_engagement_summary_email", default=False)
     
     if not summary_email_needed:
         logging.info("No engagement summary email to send")
         return "No summary email to send"
     
-    email_data = ti.xcom_pull(key="email_data")
-    engagement_summary_email = ti.xcom_pull(key="engagement_summary_email")
+    email_data = ti.xcom_pull(key="email_data", task_ids = "load_context_from_dag_run", default={})
+    engagement_summary_email = ti.xcom_pull(key="engagement_summary_email",task_ids = "compose_engagement_summary_email")
     
     service = authenticate_gmail()
     if not service:
@@ -4888,7 +4893,7 @@ def send_engagement_summary_email(ti, **context):
 
 def decide_workflow_path(ti, **context):
     """Decide whether to proceed with summary email or confirmation workflow"""
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids="analyze_thread_entities",default={})
     if entity_flags.get("request_summary",False) or entity_flags.get("request_summary_360", False):
         logging.info("Taking summary path - will compose and send engagement summary")
         return "compose_engagement_summary_email"
