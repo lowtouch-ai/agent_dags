@@ -283,11 +283,11 @@ def analyze_user_response(ti, **context):
     """Analyze user's message to determine intent and entities using conversation history.
     If AI fails → send polite fallback email to ALL recipients with proper threading."""
    
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    thread_history = ti.xcom_pull(key="thread_history", default=[])
-    thread_id = ti.xcom_pull(key="thread_id")
-    latest_user_message = ti.xcom_pull(key="latest_message", default="")
-    email_data = ti.xcom_pull(key="email_data", default={})
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
+    thread_history = ti.xcom_pull(key="thread_history", task_ids="load_context_from_dag_run", default=[])
+    thread_id = ti.xcom_pull(key="thread_id", task_ids="load_context_from_dag_run")
+    latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="")
+    email_data = ti.xcom_pull(key="email_data", task_ids="load_context_from_dag_run", default={})
     
     if not thread_id:
         logging.error("No thread_id provided")
@@ -367,7 +367,6 @@ Email: {sender_email}
    - Never regenerate or rephrase note content — copy it verbatim from the confirmed plan
    - Keep everything in the notes as it is without changing the speaker name unless explicitly asked to change it
    - All the entities in the confirmation email should be there at the final email without fail and without any modification unless user explicitly asks for a change
-   - **CRITICAL: Meetings must be preserved with ALL fields: meeting_title, start_time, end_time, location, outcome, attendees, meeting_type, meeting_status**
    - Do not change the **speaker_name** in the notes.Copy the exact note content in the confirmation email exactly as it is in the final mail without fail.
 3. If user says "proceed", "yes", "go ahead", "looks good" → return the entire confirmed plan with all the changes requested by the user.If no changes are mentioned , return the confirmed plan as-is.
 4. Casual comments (e.g. "Great meeting!", "This is exciting") → create ONE new note with that text, BUT still return full confirmed plan
@@ -379,17 +378,7 @@ CRITICAL INSTRUCTIONS:
 - Parse these tables to extract existing entities and proposed new entities
 - **CRITICAL**: Parse the Notes table from the confirmation email - preserve ALL notes exactly
 - **CRITICAL**: Parse the Tasks table from the confirmation email - preserve ALL tasks exactly  
-- **CRITICAL**: Parse the Meetings table from the confirmation email - preserve ALL meetings with:
-  * meeting_title
-  * start_time (in ISO format: YYYY-MM-DDTHH:MM:SSZ)
-  * end_time (in ISO format: YYYY-MM-DDTHH:MM:SSZ)
-  * location
-  * outcome
-  * timestamp
-  * attendees (list of attendee names/emails)
-  * meeting_type (e.g., "discovery_call", "demo", "follow_up")
-  * meeting_status (e.g., "SCHEDULED", "COMPLETED")
-- **If the confirmation email has a "Meetings Details" table, you MUST extract every row and include it in entities_to_create.meetings**
+- **CRITICAL**: Parse the Meetings table from the confirmation email - preserve ALL meetings exactly
 - The user's latest message indicates their intent (confirm, modify, select specific, etc.)
 
 CRITICAL PRESERVATION RULES - NON-NEGOTIABLE:
@@ -591,9 +580,9 @@ def validate_and_clean_analysis(ti, **context):
     Validate and clean analysis results to ensure consistency and correctness.
     This function verifies that the analysis from analyze_user_response is accurate and complete.
     """
-    analysis_results = ti.xcom_pull(key="analysis_results", default={})
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_user_message = ti.xcom_pull(key="latest_message", default="")
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="analyze_user_response", default={})
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
+    latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="")
     
     logging.info("=== VALIDATING AND CLEANING ANALYSIS RESULTS ===")
     
@@ -644,7 +633,6 @@ VALIDATION RULES:
    - All tasks must have: task_details, task_owner_name, task_owner_id, due_date, priority, task_index
    - All contacts must have at minimum: email or (firstname + lastname)
    - All companies must have: name
-   - All meetings must have :attendees
 
 3. **Check Data Integrity**:
    - Timestamps must be in valid format (YYYY-MM-DD HH:MM:SS)
@@ -776,9 +764,9 @@ CRITICAL:
     
 def determine_owner(ti, **context):
     """Determine deal and task owners from conversation"""
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    analysis_results = ti.xcom_pull(key="analysis_results", default={})
-    latest_user_message = ti.xcom_pull(key="latest_message", default="")
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis", default={}) or {}
+    latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="")
 
     
     # Get tasks to be created
@@ -882,10 +870,10 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
 def check_task_threshold(ti, **context):
     """Check if task volume exceeds threshold"""
-    analysis_results = ti.xcom_pull(key="analysis_results", default={})
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    owner_info = ti.xcom_pull(key="owner_info", default={})
-    latest_user_message = ti.xcom_pull(key="latest_message", default="")
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis", default={}) or {}
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    owner_info = ti.xcom_pull(key="owner_info", task_ids="determine_owner", default={}) or {}
+    latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="")
     
     entities_to_create = analysis_results.get("entities_to_create", {})
     tasks_to_create = entities_to_create.get("tasks", [])
@@ -1004,11 +992,11 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 def create_contacts(ti, **context):
     """Create new contacts in HubSpot with full retry logic."""
     
-    analysis_results = ti.xcom_pull(key="analysis_results")
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis")
     to_create_contacts = analysis_results.get("entities_to_create", {}).get("contacts", [])
     logging.info(f"Contacts to create (pre-filter): {to_create_contacts}")
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    owner_info = ti.xcom_pull(key="owner_info", default={})
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    owner_info = ti.xcom_pull(key="owner_info", task_ids="determine_owner", default={}) or {}
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1018,8 +1006,8 @@ def create_contacts(ti, **context):
     logging.info(f"=== CREATE CONTACTS - Attempt {current_try}/{max_tries} ===")
     logging.info(f"Contacts to create: {len(to_create_contacts)}")
 
-    previous_status = ti.xcom_pull(key="contact_creation_status")
-    previous_response = ti.xcom_pull(key="contact_creation_response")
+    previous_status = ti.xcom_pull(key="contact_creation_status", task_ids="create_contacts")
+    previous_response = ti.xcom_pull(key="contact_creation_response", task_ids="create_contacts")
     is_retry = current_try > 1
 
     # REMOVED: All filtration logic - trust analyze_user_response decision
@@ -1201,9 +1189,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
 
 def create_companies(ti, **context):
     """Create new companies in HubSpot with full retry support"""
-    analysis_results = ti.xcom_pull(key="analysis_results")
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
     to_create_companies = analysis_results.get("entities_to_create", {}).get("companies", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1213,8 +1201,8 @@ def create_companies(ti, **context):
     logging.info(f"=== CREATE COMPANIES - Attempt {current_try}/{max_tries} ===")
     logging.info(f"Companies to create: {len(to_create_companies)}")
 
-    previous_status = ti.xcom_pull(key="company_creation_status")
-    previous_response = ti.xcom_pull(key="company_creation_response")
+    previous_status = ti.xcom_pull(key="company_creation_status", task_ids="create_companies")
+    previous_response = ti.xcom_pull(key="company_creation_response", task_ids="create_companies")
     is_retry = current_try > 1
     
     # REMOVED: All filtration logic - trust analyze_user_response decision
@@ -1381,10 +1369,10 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
 
 def create_deals(ti, **context):
     """Create new deals in HubSpot with full retry logic"""
-    analysis_results = ti.xcom_pull(key="analysis_results")
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
     to_create_deals = analysis_results.get("entities_to_create", {}).get("deals", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    owner_info = ti.xcom_pull(key="owner_info", default={})
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    owner_info = ti.xcom_pull(key="owner_info", task_ids="determine_owner", default={}) or {}
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1394,8 +1382,8 @@ def create_deals(ti, **context):
     logging.info(f"=== CREATE DEALS - Attempt {current_try}/{max_tries} ===")
     logging.info(f"Deals to create: {len(to_create_deals)}")
 
-    previous_status = ti.xcom_pull(key="deal_creation_status")
-    previous_response = ti.xcom_pull(key="deal_creation_response")
+    previous_status = ti.xcom_pull(key="deal_creation_status", task_ids="create_deals")
+    previous_response = ti.xcom_pull(key="deal_creation_response", task_ids="create_deals")
     is_retry = current_try > 1
     
     # REMOVED: All filtration logic - trust analyze_user_response decision
@@ -1589,9 +1577,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
 
 def create_meetings(ti, **context):
     """Create meetings in HubSpot with full retry logic and clean error handling"""
-    analysis_results = ti.xcom_pull(key="analysis_results")
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
     to_create_meetings = analysis_results.get("entities_to_create", {}).get("meetings", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1600,8 +1588,8 @@ def create_meetings(ti, **context):
 
     logging.info(f"=== CREATE MEETINGS - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="meeting_creation_status")
-    previous_response = ti.xcom_pull(key="meeting_creation_response")
+    previous_status = ti.xcom_pull(key="meeting_creation_status", task_ids="create_meetings")
+    previous_response = ti.xcom_pull(key="meeting_creation_response", task_ids="create_meetings")
     is_retry = current_try > 1
 
     if not to_create_meetings:
@@ -1759,9 +1747,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
 
 def create_notes(ti, **context):
     """Create notes in HubSpot with full retry logic and consistent error handling"""
-    analysis_results = ti.xcom_pull(key="analysis_results")
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
     to_create_notes = analysis_results.get("entities_to_create", {}).get("notes", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1770,8 +1758,8 @@ def create_notes(ti, **context):
 
     logging.info(f"=== CREATE NOTES - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="note_creation_status")
-    previous_response = ti.xcom_pull(key="note_creation_response")
+    previous_status = ti.xcom_pull(key="note_creation_status", task_ids="create_notes")
+    previous_response = ti.xcom_pull(key="note_creation_response", task_ids="create_notes")
     is_retry = current_try > 1
 
     if not to_create_notes:
@@ -1987,10 +1975,10 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
 
 def create_tasks(ti, **context):
     """Create HubSpot tasks with correct owner assignment and full retry resilience"""
-    analysis_results = ti.xcom_pull(key="analysis_results")
-    owner_info = ti.xcom_pull(key="owner_info", default={})
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
+    owner_info = ti.xcom_pull(key="owner_info", task_ids="determine_owner", default={}) or {}
     to_create_tasks = analysis_results.get("entities_to_create", {}).get("tasks", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1999,8 +1987,8 @@ def create_tasks(ti, **context):
 
     logging.info(f"=== CREATE TASKS - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="task_creation_status")
-    previous_response = ti.xcom_pull(key="task_creation_response")
+    previous_status = ti.xcom_pull(key="task_creation_status", task_ids="create_tasks")
+    previous_response = ti.xcom_pull(key="task_creation_response", task_ids="create_tasks")
     is_retry = current_try > 1
 
     if not to_create_tasks:
@@ -2206,9 +2194,9 @@ import logging
 
 def update_contacts(ti, **context):
     """Update existing contacts in HubSpot with full retry support"""
-    analysis_results = ti.xcom_pull(key="analysis_results")
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
     to_update = analysis_results.get("entities_to_update", {}).get("contacts", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -2217,8 +2205,8 @@ def update_contacts(ti, **context):
 
     logging.info(f"=== UPDATE CONTACTS - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="contact_update_status")
-    previous_response = ti.xcom_pull(key="contact_update_response")
+    previous_status = ti.xcom_pull(key="contact_update_status", task_ids="update_contacts")
+    previous_response = ti.xcom_pull(key="contact_update_response", task_ids="update_contacts")
     is_retry = current_try > 1
 
     if not to_update:
@@ -2370,9 +2358,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
 
 def update_companies(ti, **context):
     """Update existing companies in HubSpot with full retry support"""
-    analysis_results = ti.xcom_pull(key="analysis_results")
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
     to_update = analysis_results.get("entities_to_update", {}).get("companies", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -2537,9 +2525,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
             raise
 
 def update_deals(ti, **context):
-    analysis_results = ti.xcom_pull(key="analysis_results")
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
     to_update = analysis_results.get("entities_to_update", {}).get("deals", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
     # Get current attempt number
     task_instance = context['task_instance']
     current_try_number = task_instance.try_number
@@ -2548,8 +2536,8 @@ def update_deals(ti, **context):
     logging.info(f"=== UPDATE DEALS - Attempt {current_try_number}/{max_tries} ===")
     
     # Check if this is a retry by pulling previous status
-    previous_status = ti.xcom_pull(key="deal_update_status")
-    previous_response = ti.xcom_pull(key="deal_update_response")
+    previous_status = ti.xcom_pull(key="company_update_status", task_ids="update_companies")
+    previous_response = ti.xcom_pull(key="company_update_response", task_ids="update_companies")
     
     if not to_update:
         logging.info("No deals to update")
@@ -2767,9 +2755,9 @@ If error, set status as failure, error message in reason and include individual 
 
 def update_meetings(ti, **context):
     """Update meetings in HubSpot with full retry support"""
-    analysis_results = ti.xcom_pull(key="analysis_results")
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
     to_update = analysis_results.get("entities_to_update", {}).get("meetings", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -2778,8 +2766,8 @@ def update_meetings(ti, **context):
 
     logging.info(f"=== UPDATE MEETINGS - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="meeting_update_status")
-    previous_response = ti.xcom_pull(key="meeting_update_response")
+    previous_status = ti.xcom_pull(key="deal_update_status", task_ids="update_deals")
+    previous_response = ti.xcom_pull(key="deal_update_response", task_ids="update_deals")
     is_retry = current_try > 1
 
     if not to_update:
@@ -2912,9 +2900,9 @@ RETURN ONLY CLEAN JSON."""
             raise
 def update_notes(ti, **context):
     """Update notes in HubSpot with full retry support"""
-    analysis_results = ti.xcom_pull(key="analysis_results")
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
     to_update = analysis_results.get("entities_to_update", {}).get("notes", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
 
     task_instance = context['task_instance']
     current_try = task_instance.try_number
@@ -2922,8 +2910,8 @@ def update_notes(ti, **context):
 
     logging.info(f"=== UPDATE NOTES - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="note_update_status")
-    previous_response = ti.xcom_pull(key="note_update_response")
+    previous_status = ti.xcom_pull(key="note_update_status", task_ids="update_notes")
+    previous_response = ti.xcom_pull(key="note_update_response", task_ids="update_notes")
     is_retry = current_try > 1
 
     if not to_update:
@@ -3049,10 +3037,10 @@ RETURN ONLY VALID JSON."""
 
 def update_tasks(ti, **context):
     """Update HubSpot tasks with full retry support and owner preservation"""
-    analysis_results = ti.xcom_pull(key="analysis_results")
-    owner_info = ti.xcom_pull(key="owner_info", default={})
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
+    owner_info = ti.xcom_pull(key="owner_info", task_ids="determine_owner", default={})
     to_update = analysis_results.get("entities_to_update", {}).get("tasks", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -3061,8 +3049,8 @@ def update_tasks(ti, **context):
 
     logging.info(f"=== UPDATE TASKS - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="task_update_status")
-    previous_response = ti.xcom_pull(key="task_update_response")
+    previous_status = ti.xcom_pull(key="task_update_status", task_ids="update_tasks")
+    previous_response = ti.xcom_pull(key="task_update_response", task_ids="update_tasks")
     is_retry = current_try > 1
 
     if not to_update:
@@ -3278,37 +3266,37 @@ def create_associations(ti, **context):
 
     logging.info(f"=== CREATE ASSOCIATIONS - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="association_creation_status")
-    previous_response = ti.xcom_pull(key="association_creation_response")
+    previous_status = ti.xcom_pull(key="association_creation_status", task_ids="create_associations")
+    previous_response = ti.xcom_pull(key="association_creation_response", task_ids="create_associations")
     is_retry = current_try > 1
 
     # === Load all data ===
-    analysis_results = ti.xcom_pull(key="analysis_results")
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    thread_history = ti.xcom_pull(key="thread_history", default=[])
-    latest_user_message = ti.xcom_pull(key="latest_message", default="")
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    thread_history = ti.xcom_pull(key="thread_history", task_ids="load_context_from_dag_run", default=[]) or []
+    latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="") or []
     # Created entities
-    created_contacts = ti.xcom_pull(key="created_contacts", default=[])
-    created_companies = ti.xcom_pull(key="created_companies", default=[])
-    created_deals = ti.xcom_pull(key="created_deals", default=[])
-    created_meetings = ti.xcom_pull(key="created_meetings", default=[])
-    created_notes = ti.xcom_pull(key="created_notes", default=[])
-    created_tasks = ti.xcom_pull(key="created_tasks", default=[])
+    created_contacts = ti.xcom_pull(key="created_contacts", task_ids="create_contacts", default=[]) or []
+    created_companies = ti.xcom_pull(key="created_companies", task_ids="create_companies", default=[]) or []
+    created_deals = ti.xcom_pull(key="created_deals", task_ids="create_deals", default=[]) or []
+    created_meetings = ti.xcom_pull(key="created_meetings", task_ids="create_meetings", default=[]) or []
+    created_notes = ti.xcom_pull(key="created_notes", task_ids="create_notes", default=[]) or []
+    created_tasks = ti.xcom_pull(key="created_tasks", task_ids="create_tasks", default=[]) or []
     # Updated entities
-    updated_contacts = ti.xcom_pull(key="updated_contacts", default=[])
-    updated_companies = ti.xcom_pull(key="updated_companies", default=[])
-    updated_deals = ti.xcom_pull(key="updated_deals", default=[])
+    updated_contacts = ti.xcom_pull(key="updated_contacts", task_ids="update_contacts", default=[]) or []
+    updated_companies = ti.xcom_pull(key="updated_companies", task_ids="update_companies", default=[]) or []
+    updated_deals = ti.xcom_pull(key="updated_deals", task_ids="update_deals", default=[]) or []
 
-    failed_contacts = ti.xcom_pull(key="failed_contacts", default=[])
-    failed_companies = ti.xcom_pull(key="failed_companies", default=[])
-    failed_deals = ti.xcom_pull(key="failed_deals", default=[])
-    failed_meetings = ti.xcom_pull(key="failed_meetings", default=[])
-    failed_notes = ti.xcom_pull(key="failed_notes", default=[])
-    failed_tasks = ti.xcom_pull(key="failed_tasks", default=[])
+    failed_contacts = ti.xcom_pull(key="failed_contacts", task_ids="create_contacts", default=[]) or []
+    failed_companies = ti.xcom_pull(key="failed_companies", task_ids="create_companies", default=[]) or []
+    failed_deals = ti.xcom_pull(key="failed_deals", task_ids="create_deals", default=[]) or []
+    failed_meetings = ti.xcom_pull(key="failed_meetings", task_ids="create_meetings", default=[]) or []
+    failed_notes = ti.xcom_pull(key="failed_notes", task_ids="create_notes", default=[]) or []
+    failed_tasks = ti.xcom_pull(key="failed_tasks", task_ids="create_tasks", default=[]) or []
 
-    failed_updated_contacts = ti.xcom_pull(key="failed_updated_contacts", default=[])
-    failed_updated_companies = ti.xcom_pull(key="failed_updated_companies", default=[])
-    failed_updated_deals = ti.xcom_pull(key="failed_updated_deals", default=[])
+    failed_updated_contacts = ti.xcom_pull(key="failed_updated_contacts", task_ids="update_contacts", default=[]) or []
+    failed_updated_companies = ti.xcom_pull(key="failed_updated_companies", task_ids="update_companies", default=[]) or []
+    failed_updated_deals = ti.xcom_pull(key="failed_updated_deals", task_ids="update_deals", default=[]) or []
 
     errors = []
 
@@ -3622,22 +3610,22 @@ RETURN ONLY CLEAN JSON."""
 
 def collect_and_save_results(ti, **context):
     """Collect all results for final email"""
-    created_contacts = ti.xcom_pull(key="created_contacts", default=[])
-    created_companies = ti.xcom_pull(key="created_companies", default=[])
-    created_deals = ti.xcom_pull(key="created_deals", default=[])
-    created_meetings = ti.xcom_pull(key="created_meetings", default=[])
-    created_notes = ti.xcom_pull(key="created_notes", default=[])
-    created_tasks = ti.xcom_pull(key="created_tasks", default=[])
+    created_contacts = ti.xcom_pull(key="created_contacts", task_ids="create_contacts", default=[]) or []
+    created_companies = ti.xcom_pull(key="created_companies", task_ids="create_companies", default=[]) or []
+    created_deals = ti.xcom_pull(key="created_deals", task_ids="create_deals", default=[]) or []
+    created_meetings = ti.xcom_pull(key="created_meetings", task_ids="create_meetings", default=[]) or []
+    created_notes = ti.xcom_pull(key="created_notes", task_ids="create_notes", default=[]) or []
+    created_tasks = ti.xcom_pull(key="created_tasks", task_ids="create_tasks", default=[]) or []
     
-    updated_contacts = ti.xcom_pull(key="updated_contacts", default=[])
-    updated_companies = ti.xcom_pull(key="updated_companies", default=[])
-    updated_deals = ti.xcom_pull(key="updated_deals", default=[])
-    updated_meetings = ti.xcom_pull(key="updated_meetings", default=[])
-    updated_notes = ti.xcom_pull(key="updated_notes", default=[])
-    updated_tasks = ti.xcom_pull(key="updated_tasks", default=[])
+    updated_contacts = ti.xcom_pull(key="updated_contacts", task_ids="update_contacts", default=[]) or []
+    updated_companies = ti.xcom_pull(key="updated_companies", task_ids="update_companies", default=[]) or []
+    updated_deals = ti.xcom_pull(key="updated_deals", task_ids="update_deals", default=[]) or []
+    updated_meetings = ti.xcom_pull(key="updated_meetings", task_ids="update_meetings", default=[]) or []
+    updated_notes = ti.xcom_pull(key="updated_notes", task_ids="update_notes", default=[]) or []
+    updated_tasks = ti.xcom_pull(key="updated_tasks", task_ids="update_tasks", default=[]) or []
     
-    associations_created = ti.xcom_pull(key="associations_created", default=[])
-    analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    associations_created = ti.xcom_pull(key="associations_created", task_ids="create_associations", default=[]) or []
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis", default={}) or {}
     selected_entities = analysis_results.get("selected_entities", {})
     
     create_results = {
@@ -3665,30 +3653,27 @@ def collect_and_save_results(ti, **context):
 
 def compose_response_html(ti, **context):
     """Compose HTML response email with all created/updated/selected entities"""
-    analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis", default={}) or {}
     if analysis_results.get("fallback_email_sent", False):
         logging.info("Fallback email was already sent - skipping compose_response_html")
         ti.xcom_push(key="response_html", value=None)
         return None
-    owner_info = ti.xcom_pull(key="owner_info", default={})
-    task_threshold_info = ti.xcom_pull(key="task_threshold_info", default={})
+    owner_info = ti.xcom_pull(key="owner_info", task_ids="determine_owner", default={})
+    task_threshold_info = ti.xcom_pull(key="task_threshold_info", task_ids="check_task_threshold", default={}) or {}
 
-    contact_creation_final_status = ti.xcom_pull(key="contact_creation_final_status")
-    contact_creation_failure_reason = ti.xcom_pull(key="contact_creation_failure_reason")
+    created_contacts = ti.xcom_pull(key="created_contacts", task_ids="create_contacts", default=[]) or []
+    created_companies = ti.xcom_pull(key="created_companies", task_ids="create_companies", default=[]) or []
+    created_deals = ti.xcom_pull(key="created_deals", task_ids="create_deals", default=[]) or []
+    created_meetings = ti.xcom_pull(key="created_meetings", task_ids="create_meetings", default=[]) or []
+    created_notes = ti.xcom_pull(key="created_notes", task_ids="create_notes", default=[]) or []
+    created_tasks = ti.xcom_pull(key="created_tasks", task_ids="create_tasks", default=[]) or []
     
-    created_contacts = ti.xcom_pull(key="created_contacts", default=[])
-    created_companies = ti.xcom_pull(key="created_companies", default=[])
-    created_deals = ti.xcom_pull(key="created_deals", default=[])
-    created_meetings = ti.xcom_pull(key="created_meetings", default=[])
-    created_notes = ti.xcom_pull(key="created_notes", default=[])
-    created_tasks = ti.xcom_pull(key="created_tasks", default=[])
-    
-    updated_contacts = ti.xcom_pull(key="updated_contacts", default=[])
-    updated_companies = ti.xcom_pull(key="updated_companies", default=[])
-    updated_deals = ti.xcom_pull(key="updated_deals", default=[])
-    updated_meetings = ti.xcom_pull(key="updated_meetings", default=[])
-    updated_notes = ti.xcom_pull(key="updated_notes", default=[])
-    updated_tasks = ti.xcom_pull(key="updated_tasks", default=[])
+    updated_contacts = ti.xcom_pull(key="updated_contacts", task_ids="update_contacts", default=[]) or []
+    updated_companies = ti.xcom_pull(key="updated_companies", task_ids="update_companies", default=[]) or []
+    updated_deals = ti.xcom_pull(key="updated_deals", task_ids="update_deals", default=[]) or []
+    updated_meetings = ti.xcom_pull(key="updated_meetings", task_ids="update_meetings", default=[]) or []
+    updated_notes = ti.xcom_pull(key="updated_notes", task_ids="update_notes", default=[]) or []
+    updated_tasks = ti.xcom_pull(key="updated_tasks", task_ids="update_tasks", default=[]) or []
     
     selected_entities = analysis_results.get("selected_entities", {})
     existing_contacts = selected_entities.get("contacts", [])
@@ -3696,23 +3681,23 @@ def compose_response_html(ti, **context):
     existing_deals = selected_entities.get("deals", [])
     
     thread_id = context['dag_run'].conf.get("thread_id")
-    email_data = ti.xcom_pull(key="email_data", default={})
+    email_data = ti.xcom_pull(key="email_data", task_ids="load_context_from_dag_run", default={})
     from_sender = email_data.get("headers", {}).get("From", "")
     
     # Filter out updated tasks from created tasks to avoid duplication
     updated_task_ids = [task.get("id") for task in updated_tasks if task.get("id")]
     final_created_tasks = [t for t in created_tasks if t.get("id") not in updated_task_ids]
 
-    failed_contacts = ti.xcom_pull(key="failed_contacts", default=[])
-    failed_companies = ti.xcom_pull(key="failed_companies", default=[])
-    failed_deals = ti.xcom_pull(key="failed_deals", default=[])
-    failed_meetings = ti.xcom_pull(key="failed_meetings", default=[])
-    failed_notes = ti.xcom_pull(key="failed_notes", default=[])
-    failed_tasks = ti.xcom_pull(key="failed_tasks", default=[])
+    failed_contacts = ti.xcom_pull(key="failed_contacts", task_ids="create_contacts", default=[]) or []
+    failed_companies = ti.xcom_pull(key="failed_companies", task_ids="create_companies", default=[]) or []
+    failed_deals = ti.xcom_pull(key="failed_deals", task_ids="create_deals", default=[]) or []
+    failed_meetings = ti.xcom_pull(key="failed_meetings", task_ids="create_meetings", default=[]) or []
+    failed_notes = ti.xcom_pull(key="failed_notes", task_ids="create_notes", default=[]) or []
+    failed_tasks = ti.xcom_pull(key="failed_tasks", task_ids="create_tasks", default=[]) or []
 
-    failed_updated_contacts = ti.xcom_pull(key="failed_updated_contacts", default=[])
-    failed_updated_companies = ti.xcom_pull(key="failed_updated_companies", default=[])
-    failed_updated_deals = ti.xcom_pull(key="failed_updated_deals", default=[])
+    failed_updated_contacts = ti.xcom_pull(key="failed_updated_contacts", task_ids="update_contacts", default=[]) or []
+    failed_updated_companies = ti.xcom_pull(key="failed_updated_companies", task_ids="update_companies", default=[]) or []
+    failed_updated_deals = ti.xcom_pull(key="failed_updated_deals", task_ids="update_deals", default=[]) or []
 
     errors = []
 
@@ -4414,12 +4399,12 @@ def compose_response_html(ti, **context):
 def send_final_email(ti, **context):
     """Send final completion email with proper recipient handling"""
     import re
-    analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis", default={})
     if analysis_results.get("fallback_email_sent", False):
         logging.info("Fallback email was already sent - skipping send_final_email")
         return None
-    email_data = ti.xcom_pull(key="email_data", default={})
-    response_html = ti.xcom_pull(key="response_html")
+    email_data = ti.xcom_pull(key="email_data", task_ids="load_context_from_dag_run", default={})
+    response_html = ti.xcom_pull(key="response_html", task_ids="compose_response_html")
     
     service = authenticate_gmail()
     if not service:
@@ -4517,7 +4502,7 @@ def send_final_email(ti, **context):
     raise ValueError("Failed to send final email")
 
 def branch_to_creation_tasks(ti, **context):
-    analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis", default={})
     
     if analysis_results.get("fallback_email_sent", False):
         return ["end_workflow"]
