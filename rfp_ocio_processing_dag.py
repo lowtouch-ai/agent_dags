@@ -736,12 +736,12 @@ Respond with **ONLY** a valid JSON object in the exact format below.
 Do NOT include explanations, markdown fences, or extra text outside JSON.
 
 JSON FORMAT:
-{
+{{
   "answer": "ONLY the answer content. Markdown allowed. No sources or confidence.",
   "sources_referenced": ["<actual RFP section/page/clause if used>"],
   "confidence": "High" or "Medium" or "Low",
   "is_sensitive": true or false
-}
+}}
 
 ### Validation Rules
 - The answer must be understandable on its own
