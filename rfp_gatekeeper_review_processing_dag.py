@@ -11,6 +11,7 @@ import os
 import pymupdf4llm
 from ollama import Client
 import re
+import time
 
 # =============================================================================
 # Configuration
@@ -670,11 +671,14 @@ def generate_answers_with_ai(**context):
     """Generate answers for all questions using AI"""
     questions_with_id = context["ti"].xcom_pull(task_ids="validate_and_fix_questions", key="questions_with_id")
     conf = context["dag_run"].conf
+    project_id = conf["project_id"]
     workspace_uuid = conf['workspace_uuid']
     x_ltai_user_email = conf['x-ltai-user-email']
     headers = {"WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
     
     answers_dict = {}
+    generated_count = 0
+    project_url = f"{RFP_API_BASE}/rfp/projects/{project_id}"
     
     for q_num, question_data in questions_with_id.items():
         question_text = question_data["text"]
@@ -694,48 +698,109 @@ Answer instructions (MANDATORY):
 
 Follow the instructions strictly.
 
-Provide a complete, professional answer. Use bullet points if needed. Be concise yet thorough.
+### Answer Generation Rules
+- Provide a **complete, professional, client-ready answer**
+- The `"answer"` field must contain **ONLY the actual answer content**
+- Do NOT include sources, references, page numbers, or confidence inside the answer text
+- Use **Markdown formatting inside the answer field only**:
+  - Use **bold text** for headings or key sections
+  - Use bullet points **only when they improve clarity**
+- Be concise, factual, and aligned with RFP expectations
 
-At the end, list any sources from the RFP document you referenced and your confidence level.
+### Attachment / Document Handling (CONDITIONAL — DO NOT APPLY BY DEFAULT)
+Apply this section **only if the question explicitly asks for**:
+- Attaching a document
+- Uploading an image
+- Providing a chart, report, or external file
 
-IMPORTANT: Respond with ONLY a valid JSON object in this exact format:
+If triggered:
+- Clearly state **what document(s) or artifact(s) are required**
+- Explain **how the user can generate or attach them**
+  (e.g., export from dashboard, upload signed PDF, attach report)
+- Do NOT fabricate data or imply the attachment already exists
+
+If not triggered:
+- Answer normally
+- Do NOT include procedural guidance or disclaimers
+
+### Source Handling (STRICT SEPARATION)
+- Populate `"sources_referenced"` ONLY with actual RFP sections, clauses, or page references used
+- If no RFP source is explicitly referenced, return an empty array
+- NEVER include source information inside the `"answer"` field
+
+### Sensitivity Classification
+- Set `"is_sensitive": true` if the content is confidential, regulatory, security-related, or proprietary
+- Otherwise set it to false
+
+### Output Rules (STRICT)
+Respond with **ONLY** a valid JSON object in the exact format below.
+Do NOT include explanations, markdown fences, or extra text outside JSON.
+
+JSON FORMAT:
 {{
-  "answer": "your detailed answer text here (do not include sources or confidence in this field)",
-  "sources_referenced": ["<insert actual section/page found in text>", "<insert another actual source if applicable>"],
+  "answer": "ONLY the answer content. Markdown allowed. No sources or confidence.",
+  "sources_referenced": ["<actual RFP section/page/clause if used>"],
   "confidence": "High" or "Medium" or "Low",
   "is_sensitive": true or false
 }}
 
-Do not add any extra text, markdown, or explanations outside the JSON.
+### Validation Rules
+- The answer must be understandable on its own
+- The JSON must be syntactically valid and parsable
 """
         
+        # Initialize variables before the retry loop
+        answer = None
+        sources = []
+        confidence = None
+        is_sensitive = False
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response_str = get_ai_response(prompt_answer, headers=headers).strip()
+                response_data = extract_json_from_response(response_str)
+                
+                raw_answer = response_data.get("answer", "")
+                if isinstance(raw_answer, list):
+                    answer = "\n".join(str(item) for item in raw_answer).strip()
+                else:
+                    answer = str(raw_answer).strip()
+                sources = response_data.get("sources_referenced", [])
+                confidence = response_data.get("confidence")
+                is_sensitive = response_data.get("is_sensitive", False)
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 5 * (attempt + 1)
+                    logging.warning(f"Attempt {attempt + 1} failed for Q{q_num}: {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logging.error(f"All {max_retries} attempts failed for Q{q_num}: {e}")
+
+        # Check if we got a valid answer after retries
+        if not answer:
+            logging.warning(f"Empty answer or failed generation for Q{q_num}, skipping.")
+            continue
+        
+        answers_dict[question_id] = {
+            "answer": answer,
+            "sources_referenced": sources if isinstance(sources, list) else [],
+            "confidence": confidence if confidence else None,
+            "is_sensitive": is_sensitive,
+            "question_num": q_num,
+            "answer_instructions": answer_instructions
+        }
+        logging.info(f"Generated answer for Q{q_num} (ID: {question_id}) with sources and confidence")
+        generated_count += 1
         try:
-            response_str = get_ai_response(prompt_answer, headers=headers).strip()
-            response_data = extract_json_from_response(response_str)
-            
-            answer = response_data.get("answer", "").strip()
-            sources = response_data.get("sources_referenced", [])
-            confidence = response_data.get("confidence")
-            is_sensitive = response_data.get("is_sensitive", False)
-            
-            if not answer:
-                logging.warning(f"Empty answer received for Q{q_num}, skipping")
-                continue
-            
-            answers_dict[question_id] = {
-                "answer": answer,
-                "sources_referenced": sources if isinstance(sources, list) else [],
-                "confidence": confidence if confidence else None,
-                "is_sensitive": is_sensitive,
-                "question_num": q_num,
-                "answer_instructions": answer_instructions
-            }
-            logging.info(f"Generated answer for Q{q_num} (ID: {question_id}) with sources and confidence")
-            
-        except json.JSONDecodeError as e:
-            logging.error(f"Failed to parse JSON response for Q{q_num}: {e}. Raw response: '{response_str}'")
+            api_headers = {"Content-Type": "application/json", "Accept": "application/json", "WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
+            response = requests.patch(project_url, json={"answer_generated_count": generated_count}, headers=api_headers, timeout=3)
+            response.raise_for_status()
+            logging.info(f"Progress update: {generated_count} answers generated")
         except Exception as e:
-            logging.error(f"Failed to generate answer for Q{q_num}: {e}")
+            # Non-blocking error: Log and continue even if progress update fails
+            logging.warning(f"Failed to update project progress count: {e}")
     
     context["ti"].xcom_push(key="answers_dict", value=answers_dict)
     logging.info(f"Generated {len(answers_dict)}/{len(questions_with_id)} answers")
