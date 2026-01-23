@@ -698,19 +698,55 @@ Answer instructions (MANDATORY):
 
 Follow the instructions strictly.
 
-Provide a complete, professional answer. Use bullet points if needed. Be concise yet thorough.
+### Answer Generation Rules
+- Provide a **complete, professional, client-ready answer**
+- The `"answer"` field must contain **ONLY the actual answer content**
+- Do NOT include sources, references, page numbers, or confidence inside the answer text
+- Use **Markdown formatting inside the answer field only**:
+  - Use **bold text** for headings or key sections
+  - Use bullet points **only when they improve clarity**
+- Be concise, factual, and aligned with RFP expectations
 
-At the end, list any sources from the RFP document you referenced and your confidence level.
+### Attachment / Document Handling (CONDITIONAL — DO NOT APPLY BY DEFAULT)
+Apply this section **only if the question explicitly asks for**:
+- Attaching a document
+- Uploading an image
+- Providing a chart, report, or external file
 
-IMPORTANT: Respond with ONLY a valid JSON object in this exact format:
-{{
-  "answer": "your detailed answer text here (do not include sources or confidence in this field)",
-  "sources_referenced": ["<insert actual section/page found in text>", "<insert another actual source if applicable>"],
+If triggered:
+- Clearly state **what document(s) or artifact(s) are required**
+- Explain **how the user can generate or attach them**
+  (e.g., export from dashboard, upload signed PDF, attach report)
+- Do NOT fabricate data or imply the attachment already exists
+
+If not triggered:
+- Answer normally
+- Do NOT include procedural guidance or disclaimers
+
+### Source Handling (STRICT SEPARATION)
+- Populate `"sources_referenced"` ONLY with actual RFP sections, clauses, or page references used
+- If no RFP source is explicitly referenced, return an empty array
+- NEVER include source information inside the `"answer"` field
+
+### Sensitivity Classification
+- Set `"is_sensitive": true` if the content is confidential, regulatory, security-related, or proprietary
+- Otherwise set it to false
+
+### Output Rules (STRICT)
+Respond with **ONLY** a valid JSON object in the exact format below.
+Do NOT include explanations, markdown fences, or extra text outside JSON.
+
+JSON FORMAT:
+{
+  "answer": "ONLY the answer content. Markdown allowed. No sources or confidence.",
+  "sources_referenced": ["<actual RFP section/page/clause if used>"],
   "confidence": "High" or "Medium" or "Low",
   "is_sensitive": true or false
-}}
+}
 
-Do not add any extra text, markdown, or explanations outside the JSON.
+### Validation Rules
+- The answer must be understandable on its own
+- The JSON must be syntactically valid and parsable
 """
         
         # Initialize variables before the retry loop
