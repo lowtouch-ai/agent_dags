@@ -671,11 +671,14 @@ def generate_answers_with_ai(**context):
     """Generate answers for all questions using AI"""
     questions_with_id = context["ti"].xcom_pull(task_ids="validate_and_fix_questions", key="questions_with_id")
     conf = context["dag_run"].conf
+    project_id = conf["project_id"]
     workspace_uuid = conf['workspace_uuid']
     x_ltai_user_email = conf['x-ltai-user-email']
     headers = {"WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
     
     answers_dict = {}
+    generated_count = 0
+    project_url = f"{RFP_API_BASE}/rfp/projects/{project_id}"
     
     for q_num, question_data in questions_with_id.items():
         question_text = question_data["text"]
@@ -753,6 +756,15 @@ Do not add any extra text, markdown, or explanations outside the JSON.
             "answer_instructions": answer_instructions
         }
         logging.info(f"Generated answer for Q{q_num} (ID: {question_id}) with sources and confidence")
+        generated_count += 1
+        try:
+            api_headers = {"Content-Type": "application/json", "Accept": "application/json", "WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
+            response = requests.patch(project_url, json={"answer_generated_count": generated_count}, headers=api_headers, timeout=3)
+            response.raise_for_status()
+            logging.info(f"Progress update: {generated_count} answers generated")
+        except Exception as e:
+            # Non-blocking error: Log and continue even if progress update fails
+            logging.warning(f"Failed to update project progress count: {e}")
     
     context["ti"].xcom_push(key="answers_dict", value=answers_dict)
     logging.info(f"Generated {len(answers_dict)}/{len(questions_with_id)} answers")
