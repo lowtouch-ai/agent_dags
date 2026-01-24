@@ -1,8 +1,7 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.utils.dates import days_ago
 from airflow.decorators import task
 import os
 import logging
@@ -88,7 +87,7 @@ with DAG(
     default_args=default_args,
     description='Monitors UUID folders for PDF files and triggers processing',
     schedule='* * * * *',
-    start_date=days_ago(1),
+    start_date = datetime.now() - timedelta(days=1),
     catchup=False,
     tags=["shared", "folder", "monitor", "pdf", "rag"],
     max_active_runs=1,
