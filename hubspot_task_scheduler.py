@@ -306,24 +306,29 @@ def send_task_reminder_email(service, task, owner_info):
         contact_lines = []
         for contact in associations.get("contacts", []):
             cp = contact.get("properties", {})
+            contact_id = contact.get("id", "N/A")
             name = f"{cp.get('firstname', '')} {cp.get('lastname', '')}".strip() or "Unknown"
             email = cp.get("email", "")
+    
+            contact_lines.append(f'<li><strong>Contact ID:</strong> {contact_id}</li>')
+            contact_lines.append(f'<li><strong>Name:</strong> {name}</li>')
             if email:
-                contact_lines.append(f'<li>{name} – <a href="mailto:{email}">{email}</a></li>')
-            else:
-                contact_lines.append(f'<li>{name}</li>')
+                contact_lines.append(f'<li><strong>Email:</strong> <a href="mailto:{email}">{email}</a></li>')
 
         # Company
         company_name = "No company associated"
+        company_id = ""
         companies = associations.get("companies", [])
         if companies:
             company_name = companies[0].get("properties", {}).get("name", "Unknown Company").strip()
+            company_id = companies[0].get("id", "N/A")
 
         # Deal - only if exists
         deal_section = ""
         deals = associations.get("deals", [])
         if deals:
             deal = deals[0].get("properties", {})
+            deal_id = deals[0].get("id", "N/A")
             deal_name = deal.get("dealname", "Unknown Deal")
             amount = deal.get("amount", "")
             if amount:
@@ -346,6 +351,7 @@ def send_task_reminder_email(service, task, owner_info):
                     close_date = ""
 
             deal_lines = []
+            deal_lines.append(f"<li><strong>Deal ID:</strong> {deal_id}</li>")
             deal_lines.append(f"<li><strong>Deal Name:</strong> {deal_name}</li>")
             if amount:
                 deal_lines.append(f"<li><strong>Amount:</strong> {amount}</li>")
@@ -465,7 +471,12 @@ def send_task_reminder_email(service, task, owner_info):
         <li><strong>Contacts:</strong>
             <ul>{''.join(contact_lines) or '<li>None</li>'}</ul>
         </li>
-        <li><strong>Company:</strong> {company_name}</li>
+        <li><strong>Company:</strong>
+            <ul>
+                {f'<li><strong>Company ID:</strong> {company_id}</li>' if company_id else ''}
+                <li><strong>Company Name:</strong> {company_name}</li>
+            </ul>
+        </li>
         {deal_section}
     </ul>
 
