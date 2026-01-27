@@ -1258,6 +1258,10 @@ Return ONLY this JSON structure (no other text):
 }}"""
 
     # === Retry Prompt (with previous failure context) ===
+    previous_status = ti.xcom_pull(key="company_creation_status")
+    previous_response = ti.xcom_pull(key="company_creation_response")
+    is_retry = current_try > 1
+
     if is_retry:
         logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try}/{max_tries})")
 
@@ -1432,13 +1436,15 @@ Critical Deal Naming Rules:
 7. Preserve any specific deal amount, close date, or stage information provided
 8. Never use commas for deal amount.
 9. Use only the following for deal stage:
-    - appointmentscheduled
-    - qualifiedtobuy
-    - presentationscheduled
-    - decisionmakerboughtin
-    - contractsent
-    - closedwon
-    - closedlost
+    - Lead
+    - Qualified Lead
+    - Solution Discussion
+    - Proposal
+    - Negotiations
+    - Contracting
+    - Closed Won
+    - Closed Lost
+    - Inactive
 10. Never use the hubspot owner name for calling the api, it should always be the id.
 
 Steps:
@@ -1465,6 +1471,10 @@ Return JSON:
 }}"""
 
     # === Retry Prompt (with previous failure) ===
+    previous_status = ti.xcom_pull(key="deal_creation_status")
+    previous_response = ti.xcom_pull(key="deal_creation_response")
+    is_retry = current_try > 1
+
     if is_retry:
         logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try}/{max_tries})")
 
@@ -1646,6 +1656,10 @@ Return ONLY this JSON structure (no other text):
 }}"""
 
     # === Retry Prompt (with previous failure context) ===
+    previous_status = ti.xcom_pull(key="meeting_creation_status")
+    previous_response = ti.xcom_pull(key="meeting_creation_response")
+    is_retry = current_try > 1
+
     if is_retry:
         logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try}/{max_tries})")
 
@@ -1875,6 +1889,10 @@ PRESERVE SPEAKER FROM INPUT - CRITICAL:
 """
 
     # === Final Prompt (Initial vs Retry) ===
+    previous_status = ti.xcom_pull(key="note_creation_status")
+    previous_response = ti.xcom_pull(key="note_creation_response")
+    is_retry = current_try > 1
+
     if is_retry:
         logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try}/{max_tries})")
 
@@ -2077,8 +2095,12 @@ Return ONLY this JSON structure (no other text):
 CRITICAL: Preserve the task_owner_id from the input. Do not default to Kishore ({DEFAULT_OWNER_ID}) unless explicitly specified."""
 
     # === Build Final Prompt (Retry vs Initial) ===
+    previous_status = ti.xcom_pull(key="task_creation_status")
+    previous_response = ti.xcom_pull(key="task_creation_response")
+    is_retry = current_try > 1
+
     if is_retry:
-        logging.info(f"RETRY ATTEMPT {current_try}/{max_tries} - Using enhanced retry prompt")
+        logging.info(f"RETRY DETECTED - Using retry prompt (attempt {current_try}/{max_tries})")
 
         prev_reason = previous_status.get("reason", "Unknown error") if previous_status else "No previous status"
         prev_resp_str = json.dumps(previous_response, indent=2) if previous_response else "No previous response"
