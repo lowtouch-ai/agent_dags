@@ -161,7 +161,7 @@ def fetch_pdf_from_api(**context):
         headers["x-ltai-user-email"] = user_email
 
     # Ensure status is 'generating'
-    set_project_status(project_id, "generating", headers)
+    set_project_status(project_id, "analyzing", headers)
 
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/rfpfile"
     logging.info(f"Downloading PDF for project_id={project_id}")
@@ -229,6 +229,13 @@ def extract_questions_with_ai(**context):
     workspace_uuid = conf['workspace_uuid']
     x_ltai_user_email = conf['x-ltai-user-email']
     headers = {"WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
+    status_headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "WORKSPACE_UUID": workspace_uuid,
+        "x-ltai-user-email": x_ltai_user_email
+    }
+    set_project_status(project_id, "extracting", status_headers)
     
     if len(extracted_text.strip()) < 50:
         raise ValueError("Insufficient text for question extraction")
@@ -675,6 +682,13 @@ def generate_answers_with_ai(**context):
     workspace_uuid = conf['workspace_uuid']
     x_ltai_user_email = conf['x-ltai-user-email']
     headers = {"WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
+    status_headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "WORKSPACE_UUID": workspace_uuid,
+        "x-ltai-user-email": x_ltai_user_email
+    }
+    set_project_status(project_id, "generating", status_headers)
     
     answers_dict = {}
     generated_count = 0
