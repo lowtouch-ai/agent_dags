@@ -303,6 +303,7 @@ def send_task_reminder_email(service, task, owner_info):
         associations = task.get("associations", {})
 
         # Contacts
+        contact_section = ""
         contact_lines = []
         for contact in associations.get("contacts", []):
             cp = contact.get("properties", {})
@@ -315,13 +316,27 @@ def send_task_reminder_email(service, task, owner_info):
             if email:
                 contact_lines.append(f'<li><strong>Email:</strong> <a href="mailto:{email}">{email}</a></li>')
 
+        if contact_lines:
+            contact_section = f"""
+            <li><strong>Contacts:</strong>
+                <ul>{''.join(contact_lines)}</ul>
+            </li>
+            """
+
         # Company
-        company_name = "No company associated"
-        company_id = ""
+        company_section = ""
         companies = associations.get("companies", [])
         if companies:
             company_name = companies[0].get("properties", {}).get("name", "Unknown Company").strip()
             company_id = companies[0].get("id", "N/A")
+            company_section = f"""
+            <li><strong>Company:</strong>
+                <ul>
+                    <li><strong>Company ID:</strong> {company_id}</li>
+                    <li><strong>Company Name:</strong> {company_name}</li>
+                </ul>
+            </li>
+            """
 
         # Deal - only if exists
         deal_section = ""
@@ -468,15 +483,8 @@ def send_task_reminder_email(service, task, owner_info):
 
     <p><strong>Associated Records</strong></p>
     <ul>
-        <li><strong>Contacts:</strong>
-            <ul>{''.join(contact_lines) or '<li>None</li>'}</ul>
-        </li>
-        <li><strong>Company:</strong>
-            <ul>
-                {f'<li><strong>Company ID:</strong> {company_id}</li>' if company_id else ''}
-                <li><strong>Company Name:</strong> {company_name}</li>
-            </ul>
-        </li>
+        {contact_section}
+        {company_section}
         {deal_section}
     </ul>
 
