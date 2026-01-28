@@ -1979,6 +1979,7 @@ def branch_function(**kwargs):
         task_id = check_if_task_completion_reply(email)
         if task_id:
             email["task_id"] = task_id
+            email["is_task_reply"] = True  # Flag for special routing logic
             task_completion_emails.append(email)
             logging.info(f"Identified task completion reply for task {task_id}")
         else:
@@ -2018,12 +2019,13 @@ RETURN ONLY ONE OF THESE FOUR JSONS — NO TEXT BEFORE/AFTER:
 {{"task_type": "report_dag", "reason": "<REASON>"}}
 {{"task_type": "no_action", "reason": "<REASON>"}}
 # RULES — MEMORIZE AND OBEY 100%
-# ROUTE TO **search_dag** → FIRST-TIME ACTION (use only in these 8 cases):
+# ROUTE TO **search_dag** → FIRST-TIME ACTION(use in these cases):
     1. User wants to CREATE anything new → deal, contact, company, task, meeting, note, call log. Exclude the situation when the user is replying to a confirmation template.
     2. User asks for "360 view", "full picture", "deep dive", "what do we know about X", "research company"
     3. User pastes meeting notes/transcript and clearly expects them to be saved in HubSpot
     4. User gives a meeting minutes or a conversational prompt AND it's followed by a creation intent. exclude the situation when the user is confirming and adding changes to the confirmation mail.
     5. User explicitly says "summarize our history with Acme" (because this requires pulling engagements).Mainly used before the next meeting with the exiisting client
+    6. User wants to ASSOCIATE/LINK a task with an existing entity
 → {{"task_type": "search_dag"}}
 
 # ROUTE TO **continuation_dag** → USER IS REPLYING TO OUR CONFIRMATION EMAIL
@@ -2070,6 +2072,38 @@ Includes:
 • You dont have the capability to act on when the user explicitly uses the key word report.
 → {{"task_type": "no_action"}}
 
+# ROUTE TO **task_completion_dag** → ONLY in these 3 cases:
+    1. User wants to create a followup task to a task previously created in the thread.
+    2. user wants to update a deal which is associated with the task previously created in the thread.
+    3. User wants to mark the task in the thread as completed,rescheduled or cancelled.
+→ {{"task_type": "task_completion_dag"}}
+
+# SPECIAL LOGIC FOR TASK REMINDER REPLIES (is_task_reply=True)
+If is_task_reply is True, analyze the latest_message:
+
+**Case 1: Meeting minutes or detailed notes provided**
+- Check if latest_message contains structured notes or action items
+→ ROUTE TO search_dag (to process meeting minutes)
+
+**Case 2: Simple follow-up task requested**
+- "Create a follow-up task to call them next week"
+- "Remind me to check in on Friday"
+- "Set up a task to review proposal"
+→ ROUTE TO task_completion_dag
+
+**Case 3: Status update on the task**
+- "Task is complete"
+- "Mark as done"
+- "Reschedule to next Monday"
+- "Cancel this task"
+→ ROUTE TO task_completion_dag
+
+**Case 4: Casual acknowledgment**
+- "Thanks for the reminder"
+- "Got it"
+- "OK"
+→ ROUTE TO no_action (just acknowledging)
+
 EXAMPLES — YOU MUST GET THESE 100% RIGHT
 
 ┌────────────────────────────────────────────────────────────────────┬──────────────────────┐
@@ -2078,6 +2112,7 @@ EXAMPLES — YOU MUST GET THESE 100% RIGHT
 │ "Create a $300k deal for Nvidia closing Q4"                        │ search_dag           │
 │ "Log today's call with Sarah from Stripe"                          │ search_dag           │
 │ "Give me a 360 view of the Enterprise deal"                        │ search_dag           │
+│ "Associate this task to deal X"                                    │ search_dag           │
 │ "Yes, proceed" (in thread with our confirmation)                   │ continuation_dag     │
 │ "Change amount to $350k and add Sarah as contact"                  │ continuation_dag     │
 │ "Looks good, just change close date to Dec 20"                     │ continuation_dag     │
@@ -2090,6 +2125,10 @@ EXAMPLES — YOU MUST GET THESE 100% RIGHT
 │ "Can you pull contact details for john@acme.com?"                  │ no_action            │
 │ "THis was a great meeting, looking forward to our next steps"      │ continuation_dag     │
 │ "Get me the report of all deals or deals associated with X"        │ report_dag           │
+│ "Mark the task as complete"                                        │ task_completion_dag  │
+│ "Create a followup task to call the client next week"              │ task_completion_dag  │
+│ "Update the deal amount of associated deal"                        │ task_completion_dag  │
+│ "Reschedule the task to next Friday"                               │ task_completion_dag  │          │
 └────────────────────────────────────────────────────────────────────┴──────────────────────┘
 Final instruction: If in doubt → route to **no_action**. Never guess creation**.
 
