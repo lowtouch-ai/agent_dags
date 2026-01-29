@@ -1980,8 +1980,54 @@ def branch_function(**kwargs):
         if task_id:
             email["task_id"] = task_id
             email["is_task_reply"] = True  # Flag for special routing logic
-            task_completion_emails.append(email)
-            logging.info(f"Identified task completion reply for task {task_id}")
+            latest_message = email.get("content", "").strip().lower()
+            
+            # Check if it's a REAL task status update (completion/reschedule/cancel)
+            is_task_status_update = any([
+                # Completion indicators
+                "complete" in latest_message and "task" in latest_message,
+                "done" in latest_message and "task" in latest_message,
+                "finished" in latest_message,
+                "mark as complete" in latest_message,
+                "mark as done" in latest_message,
+                
+                # Rescheduling indicators
+                "reschedule" in latest_message,
+                "move to" in latest_message and ("next" in latest_message or "date" in latest_message),
+                "change due date" in latest_message,
+                
+                # Cancellation indicators
+                "cancel" in latest_message and "task" in latest_message,
+                "delete" in latest_message and "task" in latest_message,
+            ])
+            
+            # Check if it contains meeting minutes or detailed notes
+            has_meeting_content = any([
+                "meeting" in latest_message and ("notes" in latest_message or "minutes" in latest_message),
+                "discussion" in latest_message,
+                "agenda" in latest_message,
+                "action items" in latest_message,
+                "attendees" in latest_message,
+                "key points" in latest_message,
+            ])
+            
+            # Check if it's asking to create/link entities
+            wants_entity_creation = any([
+                "create" in latest_message and ("deal" in latest_message or "contact" in latest_message or "company" in latest_message),
+                "add" in latest_message and ("deal" in latest_message or "contact" in latest_message),
+                "associate" in latest_message,
+                "link" in latest_message and ("deal" in latest_message or "contact" in latest_message),
+            ])
+            if has_meeting_content or wants_entity_creation:
+                # Route to search_dag for processing meeting minutes or entity creation
+                logging.info(f"✓ Task reminder reply contains meeting minutes/entity creation → ROUTING TO SEARCH_DAG")
+                email["is_task_reply"] = False  # Override the flag
+                other_emails.append(email)
+            elif is_task_status_update:
+                # This IS a task status update - route to task_completion_dag
+                logging.info(f"✓ Task reminder reply is status update → ROUTING TO TASK_COMPLETION_DAG")
+                task_completion_emails.append(email)
+                logging.info(f"Identified task completion reply for task {task_id}")
         else:
             other_emails.append(email)
     
@@ -2071,38 +2117,6 @@ Includes:
 • You dont have the capability to act on casual comments or chit-chat.
 • You dont have the capability to act on when the user explicitly uses the key word report.
 → {{"task_type": "no_action"}}
-
-# ROUTE TO **task_completion_dag** → ONLY in these 3 cases:
-    1. User wants to create a followup task to a task previously created in the thread.
-    2. user wants to update a deal which is associated with the task previously created in the thread.
-    3. User wants to mark the task in the thread as completed,rescheduled or cancelled.
-→ {{"task_type": "task_completion_dag"}}
-
-# SPECIAL LOGIC FOR TASK REMINDER REPLIES (is_task_reply=True)
-If is_task_reply is True, analyze the latest_message:
-
-**Case 1: Meeting minutes or detailed notes provided**
-- Check if latest_message contains structured notes or action items
-→ ROUTE TO search_dag (to process meeting minutes)
-
-**Case 2: Simple follow-up task requested**
-- "Create a follow-up task to call them next week"
-- "Remind me to check in on Friday"
-- "Set up a task to review proposal"
-→ ROUTE TO task_completion_dag
-
-**Case 3: Status update on the task**
-- "Task is complete"
-- "Mark as done"
-- "Reschedule to next Monday"
-- "Cancel this task"
-→ ROUTE TO task_completion_dag
-
-**Case 4: Casual acknowledgment**
-- "Thanks for the reminder"
-- "Got it"
-- "OK"
-→ ROUTE TO no_action (just acknowledging)
 
 EXAMPLES — YOU MUST GET THESE 100% RIGHT
 
