@@ -64,7 +64,7 @@ with DAG(
     'lowtouch_sitemap_parser',
     default_args=default_args,
     description='Parse lowtouch.ai sitemap and trigger HTML processing',
-    schedule = "30 4 * * *",
+    schedule = "0 2 * * *",
     start_date=datetime(2025, 4, 16),
     catchup=False,
     tags=['lowtouch', 'sitemap','agentvector','parse'],
