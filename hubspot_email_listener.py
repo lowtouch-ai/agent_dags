@@ -1979,8 +1979,55 @@ def branch_function(**kwargs):
         task_id = check_if_task_completion_reply(email)
         if task_id:
             email["task_id"] = task_id
-            task_completion_emails.append(email)
-            logging.info(f"Identified task completion reply for task {task_id}")
+            email["is_task_reply"] = True  # Flag for special routing logic
+            latest_message = email.get("content", "").strip().lower()
+            
+            # Check if it's a REAL task status update (completion/reschedule/cancel)
+            is_task_status_update = any([
+                # Completion indicators
+                "complete" in latest_message and "task" in latest_message,
+                "done" in latest_message and "task" in latest_message,
+                "finished" in latest_message,
+                "mark as complete" in latest_message,
+                "mark as done" in latest_message,
+                
+                # Rescheduling indicators
+                "reschedule" in latest_message,
+                "move to" in latest_message and ("next" in latest_message or "date" in latest_message),
+                "change due date" in latest_message,
+                
+                # Cancellation indicators
+                "cancel" in latest_message and "task" in latest_message,
+                "delete" in latest_message and "task" in latest_message,
+            ])
+            
+            # Check if it contains meeting minutes or detailed notes
+            has_meeting_content = any([
+                "meeting" in latest_message and ("notes" in latest_message or "minutes" in latest_message),
+                "discussion" in latest_message,
+                "agenda" in latest_message,
+                "action items" in latest_message,
+                "attendees" in latest_message,
+                "key points" in latest_message,
+            ])
+            
+            # Check if it's asking to create/link entities
+            wants_entity_creation = any([
+                "create" in latest_message and ("deal" in latest_message or "contact" in latest_message or "company" in latest_message),
+                "add" in latest_message and ("deal" in latest_message or "contact" in latest_message),
+                "associate" in latest_message,
+                "link" in latest_message and ("deal" in latest_message or "contact" in latest_message),
+            ])
+            if has_meeting_content or wants_entity_creation:
+                # Route to search_dag for processing meeting minutes or entity creation
+                logging.info(f"✓ Task reminder reply contains meeting minutes/entity creation → ROUTING TO SEARCH_DAG")
+                email["is_task_reply"] = False  # Override the flag
+                other_emails.append(email)
+            elif is_task_status_update:
+                # This IS a task status update - route to task_completion_dag
+                logging.info(f"✓ Task reminder reply is status update → ROUTING TO TASK_COMPLETION_DAG")
+                task_completion_emails.append(email)
+                logging.info(f"Identified task completion reply for task {task_id}")
         else:
             other_emails.append(email)
     
@@ -2018,12 +2065,13 @@ RETURN ONLY ONE OF THESE FOUR JSONS — NO TEXT BEFORE/AFTER:
 {{"task_type": "report_dag", "reason": "<REASON>"}}
 {{"task_type": "no_action", "reason": "<REASON>"}}
 # RULES — MEMORIZE AND OBEY 100%
-# ROUTE TO **search_dag** → FIRST-TIME ACTION (use only in these 8 cases):
+# ROUTE TO **search_dag** → FIRST-TIME ACTION(use in these cases):
     1. User wants to CREATE anything new → deal, contact, company, task, meeting, note, call log. Exclude the situation when the user is replying to a confirmation template.
     2. User asks for "360 view", "full picture", "deep dive", "what do we know about X", "research company"
     3. User pastes meeting notes/transcript and clearly expects them to be saved in HubSpot
     4. User gives a meeting minutes or a conversational prompt AND it's followed by a creation intent. exclude the situation when the user is confirming and adding changes to the confirmation mail.
     5. User explicitly says "summarize our history with Acme" (because this requires pulling engagements).Mainly used before the next meeting with the exiisting client
+    6. User wants to ASSOCIATE/LINK a task with an existing entity
 → {{"task_type": "search_dag"}}
 
 # ROUTE TO **continuation_dag** → USER IS REPLYING TO OUR CONFIRMATION EMAIL
@@ -2078,6 +2126,7 @@ EXAMPLES — YOU MUST GET THESE 100% RIGHT
 │ "Create a $300k deal for Nvidia closing Q4"                        │ search_dag           │
 │ "Log today's call with Sarah from Stripe"                          │ search_dag           │
 │ "Give me a 360 view of the Enterprise deal"                        │ search_dag           │
+│ "Associate this task to deal X"                                    │ search_dag           │
 │ "Yes, proceed" (in thread with our confirmation)                   │ continuation_dag     │
 │ "Change amount to $350k and add Sarah as contact"                  │ continuation_dag     │
 │ "Looks good, just change close date to Dec 20"                     │ continuation_dag     │
@@ -2090,6 +2139,10 @@ EXAMPLES — YOU MUST GET THESE 100% RIGHT
 │ "Can you pull contact details for john@acme.com?"                  │ no_action            │
 │ "THis was a great meeting, looking forward to our next steps"      │ continuation_dag     │
 │ "Get me the report of all deals or deals associated with X"        │ report_dag           │
+│ "Mark the task as complete"                                        │ task_completion_dag  │
+│ "Create a followup task to call the client next week"              │ task_completion_dag  │
+│ "Update the deal amount of associated deal"                        │ task_completion_dag  │
+│ "Reschedule the task to next Friday"                               │ task_completion_dag  │          │
 └────────────────────────────────────────────────────────────────────┴──────────────────────┘
 Final instruction: If in doubt → route to **no_action**. Never guess creation**.
 
