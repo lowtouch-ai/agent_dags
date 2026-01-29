@@ -13,7 +13,7 @@ dag = DAG(
     'bigquery_simulator',
     default_args=default_args,
     description='A DAG to simulate BigQuery queries by running good and bad queries sequentially',
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     tags=["sre", "bigquery", "simulation"]
 )

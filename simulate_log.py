@@ -144,7 +144,6 @@ def generate_payment_reports():
 with DAG(
     dag_id="airflow_log_simulator",
     start_date=datetime(2024, 1, 1),
-    schedule_interval=None,
     catchup=False,
     tags=["payments", "gateway", "transactions", "finance"],
     default_args={
