@@ -1074,8 +1074,8 @@ Return ONLY this JSON structure (no other text):
 }}"""
 
     # === Retry Prompt (with previous failure context) ===
-    previous_status = ti.xcom_pull(key="contact_creation_status")
-    previous_response = ti.xcom_pull(key="contact_creation_response")
+    previous_status = ti.xcom_pull(key="contact_creation_status", task_ids="create_contacts")
+    previous_response = ti.xcom_pull(key="contact_creation_response", task_ids="create_contacts")
     is_retry = current_try > 1
 
     if is_retry:
@@ -1258,8 +1258,8 @@ Return ONLY this JSON structure (no other text):
 }}"""
 
     # === Retry Prompt (with previous failure context) ===
-    previous_status = ti.xcom_pull(key="company_creation_status")
-    previous_response = ti.xcom_pull(key="company_creation_response")
+    previous_status = ti.xcom_pull(key="company_creation_status", task_ids="create_companies")
+    previous_response = ti.xcom_pull(key="company_creation_response", task_ids="create_companies")
     is_retry = current_try > 1
 
     if is_retry:
@@ -1471,8 +1471,8 @@ Return JSON:
 }}"""
 
     # === Retry Prompt (with previous failure) ===
-    previous_status = ti.xcom_pull(key="deal_creation_status")
-    previous_response = ti.xcom_pull(key="deal_creation_response")
+    previous_status = ti.xcom_pull(key="deal_creation_status", task_ids="create_deals")
+    previous_response = ti.xcom_pull(key="deal_creation_response", task_ids="create_deals")
     is_retry = current_try > 1
 
     if is_retry:
@@ -1656,8 +1656,8 @@ Return ONLY this JSON structure (no other text):
 }}"""
 
     # === Retry Prompt (with previous failure context) ===
-    previous_status = ti.xcom_pull(key="meeting_creation_status")
-    previous_response = ti.xcom_pull(key="meeting_creation_response")
+    previous_status = ti.xcom_pull(key="meeting_creation_status", task_ids="create_meetings")
+    previous_response = ti.xcom_pull(key="meeting_creation_response", task_ids="create_meetings")
     is_retry = current_try > 1
 
     if is_retry:
@@ -1889,8 +1889,8 @@ PRESERVE SPEAKER FROM INPUT - CRITICAL:
 """
 
     # === Final Prompt (Initial vs Retry) ===
-    previous_status = ti.xcom_pull(key="note_creation_status")
-    previous_response = ti.xcom_pull(key="note_creation_response")
+    previous_status = ti.xcom_pull(key="note_creation_status", task_ids="create_notes")
+    previous_response = ti.xcom_pull(key="note_creation_response", task_ids="create_notes")
     is_retry = current_try > 1
 
     if is_retry:
@@ -2095,8 +2095,8 @@ Return ONLY this JSON structure (no other text):
 CRITICAL: Preserve the task_owner_id from the input. Do not default to Kishore ({DEFAULT_OWNER_ID}) unless explicitly specified."""
 
     # === Build Final Prompt (Retry vs Initial) ===
-    previous_status = ti.xcom_pull(key="task_creation_status")
-    previous_response = ti.xcom_pull(key="task_creation_response")
+    previous_status = ti.xcom_pull(key="task_creation_status", task_ids="create_tasks")
+    previous_response = ti.xcom_pull(key="task_creation_response", task_ids="create_tasks")
     is_retry = current_try > 1
 
     if is_retry:
@@ -2391,8 +2391,8 @@ def update_companies(ti, **context):
 
     logging.info(f"=== UPDATE COMPANIES - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="company_update_status")
-    previous_response = ti.xcom_pull(key="company_update_response")
+    previous_status = ti.xcom_pull(key="company_update_status", task_ids="update_companies")
+    previous_response = ti.xcom_pull(key="company_update_response", task_ids="update_companies")
     is_retry = current_try > 1
 
     if not to_update:
