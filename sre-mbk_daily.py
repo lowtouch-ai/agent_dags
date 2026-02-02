@@ -46,22 +46,16 @@ OLLAMA_HOST = Variable.get("ltai.v1.srembk.MBK_OLLAMA_HOST", "http://agentomatic
 PROMETHEUS_URL = Variable.get("ltai.v1.srembk.MBK_PROMETHEUS_URL", "https://mbk-prometheus.lowtouchcloud.io")
 PROMETHEUS_USER = Variable.get("ltai.v1.srembk.AGENT_PROMETHEUS_USER_MBK")
 PROMETHEUS_PASSWORD = Variable.get("ltai.v1.srembk.AGENT_PROMETHEUS_PASSWORD_MBK")
-logging.info(f"Using Prometheus user: {PROMETHEUS_USER}, password: {PROMETHEUS_PASSWORD}")
 auth = HTTPBasicAuth(PROMETHEUS_USER, PROMETHEUS_PASSWORD)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # IP-to-Name Mapping from queries.md
-NODE_MAPPING = {
-    "172.16.1.10": "engine-master",
-    "172.16.6.55": "dev-worker-0",
-    "172.16.4.194": "dev-worker-1",
-    "172.16.5.67": "dev-worker-2",
-}
-
 def get_node_name(instance):
     ip = instance.split(':')[0]
-    return NODE_MAPPING.get(ip, f"Unknown Node ({ip})")
+    mapping = Variable.get("ltai.v1.srembk.NODE_IP_MAPPING", default={}, deserialize_json=True)
+    return mapping.get(ip, f"Unknown Node ({ip})")
+
 
 # === Precise Date & Time Helpers (computed once per DAG run) ===
 def get_daily_ranges():
