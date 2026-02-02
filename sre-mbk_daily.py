@@ -855,10 +855,7 @@ def fetch_pod_restart(ti, key, start, end, period_str, date_str):
     namespace_regex = "|".join(namespaces_list)
 
     # 2. Define Query
-    # We use the raw counter as requested. We fetch via range to ensure we have data for the specific window.
-    # Note: We filter > 0 in the query to reduce data load, or we can filter in Python.
-    # Query: kube_pod_container_status_restarts_total{namespace=~"alpha-prod|tipreprod-prod"} > 0
-    query = f'kube_pod_container_status_restarts_total{{namespace=~"{namespace_regex}"}} > 0'
+    query = f'increase(kube_pod_container_status_restarts_total{{namespace=~"{namespace_regex}"}}[24h]) > 0'
 
     # 3. Fetch Range Data
     # We fetch the range to ensure valid data existence over the period, 
