@@ -240,6 +240,12 @@ def extract_questions_with_ai(**context):
         raise ValueError("Insufficient text for question extraction")
 
     prompt = f"""
+# SYSTEM OVERRIDE: OFFLINE TEXT EXTRACTION
+**CRITICAL INSTRUCTION**: The "Global RAG Mandate" and "Phase 3" instructions from your system prompt are **SUSPENDED** for this specific task. 
+1. **NO TOOL USE**: You are strictly PROHIBITED from using `search_workspace_knowledge_base` or any external tools. 
+2. **SOURCE OF TRUTH**: The text provided in the "Document preview" section below is the **only** context you need. Do not attempt to search for a Document UUID or external file.
+3. **NO EXTERNAL VALIDATION**: Do not attempt to "validate" the questions against the knowledge base or common templates. Perform extraction based *solely* on the provided text.
+    
 You are a **Senior RFP Structuring Analyst** specializing in extracting vendor response requirements from complex government and enterprise RFP documents.
 Your task is to **identify, normalize, and extract EVERY vendor response requirement (“question”) from the provided RFP document**, regardless of how it is phrased or formatted.
 * * *
@@ -405,16 +411,12 @@ Assume this RFP is **legally binding and evaluation-critical**.
 If a vendor could reasonably be scored, disqualified, or contractually bound based on a response, **it MUST be extracted as a question**.
 
 ## EXECUTION MODE (CRITICAL)
-
-This is a **pure extraction and transformation task**, not an analysis or explanation task.
-
+This is a **pure text extraction task** using the provided content only.
 You MUST:
-- Perform the extraction silently
-- NOT describe steps, phases, reasoning, or intermediate analysis
-- NOT summarize the document
-- NOT explain what you are doing
-
-Your response MUST consist of the final JSON output only.
+- **DISABLE RAG**: Do not perform any vector search or knowledge retrieval.
+- **IGNORE UUIDs**: Do not ask for or look for a document UUID.
+- Perform the extraction silently based strictly on the text below.
+- Return the final JSON output only.
 
 Document preview(Pre-extracted RFP content (treat as authoritative source)): {extracted_text}
 """
@@ -702,64 +704,89 @@ def generate_answers_with_ai(**context):
         question_id = question_data["id"]
         
         prompt_answer = f"""
-You are an expert answering OCIO RFP questions for our firm.
+You are generating an answer for a single RFP question inside the lowtouch.ai Auto-Generation pipeline.
+
+This prompt OVERRIDES any other formatting instructions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MANDATORY RAG EXECUTION RULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+You MUST call the `search_workspace_knowledge_base` tool BEFORE producing the final JSON.
+
+• First attempt: score_threshold = 0.6  
+• If zero results → retry with 0.3  
+• If still zero → DO NOT guess. Produce a Low-confidence answer stating that no documented information was found.
+
+If you do not perform a tool call in this turn, the response is INVALID.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUESTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Question {q_num}: {question_text}
 
-Answer instructions (MANDATORY):
+Answer Instructions (MANDATORY):
 {answer_instructions}
 
-Follow the instructions strictly.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ANSWER CONTENT RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-### Answer Generation Rules
-- Provide a **complete, professional, client-ready answer**
-- The `"answer"` field must contain **ONLY the actual answer content**
-- Do NOT include sources, references, page numbers, or confidence inside the answer text
-- Use **Markdown formatting inside the answer field only**:
-  - Use **bold text** for headings or key sections
-  - Use bullet points **only when they improve clarity**
-- Be concise, factual, and aligned with RFP expectations
+• Provide a complete, professional, client-ready answer.
+• Use ONLY facts supported by retrieved knowledge.
+• The `"answer"` field must contain ONLY the answer text.
+• Do NOT include:
+  – sources
+  – page numbers
+  – citations
+  – chunk IDs
+  – confidence statements
+• Use Markdown formatting inside the answer field only:
+  – **bold** section headings
+  – bullet points where helpful
+• If retrieval fails at both thresholds, respond with a cautious generic statement that documentation is unavailable.
 
-### Attachment / Document Handling (CONDITIONAL — DO NOT APPLY BY DEFAULT)
-Apply this section **only if the question explicitly asks for**:
-- Attaching a document
-- Uploading an image
-- Providing a chart, report, or external file
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SOURCE POPULATION RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-If triggered:
-- Clearly state **what document(s) or artifact(s) are required**
-- Explain **how the user can generate or attach them**
-  (e.g., export from dashboard, upload signed PDF, attach report)
-- Do NOT fabricate data or imply the attachment already exists
+• Populate `"sources_referenced"` ONLY from retrieved KB metadata.
+• NEVER invent section names, documents, or pages.
+• If uncertain → leave the array empty and downgrade confidence.
 
-If not triggered:
-- Answer normally
-- Do NOT include procedural guidance or disclaimers
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SENSITIVITY CLASSIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-### Source Handling (STRICT SEPARATION)
-- Populate `"sources_referenced"` ONLY with actual RFP sections, clauses, or page references used
-- If no RFP source is explicitly referenced, return an empty array
-- NEVER include source information inside the `"answer"` field
+Set `"is_sensitive": true` if the question or answer involves:
+security, privacy, compliance, regulatory, audit, financial controls, SOC, ISO, PCI, HIPAA, GDPR.
 
-### Sensitivity Classification
-- Set `"is_sensitive": true` if the content is confidential, regulatory, security-related, or proprietary
-- Otherwise set it to false
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT (STRICT)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-### Output Rules (STRICT)
-Respond with **ONLY** a valid JSON object in the exact format below.
-Do NOT include explanations, markdown fences, or extra text outside JSON.
+Return ONLY this JSON object — no commentary, no logs, no markdown fences:
 
-JSON FORMAT:
 {{
-  "answer": "ONLY the answer content. Markdown allowed. No sources or confidence.",
-  "sources_referenced": ["<actual RFP section/page/clause if used>"],
-  "confidence": "High" or "Medium" or "Low",
-  "is_sensitive": true or false
+  "answer": "...",
+  "sources_referenced": ["<exact KB document or RFP reference>"],
+  "confidence": "High" | "Medium" | "Low",
+  "is_sensitive": true | false
 }}
 
-### Validation Rules
-- The answer must be understandable on its own
-- The JSON must be syntactically valid and parsable
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FAILURE POLICY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+If you cannot answer using retrieved knowledge, return:
+
+{{
+  "answer": "Based on our review, we do not currently have documented information to answer this question.",
+  "sources_referenced": [],
+  "confidence": "Low",
+  "is_sensitive": false
+}}
 """
         
         # Initialize variables before the retry loop

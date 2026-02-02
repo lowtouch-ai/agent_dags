@@ -167,8 +167,8 @@ def fetch_pdf_and_extract_text(**context):
     if user_email:
         headers["x-ltai-user-email"] = user_email
 
-    # Set status to 'generating' immediately
-    set_project_status(project_id, "generating", headers)
+    # Set status to 'analyzing' immediately
+    set_project_status(project_id, "analyzing", headers)
 
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/rfpfile"
     logging.info(f"Downloading PDF for project_id={project_id} from {url}")
