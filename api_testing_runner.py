@@ -330,7 +330,7 @@ def create_and_validate_test_cases(*args, **kwargs):
     - **Always give preference to Special Instructions over general Test Requirements.**
     - **Only create test cases for the methods and endpoints mentioned in the API documentation.** For example, if the API description contains only GET methods, do not create test cases for POST, PUT or DELETE methods.
     - **If PDF documentation provides additional endpoints or methods, include them in testing.**
-    - Do not create test cases for authentication.
+    - **Do not create test cases for authentication scenatios** skip authentication scenarios for now.
     """
     
     test_cases_response = get_ai_response(generate_prompt, model=MODEL_NAME, conversation_history=history)
