@@ -400,19 +400,28 @@ def step_3_compose_email(ti, **context):
            Total Amount: [value]<br>
 
         For duplicates, label this as 'Existing Invoice Summary' or 'Existing Draft Invoice Summary' based on the existing status, and populate with the existing invoice's details.
+        5. Validation Steps Performed section:
+            <p><strong>Validation Steps Performed</strong></p>
+            <p>
+            We performed the following validation checks on this invoice:<br>
+            - Verified that the vendor exists and is active in our ERP system.<br>
+            - Confirmed that the referenced Purchase Order exists and is in a valid state.<br>
+            - Validated that the invoiced products match the Purchase Order line items.<br>
+            - Ensured that invoiced quantities do not exceed the available-to-bill quantities.<br>
+            - Verified that the applied tax matches the tax configuration of the products.<br>
+            </p>
+        6. Product Details section: <p><strong>Product Details</strong></p> followed immediately by a table: <table border="1" cellspacing="0" cellpadding="5"><tr><th>Item Description</th><th>Quantity</th><th>Unit Price</th><th>Tax</th><th>Total Price</th></tr> [rows with <tr><td>[desc]</td><td>[qty]</td><td>[price]</td><td>[tax]</td><td>[total]</td></tr> for each item] </table>
 
-        5. Product Details section: <p><strong>Product Details</strong></p> followed immediately by a table: <table border="1" cellspacing="0" cellpadding="5"><tr><th>Item Description</th><th>Quantity</th><th>Unit Price</th><th>Tax</th><th>Total Price</th></tr> [rows with <tr><td>[desc]</td><td>[qty]</td><td>[price]</td><td>[tax]</td><td>[total]</td></tr> for each item] </table>
-
-        6. Closing statement paragraph: <p>[A concise natural statement based on the invoice status:
+        7. Closing statement paragraph: <p>[A concise natural statement based on the invoice status:
            - Posted: The invoice is now in our payment cycle and will be processed accordingly.
            - Draft: Please review the issues above, make the necessary corrections, and resubmit the updated invoice to <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>.
            - Duplicate (Posted): Please review the existing invoice details above. If this was submitted in error, no further action is needed; otherwise, contact us for support.
            - Duplicate (Draft): Please review the existing draft details above, correct any issues, and resubmit to <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>.
            ]</p>
 
-        7. Assistance paragraph: <p>Please let us know if you need any assistance. You can reach us at <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>.</p>
+        8. Assistance paragraph: <p>Please let us know if you need any assistance. You can reach us at <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>.</p>
 
-        8. Signature: <p>Best regards,<br>Invoice Processing Team,<br>InvoFlux</p>
+        9. Signature: <p>Best regards,<br>Invoice Processing Team,<br>InvoFlux</p>
 
         Ensure the email is natural, professional, and concise. Avoid rigid or formulaic language to maintain a human-like tone. Do not use placeholders; replace with actual extracted values. Return only the HTML content as specified, without <!DOCTYPE>, <html>, or <body> tags.
 
