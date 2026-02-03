@@ -382,9 +382,19 @@ def step_3_compose_email(ti, **context):
 
         If the Content indicates a duplicate (e.g., 'Duplicate invoice number found' in validation issues), use: 'We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name]. However, this invoice is a duplicate. The existing invoice is in [Posted/Draft] status, and no new invoice was created' [due to the following validation issues: only if the existing status is Draft and there are other non-duplicate validation issues, else omit this part]. Use the existing status from Content if available, else infer from context (e.g., Draft if validation failed).
         
-        3. Issues list (only if Draft or if duplicate with other validation issues): If there are validation issues, include only non-duplicate issues, do not include duplicate issues:
-        *  followed by
-        * [each specific issue].
+        3. Issues list (only if Draft or if duplicate with other validation issues): 
+        If there are validation issues, render them strictly as a valid HTML unordered list.
+        Do NOT use Markdown bullets (* or -).
+
+        Format must be exactly:
+
+        <ul>
+        <li>[issue 1]</li>
+        <li>[issue 2]</li>
+        </ul>
+
+        Include only non-duplicate validation issues.
+        If there are no applicable issues, omit this entire section.
         
         4. Invoice Summary section: <p><strong>Invoice Summary</strong></p> followed by a list in paragraph form (each on new line with <br>): 
            Invoice Number: [value]<br>
