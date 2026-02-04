@@ -137,7 +137,7 @@ def get_initiated_owners_today(ti, owner_id, owner_timezone):
         
         key = f"initiated_owners_{owner_local_date}_{owner_id}"
         
-        initiated = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=True, dag_id=ti.dag_id)
+        initiated = ti.xcom_pull(key=key, task_ids='check_delivery_window', include_prior_dates=True, dag_id=ti.dag_id)
         return initiated is not None
     except Exception as e:
         logging.warning(f"Failed to check initiated status: {e}")
@@ -166,7 +166,7 @@ def get_sent_reminders_today(ti, owner_id, owner_timezone):
         key = f"sent_reminders_{owner_local_date}_{owner_id}"
 
         # Try current run XCom first
-        sent_list = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=False)
+        sent_list = ti.xcom_pull(key=key, task_ids='send_spaced_reminders', include_prior_dates=False)
         if sent_list is not None:
             sent_set = set(sent_list)
             logging.info(f" Loaded {len(sent_set)} sent reminder(s) for owner {owner_id} from current run")
@@ -175,7 +175,7 @@ def get_sent_reminders_today(ti, owner_id, owner_timezone):
         # Try from previous DAG runs today (cross-run persistence)
         sent_list = ti.xcom_pull(
             key=key,
-            task_ids=None,
+            task_ids='send_spaced_reminders',
             include_prior_dates=True,
             dag_id=ti.dag_id
         )
@@ -604,7 +604,7 @@ def get_all_task_owners(ti, **context):
 def check_delivery_window(ti, **context):
     """Check if we're in the delivery window AND it's a business day for any owner"""
     try:
-        owners = ti.xcom_pull(key="all_owners", default=[])
+        owners = ti.xcom_pull(key="all_owners", task_ids='get_all_task_owners', default=[])
 
         if not owners:
             logging.info("No owners found, skipping delivery window check")
@@ -669,7 +669,7 @@ def check_delivery_window(ti, **context):
 
 def collect_due_tasks(ti, **context):
     """Collect tasks due today or overdue for each owner, using their local timezone"""
-    owners = ti.xcom_pull(key="owners_to_process", default=[])
+    owners = ti.xcom_pull(key="owners_to_process", task_ids='check_delivery_window', default=[])
     if not owners:
         ti.xcom_push(key="tasks_by_owner", value={})
         return {}
@@ -771,7 +771,7 @@ Use <h4> for headings and concise paragraphs/lists."""
 def send_spaced_reminders(ti, **context):
     """Send task reminder emails with 3-minute spacing - ONE EMAIL PER TASK"""
     try:
-        tasks_by_owner = ti.xcom_pull(key="tasks_by_owner", default={})
+        tasks_by_owner = ti.xcom_pull(key="tasks_by_owner", task_ids='collect_due_tasks', default={})
 
         if not tasks_by_owner:
             logging.info("No tasks to send reminders for")

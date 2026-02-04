@@ -33,7 +33,7 @@ def clear_retry_tracker_on_success(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         del retry_tracker[tracker_key]
@@ -50,7 +50,7 @@ def update_retry_tracker_on_failure(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         retry_tracker[tracker_key]["status"] = "failed"
@@ -1320,7 +1320,6 @@ Return ONLY valid JSON:
             firstname = contact.get("firstname", "").strip()
             lastname = contact.get("lastname", "").strip()
             email = contact.get("email", "").strip()
-            logging.info(f"first_name:{firstname} and last_name is:{lastname}")
             # Search contact
             search_result = search_contacts_api(
                 firstname=firstname if firstname else None,
@@ -1782,7 +1781,6 @@ def refine_contacts_by_associations(ti, **context):
     - Otherwise, prioritize contacts linked to relevant companies/deals.
     """
     contact_info = ti.xcom_pull(key="contact_info_with_associations",task_ids = "search_contacts_with_associations", default={})
-    logging.info(f"contact_info:{contact_info}")
     company_info = ti.xcom_pull(key="company_info",task_ids = "validate_companies_against_associations", default={})
     deal_info = ti.xcom_pull(key="deal_info",task_ids = "validate_deals_against_associations", default={})
 
@@ -1975,7 +1973,7 @@ Return ONLY valid JSON:
                 response.raise_for_status()
                 
                 results = response.json().get("results", [])
-                logging.info(f"HubSpot returned {results} results for deal search '{deal_name}'")
+                logging.info(f"HubSpot returned {len(results)} results for deal search '{deal_name}'")
                 
                 for deal in results:
                     props = deal.get("properties", {})
