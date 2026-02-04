@@ -2,7 +2,6 @@ import pendulum
 from airflow.sdk import DAG
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.python import PythonOperator
-from datetime import timedelta
 from cosmos import DbtTaskGroup, RenderConfig
 from cosmos.config import ProfileConfig, ProjectConfig, ExecutionConfig
 from pathlib import Path
@@ -16,14 +15,14 @@ def on_failure_callback(context,SVC_NAME):
     exec_date=context.get("logical_date")
     dag_run = context.get('dag_run')
     log_url = context.get("task_instance").log_url
-    msg = f""" 
+    msg = f"""
             SVC: {svc}
             Dag: {dag}
             Task: {task}
             DagRun: {dag_run}
             TaskInstance: {ti}
-            Log Url: {log_url} 
-            Execution Time: {exec_date} 
+            Log Url: {log_url}
+            Execution Time: {exec_date}
             """
     print(msg)
 
@@ -110,14 +109,14 @@ with DAG(
     ),
         default_args={"retries": 2},
     )
-    
-    # send_email = EmailOperator( 
-    #     task_id='send_email', 
-    #     to='mpmathew@ecloudcontrol.com', 
-    #     subject='test email for airflow', 
-    #     html_content="Date: {{ ds }}", 
+
+    # send_email = EmailOperator(
+    #     task_id='send_email',
+    #     to='mpmathew@ecloudcontrol.com',
+    #     subject='test email for airflow',
+    #     html_content="Date: {{ ds }}",
     # )
-   
+
     e2 = EmptyOperator(task_id="post_dbt")
-    
+
     e1 >> seeds_tg >> stg_tg >> dbt_tg >> e2
