@@ -408,31 +408,37 @@ with DAG(
     t1 = PythonOperator(
         task_id="check_execution_count",
         python_callable=check_execution_count,
+        
     )
     
     t2 = PythonOperator(
         task_id="check_slot_usage",
         python_callable=check_slot_usage,
+        
     )
     
     t3 = PythonOperator(
         task_id="check_execution_time",
         python_callable=check_execution_time,
+        
     )
     
     t4 = PythonOperator(
         task_id="check_memory_usage",
         python_callable=check_memory_usage,
+        
     )
     
     t5 = PythonOperator(
         task_id="compile_analysis_report",
         python_callable=compile_analysis_report,
+        
     )
     
     t6 = PythonOperator(
         task_id="convert_to_html",
         python_callable=convert_to_html,
+        
     )
     
     t7 = PythonOperator(
