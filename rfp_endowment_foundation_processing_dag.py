@@ -1,15 +1,18 @@
 from datetime import datetime
 from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.task.trigger_rule import TriggerRule
 from airflow.models import Variable, Param
 import logging
 import json
 import requests
-from io import BytesIO
-from pypdf import PdfReader
+import tempfile
+import os
+import pymupdf4llm
 from ollama import Client
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =============================================================================
 # Configuration
@@ -64,7 +67,7 @@ def set_project_status(project_id, status, headers):
         logging.info(f"Project {project_id} status updated to '{status}'")
     except Exception as e:
         logging.warning(f"Failed to update project status to '{status}': {e}")
-    
+
 def handle_task_failure(context):
     """
     Extracts details from Airflow context to call the existing set_project_status.
@@ -88,6 +91,54 @@ def handle_task_failure(context):
         # REUSES YOUR EXISTING FUNCTION
         set_project_status(project_id, "failed", headers)
 
+def extract_local_context(
+    full_text: str,
+    anchor: str,
+    window: int = 1200
+) -> str:
+    """
+    Extract a bounded context window around the anchor text.
+    """
+    idx = full_text.find(anchor)
+    if idx == -1:
+        return ""
+
+    start = max(0, idx - window)
+    end = min(len(full_text), idx + len(anchor) + window)
+    return full_text[start:end]
+
+def derive_answer_instructions(question_text: str, section: str, local_context: str, headers: dict) -> str:
+    """
+    Derive explicit answer-writing instructions for a question based on its text and section.
+    """
+    prompt = f"""
+You are an expert RFP response advisor.
+
+Determine the exact instructions the respondent must follow when answering the question below.
+
+Question text:
+{question_text}
+
+Section:
+{section}
+
+Nearby RFP context (authoritative):
+{local_context if local_context else "No additional context available."}
+
+Infer the expected answer format, structure, and constraints.
+
+The instruction MUST:
+- Be a single sentence
+- Be no more than 25 words
+- Describe HOW to answer, not WHAT the answer is
+- Specify format requirements (e.g. table, list, Yes/No, attachment) if implied
+
+Return ONLY the instruction sentence.
+Do NOT explain your reasoning.
+"""
+    
+    return get_ai_response(prompt, headers=headers).strip()
+
 # =============================================================================
 # Task 1: Fetch PDF and Extract Text
 # =============================================================================
@@ -100,7 +151,7 @@ def fetch_pdf_from_api(**context):
     
     if not project_id:
         raise ValueError("project_id is required in dag_run.conf")
-        
+    
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json"
@@ -111,7 +162,7 @@ def fetch_pdf_from_api(**context):
         headers["x-ltai-user-email"] = user_email
 
     # Ensure status is 'generating'
-    set_project_status(project_id, "generating", headers)
+    set_project_status(project_id, "analyzing", headers)
 
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/rfpfile"
     logging.info(f"Downloading PDF for project_id={project_id}")
@@ -138,17 +189,23 @@ def fetch_pdf_from_api(**context):
         logging.info(f"Downloaded PDF: {len(pdf_bytes):,} bytes")
 
         # Extract text from PDF
-        reader = PdfReader(BytesIO(pdf_bytes))
         text = ""
-        page_count = len(reader.pages)
-        
-        for i, page in enumerate(reader.pages, 1):
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-            if i % 10 == 0 or i == page_count:
-                logging.info(f"Extracted text from {i}/{page_count} pages...")
+        # Create a temporary file to work with pymupdf4llm
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
+            tmp_file.write(pdf_bytes)
+            tmp_path = tmp_file.name
 
+        try:
+            # Convert PDF to Markdown to preserve structure (tables, headers)
+            text = pymupdf4llm.to_markdown(tmp_path, write_images=False)
+            logging.info(f"Converted PDF to Markdown via pymupdf4llm. Length: {len(text):,}")
+        except Exception as e:
+            logging.error(f"pymupdf4llm conversion failed: {e}")
+            raise
+        finally:
+            # Clean up temporary file
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         if not text.strip():
             text = "[NO_TEXT_EXTRACTED - Likely scanned/image-based PDF]"
             logging.warning("No text extracted from PDF")
@@ -172,11 +229,24 @@ def extract_questions_with_ai(**context):
     workspace_uuid = conf['workspace_uuid']
     x_ltai_user_email = conf['x-ltai-user-email']
     headers = {"WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
+    status_headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "WORKSPACE_UUID": workspace_uuid,
+        "x-ltai-user-email": x_ltai_user_email
+    }
+    set_project_status(project_id, "extracting", status_headers)
     
     if len(extracted_text.strip()) < 50:
         raise ValueError("Insufficient text for question extraction")
 
     prompt = f"""
+# SYSTEM OVERRIDE: OFFLINE TEXT EXTRACTION
+**CRITICAL INSTRUCTION**: The "Global RAG Mandate" and "Phase 3" instructions from your system prompt are **SUSPENDED** for this specific task. 
+1. **NO TOOL USE**: You are strictly PROHIBITED from using `search_workspace_knowledge_base` or any external tools. 
+2. **SOURCE OF TRUTH**: The text provided in the "Document preview" section below is the **only** context you need. Do not attempt to search for a Document UUID or external file.
+3. **NO EXTERNAL VALIDATION**: Do not attempt to "validate" the questions against the knowledge base or common templates. Perform extraction based *solely* on the provided text.
+    
 You are a **Senior RFP Structuring Analyst** specializing in extracting vendor response requirements from complex government and enterprise RFP documents.
 Your task is to **identify, normalize, and extract EVERY vendor response requirement (“question”) from the provided RFP document**, regardless of how it is phrased or formatted.
 * * *
@@ -262,9 +332,11 @@ Each extracted question MUST be assigned a **single logical section string** tha
     *   `Returnable Schedule 7 – Price`
 4.  If none apply → `"General Requirements"`
 ### Critical Rules:
-   _Prefer_ _descriptive section headings_* over schedule or page titles
-*   Do NOT use page-level headers like:
-    *   :x: `Returnable Schedule 14` if `14.1 Information Security Questionnaire` exists
++ If a numbered subsection (e.g. "1.2 Respondent’s details") exists, you MUST use that subsection and MUST NOT use the enclosing Schedule or Form title.
+   Prefer descriptive section headings over schedule or page titles
+   Do NOT use page-level headers like:
+     ✗ Returnable Schedule 14 if 14.1 Information Security Questionnaire exists
+
    _Use the_ _exact wording_* of the section as written
    _All questions under the same heading MUST use_ _identical section strings_*
 *   Do NOT invent or summarize section names
@@ -340,16 +412,12 @@ Assume this RFP is **legally binding and evaluation-critical**.
 If a vendor could reasonably be scored, disqualified, or contractually bound based on a response, **it MUST be extracted as a question**.
 
 ## EXECUTION MODE (CRITICAL)
-
-This is a **pure extraction and transformation task**, not an analysis or explanation task.
-
+This is a **pure text extraction task** using the provided content only.
 You MUST:
-- Perform the extraction silently
-- NOT describe steps, phases, reasoning, or intermediate analysis
-- NOT summarize the document
-- NOT explain what you are doing
-
-Your response MUST consist of the final JSON output only.
+- **DISABLE RAG**: Do not perform any vector search or knowledge retrieval.
+- **IGNORE UUIDs**: Do not ask for or look for a document UUID.
+- Perform the extraction silently based strictly on the text below.
+- Return the final JSON output only.
 
 Document preview(Pre-extracted RFP content (treat as authoritative source)): {extracted_text}
 """
@@ -364,57 +432,72 @@ Document preview(Pre-extracted RFP content (treat as authoritative source)): {ex
     
     logging.info(f"Extracted {len(questions_dict)} questions via AI")
     
-    # Create questions in database and store IDs
-    questions_with_id = {}
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/questions"
 
-    for idx, (q_num, q_data) in enumerate(questions_dict.items(), start=1):
+    # 2. Define Helper for Parallel Processing
+    def process_question_details(idx, q_num, q_data):
         if isinstance(q_data, str):
-            q_text = q_data
-            q_section = "General"
+            q_text, q_section = q_data, "General"
         else:
             q_text = q_data.get("text", "")
             q_section = q_data.get("section", "General")
 
-        if not q_text.strip():
-            continue
+        if not q_text.strip(): return None
 
+        local_context = extract_local_context(extracted_text, q_num)
+
+        if not local_context:
+            local_context = extract_local_context(extracted_text, q_text[:60])
+
+        answer_instructions = derive_answer_instructions(
+            q_text.strip(),
+            q_section.strip(),
+            local_context,
+            headers
+        )
         payload = {
             "questiontext": q_text.strip(),
             "section": q_section.strip(),
-            "questionorder": idx
+            "questionorder": idx,
+            "answer_instructions": answer_instructions
         }
 
         try:
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-            if workspace_uuid:
-                headers["WORKSPACE_UUID"] = workspace_uuid
-            
-            if x_ltai_user_email:
-                headers["x-ltai-user-email"] = x_ltai_user_email
-            else:
-                logging.warning("x-ltai-user-email not provided in DAG params.")
-            resp = requests.post(url, json=payload, headers=headers, timeout=20)
+            resp = requests.post(url, json=payload, headers=status_headers, timeout=20)
             resp.raise_for_status()
-            data = resp.json()
-            question_id = data.get("questionid")
+            question_id = resp.json().get("questionid")
             
             if not question_id:
                 logging.warning(f"No ID returned for question {q_num}")
-                continue
+                return None
 
-            questions_with_id[q_num] = {
+            logging.info(f"Created question {q_num} → ID {question_id}")
+            return q_num, {
                 "text": q_text.strip(),
                 "section": q_section.strip(),
+                "answer_instructions": answer_instructions,
                 "id": question_id
             }
-            logging.info(f"Created question {q_num} → ID {question_id}")
 
         except Exception as e:
             logging.error(f"Failed to create question {q_num}: {e}")
+            return None
+
+    # 3. Execute in Parallel
+    questions_with_id = {}
+    # Use 5-10 workers depending on your DB connection limit
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        # Map futures to preserve order is not strictly necessary for Dict, but good for tracking
+        future_map = {
+            executor.submit(process_question_details, idx, q_num, q_data): q_num
+            for idx, (q_num, q_data) in enumerate(questions_dict.items(), start=1)
+        }
+        
+        for future in as_completed(future_map):
+            result = future.result()
+            if result:
+                q_num, data = result
+                questions_with_id[q_num] = data
 
     if not questions_with_id:
         raise ValueError("No questions were successfully created in backend")
@@ -431,6 +514,7 @@ def validate_and_fix_questions(**context):
     """Validate extracted questions and add any missing ones"""
     questions_dict = context["ti"].xcom_pull(task_ids="extract_questions_with_ai", key="questions_dict")
     questions_with_id = context["ti"].xcom_pull(task_ids="extract_questions_with_ai", key="questions_with_id")
+    extracted_text = context["ti"].xcom_pull(task_ids="fetch_pdf_from_api", key="extracted_text")
     def sort_key_generator(key):
         # 1. Clean the key of trailing dots or whitespace
         clean_key = key.strip().rstrip('.')
@@ -519,8 +603,12 @@ Document preview: {questions_dict}
     
     # Create missing questions in database
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/questions"
+    api_headers = {
+        "Content-Type": "application/json", "Accept": "application/json",
+        "WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email
+    }
 
-    for idx, (q_num, q_data) in enumerate(missing_dict.items(), start=len(questions_dict) + 1):
+    def process_missing_item(idx, q_num, q_data):
         if isinstance(q_data, str):
             q_text = q_data
             q_section = "General"
@@ -528,45 +616,69 @@ Document preview: {questions_dict}
             q_text = q_data.get("text", "")
             q_section = q_data.get("section", "General")
 
-        if not q_text.strip():
-            continue
+        if not q_text or not q_text.strip():
+            return None
+
+        local_context = extract_local_context(extracted_text, q_num)
+
+        if not local_context:
+            local_context = extract_local_context(extracted_text, q_text[:60])
+
+        answer_instructions = derive_answer_instructions(
+            q_text.strip(), q_section.strip(), local_context, headers
+        )
 
         payload = {
             "questiontext": q_text.strip(),
             "section": q_section.strip(),
-            "questionorder": idx
+            "questionorder": idx,
+            "answer_instructions": answer_instructions
+        }
+
+        # API Call headers
+        api_headers = {
+            "Content-Type": "application/json", 
+            "Accept": "application/json",
+            "WORKSPACE_UUID": workspace_uuid, 
+            "x-ltai-user-email": x_ltai_user_email
         }
 
         try:
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-            if workspace_uuid:
-                headers["WORKSPACE_UUID"] = workspace_uuid
-            
-            if x_ltai_user_email:
-                headers["x-ltai-user-email"] = x_ltai_user_email
-            else:
-                logging.warning("x-ltai-user-email not provided in DAG params.")
-            resp = requests.post(url, json=payload, headers=headers, timeout=20)
+            resp = requests.post(url, json=payload, headers=api_headers, timeout=20)
             resp.raise_for_status()
-            data = resp.json()
-            question_id = data.get("questionid")
+            question_id = resp.json().get("questionid")
             
             if not question_id:
                 logging.warning(f"No ID returned for missing question {q_num}")
-                continue
+                return None
 
-            questions_with_id[q_num] = {
+            logging.info(f"Added missing question {q_num} → ID {question_id}")
+            return q_num, {
                 "text": q_text.strip(),
                 "section": q_section.strip(),
+                "answer_instructions": answer_instructions,
                 "id": question_id
             }
-            logging.info(f"Added missing question {q_num} → ID {question_id}")
 
         except Exception as e:
             logging.error(f"Failed to create missing question {q_num}: {e}")
+            return None
+
+    # Execute Thread Pool
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_map = {
+            executor.submit(process_missing_item, idx, q_num, q_data): q_num
+            for idx, (q_num, q_data) in enumerate(missing_dict.items(), start=len(questions_dict) + 1)
+        }
+        
+        for future in as_completed(future_map):
+            try:
+                result = future.result()
+                if result:
+                    q_num, data = result
+                    questions_with_id[q_num] = data
+            except Exception as e:
+                logging.error(f"Worker exception in validation: {e}")
     
     context["ti"].xcom_push(key="questions_with_id", value=questions_with_id)
     logging.info(f"Total questions after validation: {len(questions_with_id)}")
@@ -576,112 +688,211 @@ Document preview: {questions_dict}
 # Task 4: Generate Answers with AI
 # =============================================================================
 def generate_answers_with_ai(**context):
-    """Generate answers for all questions using AI"""
+    """Generate answers for all questions using AI and update immediately"""
     questions_with_id = context["ti"].xcom_pull(task_ids="validate_and_fix_questions", key="questions_with_id")
     conf = context["dag_run"].conf
+    project_id = conf["project_id"]
     workspace_uuid = conf['workspace_uuid']
     x_ltai_user_email = conf['x-ltai-user-email']
     headers = {"WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
+    status_headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "WORKSPACE_UUID": workspace_uuid,
+        "x-ltai-user-email": x_ltai_user_email
+    }
+    set_project_status(project_id, "generating", status_headers)
     
     answers_dict = {}
+    project_url = f"{RFP_API_BASE}/rfp/projects/{project_id}"
     
-    for q_num, question_data in questions_with_id.items():
+    # Inner wrapper for processing a single question safely
+    def process_single_question(q_num, question_data):
         question_text = question_data["text"]
+        answer_instructions = question_data.get(
+            "answer_instructions",
+            "Provide a clear, complete response following standard RFP submission conventions."
+        )
         question_id = question_data["id"]
         
         prompt_answer = f"""
-You are an expert answering Endowment and Foundation RFP questions for our firm.
+You are generating an answer for a single RFP question inside the lowtouch.ai Auto-Generation pipeline.
+
+This prompt OVERRIDES any other formatting instructions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MANDATORY RAG EXECUTION RULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+You MUST call the `search_workspace_knowledge_base` tool BEFORE producing the final JSON.
+
+• First attempt: score_threshold = 0.6  
+• If zero results → retry with 0.3  
+• If still zero → DO NOT guess. Produce a Low-confidence answer stating that no documented information was found.
+
+If you do not perform a tool call in this turn, the response is INVALID.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUESTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Question {q_num}: {question_text}
 
-Provide a complete, professional answer. Use bullet points if needed. Be concise yet thorough.
+Answer Instructions (MANDATORY):
+{answer_instructions}
 
-At the end, list any sources from the RFP document you referenced and your confidence level.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ANSWER CONTENT RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-IMPORTANT: Respond with ONLY a valid JSON object in this exact format:
+• Provide a complete, professional, client-ready answer.
+• Use ONLY facts supported by retrieved knowledge.
+• The `"answer"` field must contain ONLY the answer text.
+• Do NOT include:
+  – sources
+  – page numbers
+  – citations
+  – chunk IDs
+  – confidence statements
+• Use Markdown formatting inside the answer field only:
+  – **bold** section headings
+  – bullet points where helpful
+• If retrieval fails at both thresholds, respond with a cautious generic statement that documentation is unavailable.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SOURCE POPULATION RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+• Populate `"sources_referenced"` ONLY from retrieved KB metadata.
+• NEVER invent section names, documents, or pages.
+• If uncertain → leave the array empty and downgrade confidence.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SENSITIVITY CLASSIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Set `"is_sensitive": true` if the question or answer involves:
+security, privacy, compliance, regulatory, audit, financial controls, SOC, ISO, PCI, HIPAA, GDPR.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT (STRICT)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Return ONLY this JSON object — no commentary, no logs, no markdown fences:
+
 {{
-  "answer": "your detailed answer text here (do not include sources or confidence in this field)",
-  "sources_referenced": ["<insert actual section/page found in text>", "<insert another actual source if applicable>"],
-  "confidence": "High" or "Medium" or "Low",
-  "is_sensitive": true or false
+  "answer": "...",
+  "sources_referenced": ["<exact KB document or RFP reference>"],
+  "confidence": "High" | "Medium" | "Low",
+  "is_sensitive": true | false
 }}
 
-Do not add any extra text, markdown, or explanations outside the JSON.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FAILURE POLICY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+If you cannot answer using retrieved knowledge, return:
+
+{{
+  "answer": "Based on our review, we do not currently have documented information to answer this question.",
+  "sources_referenced": [],
+  "confidence": "Low",
+  "is_sensitive": false
+}}
 """
         
-        try:
-            response_str = get_ai_response(prompt_answer, headers=headers).strip()
-            response_data = extract_json_from_response(response_str)
-            
-            answer = response_data.get("answer", "").strip()
-            sources = response_data.get("sources_referenced", [])
-            confidence = response_data.get("confidence")
-            is_sensitive = response_data.get("is_sensitive", False)
-            
-            if not answer:
-                logging.warning(f"Empty answer received for Q{q_num}, skipping")
-                continue
-            
-            answers_dict[question_id] = {
-                "answer": answer,
-                "sources_referenced": sources if isinstance(sources, list) else [],
-                "confidence": confidence if confidence else None,
-                "is_sensitive": is_sensitive,
-                "question_num": q_num
+        # Initialize variables before the retry loop
+        answer = None
+        sources = []
+        confidence = None
+        is_sensitive = False
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response_str = get_ai_response(prompt_answer, headers=headers).strip()
+                response_data = extract_json_from_response(response_str)
+                
+                raw_answer = response_data.get("answer", "")
+                if isinstance(raw_answer, list):
+                    answer = "\n".join(str(item) for item in raw_answer).strip()
+                else:
+                    answer = str(raw_answer).strip()
+                sources = response_data.get("sources_referenced", [])
+                confidence = response_data.get("confidence")
+                is_sensitive = response_data.get("is_sensitive", False)
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 5 * (attempt + 1)
+                    logging.warning(f"Attempt {attempt + 1} failed for Q{q_num}: {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logging.error(f"All {max_retries} attempts failed for Q{q_num}: {e}")
+
+        # Check if we got a valid answer after retries
+        if not answer:
+            logging.warning(f"Empty answer or failed generation for Q{q_num}, skipping.")
+            return None
+
+        return {
+            "question_id": question_id,
+            "data": {
+                "answer": answer, "sources_referenced": sources, "confidence": confidence,
+                "is_sensitive": is_sensitive, "question_num": q_num, "answer_instructions": answer_instructions
             }
-            logging.info(f"Generated answer for Q{q_num} (ID: {question_id}) with sources and confidence")
-            
-        except json.JSONDecodeError as e:
-            logging.error(f"Failed to parse JSON response for Q{q_num}: {e}. Raw response: '{response_str}'")
-        except Exception as e:
-            logging.error(f"Failed to generate answer for Q{q_num}: {e}")
-    
+        }
+
+    # Parallel Execution (Max 5 workers)
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_q = {executor.submit(process_single_question, q_num, q_data): q_num for q_num, q_data in questions_with_id.items()}
+        
+        generated_count = 0
+        for future in as_completed(future_to_q):
+            try:
+                result = future.result()
+                if result:
+                    q_id = result["question_id"]
+                    q_data = result["data"]
+                                        
+                    # 1. Update the specific question
+                    q_url = f"{RFP_API_BASE}/rfp/questions/{q_id}"
+                    q_payload = {
+                        "answertext": q_data["answer"],
+                        "sources_referenced": q_data.get("sources_referenced", []),
+                        "confidence": q_data.get("confidence"),
+                        "is_sensitive": q_data.get("is_sensitive", False),
+                        "answer_instructions": q_data.get("answer_instructions")
+                    }
+                    
+                    try:
+                        # Attempt to save the answer
+                        requests.patch(q_url, json=q_payload, headers=status_headers, timeout=10).raise_for_status()
+                        
+                        # 2. IF successful, increment count and update Project status immediately
+                        generated_count += 1
+                        
+                        # Optimization: Payload only updates the counter, reducing DB overhead
+                        project_payload = {"answer_generated_count": generated_count}
+                        requests.patch(project_url, json=project_payload, headers=status_headers, timeout=5)
+                        
+                        logging.info(f"Real-time update: Q{q_data['question_num']} saved. Count: {generated_count}")
+                        
+                    except Exception as e:
+                        logging.error(f"Failed to save answer or update count for Q{q_data['question_num']}: {e}")
+                        # Do NOT increment generated_count if save failed
+                    
+                    answers_dict[q_id] = q_data
+                    
+            except Exception as e:
+                logging.error(f"Worker exception: {e}")
+
     context["ti"].xcom_push(key="answers_dict", value=answers_dict)
     logging.info(f"Generated {len(answers_dict)}/{len(questions_with_id)} answers")
     return answers_dict
 
 # =============================================================================
-# Task 5: Update Answers to Database
-# =============================================================================
-def update_answers_to_database(**context):
-    """Update all generated answers to the database via API"""
-    answers_dict = context["ti"].xcom_pull(task_ids="generate_answers_with_ai", key="answers_dict")
-    conf = context["dag_run"].conf
-    workspace_uuid = conf['workspace_uuid']
-    x_ltai_user_email = conf['x-ltai-user-email']
-    if not answers_dict:
-        logging.warning("No answers to update")
-        return {"total": 0, "updated": 0}
-    
-    updated_count = 0
-    
-    for question_id, answer_data in answers_dict.items():
-        answer = answer_data["answer"]
-        is_sensitive = answer_data["is_sensitive"]
-        question_num = answer_data["question_num"]
-        
-        url = f"{RFP_API_BASE}/rfp/questions/{question_id}"
-        payload = {
-            "answertext": answer,
-            "sources_referenced": answer_data.get("sources_referenced", []),
-            "confidence": answer_data.get("confidence"),
-            "is_sensitive": is_sensitive
-        }
-        headers = {"Content-Type": "application/json", "Accept": "application/json", "WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
-        
-        try:
-            response = requests.patch(url, json=payload, headers=headers, timeout=30)
-            response.raise_for_status()
-            updated_count += 1
-            logging.info(f"Updated answer for Q{question_num} (ID: {question_id})")
-        except Exception as e:
-            logging.error(f"Failed to update answer for Q{question_num} (ID: {question_id}): {e}")
-    
-    logging.info(f"Updated {updated_count}/{len(answers_dict)} answers to database")
-    return {"total": len(answers_dict), "updated": updated_count}
-
-# =============================================================================
-# Task 6: Update Run ID & Log Completion
+# Task 5: Update Run ID & Log Completion
 # =============================================================================
 def update_run_id_and_log(**context):
     """Update processing_dag_run_id via API and log final completion status"""
@@ -759,27 +970,22 @@ with DAG(
 
     fetch_pdf = PythonOperator(
         task_id="fetch_pdf_from_api",
-        python_callable=fetch_pdf_from_api,
+        python_callable=fetch_pdf_from_api
     )
 
     extract_questions = PythonOperator(
         task_id="extract_questions_with_ai",
-        python_callable=extract_questions_with_ai,
+        python_callable=extract_questions_with_ai
     )
 
     validate_fix_questions = PythonOperator(
         task_id="validate_and_fix_questions",
-        python_callable=validate_and_fix_questions,
+        python_callable=validate_and_fix_questions
     )
 
     generate_answers = PythonOperator(
         task_id="generate_answers_with_ai",
-        python_callable=generate_answers_with_ai,
-    )
-
-    update_answers = PythonOperator(
-        task_id="update_answers_to_database",
-        python_callable=update_answers_to_database,
+        python_callable=generate_answers_with_ai
     )
 
     finalize = PythonOperator(
@@ -789,4 +995,4 @@ with DAG(
     )
 
     # Task dependencies
-    fetch_pdf >> extract_questions >> validate_fix_questions >> generate_answers >> update_answers >> finalize
+    fetch_pdf >> extract_questions >> validate_fix_questions >> generate_answers >> finalize
