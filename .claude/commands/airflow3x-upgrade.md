@@ -9,8 +9,7 @@ Upgrade the specified DAG file(s) from Airflow 2.x to Airflow 3.1.3. Apply ONLY 
 1. Read the target file(s)
 2. Walk through every rule in the checklist below
 3. Apply only the rules that match code found in the file
-4. Commit the changes to branch `10419/airflow-upgrade-3.0`
-5. If already on that branch, commit directly; otherwise cherry-pick onto it
+4. Do NOT commit — leave changes unstaged for the user to review
 
 ---
 
@@ -180,4 +179,4 @@ If the file uses `xcom_push`/`xcom_pull` with non-JSON-serializable objects (e.g
 
 - Remove any now-unused imports
 - Verify the file has no syntax errors
-- Commit to branch `10419/airflow-upgrade-3.0` with message: `Upgrade <filename> to Airflow 3.1.3`
+- Do NOT commit — summarize the changes made and let the user review before committing
