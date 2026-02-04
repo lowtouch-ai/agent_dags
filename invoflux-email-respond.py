@@ -391,6 +391,8 @@ def step_3_compose_email(ti, **context):
     - Maintain a professional U.S. business email tone.
     - Ensure visual hierarchy and spacing between headers and details.
     - Return ONLY the HTML email body.
+    - Avoid redundancies: Do not repeat information across sections (e.g., avoid restating status or details in opening/closing if already covered in summary).
+    - Consistently use <strong> to highlight key terms like headers, field names, and Passed/Failed statuses.
 
     ==================================================================
     1. GREETING (MODERN U.S. BUSINESS STYLE)
@@ -447,10 +449,6 @@ def step_3_compose_email(ti, **context):
     <p><strong>Validation Checks</strong></p>
 
     <p>
-    Each validation step below must be clearly aligned and marked as
-    <strong>Passed</strong> or <strong>Failed</strong>, based strictly on the issues listed above.
-    <br><br>
-
     ✔ Vendor exists and is active in the ERP system — <strong>[Passed / Failed]</strong><br>
     ✔ Purchase Order exists and is in a valid state — <strong>[Passed / Failed]</strong><br>
     ✔ Products match Purchase Order line items — <strong>[Passed / Failed]</strong><br>
@@ -459,6 +457,7 @@ def step_3_compose_email(ti, **context):
     </p>
 
     Rules:
+    - Always include this section.
     - Mark **Failed ONLY if a corresponding issue exists**
     - Otherwise mark **Passed**
     - Do NOT invent failures
@@ -476,7 +475,7 @@ def step_3_compose_email(ti, **context):
 
     Formatting rules (MANDATORY):
     - Render ALL invoice details using <ul> and <li>
-    - Bold the field name
+    - Bold the field name using <strong>
     - Do NOT use plain text lines
 
     <ul>
