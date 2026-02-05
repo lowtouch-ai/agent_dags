@@ -12,14 +12,14 @@ import pymupdf4llm
 from ollama import Client
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =============================================================================
 # Configuration
 # =============================================================================
 OLLAMA_HOST = Variable.get("ltai.v1.rfp.OLLAMA_HOST", default_var="http://agentomatic:8000")
 RFP_API_BASE = Variable.get("ltai.v1.rfp.RFP_API_BASE", default_var="http://agentconnector:8000")
-MODEL_FOR_EXTRACTION = "rfp/autogeneration:0.3af"
+MODEL_FOR_EXTRACTION = "rfp/extraction:0.3af"
+MODEL_FOR_ANSWERING = "rfp/answering:0.3af"
 
 default_args = {
     "owner": "lowtouch.ai",
@@ -31,7 +31,7 @@ default_args = {
 # =============================================================================
 # Helper Functions
 # =============================================================================
-def get_ai_response(prompt, headers=None):
+def get_ai_response(prompt, headers=None, model=MODEL_FOR_EXTRACTION):
     """Call Ollama API and return response text"""
     try:
         if not prompt or not isinstance(prompt, str):
@@ -39,7 +39,7 @@ def get_ai_response(prompt, headers=None):
         
         client = Client(host=OLLAMA_HOST, headers=headers)
         response = client.chat(
-            model=MODEL_FOR_EXTRACTION,
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             stream=False
         )
@@ -107,7 +107,7 @@ def extract_local_context(
     end = min(len(full_text), idx + len(anchor) + window)
     return full_text[start:end]
 
-def derive_answer_instructions(question_text: str, section: str, local_context: str, headers: dict) -> str:
+def derive_answer_instructions(question_text: str, section: str, local_context: str, headers: dict, model=MODEL_FOR_EXTRACTION) -> str:
     """
     Derive explicit answer-writing instructions for a question based on its text and section.
     """
@@ -137,7 +137,26 @@ Return ONLY the instruction sentence.
 Do NOT explain your reasoning.
 """
     
-    return get_ai_response(prompt, headers=headers).strip()
+    return get_ai_response(prompt, headers=headers, model=model).strip()
+
+def chunk_text(text, chunk_size=12000, overlap=1500):
+    """
+    Splits text into overlapping chunks to prevent context loss at boundaries.
+    """
+    chunks = []
+    start = 0
+    text_len = len(text)
+    
+    if text_len <= chunk_size:
+        return [text]
+
+    while start < text_len:
+        end = min(start + chunk_size, text_len)
+        chunks.append(text[start:end])
+        if end == text_len:
+            break
+        start = end - overlap
+    return chunks
 
 # =============================================================================
 # Task 1: Fetch PDF and Extract Text
@@ -222,7 +241,7 @@ def fetch_pdf_from_api(**context):
 # Task 2: Extract Questions with AI
 # =============================================================================
 def extract_questions_with_ai(**context):
-    """Use AI to extract all questions from RFP text and create them in database"""
+    """Use AI to extract all questions from RFP text using a Chunk-Map-Reduce approach with detailed rules."""
     extracted_text = context["ti"].xcom_pull(task_ids="fetch_pdf_from_api", key="extracted_text")
     conf = context["dag_run"].conf
     project_id = conf["project_id"]
@@ -240,15 +259,23 @@ def extract_questions_with_ai(**context):
     if len(extracted_text.strip()) < 50:
         raise ValueError("Insufficient text for question extraction")
 
-    prompt = f"""
-# SYSTEM OVERRIDE: OFFLINE TEXT EXTRACTION
-**CRITICAL INSTRUCTION**: The "Global RAG Mandate" and "Phase 3" instructions from your system prompt are **SUSPENDED** for this specific task. 
-1. **NO TOOL USE**: You are strictly PROHIBITED from using `search_workspace_knowledge_base` or any external tools. 
-2. **SOURCE OF TRUTH**: The text provided in the "Document preview" section below is the **only** context you need. Do not attempt to search for a Document UUID or external file.
-3. **NO EXTERNAL VALIDATION**: Do not attempt to "validate" the questions against the knowledge base or common templates. Perform extraction based *solely* on the provided text.
+    # 1. SPLIT TEXT INTO CHUNKS
+    # We use a larger chunk size to ensure the AI has enough context for your detailed rules
+    text_chunks = chunk_text(extracted_text, chunk_size=12000, overlap=1500)
+    logging.info(f"Splitting document into {len(text_chunks)} chunks for robust extraction.")
     
+    all_extracted_questions = {}
+
+    # 2. DEFINE CHUNK PROCESSOR WITH YOUR ORIGINAL PROMPT
+    def process_chunk(chunk_index, chunk_text):
+        # We inject the chunk text into your exact original prompt structure
+        prompt = f"""
+# SYSTEM OVERRIDE: PARTIAL DOCUMENT EXTRACTION
+**CONTEXT**: You are extracting questions from **PART {chunk_index + 1}** of a larger RFP document.
+**CRITICAL**: Apply the extraction rules below STRICTLY to the provided text segment.
+
 You are a **Senior RFP Structuring Analyst** specializing in extracting vendor response requirements from complex government and enterprise RFP documents.
-Your task is to **identify, normalize, and extract EVERY vendor response requirement (“question”) from the provided RFP document**, regardless of how it is phrased or formatted.
+Your task is to **identify, normalize, and extract EVERY vendor response requirement (“question”) from the provided text block**, regardless of how it is phrased or formatted.
 * * *
 ## 1. WHAT COUNTS AS A QUESTION (NON-NEGOTIABLE)
 A **question** is **ANY requirement that expects the vendor to provide information, confirmation, data, documentation, or a declaration**, even if:
@@ -398,43 +425,46 @@ Return **ONLY valid JSON** in the following format:
     "text": "{{A fully self-contained question written as a single, answerable instruction}}"
   }}
 }}
-```
-### Mandatory Constraints:
-*   :x: Do NOT include any additional fields
-*   :x: Do NOT include explanations outside JSON
-*   :x: Do NOT group unrelated requests
-   _:white_check_mark: Prefer_ _over-extraction_* to missing questions
-*   :white_check_mark: Treat compliance, confirmations, and declarations as first-class questions ONLY when the Respondent is explicitly required to provide a confirmation, declaration, certification, or completed response as part of the Proposal or a Returnable Schedule.
 
-* * *
-## 7. FINAL GUIDANCE
-Assume this RFP is **legally binding and evaluation-critical**.
-If a vendor could reasonably be scored, disqualified, or contractually bound based on a response, **it MUST be extracted as a question**.
+## EXECUTION MODE
 
-## EXECUTION MODE (CRITICAL)
-This is a **pure text extraction task** using the provided content only.
-You MUST:
-- **DISABLE RAG**: Do not perform any vector search or knowledge retrieval.
-- **IGNORE UUIDs**: Do not ask for or look for a document UUID.
-- Perform the extraction silently based strictly on the text below.
-- Return the final JSON output only.
+* **DISABLE RAG**: No external tools.
+* **IGNORE CUT-OFFS**: If a question is clearly cut off at the start/end of this text block, IGNORE IT (it is handled in adjacent chunks).
 
-Document preview(Pre-extracted RFP content (treat as authoritative source)): {extracted_text}
+**TEXT TO ANALYZE**:
+{chunk_text}
 """
+        # Retry logic per chunk
+        for attempt in range(3):
+            try:
+                raw_response = get_ai_response(prompt, headers=headers, model=MODEL_FOR_EXTRACTION)
+                return extract_json_from_response(raw_response)
+            except Exception as e:
+                logging.warning(f"Chunk {chunk_index} attempt {attempt+1} failed: {e}")
+                time.sleep(2)
+        return {}
 
-    raw_json = get_ai_response(prompt, headers=headers)
-    
-    try:
-        questions_dict = extract_json_from_response(raw_json)
-    except json.JSONDecodeError as e:
-        logging.error(f"Failed to parse AI response as JSON: {raw_json[:500]}")
-        raise
-    
-    logging.info(f"Extracted {len(questions_dict)} questions via AI")
-    
+    # 3. SEQUENTIAL EXECUTION
+    # Process chunks strictly in order to preserve document flow
+    for i, chunk in enumerate(text_chunks):
+        try:
+            chunk_results = process_chunk(i, chunk)
+            if chunk_results:
+                # Merge into main dictionary. Since we process sequentially,
+                # questions are added in the order they appear.
+                all_extracted_questions.update(chunk_results)
+        except Exception as e:
+            logging.error(f"Chunk {i} extraction failed: {e}")
+
+    questions_dict = all_extracted_questions
+    logging.info(f"Total unique questions extracted after merge: {len(questions_dict)}")
+
+    if not questions_dict:
+        raise ValueError("No questions extracted from any chunk.")
+
+    # 4. DATABASE CREATION (Standard Logic)
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/questions"
 
-    # 2. Define Helper for Parallel Processing
     def process_question_details(idx, q_num, q_data):
         if isinstance(q_data, str):
             q_text, q_section = q_data, "General"
@@ -453,7 +483,8 @@ Document preview(Pre-extracted RFP content (treat as authoritative source)): {ex
             q_text.strip(),
             q_section.strip(),
             local_context,
-            headers
+            headers,
+            model=MODEL_FOR_EXTRACTION
         )
         payload = {
             "questiontext": q_text.strip(),
@@ -483,21 +514,22 @@ Document preview(Pre-extracted RFP content (treat as authoritative source)): {ex
             logging.error(f"Failed to create question {q_num}: {e}")
             return None
 
-    # 3. Execute in Parallel
     questions_with_id = {}
-    # Use 5-10 workers depending on your DB connection limit
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        # Map futures to preserve order is not strictly necessary for Dict, but good for tracking
-        future_map = {
-            executor.submit(process_question_details, idx, q_num, q_data): q_num
-            for idx, (q_num, q_data) in enumerate(questions_dict.items(), start=1)
-        }
-        
-        for future in as_completed(future_map):
-            result = future.result()
+
+    # Convert dict items to a list to maintain order during iteration
+    # Since all_extracted_questions was built sequentially, this list is ordered.
+    ordered_questions = list(questions_dict.items())
+
+    # SEQUENTIAL DATABASE CREATION
+    # We iterate and process one by one to ensure DB IDs increment strictly by document order.
+    for idx, (q_num, q_data) in enumerate(ordered_questions, start=1):
+        try:
+            result = process_question_details(idx, q_num, q_data)
             if result:
                 q_num, data = result
                 questions_with_id[q_num] = data
+        except Exception as e:
+            logging.error(f"Error creating question {q_num}: {e}")
 
     if not questions_with_id:
         raise ValueError("No questions were successfully created in backend")
@@ -511,49 +543,38 @@ Document preview(Pre-extracted RFP content (treat as authoritative source)): {ex
 # Task 3: Validate & Fix Missing Questions
 # =============================================================================
 def validate_and_fix_questions(**context):
-    """Validate extracted questions and add any missing ones"""
+    """Validate extracted questions for sequence gaps and extract missing ones using chunked search."""
     questions_dict = context["ti"].xcom_pull(task_ids="extract_questions_with_ai", key="questions_dict")
     questions_with_id = context["ti"].xcom_pull(task_ids="extract_questions_with_ai", key="questions_with_id")
     extracted_text = context["ti"].xcom_pull(task_ids="fetch_pdf_from_api", key="extracted_text")
-    def sort_key_generator(key):
-        # 1. Clean the key of trailing dots or whitespace
-        clean_key = key.strip().rstrip('.')
-        
-        # 2. Split by dot OR underscore (handling both '1.1' and 'Section_1')
-        parts = re.split(r'[._]', clean_key)
-        
-        # 3. Primary Sort: Try to parse the *last* part as a number (e.g. '1' in 'Section_1')
-        #    If that fails, try the first part. Fallback to 999999.
-        try:
-            primary = int(parts[-1]) 
-        except ValueError:
-            try:
-                primary = int(parts[0])
-            except ValueError:
-                primary = 999999
-        
-        return (primary, clean_key)
-
-    current_keys = sorted(questions_dict.keys(), key=sort_key_generator)
+    
+    # No sorting needed if we trust the sequential extraction order
+    current_keys = list(questions_dict.keys())
+    
     conf = context["dag_run"].conf
     project_id = conf["project_id"]
     workspace_uuid = conf['workspace_uuid']
     x_ltai_user_email = conf['x-ltai-user-email']
     headers = {"WORKSPACE_UUID": workspace_uuid, "x-ltai-user-email": x_ltai_user_email}
     
+    # ---------------------------------------------------------
+    # STEP 1: Detect Gaps
+    # ---------------------------------------------------------
     prompt_validate = f"""
-Review these extracted questions against the RFP document. List ONLY the question numbers that appear MISSING (e.g., "1.2, 4, 5.1-5.3").
+Review the list of extracted question identifiers below.
+Identify obvious numbering gaps (e.g., having "1.1" and "1.3" but missing "1.2").
 
 Extracted keys: {json.dumps(current_keys)}
 
-Document preview: {questions_dict}
-
-IMPORTANT: Respond with ONLY "COMPLETE" if all questions are extracted, or ONLY a comma-separated list of missing numbers. Do not include any explanations, analysis, lists, or markdown. No additional text.
+IMPORTANT:
+- Respond with "COMPLETE" if the sequence looks logical.
+- If gaps exist, list ONLY the missing specific numbers (e.g., "1.2, Section 4").
+- Do not hallucinate questions that are likely not in the document (e.g. don't invent "1.10" just because "1.9" exists unless it's a clear gap before "1.11").
 
 Response format: Comma-separated missing numbers OR "COMPLETE"
 """
 
-    missing_str = get_ai_response(prompt_validate, headers=headers).strip()
+    missing_str = get_ai_response(prompt_validate, headers=headers, model=MODEL_FOR_EXTRACTION).strip()
     logging.info(f"Raw validation response: '{missing_str}'")
     
     if "COMPLETE" in missing_str.upper():
@@ -563,15 +584,7 @@ Response format: Comma-separated missing numbers OR "COMPLETE"
 
     # Parse missing question numbers
     missing_raw = [m.strip() for m in missing_str.split(',') if m.strip()]
-    question_pattern = re.compile(r'^\d+(\.\d+)?(-?\d+(\.\d+)?)?$')
-    missing_list = []
-    
-    for item in missing_raw:
-        cleaned = re.sub(r'^MISSING:\s*', '', item.strip(), flags=re.IGNORECASE)
-        if question_pattern.match(cleaned):
-            missing_list.append(cleaned)
-        else:
-            logging.warning(f"Skipping invalid missing item: '{item}' -> cleaned '{cleaned}'")
+    missing_list = [re.sub(r'^MISSING:\s*', '', item, flags=re.IGNORECASE) for item in missing_raw if item]
     
     logging.info(f"Missing questions identified: {missing_list}")
 
@@ -579,29 +592,66 @@ Response format: Comma-separated missing numbers OR "COMPLETE"
         context["ti"].xcom_push(key="questions_with_id", value=questions_with_id)
         return questions_with_id
 
-    # Extract missing questions
-    prompt_missing = f"""
-Extract ONLY these missing questions from the document. Do not touch existing ones. Determine the section they belong to.
+    # ---------------------------------------------------------
+    # STEP 2: Targeted Extraction of Missing Items
+    # ---------------------------------------------------------
+    text_chunks = chunk_text(extracted_text, chunk_size=12000, overlap=1500)
+    missing_dict = {}
 
-Missing numbers: {', '.join(missing_list)}
+    def process_missing_in_chunk(chunk_text, missing_targets):
+        chunk_text_lower = chunk_text.lower()
+        potential_targets = [m for m in missing_targets if m.lower() in chunk_text_lower]
+        
+        if not potential_targets:
+            return {}
 
-Return ONLY a valid JSON object (dict) with these keys and their question text. No other text, explanations, or markdown.
+        prompt_missing = f"""
+# SYSTEM OVERRIDE: TARGETED EXTRACTION
+Your task is to find specific missing questions in the provided text block.
 
-Example: {{"3.3": {{"text": "What is the deadline?", "section": "Timeline"}}, "5.2": {{"text": "Describe the process.", "section": "Operations"}}}}
+**TARGETS**: Look specifically for these missing identifiers: {', '.join(potential_targets)}
 
-Document preview: {questions_dict}
+**INSTRUCTIONS**:
+1. If you find the text for a target question, extract it.
+2. If the target is not in this text block, ignore it.
+3. Return valid JSON only.
+
+**OUTPUT FORMAT**:
+{{
+  "{{Question Identifier}}": {{
+    "section": "{{Section Name}}",
+    "text": "{{Question Text}}"
+  }}
+}}
+
+**TEXT TO ANALYZE**:
+{chunk_text}
 """
+        try:
+            raw = get_ai_response(prompt_missing, headers=headers, model=MODEL_FOR_EXTRACTION)
+            return extract_json_from_response(raw)
+        except Exception:
+            return {}
 
-    missing_dict_str = get_ai_response(prompt_missing, headers=headers).strip()
-    logging.info(f"Raw missing extraction response: '{missing_dict_str}'")
-    
-    try:
-        missing_dict = extract_json_from_response(missing_dict_str)
-    except json.JSONDecodeError as e:
-        logging.error(f"Failed to parse JSON from missing extraction: {e}. Raw response: '{missing_dict_str}'")
-        raise
-    
-    # Create missing questions in database
+    # Iterate strictly sequentially through chunks
+    for chunk in text_chunks:
+        try:
+            result = process_missing_in_chunk(chunk, missing_list)
+            if result:
+                missing_dict.update(result)
+        except Exception as e:
+            logging.error(f"Missing extraction loop error: {e}")
+
+    if not missing_dict:
+        logging.warning("Could not find any of the missing questions in the source text.")
+        context["ti"].xcom_push(key="questions_with_id", value=questions_with_id)
+        return questions_with_id
+
+    logging.info(f"Successfully recovered {len(missing_dict)} missing questions: {list(missing_dict.keys())}")
+
+    # ---------------------------------------------------------
+    # STEP 3: Database Creation for Recovered Questions
+    # ---------------------------------------------------------
     url = f"{RFP_API_BASE}/rfp/projects/{project_id}/questions"
     api_headers = {
         "Content-Type": "application/json", "Accept": "application/json",
@@ -609,12 +659,8 @@ Document preview: {questions_dict}
     }
 
     def process_missing_item(idx, q_num, q_data):
-        if isinstance(q_data, str):
-            q_text = q_data
-            q_section = "General"
-        else:
-            q_text = q_data.get("text", "")
-            q_section = q_data.get("section", "General")
+        q_text = q_data.get("text", "")
+        q_section = q_data.get("section", "General")
 
         if not q_text or not q_text.strip():
             return None
@@ -625,7 +671,7 @@ Document preview: {questions_dict}
             local_context = extract_local_context(extracted_text, q_text[:60])
 
         answer_instructions = derive_answer_instructions(
-            q_text.strip(), q_section.strip(), local_context, headers
+            q_text.strip(), q_section.strip(), local_context, headers, model=MODEL_FOR_EXTRACTION
         )
 
         payload = {
@@ -633,14 +679,6 @@ Document preview: {questions_dict}
             "section": q_section.strip(),
             "questionorder": idx,
             "answer_instructions": answer_instructions
-        }
-
-        # API Call headers
-        api_headers = {
-            "Content-Type": "application/json", 
-            "Accept": "application/json",
-            "WORKSPACE_UUID": workspace_uuid, 
-            "x-ltai-user-email": x_ltai_user_email
         }
 
         try:
@@ -664,21 +702,16 @@ Document preview: {questions_dict}
             logging.error(f"Failed to create missing question {q_num}: {e}")
             return None
 
-    # Execute Thread Pool
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        future_map = {
-            executor.submit(process_missing_item, idx, q_num, q_data): q_num
-            for idx, (q_num, q_data) in enumerate(missing_dict.items(), start=len(questions_dict) + 1)
-        }
-        
-        for future in as_completed(future_map):
-            try:
-                result = future.result()
-                if result:
-                    q_num, data = result
-                    questions_with_id[q_num] = data
-            except Exception as e:
-                logging.error(f"Worker exception in validation: {e}")
+    # Append to existing questions sequentially
+    start_idx = len(questions_dict) + 1
+    for i, (q_num, q_data) in enumerate(missing_dict.items()):
+        try:
+            result = process_missing_item(start_idx + i, q_num, q_data)
+            if result:
+                q_num, data = result
+                questions_with_id[q_num] = data
+        except Exception as e:
+            logging.error(f"Error creating missing question {q_num}: {e}")
     
     context["ti"].xcom_push(key="questions_with_id", value=questions_with_id)
     logging.info(f"Total questions after validation: {len(questions_with_id)}")
@@ -724,13 +757,27 @@ This prompt OVERRIDES any other formatting instructions.
 MANDATORY RAG EXECUTION RULE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-You MUST call the `search_workspace_knowledge_base` tool BEFORE producing the final JSON.
+You must perform the tool call `search_workspace_knowledge_base` in steps:
 
-• First attempt: score_threshold = 0.6  
-• If zero results → retry with 0.3  
-• If still zero → DO NOT guess. Produce a Low-confidence answer stating that no documented information was found.
+**STEP 1: High Confidence Search**
+- Call tool with `score_threshold=0.6`
+- IF results are found:
+  - Generate Answer.
+  - Set `confidence: "High"`.
+  - STOP.
 
-If you do not perform a tool call in this turn, the response is INVALID.
+**STEP 2: Medium Confidence Search (Retry)**
+- IF Step 1 returned 0 results:
+- Call tool again with `score_threshold=0.3`
+- IF results are found:
+  - Generate Answer using these chunks.
+  - Set `confidence: "Medium"`.
+  - STOP.
+
+**STEP 3: Low Confidence Fallback**
+- IF Step 2 returned 0 results:
+- Generate a polite, cautious response stating no specific information was found.
+- Set `confidence: "Low"`.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 QUESTION
@@ -754,25 +801,7 @@ ANSWER CONTENT RULES
   – citations
   – chunk IDs
   – confidence statements
-• Use Markdown formatting inside the answer field only:
-  – **bold** section headings
-  – bullet points where helpful
-• If retrieval fails at both thresholds, respond with a cautious generic statement that documentation is unavailable.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SOURCE POPULATION RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-• Populate `"sources_referenced"` ONLY from retrieved KB metadata.
-• NEVER invent section names, documents, or pages.
-• If uncertain → leave the array empty and downgrade confidence.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SENSITIVITY CLASSIFICATION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Set `"is_sensitive": true` if the question or answer involves:
-security, privacy, compliance, regulatory, audit, financial controls, SOC, ISO, PCI, HIPAA, GDPR.
+• Use Markdown formatting inside the answer field only
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT (STRICT)
@@ -782,7 +811,7 @@ Return ONLY this JSON object — no commentary, no logs, no markdown fences:
 
 {{
   "answer": "...",
-  "sources_referenced": ["<exact KB document or RFP reference>"],
+  "sources_referenced": ["..."],
   "confidence": "High" | "Medium" | "Low",
   "is_sensitive": true | false
 }}
@@ -791,7 +820,7 @@ Return ONLY this JSON object — no commentary, no logs, no markdown fences:
 FAILURE POLICY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-If you cannot answer using retrieved knowledge, return:
+If you cannot answer using retrieved knowledge (Step 3), return:
 
 {{
   "answer": "Based on our review, we do not currently have documented information to answer this question.",
@@ -810,7 +839,7 @@ If you cannot answer using retrieved knowledge, return:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                response_str = get_ai_response(prompt_answer, headers=headers).strip()
+                response_str = get_ai_response(prompt_answer, headers=headers, model=MODEL_FOR_ANSWERING).strip()
                 response_data = extract_json_from_response(response_str)
                 
                 raw_answer = response_data.get("answer", "")
@@ -843,49 +872,47 @@ If you cannot answer using retrieved knowledge, return:
             }
         }
 
-    # Parallel Execution (Max 5 workers)
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_q = {executor.submit(process_single_question, q_num, q_data): q_num for q_num, q_data in questions_with_id.items()}
-        
-        generated_count = 0
-        for future in as_completed(future_to_q):
-            try:
-                result = future.result()
-                if result:
-                    q_id = result["question_id"]
-                    q_data = result["data"]
-                                        
-                    # 1. Update the specific question
-                    q_url = f"{RFP_API_BASE}/rfp/questions/{q_id}"
-                    q_payload = {
-                        "answertext": q_data["answer"],
-                        "sources_referenced": q_data.get("sources_referenced", []),
-                        "confidence": q_data.get("confidence"),
-                        "is_sensitive": q_data.get("is_sensitive", False),
-                        "answer_instructions": q_data.get("answer_instructions")
-                    }
+    # SEQUENTIAL EXECUTION
+    # We iterate over the dictionary items one by one.
+    generated_count = 0
+    for q_num, q_data in questions_with_id.items():
+        try:
+            result = process_single_question(q_num, q_data)
+            if result:
+                q_id = result["question_id"]
+                q_data = result["data"]
+                                    
+                # 1. Update the specific question
+                q_url = f"{RFP_API_BASE}/rfp/questions/{q_id}"
+                q_payload = {
+                    "answertext": q_data["answer"],
+                    "sources_referenced": q_data.get("sources_referenced", []),
+                    "confidence": q_data.get("confidence"),
+                    "is_sensitive": q_data.get("is_sensitive", False),
+                    "answer_instructions": q_data.get("answer_instructions")
+                }
+                
+                try:
+                    # Attempt to save the answer
+                    requests.patch(q_url, json=q_payload, headers=status_headers, timeout=10).raise_for_status()
                     
-                    try:
-                        # Attempt to save the answer
-                        requests.patch(q_url, json=q_payload, headers=status_headers, timeout=10).raise_for_status()
-                        
-                        # 2. IF successful, increment count and update Project status immediately
-                        generated_count += 1
-                        
-                        # Optimization: Payload only updates the counter, reducing DB overhead
-                        project_payload = {"answer_generated_count": generated_count}
-                        requests.patch(project_url, json=project_payload, headers=status_headers, timeout=5)
-                        
-                        logging.info(f"Real-time update: Q{q_data['question_num']} saved. Count: {generated_count}")
-                        
-                    except Exception as e:
-                        logging.error(f"Failed to save answer or update count for Q{q_data['question_num']}: {e}")
-                        # Do NOT increment generated_count if save failed
+                    # 2. IF successful, increment count and update Project status immediately
+                    generated_count += 1
                     
-                    answers_dict[q_id] = q_data
+                    # Optimization: Payload only updates the counter, reducing DB overhead
+                    project_payload = {"answer_generated_count": generated_count}
+                    requests.patch(project_url, json=project_payload, headers=status_headers, timeout=5)
                     
-            except Exception as e:
-                logging.error(f"Worker exception: {e}")
+                    logging.info(f"Real-time update: Q{q_data['question_num']} saved. Count: {generated_count}")
+                    
+                except Exception as e:
+                    logging.error(f"Failed to save answer or update count for Q{q_data['question_num']}: {e}")
+                    # Do NOT increment generated_count if save failed
+                
+                answers_dict[q_id] = q_data
+                
+        except Exception as e:
+            logging.error(f"Error answering Q{q_num}: {e}")
 
     context["ti"].xcom_push(key="answers_dict", value=answers_dict)
     logging.info(f"Generated {len(answers_dict)}/{len(questions_with_id)} answers")
