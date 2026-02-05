@@ -1549,7 +1549,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
         try:
             client = Client(
                 host=OLLAMA_HOST, 
-                headers={'x-ltai-client': 'hubspot-v6af'},
+                headers={'x-ltai-client': 'hubspot-v6af_cl'},
                 timeout=60.0  # Add explicit timeout
             )
             messages = []
@@ -1572,7 +1572,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
                 logging.info(f"Retry attempt {attempt + 1}/{max_retries}")
             
             response = client.chat(
-                model='hubspot:v6af', 
+                model='hubspot:v6af_cl', 
                 messages=messages, 
                 stream=stream,
                 options={

@@ -231,7 +231,7 @@ def authenticate_gmail():
 def get_ai_response(prompt, conversation_history=None, expect_json=False):
     """Get response from AI model"""
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af_cl'})
         messages = []
 
         if expect_json:
@@ -246,7 +246,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
                     messages.append({"role": item["role"], "content": item["content"]})
 
         messages.append({"role": "user", "content": prompt})
-        response = client.chat(model='hubspot:v6af', messages=messages, stream=False)
+        response = client.chat(model='hubspot:v6af_cl', messages=messages, stream=False)
         ai_content = response.message.content
         ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
         return ai_content.strip()

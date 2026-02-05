@@ -110,9 +110,9 @@ def decode_email_payload(msg):
         logging.error(f"Error decoding email payload: {e}")
         return ""
 
-def get_ai_response(prompt, conversation_history=None, expect_json=False, model='hubspot:v6af', stream=True):
+def get_ai_response(prompt, conversation_history=None, expect_json=False, model='hubspot:v6af_cl', stream=True):
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af_cl'})
         messages = []
         
         if expect_json and model != "hubspot:v7-perplexity":
