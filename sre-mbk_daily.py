@@ -34,11 +34,11 @@ default_args = {
 # SMTP Configuration from Airflow Variables
 SMTP_USER = Variable.get("ltai.v1.srembk.SMTP_USER")
 SMTP_PASSWORD = Variable.get("ltai.v1.srembk.SMTP_PASSWORD")
-SMTP_HOST = Variable.get("ltai.v1.srembk.SMTP_HOST", default_var="mail.authsmtp.com")
-SMTP_PORT = int(Variable.get("ltai.v1.srembk.SMTP_PORT", default_var="2525"))
-SMTP_SUFFIX = Variable.get("ltai.v1.srembk.SMTP_FROM_SUFFIX", default_var="via lowtouch.ai <webmaster@ecloudcontrol.com>")
-SENDER_EMAIL = Variable.get("ltai.v1.srembk.MBK_FROM_ADDRESS", default_var=SMTP_USER)
-RECEIVER_EMAIL = Variable.get("ltai.v1.srembk.MBK_TO_ADDRESS", default_var=SENDER_EMAIL)
+SMTP_HOST = Variable.get("ltai.v1.srembk.SMTP_HOST", default="mail.authsmtp.com")
+SMTP_PORT = int(Variable.get("ltai.v1.srembk.SMTP_PORT", default="2525"))
+SMTP_SUFFIX = Variable.get("ltai.v1.srembk.SMTP_FROM_SUFFIX", default="via lowtouch.ai <webmaster@ecloudcontrol.com>")
+SENDER_EMAIL = Variable.get("ltai.v1.srembk.MBK_FROM_ADDRESS", default=SMTP_USER)
+RECEIVER_EMAIL = Variable.get("ltai.v1.srembk.MBK_TO_ADDRESS", default=SENDER_EMAIL)
 
 OLLAMA_HOST = Variable.get("ltai.v1.srembk.MBK_OLLAMA_HOST", "http://agentomatic:8000/")
 
