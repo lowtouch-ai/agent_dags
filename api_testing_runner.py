@@ -23,7 +23,7 @@ from agent_dags.utils.agent_utils import (
 # Get configuration from Airflow Variables
 GMAIL_FROM_ADDRESS = Variable.get("ltai.api.test.from_address", default_var="")
 GMAIL_CREDENTIALS = Variable.get("ltai.api.test.gmail_credentials", default_var="")
-MODEL_NAME = "APITestAgent:3.0"
+MODEL_NAME = Variable.get("ltai.model.name", default_var="PostmanAPITestAgent:3.0")
 server_host = Variable.get("ltai.server.host", default_var="http://localhost:8080")
 
 # ═══════════════════════════════════════════════════════════════
