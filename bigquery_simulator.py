@@ -13,7 +13,7 @@ dag = DAG(
     'bigquery_simulator',
     default_args=default_args,
     description='A DAG to simulate BigQuery queries by running good and bad queries sequentially',
-    schedule=None,
+    schedule_interval=None,
     catchup=False,
     tags=["sre", "bigquery", "simulation"]
 )
@@ -193,5 +193,4 @@ for i, query in enumerate(all_queries):
     if prev_task:
         prev_task >> task
     prev_task = task
-
 
