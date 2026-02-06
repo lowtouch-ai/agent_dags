@@ -1043,7 +1043,7 @@ def generate_pdf_report_callable(ti=None, **context):
 with DAG(
     dag_id="sre_mediamelon_sre_report_weekly_v1",
     default_args=default_args,
-    schedule_interval = "30 4 * * 4" ,  # At 04:30 on Thursday (to cover full week ending Friday)
+    schedule= "30 4 * * 4" ,  # At 04:30 on Thursday (to cover full week ending Friday)
     start_date=datetime(2025, 11, 1),
     catchup=False,
     tags=["sre", "mediamelon", "weekly", "Thursday", "eow-report"],
@@ -1053,27 +1053,27 @@ with DAG(
     render_template_as_native_obj=True,
 ) as dag:
    
-    t_node_cpu_this_week = PythonOperator(task_id="node_cpu_this_week", python_callable=node_cpu_this_week_callable, provide_context=True)
-    t_node_memory_this_week = PythonOperator(task_id="node_memroy_last_week", python_callable=node_memory_this_week_callable, provide_context=True)
-    t_node_disk_this_week = PythonOperator(task_id="node_disk_this_week", python_callable=node_disk_this_week_callable, provide_context=True)
+    t_node_cpu_this_week = PythonOperator(task_id="node_cpu_this_week", python_callable=node_cpu_this_week_callable)
+    t_node_memory_this_week = PythonOperator(task_id="node_memroy_last_week", python_callable=node_memory_this_week_callable)
+    t_node_disk_this_week = PythonOperator(task_id="node_disk_this_week", python_callable=node_disk_this_week_callable)
     
-    t_pod_cpu_this_week = PythonOperator(task_id="pod_cpu_this_week", python_callable=pod_cpu_this_week_callable, provide_context=True)
-    t_pod_memory_this_week = PythonOperator(task_id="pod_memory_this_week", python_callable=pod_memory_this_week_callable, provide_context=True)
+    t_pod_cpu_this_week = PythonOperator(task_id="pod_cpu_this_week", python_callable=pod_cpu_this_week_callable)
+    t_pod_memory_this_week = PythonOperator(task_id="pod_memory_this_week", python_callable=pod_memory_this_week_callable)
 
     
-    t_node_cpu_last_week = PythonOperator(task_id="node_cpu_last_week", python_callable=node_cpu_last_week_callable, provide_context=True)
-    t_node_memory_last_week = PythonOperator(task_id="node_memory_last_week", python_callable=node_memory_last_week_callable, provide_context=True)
-    t_node_disk_last_week = PythonOperator(task_id="node_disk_last_week", python_callable=node_disk_last_week_callable, provide_context=True)
+    t_node_cpu_last_week = PythonOperator(task_id="node_cpu_last_week", python_callable=node_cpu_last_week_callable)
+    t_node_memory_last_week = PythonOperator(task_id="node_memory_last_week", python_callable=node_memory_last_week_callable)
+    t_node_disk_last_week = PythonOperator(task_id="node_disk_last_week", python_callable=node_disk_last_week_callable)
 
-    t_pod_cpu_last_week = PythonOperator(task_id="pod_cpu_last_week", python_callable=pod_cpu_last_week_callable, provide_context=True)
-    t_pod_memory_last_week  = PythonOperator(task_id="pod_memory_last_week", python_callable=pod_memory_last_week_callable, provide_context=True)
+    t_pod_cpu_last_week = PythonOperator(task_id="pod_cpu_last_week", python_callable=pod_cpu_last_week_callable)
+    t_pod_memory_last_week  = PythonOperator(task_id="pod_memory_last_week", python_callable=pod_memory_last_week_callable)
 
-    t_node_cpu_compare = PythonOperator(task_id="node_cpu_compare", python_callable=node_cpu_compare_callable, provide_context=True)
-    t_node_memory_compare = PythonOperator(task_id="node_memory_compare", python_callable=node_memory_compare_callable, provide_context=True)
-    t_node_disk_compare = PythonOperator(task_id="node_disk_compare", python_callable=node_disk_compare_callable, provide_context=True)
+    t_node_cpu_compare = PythonOperator(task_id="node_cpu_compare", python_callable=node_cpu_compare_callable)
+    t_node_memory_compare = PythonOperator(task_id="node_memory_compare", python_callable=node_memory_compare_callable)
+    t_node_disk_compare = PythonOperator(task_id="node_disk_compare", python_callable=node_disk_compare_callable)
 
-    t_pod_cpu_compare = PythonOperator(task_id="pod_cpu_compare", python_callable=pod_cpu_compare_callable, provide_context=True)
-    t_pod_memory_compare = PythonOperator(task_id="pod_memory_compare", python_callable=pod_memory_compare_callable, provide_context=True)
+    t_pod_cpu_compare = PythonOperator(task_id="pod_cpu_compare", python_callable=pod_cpu_compare_callable)
+    t_pod_memory_compare = PythonOperator(task_id="pod_memory_compare", python_callable=pod_memory_compare_callable)
     
     ns_list = list_namespaces()
     ns_results = process_namespace.expand(ns=ns_list)
@@ -1103,7 +1103,7 @@ with DAG(
             logger.debug("ti.xcom_push not available.")
         return report
 
-    t_compile_node_report = PythonOperator(task_id="compile_node_report", python_callable=compile_node_report_callable, provide_context=True)
+    t_compile_node_report = PythonOperator(task_id="compile_node_report", python_callable=compile_node_report_callable)
 
     # Combine node_markdown + namespace_markdown into final combined markdown
     def combine_reports_callable(ti=None, **context):
@@ -1116,7 +1116,7 @@ with DAG(
             logger.debug("ti.xcom_push not available.")
         return combined
 
-    t_combine_reports = PythonOperator(task_id="combine_reports", python_callable=combine_reports_callable, provide_context=True)
+    t_combine_reports = PythonOperator(task_id="combine_reports", python_callable=combine_reports_callable)
 
     # Summary extraction
     def extract_and_combine_summary_callable(ti=None, **context):
@@ -1154,22 +1154,22 @@ with DAG(
             logger.debug("ti.xcom_push not available.")
         return combined_summary
 
-    t_extract_summary = PythonOperator(task_id="extract_and_combine_summary", python_callable=extract_and_combine_summary_callable, provide_context=True)
+    t_extract_summary = PythonOperator(task_id="extract_and_combine_summary", python_callable=extract_and_combine_summary_callable)
 
     # Final compile (uses compile_sre_report to push sre_full_report)
-    t_compile_sre_report = PythonOperator(task_id="compile_sre_report", python_callable=compile_sre_report_callable, provide_context=True)
+    t_compile_sre_report = PythonOperator(task_id="compile_sre_report", python_callable=compile_sre_report_callable)
 
     # Convert to HTML -> send email
-    t_convert_to_html = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html_callable, provide_context=True)
+    t_convert_to_html = PythonOperator(task_id="convert_to_html", python_callable=convert_to_html_callable)
 
     # PDF generation task (new)
-    t_generate_pdf = PythonOperator(task_id="generate_pdf", python_callable=generate_pdf_report_callable, provide_context=True)
+    t_generate_pdf = PythonOperator(task_id="generate_pdf", python_callable=generate_pdf_report_callable)
 
     # Overall summary task (new) - produces overall_summary XCom used for email body
-    t_overall_summary = PythonOperator(task_id="overall_summary", python_callable=overall_summary_callable, provide_context=True)
+    t_overall_summary = PythonOperator(task_id="overall_summary", python_callable=overall_summary_callable)
 
     # Updated send email (attaches PDF, uses overall_summary in body)
-    t_send_email = PythonOperator(task_id="send_email_report", python_callable=send_email_report_callable, provide_context=True)
+    t_send_email = PythonOperator(task_id="send_email_report", python_callable=send_email_report_callable)
 
     # -----------------------
     # DAG wiring (clean and inside DAG context)

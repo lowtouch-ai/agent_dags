@@ -153,7 +153,7 @@ def no_files_found(**kwargs):
 with DAG(
     "netexa_dsx_oracle_monitor_github",
     default_args=default_args,
-    schedule_interval=timedelta(minutes=5),
+    schedule=timedelta(minutes=5),
     catchup=False,
     tags=["dsx", "monitor", "github"]
 ) as dag:
@@ -161,25 +161,21 @@ with DAG(
     list_files_task = PythonOperator(
         task_id="list_unprocessed_dsx_files",
         python_callable=list_unprocessed_dsx_files,
-        provide_context=True
     )
     
     branch_task = BranchPythonOperator(
         task_id="branch_task",
         python_callable=branch_function,
-        provide_context=True
     )
     
     trigger_transform_task = PythonOperator(
         task_id="trigger_transform_tasks",
         python_callable=trigger_transform_tasks,
-        provide_context=True
     )
     
     no_files_task = PythonOperator(
         task_id="no_files_task",
         python_callable=no_files_found,
-        provide_context=True
     )
     
     # Set task dependencies

@@ -29,7 +29,7 @@ with open(readme_path, 'r') as file:
 with DAG(
     "shared_transcribe_message_voice",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     doc_md=readme_content,
     tags=["shared", "message", "voice", "transcribe"],
@@ -141,5 +141,4 @@ with DAG(
     transcribe_task = PythonOperator(
         task_id="transcribe_audio",
         python_callable=transcribe_audio,
-        provide_context=True,
     )

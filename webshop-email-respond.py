@@ -371,7 +371,7 @@ except FileNotFoundError:
 with DAG(
     "shared_send_message_email", 
     default_args=default_args, 
-    schedule_interval=None, 
+    schedule=None, 
     catchup=False, 
     doc_md=readme_content, 
     tags=["email", "webshop", "quote", "multi-step"]
@@ -381,49 +381,41 @@ with DAG(
     task_1 = PythonOperator(
         task_id="step_1_initial_quote_request",
         python_callable=step_1_initial_quote_request,
-        provide_context=True
     )
     
     task_2 = PythonOperator(
         task_id="step_2_customer_lookup",
         python_callable=step_2_customer_lookup,
-        provide_context=True
     )
     
     task_3 = PythonOperator(
         task_id="step_3_apply_discounts",
         python_callable=step_3_apply_discounts,
-        provide_context=True
     )
     
     task_4 = PythonOperator(
         task_id="step_4_include_summary",
         python_callable=step_4_include_summary,
-        provide_context=True
     )
     
     task_5 = PythonOperator(
         task_id="step_5_calculate_discount",
         python_callable=step_5_calculate_discount,
-        provide_context=True
     )
     
     task_6 = PythonOperator(
         task_id="step_6_quality_check",
         python_callable=step_6_quality_check,
-        provide_context=True
     )
     
     task_7 = PythonOperator(
         task_id="step_7_compose_final_email",
         python_callable=step_7_compose_final_email,
-        provide_context=True
     )
     
     task_8 = PythonOperator(
         task_id="step_8_send_quote_email",
         python_callable=step_8_send_quote_email,
-        provide_context=True
     )
     
     # Set up task dependencies (sequential execution)

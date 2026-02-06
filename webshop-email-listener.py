@@ -114,7 +114,7 @@ with open(readme_path, 'r') as file:
 # Define DAG
 with DAG("webshop_monitor_mailbox",
          default_args=default_args,
-         schedule_interval=timedelta(minutes=1),
+         schedule=timedelta(minutes=1),
          catchup=False,
          doc_md=readme_content,
          tags=["mailbox", "webshop", "monitor"])as dag:
@@ -122,7 +122,6 @@ with DAG("webshop_monitor_mailbox",
     fetch_emails_task = PythonOperator(
         task_id="fetch_unread_emails",
         python_callable=fetch_unread_emails,
-        provide_context=True
     )
 
     def trigger_response_tasks(**kwargs):
@@ -154,7 +153,6 @@ with DAG("webshop_monitor_mailbox",
     trigger_email_response_task = PythonOperator(
         task_id="trigger-email-response-dag",
         python_callable=trigger_response_tasks,
-        provide_context=True
     )
 
     fetch_emails_task >> trigger_email_response_task

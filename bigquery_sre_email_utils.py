@@ -364,7 +364,7 @@ def no_email_found(**kwargs):
 with DAG(
     "bigquery_mailbox_monitor",
     default_args=default_args,
-    schedule_interval="*/1 * * * *",  # Every minute
+    schedule="*/1 * * * *",  # Every minute
     catchup=False,
     tags=["sre", "bigquery", "monitoring", "replies"]
 ) as monitor_dag:
@@ -372,25 +372,21 @@ with DAG(
     fetch_emails_task = PythonOperator(
         task_id="fetch_reply_emails",
         python_callable=fetch_reply_emails,
-        provide_context=True
     )
 
     branch_task = BranchPythonOperator(
         task_id="branch_task",
         python_callable=branch_function,
-        provide_context=True
     )
 
     trigger_reply_response_task = PythonOperator(
         task_id="trigger_reply_response_task",
         python_callable=trigger_response_tasks,
-        provide_context=True
     )
 
     no_email_found_task = PythonOperator(
         task_id="no_email_found_task",
         python_callable=no_email_found,
-        provide_context=True
     )
 
     # Task dependencies
@@ -776,7 +772,7 @@ def response_checker(ti, **context):
 with DAG(
     "bigquery_email_responder",
     default_args=default_args,
-    schedule_interval=None,  # Triggered only
+    schedule=None,  # Triggered only
     catchup=False,
     tags=["sre", "bigquery", "email", "responder"]
 ) as processor_dag:
@@ -784,57 +780,48 @@ with DAG(
     categorize = PythonOperator(
         task_id="categorize_prompt",
         python_callable=categorize_prompt,
-        provide_context=True
     )
     
     branch = BranchPythonOperator(
         task_id="branch_on_category",
         python_callable=branch_on_category,
-        provide_context=True
     )
     
     t1 = PythonOperator(
         task_id="ask_for_details",
         python_callable=ask_for_details,
-        provide_context=True
     )
     
     t2 = PythonOperator(
         task_id="usage_analyzer",
         python_callable=usage_analyzer,
-        provide_context=True
     )
     
     t3 = PythonOperator(
         task_id="non_relevant_question",
         python_callable=non_relevant_question,
-        provide_context=True
     )
     
     # t4 = PythonOperator(
     #     task_id="check_memory_usage",
     #     python_callable=check_memory_usage,
-    #     provide_context=True
     # )
     
     t5 = PythonOperator(
         task_id="response_checker",
         python_callable=response_checker,  # Modified version
-        provide_context=True,
         trigger_rule='one_success'
     )
     
     t6 = PythonOperator(
         task_id="convert_to_html",
         python_callable=convert_to_html,
-        provide_context=True,
         trigger_rule='one_success'
     )
     
     t7 = PythonOperator(
         task_id="send_reply",
         python_callable=send_reply,
-        provide_context=True,
         trigger_rule='one_success'
     )
     

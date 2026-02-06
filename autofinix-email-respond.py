@@ -550,7 +550,7 @@ except FileNotFoundError:
 with DAG(
     "autofinix_send_message_email",
     default_args=default_args,
-    schedule_interval=None,  # Triggered externally
+    schedule=None,  # Triggered externally
     catchup=False,
     doc_md=readme_content,
     tags=["autofinix", "send", "email", "response"],
@@ -561,7 +561,6 @@ with DAG(
     extract_request_task = PythonOperator(
         task_id="step_1_extract_loan_request",
         python_callable=step_1_extract_loan_request,
-        provide_context=True,
         doc_md="Extract loan request details from email and retrieve data using API tools"
     )
     
@@ -569,7 +568,6 @@ with DAG(
     validate_customer_task = PythonOperator(
         task_id="step_2_validate_customer_access",
         python_callable=step_2_validate_customer_access,
-        provide_context=True,
         doc_md="Validate customer authorization to access requested loan information"
     )
     
@@ -577,7 +575,6 @@ with DAG(
     compose_email_task = PythonOperator(
         task_id="step_3_compose_email_response",
         python_callable=step_3_compose_email_response,
-        provide_context=True,
         doc_md="Compose professional email response based on validation result and loan data"
     )
     
@@ -585,7 +582,6 @@ with DAG(
     send_email_task = PythonOperator(
         task_id="step_4_send_email_response",
         python_callable=step_4_send_email_response,
-        provide_context=True,
         doc_md="Send final email response to customer"
     )
     

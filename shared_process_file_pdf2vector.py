@@ -1,6 +1,5 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.utils.dates import days_ago
 import os
 import requests
 from pathlib import Path
@@ -55,7 +54,7 @@ with DAG(
     'shared_process_file_pdf2vector',
     default_args=default_args,
     description='Processes PDF files to vector format',
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     tags=["shared", "process", "pdf", "vector"],
     max_active_runs=6
@@ -64,5 +63,4 @@ with DAG(
     process_task = PythonOperator(
         task_id='process_pdf_to_vector',
         python_callable=process_pdf_file,
-        provide_context=True,
     )

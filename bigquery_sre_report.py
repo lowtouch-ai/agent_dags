@@ -400,7 +400,7 @@ def send_email(ti, **context):
 with DAG(
     "bigquery_monitor",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     tags=["sre", "bigquery", "monitoring", "lowtouch.ai"]
 ) as dag:
@@ -408,43 +408,42 @@ with DAG(
     t1 = PythonOperator(
         task_id="check_execution_count",
         python_callable=check_execution_count,
-        provide_context=True
+        
     )
     
     t2 = PythonOperator(
         task_id="check_slot_usage",
         python_callable=check_slot_usage,
-        provide_context=True
+        
     )
     
     t3 = PythonOperator(
         task_id="check_execution_time",
         python_callable=check_execution_time,
-        provide_context=True
+        
     )
     
     t4 = PythonOperator(
         task_id="check_memory_usage",
         python_callable=check_memory_usage,
-        provide_context=True
+        
     )
     
     t5 = PythonOperator(
         task_id="compile_analysis_report",
         python_callable=compile_analysis_report,
-        provide_context=True
+        
     )
     
     t6 = PythonOperator(
         task_id="convert_to_html",
         python_callable=convert_to_html,
-        provide_context=True
+        
     )
     
     t7 = PythonOperator(
         task_id="send_email",
         python_callable=send_email,
-        provide_context=True
     )
 
     t1 >> t2 >> t3 >> t4 >> t5 >> t6 >> t7

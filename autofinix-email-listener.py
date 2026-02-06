@@ -118,7 +118,7 @@ with open(readme_path, 'r') as file:
 
 with DAG("autofinix_monitor_mailbox",
          default_args=default_args,
-         schedule_interval=timedelta(minutes=1),
+         schedule=timedelta(minutes=1),
          catchup=False,
          doc_md=readme_content,
          tags=["mailbox", "autofinix", "monitor"]) as dag:
@@ -126,25 +126,21 @@ with DAG("autofinix_monitor_mailbox",
     fetch_emails_task = PythonOperator(
         task_id="fetch_unread_emails",
         python_callable=fetch_unread_emails,
-        provide_context=True
     )
 
     branch_task = BranchPythonOperator(
         task_id="branch_task",
         python_callable=branch_function,
-        provide_context=True
     )
 
     trigger_email_response_task = PythonOperator(
         task_id="trigger_email_response_task",
         python_callable=trigger_response_tasks,
-        provide_context=True
     )
 
     no_email_found_task = PythonOperator(
         task_id="no_email_found_task",
         python_callable=no_email_found,
-        provide_context=True
     )
 
     # Task dependencies
