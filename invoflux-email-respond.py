@@ -367,57 +367,189 @@ def step_3_compose_email(ti, **context):
         sender_name = "Valued Customer"
     logging.info(f"Sender name extracted: {sender_name}")
     
-    prompt=f"""
-        Generate a professional, human-like business email in American English, written in the tone of a senior Customer Success Manager, to notify a vendor, addressed by name '{sender_name}', about the status of their invoice submission (Posted or Draft), including any duplicate invoice detections.
+    prompt = f"""
+    Generate a professional, human-like business email in **American English**, written in the tone of a **senior Customer Success / Finance Operations professional** communicating with an external vendor.
 
-        Content: {content_appended}
+    The email must clearly communicate the status of the vendor’s invoice submission (Posted, Draft, or Duplicate) in a modern U.S. professional email style.
 
-        Follow this exact structure for the email body, using clean, valid HTML without any additional wrappers like <html> or <body>. Do not omit any sections or elements listed below. Use natural, professional wording but adhere strictly to the format. Extract all details from the provided Content; use 'N/A' if a value is not available. For the due date, if not mentioned in the Content, specify '30 days from the invoice date'.
+    ==================================================================
+    AUTHORITATIVE CONTENT SOURCE
+    ==================================================================
+    {content_appended}
 
-        1. Greeting: <p>Dear {sender_name},</p>
+    ==================================================================
+    GLOBAL OUTPUT RULES (MANDATORY)
+    ==================================================================
+    - Output ONLY clean, valid HTML.
+    - Do NOT include <html>, <body>, or <!DOCTYPE> tags.
+    - Follow the section order EXACTLY as defined below.
+    - Avoid plain text blocks under headers — use structured HTML.
+    - Do NOT hard-code fixed sentences; wording must be flexible but consistent.
+    - Extract all values strictly from the Content Source.
+    - If a value is missing, use **N/A**.
+    - If Due Date is missing, use **30 days from the invoice date**.
+    - Maintain a professional U.S. business email tone.
+    - Ensure visual hierarchy and spacing between headers and details.
+    - Return ONLY the HTML email body.
+    - Avoid redundancies: Do not repeat information across sections (e.g., avoid restating status or details in opening/closing if already covered in summary).
+    - Consistently use <strong> to highlight key terms like headers, field names, and Passed/Failed statuses.
 
-        2. Opening paragraph: If the Content does not indicate a duplicate (e.g., no 'Duplicate invoice number found' in validation issues): 
-           - If Status is Posted, use: We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name if available, else omit 'from [Vendor Name]']. It has been created in the Posted status.
-           - If Status is Draft, use: We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name if available, else omit 'from [Vendor Name]']. The invoice has been recorded in our system; however, it currently remains in Draft status due to the following validation issues.
+    ==================================================================
+    1. GREETING (MODERN U.S. BUSINESS STYLE)
+    ==================================================================
+    - Do NOT use "Dear".
+    - Use a neutral, professional U.S. business greeting.
 
-        If the Content indicates a duplicate (e.g., 'Duplicate invoice number found' in validation issues), use: 'We acknowledge receipt of your invoice [Invoice Number] dated [Invoice Date] from [Vendor Name]. However, this invoice is a duplicate. The existing invoice is in [Posted/Draft] status, and no new invoice was created' [due to the following validation issues: only if the existing status is Draft and there are other non-duplicate validation issues, else omit this part]. Use the existing status from Content if available, else infer from context (e.g., Draft if validation failed).
-        
-        3. Issues list (only if Draft or if duplicate with other validation issues): If there are validation issues, include only non-duplicate issues, do not include duplicate issues:
-        *  followed by
-        * [each specific issue].
-        
-        4. Invoice Summary section: <p><strong>Invoice Summary</strong></p> followed by a list in paragraph form (each on new line with <br>): 
-           Invoice Number: [value]<br>
-           Invoice Date: [value]<br>
-           Due Date: [value if available, else '30 days from the invoice date']<br>
-           Internal Invoice ID: [value]<br>
-           Status: [value]<br>
-           Vendor Name: [value]<br>
-           Purchase Order: [value]<br>
-           Currency: [value]<br>
-           Subtotal: [value]<br>
-           Tax ([rate if available]%): [amount if available]<br>
-           Total Amount: [value]<br>
+    <p>Hello {sender_name},</p>
 
-        For duplicates, label this as 'Existing Invoice Summary' or 'Existing Draft Invoice Summary' based on the existing status, and populate with the existing invoice's details.
+    If the recipient name is unavailable:
+    <p>Hello,</p>
 
-        5. Product Details section: <p><strong>Product Details</strong></p> followed immediately by a table: <table border="1" cellspacing="0" cellpadding="5"><tr><th>Item Description</th><th>Quantity</th><th>Unit Price</th><th>Tax</th><th>Total Price</th></tr> [rows with <tr><td>[desc]</td><td>[qty]</td><td>[price]</td><td>[tax]</td><td>[total]</td></tr> for each item] </table>
+    ==================================================================
+    2. OPENING PARAGRAPH (STATUS-AWARE & FLEXIBLE)
+    ==================================================================
+    Write a concise opening paragraph (2–3 sentences maximum) that:
 
-        6. Closing statement paragraph: <p>[A concise natural statement based on the invoice status:
-           - Posted: The invoice is now in our payment cycle and will be processed accordingly.
-           - Draft: Please review the issues above, make the necessary corrections, and resubmit the updated invoice to <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>.
-           - Duplicate (Posted): Please review the existing invoice details above. If this was submitted in error, no further action is needed; otherwise, contact us for support.
-           - Duplicate (Draft): Please review the existing draft details above, correct any issues, and resubmit to <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>.
-           ]</p>
+    - Acknowledges receipt of the invoice
+    - References:
+    • Invoice Number  
+    • Invoice Date  
+    • Vendor Name (if available)
+    - Clearly states the invoice status:
+    • Posted, Draft, or Duplicate
+    - Uses calm, professional, customer-facing language
 
-        7. Assistance paragraph: <p>Please let us know if you need any assistance. You can reach us at <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>.</p>
+    Guidance:
+    - **Posted** → confirm successful recording and posted status
+    - **Draft** → explain that the invoice remains in Draft due to validation issues
+    - **Duplicate** → explain that an existing invoice already exists and no new invoice was created
 
-        8. Signature: <p>Best regards,<br>Invoice Processing Team,<br>InvoFlux</p>
+    ==================================================================
+    3. VALIDATION ISSUES IDENTIFIED (CONDITIONAL)
+    ==================================================================
+    Include this section ONLY if:
+    - Invoice status is Draft, OR
+    - Invoice is Duplicate AND additional non-duplicate issues exist
 
-        Ensure the email is natural, professional, and concise. Avoid rigid or formulaic language to maintain a human-like tone. Do not use placeholders; replace with actual extracted values. Return only the HTML content as specified, without <!DOCTYPE>, <html>, or <body> tags.
+    Formatting rules (MANDATORY):
+    - Render issues strictly using <ul> and <li>
+    - Do NOT use special characters (•, -, *)
+    - Add spacing between the header and the list
+    - Include ONLY non-duplicate validation issues
 
-        Return only the HTML body of the email.
-        """
+    <p><strong>Validation Issues Identified</strong></p>
+
+    <ul>
+    <li>[Validation issue]</li>
+    </ul>
+
+    ==================================================================
+    4. VALIDATION CHECKLIST (PASS / FAIL)
+    ==================================================================
+    <p><strong>Validation Checks</strong></p>
+
+    <p>
+    ✔ Vendor exists and is active in the ERP system — <strong>[Passed / Failed]</strong><br>
+    ✔ Purchase Order exists and is in a valid state — <strong>[Passed / Failed]</strong><br>
+    ✔ Products match Purchase Order line items — <strong>[Passed / Failed]</strong><br>
+    ✔ Quantities do not exceed billable or received limits — <strong>[Passed / Failed]</strong><br>
+    ✔ Applied tax aligns with Purchase Order or product tax configuration — <strong>[Passed / Failed]</strong><br>
+    </p>
+
+    Rules:
+    - Always include this section.
+    - Mark **Failed ONLY if a corresponding issue exists**
+    - Otherwise mark **Passed**
+    - Do NOT invent failures
+
+    ==================================================================
+    5. INVOICE SUMMARY (BULLETED & INDENTED)
+    ==================================================================
+    <p><strong>[Invoice Summary Title]</strong></p>
+
+    Rules:
+    - Use:
+    • "Invoice Summary" → normal invoices  
+    • "Existing Invoice Summary" → Duplicate & Posted  
+    • "Existing Draft Invoice Summary" → Duplicate & Draft  
+
+    Formatting rules (MANDATORY):
+    - Render ALL invoice details using <ul> and <li>
+    - Bold the field name using <strong>
+    - Do NOT use plain text lines
+
+    <ul>
+    <li><strong>Invoice Number:</strong> [value]</li>
+    <li><strong>Invoice Date:</strong> [value]</li>
+    <li><strong>Due Date:</strong> [value]</li>
+    <li><strong>Internal Invoice ID:</strong> [value]</li>
+    <li><strong>Status:</strong> [value]</li>
+    <li><strong>Vendor Name:</strong> [value]</li>
+    <li><strong>Purchase Order:</strong> [value]</li>
+    <li><strong>Currency:</strong> [value]</li>
+    <li><strong>Subtotal:</strong> [value]</li>
+    <li><strong>Tax ([rate if available]%):</strong> [amount if available]</li>
+    <li><strong>Total Amount:</strong> [value]</li>
+    </ul>
+
+    ==================================================================
+    6. PRODUCT DETAILS (TABULAR)
+    ==================================================================
+    <p><strong>Product Details</strong></p>
+
+    <table border="1" cellspacing="0" cellpadding="5">
+    <tr>
+    <th>Item Description</th>
+    <th>Quantity</th>
+    <th>Unit Price</th>
+    <th>Tax</th>
+    <th>Total Price</th>
+    </tr>
+    <tr>
+    <td>[Description]</td>
+    <td>[Quantity]</td>
+    <td>[Unit Price]</td>
+    <td>[Tax]</td>
+    <td>[Total]</td>
+    </tr>
+    </table>
+
+    ==================================================================
+    7. CLOSING PARAGRAPH (ACTION-ORIENTED)
+    ==================================================================
+    Write a concise, courteous closing paragraph that:
+
+    - Matches the invoice status
+    - Clearly explains next steps
+    - Uses a professional U.S. business tone
+
+    Guidance:
+    - **Posted** → confirm entry into the payment cycle
+    - **Draft** → request correction and resubmission
+    - **Duplicate (Posted)** → clarify no action needed unless incorrect
+    - **Duplicate (Draft)** → request correction and resubmission
+
+    When action is required, include:
+    <a href="mailto:invoflux-agent-8013@lowtouch.ai">invoflux-agent-8013@lowtouch.ai</a>
+
+    ==================================================================
+    8. ASSISTANCE PARAGRAPH
+    ==================================================================
+    <p>
+    Politely offer assistance and invite the vendor to reach out with any
+    questions or concerns.
+    </p>
+
+    ==================================================================
+    9. SIGNATURE (U.S. BUSINESS STANDARD)
+    ==================================================================
+    <p>
+    Kind regards,<br>
+    Invoice Processing Team<br>
+    InvoFlux
+    </p>
+    """
+
     # Pass only the previous step's response as history
     history = [{"role": "assistant", "content": content_appended}] if content_appended else []
     response = get_ai_response(prompt, conversation_history=history)

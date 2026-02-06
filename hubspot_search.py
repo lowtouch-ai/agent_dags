@@ -110,9 +110,9 @@ def decode_email_payload(msg):
         logging.error(f"Error decoding email payload: {e}")
         return ""
 
-def get_ai_response(prompt, conversation_history=None, expect_json=False, model='hubspot:v6af', stream=True):
+def get_ai_response(prompt, conversation_history=None, expect_json=False, model='hubspot:v6af_cl', stream=True):
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af_cl'})
         messages = []
         
         if expect_json and model != "hubspot:v7-perplexity":
@@ -2666,7 +2666,7 @@ def parse_notes_tasks_meeting(ti, **context):
         ti.xcom_push(key="notes_tasks_meeting", value={
             "notes": [],
             "tasks": [],
-            "meeting_details": {}
+            "meeting_details": []
         })
         return
     
@@ -2774,7 +2774,7 @@ Return this exact JSON structure:
 {{
     "notes": {[] if not should_parse_notes else '[{"note_content": "detailed note content", "timestamp": "YYYY-MM-DD HH:MM:SS", "note_type": "meeting_note|discussion|decision|general"}]'},
     "tasks": {[] if not should_parse_tasks else '[{"task_details": "detailed task description", "task_owner_name": "owner_name", "task_owner_id": "owner_id", "due_date": "YYYY-MM-DD", "priority": "high|medium|low", "task_index": 1}]'},
-    "meeting_details": {{}} if not should_parse_meetings else {{"meeting_title": "meeting title", "start_time": "YYYY-MM-DD HH:MM:SS", "end_time": "YYYY-MM-DD HH:MM:SS", "location": "meeting location or virtual link", "outcome": "meeting outcome summary", "timestamp": "YYYY-MM-DD HH:MM:SS", "attendees": ["attendee1", "attendee2"], "meeting_type": "sales_meeting|follow_up|demo|presentation|other", "meeting_status": "scheduled|completed|cancelled"}}
+    "meeting_details": {[] if not should_parse_meetings else '[{"meeting_title": "meeting title", "start_time": "YYYY-MM-DD HH:MM:SS", "end_time": "YYYY-MM-DD HH:MM:SS", "location": "meeting location or virtual link", "outcome": "meeting outcome summary", "timestamp": "YYYY-MM-DD HH:MM:SS", "attendees": ["attendee1", "attendee2"], "meeting_type": "sales_meeting|follow_up|demo|presentation|other", "meeting_status": "scheduled|completed|cancelled"]'}
 }}
 
 Guidelines:
@@ -2803,7 +2803,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         if not should_parse_tasks:
             parsed_json["tasks"] = []
         if not should_parse_meetings:
-            parsed_json["meeting_details"] = {}
+            parsed_json["meeting_details"] = []
         
         if should_parse_tasks:
             for task in parsed_json.get("tasks", []):
@@ -2832,7 +2832,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
         default = {
             "notes": [],
             "tasks": [],
-            "meeting_details": {}
+            "meeting_details": []
         }
         ti.xcom_push(key="notes_tasks_meeting", value=default)
 
@@ -2874,8 +2874,8 @@ def validate_entity_creation_rules(ti, **context):
     # Get engagement entities
     notes = notes_tasks_meeting.get("notes", [])
     tasks = notes_tasks_meeting.get("tasks", [])
-    meeting_details = notes_tasks_meeting.get("meeting_details", {})
-    has_meeting = bool(meeting_details and any(str(v).strip() for v in meeting_details.values() if v is not None))
+    meeting_details = notes_tasks_meeting.get("meeting_details", [])
+    has_meeting = bool(meeting_details and any(str(v).strip() for v in meeting_details if v is not None))
     
     # Calculate totals (existing + new)
     total_contacts = existing_contacts + new_contacts
@@ -3008,7 +3008,7 @@ def compose_validation_error_email(ti, **context):
     # Determine what the user is actually trying to create
     has_notes = len(notes_tasks_meeting.get("notes", [])) > 0
     has_tasks = len(notes_tasks_meeting.get("tasks", [])) > 0
-    has_meeting = bool(notes_tasks_meeting.get("meeting_details", {}))
+    has_meeting = bool(notes_tasks_meeting.get("meeting_details", []))
 
     has_company = len(company_info.get("new_companies", [])) > 0 
     has_deal = len(deal_info.get("new_deals", [])) > 0           
@@ -3579,7 +3579,7 @@ def compile_search_results(ti, **context):
             "companies": company_info.get("new_companies", []),
             "notes": notes_tasks_meeting.get("notes", []),
             "tasks": notes_tasks_meeting.get("tasks", []),
-            "meeting_details": notes_tasks_meeting.get("meeting_details", {})
+            "meeting_details": notes_tasks_meeting.get("meeting_details", [])
         },
         "contact_owner_id": owner_info.get("contact_owner_id", ""),
         "contact_owner_name": owner_info.get("contact_owner_name", ""),
@@ -3790,7 +3790,7 @@ def compose_confirmation_email(ti, **context):
     raw_new_deals = search_results.get("new_entity_details", {}).get("deals", [])
     notes = search_results.get("new_entity_details", {}).get("notes", [])
     tasks = search_results.get("new_entity_details", {}).get("tasks", [])
-    meeting_details = search_results.get("new_entity_details", {}).get("meeting_details", {})
+    meeting_details = search_results.get("new_entity_details", {}).get("meeting_details", [])
 
     new_contacts = filter_meaningful_entities(raw_new_contacts, ["firstname", "lastname", "email"])
     new_companies = filter_meaningful_entities(raw_new_companies, ["name", "domain"])
@@ -3798,7 +3798,12 @@ def compose_confirmation_email(ti, **context):
     
     meaningful_notes = [note for note in notes if note.get("note_content", "").strip()]
     meaningful_tasks = [task for task in corrected_tasks if task.get("task_details", "").strip()]
-    meaningful_meeting = bool(meeting_details and any(str(v).strip() for v in meeting_details.values() if v is not None))
+    if isinstance(meeting_details, dict):
+        meaningful_meeting = bool(meeting_details and any(str(v).strip() for v in meeting_details.values() if v is not None))
+    elif isinstance(meeting_details, list):
+        meaningful_meeting = bool(meeting_details and any(str(item).strip() for item in meeting_details if item is not None))
+    else:
+        meaningful_meeting = False
 
     has_new_objects = bool(new_contacts or new_companies or new_deals or meaningful_notes or meaningful_tasks or meaningful_meeting)
 
@@ -3963,17 +3968,18 @@ def compose_confirmation_email(ti, **context):
                 </thead>
                 <tbody>
             """
-            attendees = ", ".join(meeting_details.get("attendees", []))
-            email_content += f"""
-                <tr>
-                    <td>{meeting_details.get("meeting_title", "")}</td>
-                    <td>{meeting_details.get("start_time", "")}</td>
-                    <td>{meeting_details.get("end_time", "")}</td>
-                    <td>{meeting_details.get("location", "")}</td>
-                    <td>{meeting_details.get("outcome", "")}</td>
-                    <td>{attendees}</td>
-                </tr>
-            """
+            for meeting in meeting_details:
+                attendees = ", ".join(meeting.get("attendees", []))
+                email_content += f"""
+                    <tr>
+                        <td>{meeting.get("meeting_title", "")}</td>
+                        <td>{meeting.get("start_time", "")}</td>
+                        <td>{meeting.get("end_time", "")}</td>
+                        <td>{meeting.get("location", "")}</td>
+                        <td>{meeting.get("outcome", "")}</td>
+                        <td>{attendees}</td>
+                    </tr>
+                """
             email_content += "</tbody></table>"
 
         email_content += "<hr>"

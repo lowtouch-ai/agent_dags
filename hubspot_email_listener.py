@@ -1549,7 +1549,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
         try:
             client = Client(
                 host=OLLAMA_HOST, 
-                headers={'x-ltai-client': 'hubspot-v6af'},
+                headers={'x-ltai-client': 'hubspot-v6af_cl'},
                 timeout=60.0  # Add explicit timeout
             )
             messages = []
@@ -1572,7 +1572,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
                 logging.info(f"Retry attempt {attempt + 1}/{max_retries}")
             
             response = client.chat(
-                model='hubspot:v6af', 
+                model='hubspot:v6af_cl', 
                 messages=messages, 
                 stream=stream,
                 options={
@@ -1976,11 +1976,39 @@ def branch_function(**kwargs):
     
     # Separate task completion emails
     for email in unread_emails:
-        task_id = check_if_task_completion_reply(email)
-        if task_id:
-            email["task_id"] = task_id
+        email_id = email.get("id", "unknown")[:8]
+        headers = email.get("headers", {})
+        subject = headers.get("Subject", "No Subject")
+        
+        logging.info(f"\n📧 Processing email {email_id}: {subject}")
+    
+        task_id_in_header = headers.get("X-Task-ID")
+        task_type_in_header = headers.get("X-Task-Type")
+        
+        if task_id_in_header and task_type_in_header == "daily-reminder":
+            logging.info(f"DIRECT task email detected (X-Task-ID: {task_id_in_header})")
+            logging.info(f"This is the task reminder itself, not a user reply")
+            email["task_id"] = task_id_in_header
+            email["is_task_reply"] = True
             task_completion_emails.append(email)
-            logging.info(f"Identified task completion reply for task {task_id}")
+            continue
+    
+        is_reply_to_task = False
+        task_id_from_thread = None
+        
+        if email.get("is_reply", False):
+            logging.info(f"Email is a reply, checking thread history...")
+            thread_history = email.get("thread_history", [])
+            
+            if not is_reply_to_task:
+                logging.info(f" No task reminder found in thread history")
+        else:
+            logging.info(f"Not a reply email, skipping thread check")
+
+        if is_reply_to_task and task_id_from_thread:
+            email["task_id"] = task_id_from_thread
+            email["is_task_association"] = True
+            other_emails.append(email)
         else:
             other_emails.append(email)
     
@@ -2017,13 +2045,18 @@ RETURN ONLY ONE OF THESE FOUR JSONS — NO TEXT BEFORE/AFTER:
 {{"task_type": "continuation_dag", "reason": "<REASON>"}}
 {{"task_type": "report_dag", "reason": "<REASON>"}}
 {{"task_type": "no_action", "reason": "<REASON>"}}
+{{"task_type": "trigger_task_completion", "reason": "<REASON>"}}
 # RULES — MEMORIZE AND OBEY 100%
-# ROUTE TO **search_dag** → FIRST-TIME ACTION (use only in these 8 cases):
+# ROUTE TO **search_dag** → FIRST-TIME ACTION(use in these cases):
     1. User wants to CREATE anything new → deal, contact, company, task, meeting, note, call log. Exclude the situation when the user is replying to a confirmation template.
     2. User asks for "360 view", "full picture", "deep dive", "what do we know about X", "research company"
     3. User pastes meeting notes/transcript and clearly expects them to be saved in HubSpot
     4. User gives a meeting minutes or a conversational prompt AND it's followed by a creation intent. exclude the situation when the user is confirming and adding changes to the confirmation mail.
     5. User explicitly says "summarize our history with Acme" (because this requires pulling engagements).Mainly used before the next meeting with the exiisting client
+    6. User wants to ASSOCIATE/LINK a task with an existing entity (deal, contact, company) as a reply to daily task reminder email.
+    7. User sends meeting minutes as a reply to the daily task reminder email.
+    8. User wants to attach/link/associate the task to a new or existing deal/contact/company.
+    9. User provides information about entities to associate with the task (e.g., "Associate with Acme Corp deal").
 → {{"task_type": "search_dag"}}
 
 # ROUTE TO **continuation_dag** → USER IS REPLYING TO OUR CONFIRMATION EMAIL
@@ -2070,6 +2103,21 @@ Includes:
 • You dont have the capability to act on when the user explicitly uses the key word report.
 → {{"task_type": "no_action"}}
 
+# ROUTE TO **trigger_task_completion** → Only for Daily Task Reminder replies with valid task-management intent
+Includes:
+* ONLY when the header/context confirms the message is a response to a **Daily Task Reminder**.
+* Requests to mark task as complete/incomplete
+* Requests to change task status (complete, in progress, etc.)
+* Requests to reschedule/change task due date
+* Requests to update task description or notes
+* Requests to change task priority
+
+Do NOT route here if user wants to:
+* Associate task with a deal/contact/company → use search_dag instead
+* Create a new task → use search_dag instead
+* Send meeting minutes → use search_dag instead
+
+→ {{"task_type": "trigger_task_completion"}}
 EXAMPLES — YOU MUST GET THESE 100% RIGHT
 
 ┌────────────────────────────────────────────────────────────────────┬──────────────────────┐
@@ -2078,6 +2126,7 @@ EXAMPLES — YOU MUST GET THESE 100% RIGHT
 │ "Create a $300k deal for Nvidia closing Q4"                        │ search_dag           │
 │ "Log today's call with Sarah from Stripe"                          │ search_dag           │
 │ "Give me a 360 view of the Enterprise deal"                        │ search_dag           │
+│ "Associate this task to deal X"                                    │ search_dag           │
 │ "Yes, proceed" (in thread with our confirmation)                   │ continuation_dag     │
 │ "Change amount to $350k and add Sarah as contact"                  │ continuation_dag     │
 │ "Looks good, just change close date to Dec 20"                     │ continuation_dag     │
@@ -2090,6 +2139,10 @@ EXAMPLES — YOU MUST GET THESE 100% RIGHT
 │ "Can you pull contact details for john@acme.com?"                  │ no_action            │
 │ "THis was a great meeting, looking forward to our next steps"      │ continuation_dag     │
 │ "Get me the report of all deals or deals associated with X"        │ report_dag           │
+│ "Mark the task as complete"                                        │ task_completion_dag  │
+│ "Create a followup task to call the client next week"              │ task_completion_dag  │
+│ "Update the deal amount of the associated deal to $90000"          │ task_completion_dag  │
+│ "Reschedule the task to next Friday"                               │ task_completion_dag  │
 └────────────────────────────────────────────────────────────────────┴──────────────────────┘
 Final instruction: If in doubt → route to **no_action**. Never guess creation**.
 
@@ -2248,7 +2301,9 @@ def trigger_meeting_minutes(**kwargs):
             "chat_history": email.get("chat_history", []),
             "thread_history": email.get("thread_history", []),
             "thread_id": email.get("threadId", ""),  # ADD THIS
-            "message_id": email.get("id", "")
+            "message_id": email.get("id", ""),
+            "task_id": email.get("task_id"),
+            "is_task_association": email.get("is_task_association", False)
         }
         
         task_id = f"trigger_search_{email['id'].replace('-', '_')}"
