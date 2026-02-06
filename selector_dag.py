@@ -27,7 +27,7 @@ DOCUMENT_TYPE_TO_DAG = {
     "RFP_CONSULTANT":       "rfp_consultant_strategy_processing_dag",
 }
 
-AUTO_DETECTION_MODEL = "rfp/autogeneration:0.3"
+AUTO_DETECTION_MODEL = "rfp/autogeneration_extraction:0.3af"
 OLLAMA_HOST = Variable.get("ltai.v1.rfp.OLLAMA_HOST", default_var="http://agentomatic:8000")
 RFP_API_BASE = "http://agentconnector:8000"
 
