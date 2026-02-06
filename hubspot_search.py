@@ -2749,9 +2749,17 @@ A. If an existing note already contains any speaker name (speaker context exists
 - The new note must NOT add speaker details again.
 
 For meetings (only if meeting parsing is enabled):
-- Extract meeting title, start time, end time, location, outcome, timestamp, attendees, meeting type, and meeting status.
-- If "I" is mentioned for attendees that refers to the email sender name.
-- Do not return empty result if no meeting details are found.
+- Identify all meetings from the email content only if they refer to meetings that have already occurred.
+- Always check for headings such as "Meeting Summary", "Discussion Summary", "Meeting Notes", or "Recap". Any section under these headings is considered potential meeting content.
+- If headings are not given, check for past-tense meeting phrases such as: "we met", "we discussed", "during the meeting", "in today's call", "as covered in the meeting", or similar indicators that a meeting already happened.
+- A meeting must include explicit details such as attendees, discussion points, outcomes, or decisions. If these are missing, do not parse it as a meeting.
+- Identify multiple meetings from one email by checking for separate sections, paragraphs, or bullet lists that clearly describe distinct past meetings.
+- Extract and record the following details for each valid meeting:
+  - Meeting title or subject (derive from context if not explicitly stated).
+  - Date of the meeting.
+  - Attendees (must be explicitly mentioned in the email content).
+  - Outcome or Summary or key discussion points.
+- If the meeting date is not explicitly stated but the message clearly summarizes a meeting that occurred "today", use the current date.
 
 For tasks (only if task parsing is enabled):
 - Identify all tasks and their respective owners from the email content.
