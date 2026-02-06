@@ -92,7 +92,7 @@ def authenticate_gmail():
 
 def get_ai_response(prompt, conversation_history=None, expect_json=False, stream=True):
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af_cl'})
         messages = []
 
         # Strong system prompt when expecting JSON
@@ -121,7 +121,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
         messages.append({"role": "user", "content": prompt})
 
         # Call Ollama
-        response = client.chat(model='hubspot:v6af', messages=messages, stream=stream)
+        response = client.chat(model='hubspot:v6af_cl', messages=messages, stream=stream)
 
         # Accumulate streamed response
         ai_content = ""
