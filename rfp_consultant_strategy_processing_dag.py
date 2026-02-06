@@ -18,8 +18,8 @@ import time
 # =============================================================================
 OLLAMA_HOST = Variable.get("ltai.v1.rfp.OLLAMA_HOST", default_var="http://agentomatic:8000")
 RFP_API_BASE = Variable.get("ltai.v1.rfp.RFP_API_BASE", default_var="http://agentconnector:8000")
-MODEL_FOR_EXTRACTION = "rfp/extraction:0.3af"
-MODEL_FOR_ANSWERING = "rfp/answering:0.3af"
+MODEL_FOR_EXTRACTION = "rfp/autogeneration_extraction:0.3af"
+MODEL_FOR_ANSWERING = "rfp/autogeneration_answering:0.3af"
 
 default_args = {
     "owner": "lowtouch.ai",
