@@ -3716,12 +3716,12 @@ def generate_final_response_or_trigger_report(**kwargs):
                 # Casual response
                 casual_html = f"""
                 <html>
-                <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+                <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 15px 0; padding: 20px;">
                     <p>Hello {sender_name},</p>
                     <p>Thank you for your message! We're happy to help with anything HubSpot-related.</p>
                     <p>Feel free to ask about contacts, deals, tasks, or anything else!</p>
                     <p>Best regards,<br>The HubSpot Assistant Team<br>
-                    <a href="http://lowtouch.ai" style="color:#666;font-size:0.9em;">lowtouch.ai</a></p>
+                    <a href="http://lowtouch.ai" style="margin-top: 15px; font-weight: bold;">lowtouch.ai</a></p>
                 </body>
                 </html>
                 """
