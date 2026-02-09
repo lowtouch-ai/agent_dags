@@ -52,7 +52,9 @@ EVALUATION_CRITERIA = {
 
 # Evaluation Prompt Template (embedded)
 EVALUATION_PROMPT_TEMPLATE = """You are an expert timesheet auditor. Evaluate the provided timesheet data against these specific criteria:
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 1. **Total Time Utilization** (Min 40 hrs/week)
    - Below 40 hrs: 1-2 stars
    - 40-42 hrs: 3 stars
@@ -151,7 +153,12 @@ EMAIL_TEMPLATE = """<!DOCTYPE html>
 <body>
     <p>Dear {username},</p>
     
-    <p>As part of our weekly timesheet review process, your timesheet for {week_info} has been evaluated based on defined productivity, logging, and reporting standards. Please find the summary below.</p>
+    <div class="week-header">
+        <h3>{week_info}</h3>
+        <p>Review Period: {week_start} to {week_end}</p>
+    </div>
+    
+    <p>As part of our weekly timesheet review process, your timesheet for the above period has been evaluated based on defined productivity, logging, and reporting standards. Please find the summary below.</p>
     
     <div class="criterion">
         <strong>Total Time Utilization (Min 40 hrs/week):</strong> 
@@ -255,10 +262,13 @@ def get_week_range(execution_date):
     week_end = execution_date - timedelta(days=1)  # Sunday
     week_start = week_end - timedelta(days=6)  # Monday
     
+    # Calculate week number within the month (not ISO week of year)
+    week_of_month = (week_start.day - 1) // 7 + 1
+    
     return {
         'start': week_start.strftime('%Y-%m-%d'),
         'end': week_end.strftime('%Y-%m-%d'),
-        'week_number': week_start.isocalendar()[1],
+        'week_number': week_of_month,  # Week within the month (1-5)
         'month': week_start.strftime('%B'),
         'year': week_start.year
     }
@@ -335,7 +345,7 @@ def fetch_mantis_timesheet_data(user_email, week_start, week_end):
         }
         
         logging.info(f"Fetching from {endpoint} for {user_email}")
-        response = requests.get(endpoint, headers=headers, params=params, timeout=30)
+        response = requests.get(endpoint, headers=headers, params=params, timeout=120)
         response.raise_for_status()
         
         data = response.json()
@@ -490,6 +500,8 @@ def load_whitelisted_users(ti, **context):
     """
     Task 1: Load whitelisted users from Airflow Variables
     """
+    import pendulum
+    
     try:
         users = WHITELISTED_USERS
         
@@ -503,7 +515,7 @@ def load_whitelisted_users(ti, **context):
             if missing_fields:
                 raise ValueError(f"User {user.get('user_id', 'unknown')} missing fields: {missing_fields}")
             
-            # hr_name, hr_email, manager_name, manager_email, admin_name, admin_email are optional
+            # Set default values for optional fields
             if 'hr_name' not in user:
                 user['hr_name'] = 'HR_Manager'
                 logging.warning(f"User {user['name']} missing hr_name, using default 'HR_Manager'")
@@ -518,6 +530,20 @@ def load_whitelisted_users(ti, **context):
                 user['admin_name'] = None
             if 'admin_email' not in user:
                 user['admin_email'] = None
+            
+            # Handle timezone - default to Asia/Kolkata if not specified
+            if 'timezone' not in user:
+                user['timezone'] = 'Asia/Kolkata'
+                logging.warning(f"User {user['name']} missing timezone, using default 'Asia/Kolkata'")
+            
+            # Validate timezone
+            try:
+                tz = pendulum.timezone(user['timezone'])
+                user['timezone_obj'] = tz  # Store the timezone object for later use
+            except Exception as e:
+                logging.warning(f"Invalid timezone '{user['timezone']}' for user {user['name']}, using 'Asia/Kolkata': {e}")
+                user['timezone'] = 'Asia/Kolkata'
+                user['timezone_obj'] = pendulum.timezone('Asia/Kolkata')
         
         # Push to XCom
         ti.xcom_push(key="whitelisted_users", value=users)
@@ -537,7 +563,7 @@ def load_whitelisted_users(ti, **context):
                 cc_info.append(f"Admin: {user.get('admin_name', 'N/A')} <{user['admin_email']}>")
             
             cc_text = f" (CC: {'; '.join(cc_info)})" if cc_info else ""
-            logging.info(f"  - {user['name']} ({user['email']}){cc_text}")
+            logging.info(f"  - {user['name']} ({user['email']}) [TZ: {user['timezone']}]{cc_text}")
         logging.info(f"=" * 80)
         
         return len(users)
@@ -545,6 +571,52 @@ def load_whitelisted_users(ti, **context):
     except Exception as e:
         logging.error(f"Failed to load whitelisted users: {e}")
         raise
+
+def get_initiated_users_today(ti, user_id, user_timezone):
+    """Check if this specific user was initiated today (Monday) in THEIR timezone"""
+    try:
+        import pendulum
+        
+        user_tz = pendulum.timezone(user_timezone)
+        user_local_datetime = pendulum.now(user_tz)
+        user_local_date = user_local_datetime.format('YYYY-MM-DD')
+        
+        # Check if it's Monday in user's timezone
+        if user_local_datetime.day_of_week != pendulum.MONDAY:
+            logging.debug(f"Not Monday in {user_timezone} (day {user_local_datetime.day_of_week})")
+            return False
+        
+        key = f"initiated_users_{user_local_date}_{user_id}"
+        
+        # Check if already initiated today
+        initiated = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=True, dag_id=ti.dag_id)
+        
+        if initiated is not None:
+            logging.info(f"User {user_id} already initiated on {user_local_date}")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        logging.warning(f"Failed to check initiated status for user {user_id}: {e}")
+        return False
+
+def mark_user_initiated(ti, user_id, user_timezone):
+    """Mark that weekly review has been initiated for this user today (in their timezone)"""
+    try:
+        import pendulum
+        
+        # Use user's local date, not UTC
+        user_tz = pendulum.timezone(user_timezone)
+        user_local_date = pendulum.now(user_tz).format('YYYY-MM-DD')
+        
+        key = f"initiated_users_{user_local_date}_{user_id}"  # Include user_id in key
+        
+        ti.xcom_push(key=key, value=True)
+        logging.info(f"✓ Marked user {user_id} as initiated on {user_local_date}")
+        
+    except Exception as e:
+        logging.error(f"Failed to mark user {user_id} as initiated: {e}")
 
 def calculate_week_range(ti, **context):
     """
@@ -564,20 +636,106 @@ def calculate_week_range(ti, **context):
     
     return week_range
 
+def filter_users_by_timezone(ti, **context):
+    """
+    Task 1.5: Filter users whose local time is 8:00 AM or later on MONDAY
+    AND who have not been initiated yet today.
+    Window: 8 AM - 11:59 PM on Monday (user's local time)
+    """
+    import pendulum
+    
+    users = ti.xcom_pull(key="whitelisted_users", task_ids="load_whitelisted_users")
+    execution_date = context['execution_date']
+    
+    if not users:
+        logging.warning("No users to filter")
+        ti.xcom_push(key="users_to_process", value=[])
+        ti.xcom_push(key="total_users_to_process", value=0)
+        return []
+    
+    # Get current UTC time from execution
+    current_utc = execution_date
+    
+    users_to_process = []
+    
+    logging.info(f"=" * 80)
+    logging.info(f"FILTERING USERS BY TIMEZONE (MONDAY 8 AM+ CHECK)")
+    logging.info(f"=" * 80)
+    logging.info(f"Current UTC time: {current_utc.format('YYYY-MM-DD HH:mm:ss')}")
+    logging.info(f"Looking for users where:")
+    logging.info(f"  1. Local day is MONDAY")
+    logging.info(f"  2. Local time is >= 8:00 AM (any time from 8 AM until midnight)")
+    logging.info(f"  3. NOT already initiated today")
+    logging.info(f"")
+    
+    for user in users:
+        username = user.get('name')
+        user_id = user.get('user_id')
+        user_timezone_str = user.get('timezone', 'Asia/Kolkata')
+        
+        try:
+            # Convert current UTC time to user's timezone
+            user_tz = pendulum.timezone(user_timezone_str)
+            user_local_time = current_utc.in_timezone(user_tz)
+            user_hour = user_local_time.hour
+            user_day_of_week = user_local_time.day_of_week
+            
+            # Check if already initiated today
+            if get_initiated_users_today(ti, user_id, user_timezone_str):
+                logging.info(f"  ⏭️  {username} ({user_timezone_str}): "
+                           f"Already initiated on {user_local_time.format('YYYY-MM-DD')} - SKIPPING")
+                continue
+            
+            # Check if it's Monday (pendulum.MONDAY = 0)
+            if user_day_of_week != pendulum.MONDAY:
+                day_name = user_local_time.format('dddd')
+                logging.info(f"  ✗ {username} ({user_timezone_str}): "
+                           f"Local day is {day_name}, not Monday - SKIPPING")
+                continue
+            
+            # Check if user's local time is 8 AM or later (>= 8)
+            if user_hour >= 8:
+                users_to_process.append(user)
+                logging.info(f"  ✓ {username} ({user_timezone_str}): "
+                           f"Local time is {user_local_time.format('YYYY-MM-DD HH:mm:ss')} "
+                           f"(Monday, {user_hour}:00 - window open) - PROCESSING")
+                
+                # Mark user as initiated for today
+                mark_user_initiated(ti, user_id, user_timezone_str)
+            else:
+                logging.info(f"  ✗ {username} ({user_timezone_str}): "
+                           f"Local time is {user_local_time.format('YYYY-MM-DD HH:mm:ss')} "
+                           f"(Hour: {user_hour}, need >= 8) - TOO EARLY")
+        
+        except Exception as e:
+            logging.error(f"  ✗ Error processing timezone for {username}: {e}")
+            continue
+    
+    logging.info(f"")
+    logging.info(f"Users to process: {len(users_to_process)} out of {len(users)}")
+    logging.info(f"=" * 80)
+    
+    # Push filtered users to XCom
+    ti.xcom_push(key="users_to_process", value=users_to_process)
+    ti.xcom_push(key="total_users_to_process", value=len(users_to_process))
+    
+    return users_to_process
+
 def fetch_all_timesheets(ti, **context):
     """
-    Task 3: Loop through all users and fetch their timesheet data via API
+    Task 3: Loop through filtered users (8 AM in their timezone) and fetch their timesheet data via API
     """
-    users = ti.xcom_pull(key="whitelisted_users", task_ids="load_whitelisted_users")
+    # Changed from whitelisted_users to users_to_process
+    users = ti.xcom_pull(key="users_to_process", task_ids="filter_users_by_timezone")
     week_range = ti.xcom_pull(key="week_range", task_ids="calculate_week_range")
     
     if not users:
-        logging.warning("No users to process")
+        logging.warning("No users to process (none at 8 AM in their timezone)")
         ti.xcom_push(key="timesheet_data_all", value=[])
         return []
     
     logging.info(f"=" * 80)
-    logging.info(f"FETCHING TIMESHEETS VIA API - {len(users)} users")
+    logging.info(f"FETCHING TIMESHEETS VIA API - {len(users)} users (filtered by timezone)")
     logging.info(f"=" * 80)
     
     all_timesheet_data = []
@@ -586,8 +744,9 @@ def fetch_all_timesheets(ti, **context):
     for idx, user in enumerate(users, 1):
         user_email = user.get("mantis_email")
         username = user.get("name")
+        user_timezone = user.get("timezone", "Asia/Kolkata")
         
-        logging.info(f"[{idx}/{len(users)}] Fetching timesheet for {username} ({user_email})")
+        logging.info(f"[{idx}/{len(users)}] Fetching timesheet for {username} ({user_email}) [TZ: {user_timezone}]")
         
         try:
             # Use direct API call instead of AI
@@ -601,6 +760,7 @@ def fetch_all_timesheets(ti, **context):
             timesheet_data['user_id'] = user.get('user_id')
             timesheet_data['username'] = username
             timesheet_data['user_email_address'] = user.get('email')
+            timesheet_data['user_timezone'] = user_timezone
             timesheet_data['hr_name'] = user.get('hr_name', 'HR_Manager')
             timesheet_data['hr_email'] = user.get('hr_email')
             timesheet_data['manager_name'] = user.get('manager_name')
@@ -627,6 +787,7 @@ def fetch_all_timesheets(ti, **context):
                 'username': username,
                 'user_email': user_email,
                 'user_email_address': user.get('email'),
+                'user_timezone': user_timezone,
                 'hr_name': user.get('hr_name', 'HR_Manager'),
                 'hr_email': user.get('hr_email'),
                 'manager_name': user.get('manager_name'),
@@ -1102,6 +1263,7 @@ def compose_and_send_all_emails(ti, **context):
     """
     Task 6: Loop through all analysis results, compose emails, and send to respective users with CC to HR, Manager, and Admin
     """
+    week_range = ti.xcom_pull(key="week_range", task_ids="calculate_week_range")
     all_analysis_results = ti.xcom_pull(key="analysis_results_all", task_ids="analyze_all_timesheets_with_ai")
     
     if not all_analysis_results:
@@ -1153,11 +1315,15 @@ def compose_and_send_all_emails(ti, **context):
             findings = analysis.get('findings', {})
             recommendations = analysis.get('recommendations', {})
             final_score = analysis.get('final_score', 0)
-            
+            from datetime import datetime
+            week_start_formatted = datetime.strptime(week_range['start'], '%Y-%m-%d').strftime('%B %d, %Y')
+            week_end_formatted = datetime.strptime(week_range['end'], '%Y-%m-%d').strftime('%B %d, %Y')
             # Compose email body
             email_body = EMAIL_TEMPLATE.format(
                 username=username,
                 week_info=week_info,
+                week_start=week_start_formatted,
+                week_end=week_end_formatted,
                 total_hours_stars=stars(ratings.get('total_hours', 0)),
                 total_hours_score=ratings.get('total_hours', 0),
                 total_hours_findings=findings.get('total_hours', ''),
@@ -1188,7 +1354,7 @@ def compose_and_send_all_emails(ti, **context):
             )
             
             # Send email via SMTP with CC to HR, Manager, and Admin
-            subject = f"Weekly Timesheet Review - {week_info}"
+            subject = f"Weekly Timesheet Review - {week_info} ({week_start_formatted} - {week_end_formatted})"
             
             # Prepare CC list (add HR, Manager, and Admin emails if available)
             cc_list = []
@@ -1329,10 +1495,10 @@ default_args = {
 with DAG(
     'weekly_timesheet_review',
     default_args=default_args,
-    description='Weekly timesheet review with issue enrichment and email notification',
-    schedule_interval='0 8 * * 1',  # Every Monday at 8 AM
+    description='Weekly timesheet review with timezone-based delivery',
+    schedule_interval='0 * * * 1',  # Every hour on Monday
     catchup=False,
-    tags=['timesheet', 'weekly', 'review', 'mantis'],
+    tags=['timesheet', 'weekly', 'review', 'mantis', 'timezone'],
 ) as dag:
     
     # Task 1: Load whitelisted users
@@ -1349,28 +1515,35 @@ with DAG(
         provide_context=True,
     )
     
-    # Task 3: Fetch all timesheets (sequential loop)
+    # Task 2.5: Filter users by timezone (8 AM check)
+    filter_timezone_task = PythonOperator(
+        task_id='filter_users_by_timezone',
+        python_callable=filter_users_by_timezone,
+        provide_context=True,
+    )
+    
+    # Task 3: Fetch timesheets for filtered users
     fetch_timesheets_task = PythonOperator(
         task_id='fetch_all_timesheets',
         python_callable=fetch_all_timesheets,
         provide_context=True,
     )
     
-    # Task 4: Enrich timesheets with issue details (NOW USING DIRECT API)
+    # Task 4: Enrich timesheets with issue details
     enrich_timesheets_task = PythonOperator(
         task_id='enrich_timesheets_with_issue_details',
         python_callable=enrich_timesheets_with_issue_details,
         provide_context=True,
     )
     
-    # Task 5: Analyze all timesheets with AI (sequential loop)
+    # Task 5: Analyze timesheets with AI
     analyze_timesheets_task = PythonOperator(
         task_id='analyze_all_timesheets_with_ai',
         python_callable=analyze_all_timesheets_with_ai,
         provide_context=True,
     )
     
-    # Task 6: Compose and send all emails (sequential loop)
+    # Task 6: Compose and send emails
     send_emails_task = PythonOperator(
         task_id='compose_and_send_all_emails',
         python_callable=compose_and_send_all_emails,
@@ -1384,5 +1557,5 @@ with DAG(
         provide_context=True,
     )
     
-    # Define task dependencies - NOW WITH DIRECT API ENRICHMENT
-    load_users_task >> calc_week_task >> fetch_timesheets_task >> enrich_timesheets_task >> analyze_timesheets_task >> send_emails_task >> log_summary_task
+    # Define task dependencies
+    load_users_task >> calc_week_task >> filter_timezone_task >> fetch_timesheets_task >> enrich_timesheets_task >> analyze_timesheets_task >> send_emails_task >> log_summary_task
