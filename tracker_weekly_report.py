@@ -1496,7 +1496,7 @@ with DAG(
     'weekly_timesheet_review',
     default_args=default_args,
     description='Weekly timesheet review with timezone-based delivery',
-    schedule_interval='0 * * * 1',  # Every hour on Monday
+    schedule='0 * * * 1',  # Every hour on Monday
     catchup=False,
     tags=['timesheet', 'weekly', 'review', 'mantis', 'timezone'],
 ) as dag:
