@@ -257,9 +257,9 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
         logging.error(f"AI response error: {str(e)}")
         raise
 
-def get_week_range(execution_date):
+def get_week_range(logical_date):
     """Calculate the previous week's date range"""
-    week_end = execution_date - timedelta(days=1)  # Sunday
+    week_end = logical_date - timedelta(days=1)  # Sunday
     week_start = week_end - timedelta(days=6)  # Monday
     
     # Calculate week number within the month (not ISO week of year)
@@ -622,8 +622,8 @@ def calculate_week_range(ti, **context):
     """
     Task 2: Calculate the week range to process
     """
-    execution_date = context['execution_date']
-    week_range = get_week_range(execution_date)
+    logical_date = context['logical_date']
+    week_range = get_week_range(logical_date)
     
     ti.xcom_push(key="week_range", value=week_range)
     
@@ -645,7 +645,7 @@ def filter_users_by_timezone(ti, **context):
     import pendulum
     
     users = ti.xcom_pull(key="whitelisted_users", task_ids="load_whitelisted_users")
-    execution_date = context['execution_date']
+    logical_date = context['logical_date']
     
     if not users:
         logging.warning("No users to filter")
@@ -654,7 +654,7 @@ def filter_users_by_timezone(ti, **context):
         return []
     
     # Get current UTC time from execution
-    current_utc = execution_date
+    current_utc = logical_date
     
     users_to_process = []
     
