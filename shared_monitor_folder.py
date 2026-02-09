@@ -1,8 +1,7 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.utils.dates import days_ago
 from airflow.decorators import task
 import os
 import logging
@@ -87,17 +86,17 @@ with DAG(
     'shared_monitor_folder_pdf',
     default_args=default_args,
     description='Monitors UUID folders for PDF files and triggers processing',
-    schedule_interval='* * * * *',
-    start_date=days_ago(1),
+    schedule='* * * * *',
+    start_date = datetime.now() - timedelta(days=1),
     catchup=False,
     tags=["shared", "folder", "monitor", "pdf", "rag"],
     max_active_runs=1,
    
 ) as dag:
 
-    start = DummyOperator(task_id='start')
+    start = EmptyOperator(task_id='start')
     check_folder_task = check_and_move_pdf_folder()
-    no_files_found = DummyOperator(task_id='no_files_found')
+    no_files_found = EmptyOperator(task_id='no_files_found')
     
     trigger_processing = TriggerDagRunOperator.partial(
         task_id='trigger_pdf_processing',
@@ -113,7 +112,7 @@ with DAG(
         )
     )
     
-    end = DummyOperator(task_id='end', trigger_rule='all_done')
+    end = EmptyOperator(task_id='end', trigger_rule='all_done')
     
     start >> check_folder_task
     check_folder_task >> [trigger_processing, no_files_found]

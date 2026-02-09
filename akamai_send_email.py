@@ -1,6 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 from airflow.models import Variable
 from datetime import datetime, timedelta
 import base64
@@ -967,7 +967,7 @@ except FileNotFoundError:
 with DAG(
     "akamai_presales_send_response_email",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     doc_md=readme_content,
     tags=["email", "cloud_assess", "send", "response"]
@@ -976,31 +976,29 @@ with DAG(
     task_1 = PythonOperator(
         task_id="step_1_process_email",
         python_callable=step_1_process_email,
-        provide_context=True
     )
     
     # ===== NEW: BRANCHING TASK =====
     branch_task = BranchPythonOperator(
         task_id="branch_by_attachment_type",
         python_callable=branch_by_attachment_type,
-        provide_context=True
     )
     # ===== END NEW SECTION =====
     
     # ===== NEW: DUMMY TASKS FOR FLOW MARKERS =====
-    excel_flow_start = DummyOperator(
+    excel_flow_start = EmptyOperator(
         task_id="excel_flow_start"
     )
     
-    cost_comparison_flow_start = DummyOperator(
+    cost_comparison_flow_start = EmptyOperator(
         task_id="cost_comparison_flow_start"
     )
     
-    combined_flow_start = DummyOperator(
+    combined_flow_start = EmptyOperator(
         task_id="combined_flow_start"
     )
     
-    no_attachment_flow = DummyOperator(
+    no_attachment_flow = EmptyOperator(
         task_id="no_attachment_flow"
     )
     
@@ -1008,46 +1006,39 @@ with DAG(
     task_2 = PythonOperator(
         task_id="step_2_compose_email",
         python_callable=step_2_compose_email,
-        provide_context=True
     )
     
     # ===== NEW: COST COMPARISON FLOW TASKS =====
     cost_comparison_report_task = PythonOperator(
         task_id="cost_comparison_generate_report",
         python_callable=cost_comparison_generate_report,
-        provide_context=True
     )
     
     cost_comparison_email_task = PythonOperator(
         task_id="cost_comparison_compose_email",
         python_callable=cost_comparison_compose_email,
-        provide_context=True
     )
     combined_flow_task = PythonOperator(
         task_id="combined_excel_pdf_summary",
         python_callable=combined_excel_pdf_summary,
-        provide_context=True
     )
     
     # No attachment flow
     no_attachment_task = PythonOperator(
         task_id="no_attachment_handler",
         python_callable=no_attachment_handler,
-        provide_context=True
     )
     
     # HTML conversion (all flows converge here)
     task_3 = PythonOperator(
         task_id="step_3_convert_to_html",
         python_callable=step_3_convert_to_html,
-        provide_context=True,
         trigger_rule="none_failed_min_one_success"  # Allow task to run from either flow
     )
 
     task_4 = PythonOperator(
         task_id="step_4_send_email",
         python_callable=step_4_send_email,
-        provide_context=True
     )
     
     task_1 >> branch_task

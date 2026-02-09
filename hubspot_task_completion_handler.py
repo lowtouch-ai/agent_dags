@@ -1035,7 +1035,7 @@ def send_confirmation_email(**kwargs):
 with DAG(
     "hubspot_task_completion_handler",
     default_args=default_args,
-    schedule_interval=None,  # Triggered by email listener
+    schedule=None,  # Triggered by email listener
     catchup=False,
     tags=["hubspot", "tasks", "deal", "completion"],
     on_success_callback=clear_retry_tracker_on_success,
@@ -1043,8 +1043,8 @@ with DAG(
     description="Handle task completion + deal updates via email with dynamic stage mapping"
 ) as dag:
 
-    analyze = PythonOperator(task_id="analyze_request", python_callable=analyze_task_completion_request, provide_context=True)
-    process = PythonOperator(task_id="process_task", python_callable=process_task_completion, provide_context=True)
-    confirm = PythonOperator(task_id="send_confirmation", python_callable=send_confirmation_email, provide_context=True)
+    analyze = PythonOperator(task_id="analyze_request", python_callable=analyze_task_completion_request)
+    process = PythonOperator(task_id="process_task", python_callable=process_task_completion)
+    confirm = PythonOperator(task_id="send_confirmation", python_callable=send_confirmation_email)
 
     analyze >> process >> confirm

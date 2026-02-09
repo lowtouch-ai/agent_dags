@@ -1188,7 +1188,7 @@ except FileNotFoundError:
 with DAG(
     "uptime_monthly_data_report", 
     default_args=default_args, 
-    schedule_interval=None, 
+    schedule=None, 
     catchup=False, 
     doc_md=readme_content, 
     tags=["uptime", "report", "monthly", "ai-insights"],
@@ -1236,13 +1236,11 @@ with DAG(
     init_config = PythonOperator(
         task_id="init_dynamic_config",
         python_callable=init_dynamic_config,
-        provide_context=True,
     )
 
     fetch_data_task = PythonOperator(
         task_id="step_1_fetch_data",
         python_callable=step_1_fetch_data,
-        provide_context=True,
         retry_delay=timedelta(minutes=15),
         on_failure_callback=slack_alert  # Call slack_alert on final failure (after retries)
     )
@@ -1250,43 +1248,36 @@ with DAG(
     anomaly_detection_task = PythonOperator(
         task_id="step_2a_anomaly_detection",
         python_callable=step_2a_anomaly_detection,
-        provide_context=True
     )
     
     rca_task = PythonOperator(
         task_id="step_2b_rca",
         python_callable=step_2b_rca,
-        provide_context=True
     )
     
     comparative_analysis_task = PythonOperator(
         task_id="step_2c_comparative_analysis",
         python_callable=step_2c_comparative_analysis,
-        provide_context=True
     )
     
     combine_analysis_task = PythonOperator(
         task_id="step_2f_combine_analysis",
         python_callable=step_2f_combine_analysis,
-        provide_context=True
     )
     
     generate_plot_task = PythonOperator(
         task_id="step_3_generate_plot",
         python_callable=step_3_generate_plot,
-        provide_context=True
     )
     
     compose_email_task = PythonOperator(
         task_id="step_4_compose_email",
         python_callable=step_4_compose_email,
-        provide_context=True
     )
     
     send_report_email_task = PythonOperator(
         task_id="step_5_send_report_email",
         python_callable=step_5_send_report_email,
-        provide_context=True
     )
     
     init_config >> fetch_data_task >> anomaly_detection_task >> rca_task >> comparative_analysis_task >> combine_analysis_task >> generate_plot_task >> compose_email_task >> send_report_email_task

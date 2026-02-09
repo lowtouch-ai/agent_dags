@@ -460,7 +460,7 @@ except FileNotFoundError:
 with DAG(
     "helpdesk_send_message_email",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     doc_md=readme_content,
     tags=["email", "shared", "send", "message", "helpdesk"]
@@ -469,14 +469,12 @@ with DAG(
     task_1 = PythonOperator(
         task_id="step_1_process_email",
         python_callable=step_1_process_email,
-        provide_context=True
     )
 
     
     task_2 = PythonOperator(
         task_id="step_2_send_email",
         python_callable=step_2_send_email,
-        provide_context=True
     )
     
     

@@ -58,7 +58,7 @@ def slack_alert(**context):
 with DAG(
     dag_id='webshop_run_chatapi_automation',
     default_args=default_args,
-    schedule_interval='30 14 * * *',  # 14:30 IST
+    schedule='30 14 * * *',  # 14:30 IST
     catchup=False,
     tags=['maven', 'automation', 'test'],
 ) as dag:
@@ -76,7 +76,6 @@ with DAG(
     slack_notify = PythonOperator(
         task_id="slack_notify",
         python_callable=slack_alert,
-        provide_context=True,
     )
 
     run_mvn_test >> slack_notify

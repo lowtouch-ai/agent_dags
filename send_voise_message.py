@@ -1,7 +1,7 @@
 from airflow import DAG
 from airflow.models.param import Param
 from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 from airflow.sensors.time_delta import TimeDeltaSensor
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.exceptions import AirflowException
@@ -72,7 +72,7 @@ with open(readme_path, 'r') as file:
 with DAG(
     "shared_send_message_voice",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     doc_md=readme_content,
     tags=["voice", "shared", "send", "message"],
@@ -346,13 +346,11 @@ with DAG(
         initiate_call_task = PythonOperator(
             task_id="initiate_call",
             python_callable=initiate_call,
-            provide_context=True
         )
 
         adjust_voicemail_task = PythonOperator(
         task_id="adjust_voicemail_message",
         python_callable=adjust_voicemail_message,
-        provide_context=True,
         retries=10,  # Increase to 5 retries
         retry_delay=timedelta(seconds=5)  # Increase to 5 seconds
         )
@@ -367,7 +365,6 @@ with DAG(
         check_status_task = PythonOperator(
             task_id="check_call_status",
             python_callable=check_call_status,
-            provide_context=True,
             retries=50,
             retry_delay=timedelta(seconds=5)
         )
@@ -375,13 +372,11 @@ with DAG(
         branch_recording_task = BranchPythonOperator(
             task_id="branch_recording_logic",
             python_callable=branch_recording_logic,
-            provide_context=True
         )
 
         fetch_recording_task = PythonOperator(
             task_id="fetch_and_save_recording",
             python_callable=fetch_and_save_recording,
-            provide_context=True,
             retries=10,
             retry_delay=timedelta(seconds=10)
         )
@@ -389,7 +384,6 @@ with DAG(
         prepare_transcription_task = PythonOperator(
             task_id="prepare_transcription_trigger",
             python_callable=prepare_transcription_trigger,
-            provide_context=True
         )
 
         trigger_transcription_task = TriggerDagRunOperator(
@@ -404,10 +398,9 @@ with DAG(
         fetch_transcription_task = PythonOperator(
             task_id="fetch_transcription",
             python_callable=fetch_transcription,
-            provide_context=True,
         )
 
-        skip_recording = DummyOperator(task_id="skip_recording")
+        skip_recording = EmptyOperator(task_id="skip_recording")
 
         # Task Dependencies
         initiate_call_task >> adjust_voicemail_task >> wait_call_status >> check_status_task
