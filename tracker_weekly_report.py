@@ -1504,57 +1504,49 @@ with DAG(
     # Task 1: Load whitelisted users
     load_users_task = PythonOperator(
         task_id='load_whitelisted_users',
-        python_callable=load_whitelisted_users,
-        provide_context=True,
+        python_callable=load_whitelisted_users
     )
     
     # Task 2: Calculate week range
     calc_week_task = PythonOperator(
         task_id='calculate_week_range',
-        python_callable=calculate_week_range,
-        provide_context=True,
+        python_callable=calculate_week_range
     )
     
     # Task 2.5: Filter users by timezone (8 AM check)
     filter_timezone_task = PythonOperator(
         task_id='filter_users_by_timezone',
-        python_callable=filter_users_by_timezone,
-        provide_context=True,
+        python_callable=filter_users_by_timezone
     )
     
     # Task 3: Fetch timesheets for filtered users
     fetch_timesheets_task = PythonOperator(
         task_id='fetch_all_timesheets',
-        python_callable=fetch_all_timesheets,
-        provide_context=True,
+        python_callable=fetch_all_timesheets
     )
     
     # Task 4: Enrich timesheets with issue details
     enrich_timesheets_task = PythonOperator(
         task_id='enrich_timesheets_with_issue_details',
-        python_callable=enrich_timesheets_with_issue_details,
-        provide_context=True,
+        python_callable=enrich_timesheets_with_issue_details
     )
     
     # Task 5: Analyze timesheets with AI
     analyze_timesheets_task = PythonOperator(
         task_id='analyze_all_timesheets_with_ai',
-        python_callable=analyze_all_timesheets_with_ai,
-        provide_context=True,
+        python_callable=analyze_all_timesheets_with_ai
     )
     
     # Task 6: Compose and send emails
     send_emails_task = PythonOperator(
         task_id='compose_and_send_all_emails',
-        python_callable=compose_and_send_all_emails,
-        provide_context=True,
+        python_callable=compose_and_send_all_emails
     )
     
     # Task 7: Log execution summary
     log_summary_task = PythonOperator(
         task_id='log_execution_summary',
-        python_callable=log_execution_summary,
-        provide_context=True,
+        python_callable=log_execution_summary
     )
     
     # Define task dependencies
