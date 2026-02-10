@@ -383,12 +383,9 @@ def notify_recruiter_for_interview(**kwargs):
         return f"Skipped - decision is {decision}"
 
     sender_email = response_data.get('sender_email', 'Unknown')
-    candidate_name = candidate_profile.get('name', 'Unknown Candidate') if candidate_profile else 'Unknown Candidate'
-    overall_score = analysis_data.get('overall_score', 'N/A')
-    strengths = analysis_data.get('strengths', [])
-    position = candidate_profile.get('matched_job', {}).get('title', 'N/A') if candidate_profile else 'N/A'
-
-    strengths_html = ''.join(f'<li>{s}</li>' for s in strengths) if strengths else '<li>See detailed analysis</li>'
+    candidate_name = candidate_profile.get('candidate_name', 'Unknown Candidate') if candidate_profile else 'Unknown Candidate'
+    overall_score = candidate_profile.get('total_score', 'N/A')
+    position = candidate_profile.get('job_title','N/A') if candidate_profile else 'N/A'
 
     body = f"""
     <h2>Interview Scheduling Request</h2>
@@ -400,12 +397,7 @@ def notify_recruiter_for_interview(**kwargs):
         <li><strong>Name:</strong> {candidate_name}</li>
         <li><strong>Email:</strong> {sender_email}</li>
         <li><strong>Position:</strong> {position}</li>
-        <li><strong>Screening Score:</strong> {overall_score}/100</li>
-    </ul>
-
-    <h3>Key Strengths:</h3>
-    <ul>
-        {strengths_html}
+        <li><strong>Screening Score:</strong> {overall_score}</li>
     </ul>
 
     <p>Please reach out to the candidate to set up an interview call.</p>

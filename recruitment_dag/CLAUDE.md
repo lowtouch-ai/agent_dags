@@ -39,7 +39,7 @@ The pipeline consists of three interconnected DAGs:
   3. Analyzes responses using AI against 7 criteria (work arrangement, availability, salary, location, motivation, technical fit, qualifications)
   4. Updates candidate profile with screening results
   5. Sends acceptance (interview invite) or rejection email to the candidate
-  6. If accepted, notifies the recruiter (Athira) via email to schedule an interview call with the candidate (with configurable CC recipients)
+  6. If accepted, notifies the recruiter (Athira) via email to schedule an interview call with the candidate — includes candidate name, email, position (`job_title`), and CV score (`total_score`) from the saved profile (with configurable CC recipients)
 
 ## Data Flow
 
