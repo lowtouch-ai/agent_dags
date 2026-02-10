@@ -17,13 +17,17 @@ Triggered externally with `dag_run.conf` containing `project_id`, `workspace_uui
 3. **AI classification**: Sends text to Ollama model `rfp/autogeneration_extraction:0.3af` to determine document type
 4. **DAG routing**: Uses `TriggerDagRunOperator` to delegate to the appropriate processing DAG based on `DOCUMENT_TYPE_TO_DAG` mapping
 
+### Shared Base: `rfp_processing_base.py`
+
+Contains all shared logic via a `create_rfp_processing_dag(dag_id, description, tags)` factory function. Includes helpers, prompt templates, and the 5-task pipeline definition.
+
 ### Processing DAGs (10 variants)
 
-Each `rfp_*_processing_dag.py` follows an identical 5-task pipeline:
+Each `rfp_*_processing_dag.py` is a thin wrapper (~9 lines) that calls `create_rfp_processing_dag()` with its unique `dag_id`, `description`, and `tags`. The factory creates an identical 5-task pipeline:
 
 1. `fetch_pdf_from_api` — Downloads PDF, converts to markdown via `pymupdf4llm`
 2. `extract_questions_with_ai` — Chunk-Map-Reduce extraction using `MODEL_FOR_EXTRACTION`
-3. `validate_and_fix_questions` — Detects numbering gaps, recovers missing questions
+3. `validate_and_fix_questions` — Chunk-level validation: sends each text chunk + known keys to AI to recover missed questions
 4. `generate_answers_with_ai` — Generates answers using `MODEL_FOR_ANSWERING` with RAG tool calls
 5. `log_completion` — Updates project status to `review`, saves `processing_dag_run_id`
 
@@ -73,8 +77,10 @@ All API calls require `WORKSPACE_UUID` and `x-ltai-user-email` headers.
 
 ## Common Patterns
 
-- All processing DAGs share identical code structure — changes to one typically apply to all 10
+- All processing DAGs use `rfp_processing_base.py` via factory pattern — changes go in the base module only
 - `dag_run.conf` always carries `project_id`, `workspace_uuid`, `x-ltai-user-email`
 - Text chunking uses 12,000 char chunks with 1,500 char overlap
+- Chunk-to-chunk deduplication: each chunk's extraction prompt receives the previous chunk's question keys so the AI skips already-extracted questions in overlap regions
+- Key collision handling: if two chunks produce the same question key, the later one is suffixed (`_1`, `_2`, …) instead of overwriting
 - Question extraction retries 3 times per chunk; answer generation retries 3 times per question
 - `handle_task_failure` callback sets project status to `failed` on any task error
