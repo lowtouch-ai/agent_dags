@@ -640,7 +640,7 @@ def filter_users_by_timezone(ti, **context):
     """
     Task 1.5: Filter users whose local time is 8:00 AM or later on MONDAY
     AND who have not been initiated yet today.
-    Window: 8 AM - 11:59 PM on Monday (user's local time)
+    Window: 8 AM - 12 PM IST on Monday (enforced)
     """
     import pendulum
     
@@ -653,20 +653,40 @@ def filter_users_by_timezone(ti, **context):
         ti.xcom_push(key="total_users_to_process", value=0)
         return []
     
-    # Get current UTC time from execution
-    current_utc = execution_date
-    
-    users_to_process = []
+    # Convert to IST for validation
+    ist_tz = pendulum.timezone('Asia/Kolkata')
+    ist_time = execution_date.in_timezone(ist_tz)
     
     logging.info(f"=" * 80)
-    logging.info(f"FILTERING USERS BY TIMEZONE (MONDAY 8 AM+ CHECK)")
+    logging.info(f"FILTERING USERS (IST Window: 8 AM - 12 PM Monday)")
     logging.info(f"=" * 80)
-    logging.info(f"Current UTC time: {current_utc.format('YYYY-MM-DD HH:mm:ss')}")
+    logging.info(f"Current UTC: {execution_date.format('YYYY-MM-DD HH:mm:ss')}")
+    logging.info(f"Current IST: {ist_time.format('YYYY-MM-DD HH:mm:ss')}")
+    logging.info(f"")
+    
+    # CRITICAL SAFEGUARD 1: Ensure we're on Monday in IST
+    if ist_time.day_of_week != pendulum.MONDAY:
+        day_name = ist_time.format('dddd')
+        logging.warning(f"Not Monday in IST (current: {day_name}). Skipping all users.")
+        ti.xcom_push(key="users_to_process", value=[])
+        ti.xcom_push(key="total_users_to_process", value=0)
+        return []
+    
+    # CRITICAL SAFEGUARD 2: Ensure we're within IST window (8 AM - 12 PM)
+    if not (8 <= ist_time.hour < 12):
+        logging.warning(f"Outside IST window (8 AM - 12 PM). Current hour: {ist_time.hour}:00. Skipping all users.")
+        ti.xcom_push(key="users_to_process", value=[])
+        ti.xcom_push(key="total_users_to_process", value=0)
+        return []
+    
+    logging.info(f"✓ IST validation passed: Monday, {ist_time.format('HH:mm:ss')}")
     logging.info(f"Looking for users where:")
     logging.info(f"  1. Local day is MONDAY")
-    logging.info(f"  2. Local time is >= 8:00 AM (any time from 8 AM until midnight)")
+    logging.info(f"  2. Local time is >= 8:00 AM")
     logging.info(f"  3. NOT already initiated today")
     logging.info(f"")
+    
+    users_to_process = []
     
     for user in users:
         username = user.get('name')
@@ -676,7 +696,7 @@ def filter_users_by_timezone(ti, **context):
         try:
             # Convert current UTC time to user's timezone
             user_tz = pendulum.timezone(user_timezone_str)
-            user_local_time = current_utc.in_timezone(user_tz)
+            user_local_time = execution_date.in_timezone(user_tz)
             user_hour = user_local_time.hour
             user_day_of_week = user_local_time.day_of_week
             
@@ -1496,7 +1516,7 @@ with DAG(
     'weekly_timesheet_review',
     default_args=default_args,
     description='Weekly timesheet review with timezone-based delivery',
-    schedule_interval='0 * * * 1',  # Every hour on Monday
+    schedule_interval='30 2-6 * * 1',  # Mon 2:30-6:30 AM UTC = 8:00 AM-12:00 PM IST
     catchup=False,
     tags=['timesheet', 'weekly', 'review', 'mantis', 'timezone'],
 ) as dag:
