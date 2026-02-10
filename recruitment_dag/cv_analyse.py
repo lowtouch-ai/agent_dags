@@ -682,7 +682,7 @@ Use a professional, encouraging tone throughout. Output only clean, valid HTML f
 with DAG(
     "cv_analyse",
     default_args=default_args,
-    schedule_interval=None,  # Triggered by cv_monitor_mailbox DAG
+    schedule=None,  # Triggered by cv_monitor_mailbox DAG
     catchup=False,
     doc_md="""
     # CV Analysis DAG
@@ -709,37 +709,37 @@ with DAG(
     extract_cv_task = PythonOperator(
         task_id="extract_cv_content",
         python_callable=extract_cv_content,
-        provide_context=True
+        
     )
 
     retrieve_jd_task = PythonOperator(
         task_id="retrive_jd_from_web",
         python_callable=retrive_jd_from_web,
-        provide_context=True
+        
     )
 
     get_jd_task = PythonOperator(
         task_id="get_the_jd_for_cv_analysis",
         python_callable=get_the_jd_for_cv_analysis,
-        provide_context=True
+        
     )
 
     score_cv_task = PythonOperator(
         task_id="get_the_score_for_cv_analysis",
         python_callable=get_the_score_for_cv_analysis,
-        provide_context=True
+        
     )
 
     save_sheets_task = PythonOperator(
         task_id="save_to_google_sheets",
         python_callable=save_to_google_sheets,
-        provide_context=True
+        
     )
 
     send_response_task = PythonOperator(
         task_id="send_response_email",
         python_callable=send_response_email,
-        provide_context=True
+        
     )
 
     # Set task dependencies

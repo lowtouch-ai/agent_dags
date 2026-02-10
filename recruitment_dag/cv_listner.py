@@ -829,6 +829,8 @@ def route_emails_to_dags(**kwargs):
         'emails_extracted_from_cv': 0,
         'emails_with_thread_context': 0
     }
+
+    trigger_requests = []
     
     for email in classified_emails:
         try:
@@ -853,8 +855,7 @@ def route_emails_to_dags(**kwargs):
                 routing_summary['skipped'] += 1
                 continue
             
-            # Create unique task_id for each trigger
-            task_id = f"trigger_{target_dag}_{email_id.replace('-', '_')}"
+            
             
             logging.info(f"Routing email {email_id} from {sender} to DAG: {target_dag}")
             logging.info(f"Classification: {email_type} (confidence: {classification.get('confidence')}%)")
@@ -862,16 +863,12 @@ def route_emails_to_dags(**kwargs):
             logging.info(f"Candidate exists in system: {candidate_exists}")
             logging.info(f"Thread history messages: {len(thread_history.get('history', []))}")
             
-            # Create and execute trigger operator
-            trigger_task = TriggerDagRunOperator(
-                task_id=task_id,
-                trigger_dag_id=target_dag,
-                conf={'email_data': email},
-                wait_for_completion=False
-            )
-            
-            trigger_task.execute(context=kwargs)
+            trigger_requests.append({
+                "trigger_dag_id": target_dag,
+                "conf": {"email_data": email}
+            })
             routing_summary[target_dag] += 1
+
             
             logging.info(f"Successfully triggered {target_dag} for email {email_id}")
             
@@ -889,10 +886,10 @@ def route_emails_to_dags(**kwargs):
     logging.info(f"  - Emails with thread context: {routing_summary['emails_with_thread_context']}")
     logging.info(f"  - Skipped/Other: {routing_summary['skipped']}")
     logging.info("=" * 60)
-    
-    ti.xcom_push(key='routing_summary', value=routing_summary)
-    
-    return routing_summary
+       
+    ti.xcom_push(key="routing_summary", value=routing_summary)
+    return trigger_requests
+
 
 
 def log_no_emails(**kwargs):
@@ -910,7 +907,7 @@ def log_no_emails(**kwargs):
 with DAG(
     "cv_monitor_mailbox",
     default_args=default_args,
-    schedule_interval=timedelta(minutes=2),  # Check every 2 minutes
+    schedule=timedelta(hours=2),  # Check every 2 minutes
     catchup=False,
     doc_md="""
     # Smart CV Mailbox Monitor DAG with Thread History & PDF Content
@@ -950,37 +947,46 @@ with DAG(
     fetch_emails_task = PythonOperator(
         task_id='fetch_cv_emails',
         python_callable=fetch_cv_emails,
-        provide_context=True
+        
     )
     
     # Task 2: Classify emails using AI (with PDF email extraction)
     classify_emails_task = PythonOperator(
         task_id='classify_email_type',
         python_callable=classify_email_type,
-        provide_context=True
+        
     )
     
     # Task 3: Branch based on email presence
     branch_task = BranchPythonOperator(
         task_id='check_for_emails',
         python_callable=check_for_emails,
-        provide_context=True
+        
     )
     
     # Task 4a: Route emails to appropriate DAGs
     route_emails_task = PythonOperator(
         task_id='route_emails_to_dags',
         python_callable=route_emails_to_dags,
-        provide_context=True
+        
     )
     
+    trigger_child_dags = TriggerDagRunOperator.partial(
+        task_id="trigger_child_dags",
+        wait_for_completion=False,
+        reset_dag_run=True,
+    ).expand_kwargs(
+        route_emails_task.output
+    )
+
     # Task 4b: Log no emails found
     no_emails_task = PythonOperator(
         task_id='no_emails_found',
         python_callable=log_no_emails,
-        provide_context=True
+        
     )
     
     # Set task dependencies
     fetch_emails_task >> classify_emails_task >> branch_task
-    branch_task >> [route_emails_task, no_emails_task]
+    branch_task >> route_emails_task >> trigger_child_dags
+    branch_task >> no_emails_task

@@ -27,6 +27,8 @@ from agent_dags.utils.agent_utils import get_ai_response, extract_json_from_text
 # Configuration constants
 GMAIL_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.email_credentials", default_var=None)
 RECRUITMENT_FROM_ADDRESS = Variable.get("ltai.v3.lowtouch.recruitment.from_address", default_var=None)
+RECRUITER_EMAIL = Variable.get("ltai.v3.lowtouch.recruitment.recruiter_email", default_var="athira@lowtouch.ai")
+RECRUITER_CC_EMAILS = Variable.get("ltai.v3.lowtouch.recruitment.recruiter_cc_emails", default_var=None)
 
 # Default DAG arguments
 default_args = {
@@ -360,11 +362,89 @@ Output clean HTML for the email body using proper tags (<p>, <h2>, etc.). Make i
         return "Failed to send email"
 
 
+def notify_recruiter_for_interview(**kwargs):
+    """
+    Send email to recruiter (Athira) to schedule an interview call
+    with the candidate if the screening decision is ACCEPT.
+    """
+    ti = kwargs['ti']
+    analysis_data = ti.xcom_pull(task_ids='analyze_screening_responses', key='analysis_data')
+    response_data = ti.xcom_pull(task_ids='extract_candidate_response', key='response_data')
+    candidate_profile = ti.xcom_pull(task_ids='load_candidate_profile', key='candidate_profile')
+
+    if not all([analysis_data, response_data]):
+        logging.warning("Missing data for recruiter notification")
+        return "Missing data - skipped"
+
+    decision = analysis_data.get('decision', 'PENDING')
+
+    if decision != 'ACCEPT':
+        logging.info(f"Decision is {decision} - skipping recruiter notification")
+        return f"Skipped - decision is {decision}"
+
+    sender_email = response_data.get('sender_email', 'Unknown')
+    candidate_name = candidate_profile.get('name', 'Unknown Candidate') if candidate_profile else 'Unknown Candidate'
+    overall_score = analysis_data.get('overall_score', 'N/A')
+    strengths = analysis_data.get('strengths', [])
+    position = candidate_profile.get('matched_job', {}).get('title', 'N/A') if candidate_profile else 'N/A'
+
+    strengths_html = ''.join(f'<li>{s}</li>' for s in strengths) if strengths else '<li>See detailed analysis</li>'
+
+    body = f"""
+    <h2>Interview Scheduling Request</h2>
+    <p>Hi Athira,</p>
+    <p>A candidate has passed the initial screening and is ready for an interview. Please schedule an interview call at your earliest convenience.</p>
+
+    <h3>Candidate Details:</h3>
+    <ul>
+        <li><strong>Name:</strong> {candidate_name}</li>
+        <li><strong>Email:</strong> {sender_email}</li>
+        <li><strong>Position:</strong> {position}</li>
+        <li><strong>Screening Score:</strong> {overall_score}/100</li>
+    </ul>
+
+    <h3>Key Strengths:</h3>
+    <ul>
+        {strengths_html}
+    </ul>
+
+    <p>Please reach out to the candidate to set up an interview call.</p>
+    <p>Best regards,<br>Recruitment Automation System</p>
+    """
+
+    service = authenticate_gmail(GMAIL_CREDENTIALS, RECRUITMENT_FROM_ADDRESS)
+    if not service:
+        logging.error("Gmail authentication failed for recruiter notification")
+        return "Gmail authentication failed"
+
+    subject = f"Interview Scheduling Request - {candidate_name} ({position})"
+
+    result = send_email(
+        service,
+        RECRUITER_EMAIL,
+        subject,
+        body,
+        None,
+        None,
+        RECRUITMENT_FROM_ADDRESS,
+        cc=RECRUITER_CC_EMAILS,
+        bcc=None,
+        thread_id=None
+    )
+
+    if result:
+        logging.info(f"Recruiter notification sent to {RECRUITER_EMAIL} (CC: {RECRUITER_CC_EMAILS}) for candidate {sender_email}")
+        return f"Recruiter notified for interview with {sender_email}"
+    else:
+        logging.error("Failed to send recruiter notification email")
+        return "Failed to send recruiter notification"
+
+
 # Define the DAG
 with DAG( 
     "screening_response_analysis",
     default_args=default_args,
-    schedule_interval=None,  # Triggered by mailbox monitor
+    schedule=None,  # Triggered by mailbox monitor
     catchup=False,
     doc_md="""
     # Screening Response Analysis DAG
@@ -399,32 +479,38 @@ with DAG(
     extract_response_task = PythonOperator(
         task_id="extract_candidate_response",
         python_callable=extract_candidate_response,
-        provide_context=True
+        
     )
     
     load_profile_task = PythonOperator(
         task_id="load_candidate_profile",
         python_callable=load_candidate_profile,
-        provide_context=True
+        
     )
     
     analyze_responses_task = PythonOperator(
         task_id="analyze_screening_responses",
         python_callable=analyze_screening_responses,
-        provide_context=True
+        
     )
     
     update_profile_task = PythonOperator(
         task_id="update_candidate_profile",
         python_callable=update_candidate_profile,
-        provide_context=True
+        
     )
     
     send_result_task = PythonOperator(
         task_id="send_screening_result_email",
         python_callable=send_screening_result_email,
-        provide_context=True
+
     )
-    
+
+    notify_recruiter_task = PythonOperator(
+        task_id="notify_recruiter_for_interview",
+        python_callable=notify_recruiter_for_interview,
+
+    )
+
     # Set task dependencies
-    extract_response_task >> load_profile_task >> analyze_responses_task >> update_profile_task >> send_result_task
+    extract_response_task >> load_profile_task >> analyze_responses_task >> update_profile_task >> send_result_task >> notify_recruiter_task
