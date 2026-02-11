@@ -27,6 +27,8 @@ MODEL_NAME = Variable.get("ltai.model.name", default_var="APITestAgent:5.0")
 server_host = Variable.get("ltai.server.host", default_var="http://localhost:8080")
 
 MAX_FIX_ITERATIONS = 3
+TEST_MODE = Variable.get("ltai.api.test.test_mode", default_var="false").lower() == "true"
+TARGET_ENDPOINT = Variable.get("ltai.api.test.target_endpoint", default_var="")  # e.g. "/api/users" — only test this endpoint
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -120,7 +122,7 @@ def _build_auth_instructions(config_path: str) -> str:
             "(API key, Bearer token, Basic Auth, etc.) by inspecting the Postman\n"
             "collection, email body, and API documentation.\n"
             "If you find hardcoded tokens or keys in the Postman collection, use\n"
-            "them via a .env file: load with `load_dotenv(Path(__file__).parent / '.env')`\n"
+            "them via a .env file: load with `load_dotenv(Path(__file__).parent / '.env', override=True)`\n"
             "and read with `os.getenv('VARIABLE_NAME')`. NEVER hardcode secrets.\n"
         )
 
@@ -136,7 +138,7 @@ def _build_auth_instructions(config_path: str) -> str:
         "    import os",
         "    from pathlib import Path",
         "    from dotenv import load_dotenv",
-        "    load_dotenv(Path(__file__).parent / '.env')",
+        "    load_dotenv(Path(__file__).parent / '.env', override=True)",
         "",
         f"Available .env variables: {', '.join(env_vars)}",
         "",
@@ -361,6 +363,13 @@ def generate_sub_test_scenarios(email_data: dict):
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    endpoint_constraint = ""
+    if TARGET_ENDPOINT:
+        endpoint_constraint = (
+            f"IMPORTANT: Only generate scenarios for the endpoint: {TARGET_ENDPOINT}\n"
+            "    Focus all test scenarios exclusively on this endpoint."
+        )
+
     scenario_prompt = f"""
     Analyze the API documentation and generate a GRANULAR list of test sub-scenarios.
     Each sub-scenario will become ONE separate pytest test file.
@@ -371,6 +380,7 @@ def generate_sub_test_scenarios(email_data: dict):
     Requires Auth: {requires_auth}
     {pdf_info}
 
+    {endpoint_constraint}
     Generate 5-15 sub-scenarios. Each should be specific enough for a single test file.
     Examples: "test_user_crud_positive", "test_input_validation", "test_auth_flows",
     "test_error_responses", "test_pagination", "test_rate_limiting", etc.
@@ -410,6 +420,10 @@ def generate_sub_test_scenarios(email_data: dict):
 
     sub_scenarios = scenarios_data.get("sub_scenarios", [])
 
+    if TEST_MODE and len(sub_scenarios) > 1:
+        logging.info(f"TEST_MODE enabled — trimming {len(sub_scenarios)} scenarios to 1")
+        sub_scenarios = sub_scenarios[:1]
+
     logging.info(f"Generated {len(sub_scenarios)} sub-scenarios:")
     for idx, s in enumerate(sub_scenarios):
         logging.info(f"  {idx+1}. {s['file_name']}: {s['description']}")
@@ -424,6 +438,95 @@ def generate_sub_test_scenarios(email_data: dict):
 
 
 # ═══════════════════════════════════════════════════════════════
+# STEP 2.5: Extract Request Body Schemas from Postman Collection
+# ═══════════════════════════════════════════════════════════════
+@task
+def extract_request_body_schemas(scenario_data: dict):
+    """
+    Asks the AI agent to extract request body examples from the Postman collection
+    for every POST/PUT/PATCH endpoint and saves them as JSON schema files under
+    {test_session_id}/testdata/schemas/.  These schemas are later fed to
+    FakerDataGenerator to produce realistic test data.
+    """
+    email_data = scenario_data["email_data"]
+    test_session_id = email_data["test_session_id"]
+    api_docs = email_data["api_documentation"]
+
+    base_dir = Variable.get("ltai.test.base_dir", default_var="/appz/pyunit_testing")
+    schemas_dir = os.path.join(base_dir, test_session_id, "testdata", "schemas")
+    os.makedirs(schemas_dir, exist_ok=True)
+
+    extraction_prompt = f"""
+    Analyze the following API documentation (Postman collection) and extract the
+    request body for every POST, PUT, and PATCH endpoint.
+
+    API Docs:
+    {json.dumps(api_docs, indent=2)[:6000]}
+
+    For each endpoint that has a request body, return a JSON object with the
+    following structure.  Use placeholder values so they can be auto-detected
+    by FakerDataGenerator (patterns: PLACEHOLDER_*, <FIELD_NAME>, {{{{field_name}}}}).
+
+    Return STRICT JSON — no markdown, no explanation:
+    {{
+        "schemas": [
+            {{
+                "endpoint": "/api/rest/resource",
+                "method": "POST",
+                "filename": "create_resource.json",
+                "body": {{
+                    "field1": "PLACEHOLDER_FIRST_NAME",
+                    "field2": "PLACEHOLDER_EMAIL",
+                    "nested": {{
+                        "field3": "PLACEHOLDER_PHONE"
+                    }}
+                }}
+            }}
+        ]
+    }}
+
+    Rules:
+    - Only include endpoints that have a request body (POST/PUT/PATCH)
+    - Use descriptive PLACEHOLDER_* values that hint at the data type
+      (e.g. PLACEHOLDER_EMAIL, PLACEHOLDER_SSN, PLACEHOLDER_DATE_OF_BIRTH)
+    - Keep the exact field names from the API docs
+    - If the collection has example bodies, use their structure with placeholders
+    - If no POST/PUT/PATCH endpoints exist, return {{"schemas": []}}
+    """
+
+    response = get_ai_response(extraction_prompt, model=MODEL_NAME)
+    schemas_data = extract_json_from_text(response)
+
+    saved_schemas = []
+
+    if schemas_data and schemas_data.get("schemas"):
+        for schema_entry in schemas_data["schemas"]:
+            filename = schema_entry.get("filename", "unknown_schema.json")
+            body = schema_entry.get("body", {})
+            endpoint = schema_entry.get("endpoint", "")
+            method = schema_entry.get("method", "")
+
+            schema_path = os.path.join(schemas_dir, filename)
+            with open(schema_path, "w", encoding="utf-8") as f:
+                json.dump(body, f, indent=2)
+
+            saved_schemas.append({
+                "filename": filename,
+                "endpoint": endpoint,
+                "method": method,
+            })
+            logging.info(f"Saved request body schema: {filename} ({method} {endpoint})")
+    else:
+        logging.info("No POST/PUT/PATCH request bodies found in the API docs")
+
+    logging.info(f"Extracted {len(saved_schemas)} request body schema(s)")
+
+    # Pass through scenario_data with the schemas info added
+    scenario_data["saved_schemas"] = saved_schemas
+    return scenario_data
+
+
+# ═══════════════════════════════════════════════════════════════
 # STEP 3: Generate ALL Test Files (No Execution)
 # ═══════════════════════════════════════════════════════════════
 @task
@@ -435,6 +538,7 @@ def generate_all_test_files(scenario_data: dict):
     """
     sub_scenarios = scenario_data["sub_scenarios"]
     email_data = scenario_data["email_data"]
+    saved_schemas = scenario_data.get("saved_schemas", [])
 
     test_session_id = email_data["test_session_id"]
     api_docs = email_data["api_documentation"]
@@ -454,6 +558,15 @@ def generate_all_test_files(scenario_data: dict):
     auth_instructions = ""
     if requires_auth and config_path:
         auth_instructions = _build_auth_instructions(config_path)
+
+    # Build available schemas info for the prompt
+    schemas_info = ""
+    if saved_schemas:
+        schema_lines = [f"  - {s['filename']} ({s['method']} {s['endpoint']})" for s in saved_schemas]
+        schemas_info = (
+            "AVAILABLE REQUEST BODY SCHEMAS (already saved in testdata/schemas/):\n"
+            + "\n".join(schema_lines)
+        )
 
     conversation_history = []
     generated_files = []
@@ -507,6 +620,19 @@ def generate_all_test_files(scenario_data: dict):
         - Only test documented endpoints
         - {"All credentials MUST come from .env via os.getenv() — NEVER hardcode secrets" if requires_auth else "Skip auth"}
         - Do NOT duplicate tests that were already generated in previous files
+
+        TEST DATA:
+        - When creating test cases, generate test data as needed and load it in the test scenario
+        - Request body schemas have been pre-extracted to {test_session_id}/testdata/schemas/
+        {schemas_info}
+        - Use FakerDataGenerator with workspace="pytest", workspace_id="{test_session_id}",
+          schema_file="<filename>" to generate realistic test data to {test_session_id}/testdata/
+        - In test files, load the generated JSON and use it in the test:
+          DATA_DIR = os.path.join(os.path.dirname(__file__), "testdata")
+          with open(os.path.join(DATA_DIR, "filename.json")) as f:
+              test_data = json.load(f)
+          response = requests.post(url, json=test_data)
+        - Generate separate data files for positive vs negative test scenarios
 
         Save to: {test_session_id}/{file_name}
         """
@@ -874,8 +1000,9 @@ def fix_and_retry_loop(run_data: dict):
 
     finally:
         # Always clean up .env to avoid leaking credentials on disk
-        _remove_env_file(test_session_id)
-        logging.info("Credential .env cleanup complete")
+        # _remove_env_file(test_session_id)
+        # logging.info("Credential .env cleanup complete")
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1145,8 +1272,11 @@ Generate-all, run-all, fix-and-retry API testing workflow:
     # Step 2: Generate granular sub-scenarios
     scenario_data = generate_sub_test_scenarios(email_data)
 
+    # Step 2.5: Extract request body schemas from Postman collection
+    scenario_data_with_schemas = extract_request_body_schemas(scenario_data)
+
     # Step 3: Generate all test files
-    generation_data = generate_all_test_files(scenario_data)
+    generation_data = generate_all_test_files(scenario_data_with_schemas)
 
     # Step 4: Run all tests together (includes .env cleanup)
     run_data = run_all_tests(generation_data)
