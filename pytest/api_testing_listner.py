@@ -14,6 +14,8 @@ import re
 from langchain_community.document_loaders import PyPDFLoader
 from PIL import Image
 import io
+from agent_dags.utils.email_utils import send_email, mark_email_as_read, extract_all_recipients
+from agent_dags.utils.agent_utils import get_ai_response, extract_json_from_text
 
 # Default DAG arguments
 default_args = {
@@ -24,8 +26,9 @@ default_args = {
     "retry_delay": timedelta(seconds=15),
 }
 
-GMAIL_FROM_ADDRESS = Variable.get("ltai.api.test.from_address", default_var="")  
-GMAIL_CREDENTIALS = Variable.get("ltai.api.test.gmail_credentials", default_var="")  
+GMAIL_FROM_ADDRESS = Variable.get("ltai.api.test.from_address", default_var="")
+GMAIL_CREDENTIALS = Variable.get("ltai.api.test.gmail_credentials", default_var="")
+MODEL_NAME = Variable.get("ltai.model.name", default_var="APITestAgent:5.0")
 LAST_PROCESSED_EMAIL_FILE = "/appz/cache/api_testing_last_processed_email.json"
 ATTACHMENT_DIR = "/appz/data/attachments/"
 
@@ -105,6 +108,44 @@ def image_to_base64(image_path: str) -> str:
     except Exception as e:
         logging.error(f"Error converting image {image_path} to base64: {str(e)}", exc_info=True)
         return ""
+
+
+def _extract_email_body(payload):
+    """Extract the full email body text from a Gmail message payload.
+
+    Walks the MIME parts tree, preferring text/plain over text/html.
+    Returns decoded body string or empty string if none found.
+    """
+    def _get_body_from_parts(parts):
+        plain_text = ""
+        html_text = ""
+        for part in parts:
+            mime_type = part.get("mimeType", "")
+            body_data = part.get("body", {}).get("data")
+            if mime_type == "text/plain" and body_data:
+                plain_text += base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace")
+            elif mime_type == "text/html" and body_data:
+                html_text += base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace")
+            elif "parts" in part:
+                nested_plain, nested_html = _get_body_from_parts(part["parts"])
+                plain_text += nested_plain
+                html_text += nested_html
+        return plain_text, html_text
+
+    # Simple message with body directly in payload
+    body_data = payload.get("body", {}).get("data")
+    if body_data:
+        return base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace")
+
+    # Multipart message — walk the parts tree
+    if "parts" in payload:
+        plain, html = _get_body_from_parts(payload["parts"])
+        if plain:
+            return plain
+        if html:
+            return re.sub(r'<[^>]+>', '', html)
+
+    return ""
 
 
 def fetch_unread_emails(**kwargs):
@@ -227,13 +268,18 @@ def fetch_unread_emails(**kwargs):
                         "metadata": pdf_content.get("metadata", {})
                     })
 
-        # Only process emails that have at least one JSON file (Postman collection required)
-        if json_attachments:
+        # Extract full email body for AI classification
+        email_body = _extract_email_body(msg_data["payload"])
+
+        # Process emails that have attachments OR non-trivial body content
+        has_attachments = json_attachments or pdf_attachments
+        has_body = len(email_body.strip()) > 10
+        if has_attachments or has_body:
             email_object = {
                 "id": msg["id"],
                 "threadId": thread_id,
                 "headers": headers,
-                "content": msg_data.get("snippet", ""),
+                "content": email_body or msg_data.get("snippet", ""),
                 "timestamp": timestamp,
                 "json_attachments": json_attachments,
                 "pdf_attachments": pdf_attachments,
@@ -243,11 +289,12 @@ def fetch_unread_emails(**kwargs):
             processed_emails.append(email_object)
             if timestamp > max_timestamp:
                 max_timestamp = timestamp
-            
+
             status_parts = [
                 f"{len(json_attachments)} JSON file(s)",
                 f"{len(pdf_attachments)} PDF file(s)" if pdf_attachments else "no PDFs",
-                "with config" if config_attachment else "without config"
+                "with config" if config_attachment else "without config",
+                "with body" if has_body else "no body"
             ]
             logging.info(f"Processed email with {', '.join(status_parts)}")
 
@@ -257,25 +304,96 @@ def fetch_unread_emails(**kwargs):
     kwargs['ti'].xcom_push(key="emails_with_attachments", value=processed_emails)
     return len(processed_emails)
 
-def branch_function(**kwargs):
-    """Branch based on whether emails with JSON attachments were found."""
+def classify_and_route(**kwargs):
+    """Classify each email using AI and route to the appropriate downstream task.
+
+    Returns one or more task IDs for the BranchPythonOperator:
+      - "trigger_test_dag"       for emails requesting API testing
+      - "reply_general_inquiry"  for general questions
+      - "no_email_found_task"    when there are no emails to process
+    """
     ti = kwargs['ti']
     emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="emails_with_attachments")
-    
-    if emails and len(emails) > 0:
-        logging.info(f"Found {len(emails)} email(s) with JSON attachments → triggering response")
-        return "trigger_test_dag"
-    else:
-        logging.info("No emails with JSON attachments found")
+
+    if not emails:
+        logging.info("No emails to classify")
         return "no_email_found_task"
 
+    CLASSIFICATION_SYSTEM_PROMPT = (
+        "You are an email routing assistant for an automated API testing service. "
+        "Classify the email intent into exactly one of two categories:\n"
+        '- "api_testing": The sender wants API tests generated or executed. They may have '
+        "attached a Postman collection (JSON), API documentation (PDF), or described APIs to test.\n"
+        '- "general_inquiry": The sender is asking a general question (what can you do, help, '
+        "status, how does this work, etc.) that does not require running the test pipeline.\n\n"
+        'Return ONLY strict JSON: {"intent": "api_testing" or "general_inquiry", "reason": "..."}'
+    )
+
+    emails_to_test = []
+    emails_to_reply = []
+
+    for email in emails:
+        subject = email["headers"].get("Subject", "")
+        body_preview = (email.get("content") or "")[:2000]
+        attachment_names = [a["filename"] for a in email.get("json_attachments", [])] + \
+                           [a["filename"] for a in email.get("pdf_attachments", [])]
+
+        user_prompt = (
+            f"Subject: {subject}\n"
+            f"Body:\n{body_preview}\n"
+            f"Attachments: {', '.join(attachment_names) if attachment_names else 'none'}"
+        )
+
+        try:
+            ai_response = get_ai_response(
+                prompt=user_prompt,
+                system_message=CLASSIFICATION_SYSTEM_PROMPT,
+                model=MODEL_NAME,
+                stream=False,
+            )
+            classification = extract_json_from_text(ai_response)
+            intent = (classification or {}).get("intent", "general_inquiry")
+            reason = (classification or {}).get("reason", "")
+            logging.info(
+                f"Email {email['id']} classified as '{intent}': {reason}"
+            )
+        except Exception as e:
+            logging.error(f"AI classification failed for email {email['id']}: {e}")
+            # Fallback: if there are JSON attachments, assume api_testing
+            intent = "api_testing" if email.get("json_attachments") else "general_inquiry"
+            logging.info(f"Fallback classification for email {email['id']}: {intent}")
+
+        if intent == "api_testing":
+            emails_to_test.append(email)
+        else:
+            emails_to_reply.append(email)
+
+    ti.xcom_push(key="emails_to_test", value=emails_to_test)
+    ti.xcom_push(key="emails_to_reply", value=emails_to_reply)
+
+    # Determine which downstream tasks to activate
+    branches = []
+    if emails_to_test:
+        branches.append("trigger_test_dag")
+    if emails_to_reply:
+        branches.append("reply_general_inquiry")
+
+    if not branches:
+        return "no_email_found_task"
+
+    logging.info(
+        f"Routing: {len(emails_to_test)} email(s) to testing, "
+        f"{len(emails_to_reply)} email(s) to general reply"
+    )
+    return branches
+
 def trigger_response_tasks(**kwargs):
-    """Trigger the test case runner DAG for each email with attachments."""
+    """Trigger the test case runner DAG for each email classified as api_testing."""
     ti = kwargs['ti']
-    emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="emails_with_attachments")
-    
+    emails = ti.xcom_pull(task_ids="classify_and_route", key="emails_to_test")
+
     if not emails:
-        logging.info("No emails with attachments in XCom → nothing to trigger")
+        logging.info("No emails classified for API testing → nothing to trigger")
         return
 
     for email in emails:
@@ -306,9 +424,98 @@ def trigger_response_tasks(**kwargs):
             wait_for_completion=False,
         ).execute(context=kwargs)
 
+def reply_general_inquiry(**kwargs):
+    """Generate an AI response and reply to emails classified as general inquiries."""
+    ti = kwargs['ti']
+    emails = ti.xcom_pull(task_ids="classify_and_route", key="emails_to_reply")
+
+    if not emails:
+        logging.info("No general inquiry emails to reply to")
+        return
+
+    service = authenticate_gmail()
+
+    REPLY_SYSTEM_PROMPT = (
+        "You are the API Testing Assistant powered by lowtouch.ai. "
+        "A user has sent an email with a general question about the service. "
+        "Write a helpful, concise, and professional HTML email reply.\n\n"
+        "The service works as follows:\n"
+        "- Users email a Postman collection (JSON file) and optionally API documentation (PDF) "
+        "and a config.yaml with auth credentials.\n"
+        "- The system automatically generates pytest-based API test cases using AI.\n"
+        "- Tests are executed and a detailed HTML report is emailed back.\n"
+        "- Supported auth types: header, basic, bearer, api_key, custom.\n"
+        "- DELETE endpoints are never tested.\n"
+        "- Each test has a single assertion for clarity.\n\n"
+        "Reply to the user's question helpfully. Use simple HTML formatting "
+        "(paragraphs, bullet lists). Do NOT include a subject line — just the body content."
+    )
+
+    for email in emails:
+        subject = email["headers"].get("Subject", "")
+        sender = email["headers"].get("From", "")
+        message_id = email["headers"].get("Message-ID", "")
+        references = email["headers"].get("References", "")
+        body_preview = (email.get("content") or "")[:2000]
+
+        user_prompt = (
+            f"The user sent this email:\n"
+            f"Subject: {subject}\n"
+            f"Body:\n{body_preview}\n\n"
+            f"Write a helpful reply."
+        )
+
+        try:
+            reply_html = get_ai_response(
+                prompt=user_prompt,
+                system_message=REPLY_SYSTEM_PROMPT,
+                model=MODEL_NAME,
+                stream=False,
+            )
+
+            # Wrap in basic HTML if the AI didn't produce a full tag
+            if "<p>" not in reply_html and "<div>" not in reply_html:
+                reply_html = f"<p>{reply_html}</p>"
+
+            # Determine recipients (reply to sender, CC others)
+            recipients_info = extract_all_recipients(email)
+            reply_to = sender
+            cc_list = [
+                addr for addr in recipients_info.get("cc", [])
+                if addr.lower() != GMAIL_FROM_ADDRESS.lower()
+            ]
+
+            reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+
+            result = send_email(
+                service=service,
+                recipient=reply_to,
+                subject=reply_subject,
+                body=reply_html,
+                in_reply_to=message_id,
+                references=references,
+                from_address=GMAIL_FROM_ADDRESS,
+                cc=cc_list if cc_list else None,
+                thread_id=email["threadId"],
+                agent_name="API Test Agent",
+            )
+            logging.info(
+                f"Sent general inquiry reply to {reply_to} "
+                f"(message_id={result.get('id', 'unknown')})"
+            )
+
+            mark_email_as_read(service, email["id"])
+
+        except Exception as e:
+            logging.error(
+                f"Failed to reply to general inquiry email {email['id']}: {e}",
+                exc_info=True,
+            )
+
+
 def no_email_found(**kwargs):
     """Log when no emails are found."""
-    logging.info("No new emails with JSON attachments found to process.")
+    logging.info("No new emails found to process.")
 
 readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'mailbox_monitor.md')
 try:
@@ -330,14 +537,19 @@ with DAG("api_testing_monitor_mailbox",
         python_callable=fetch_unread_emails,
     )
 
-    branch_task = BranchPythonOperator(
-        task_id="branch_task",
-        python_callable=branch_function,
+    classify_route_task = BranchPythonOperator(
+        task_id="classify_and_route",
+        python_callable=classify_and_route,
     )
 
     trigger_test_runner = PythonOperator(
         task_id="trigger_test_dag",
         python_callable=trigger_response_tasks,
+    )
+
+    reply_inquiry_task = PythonOperator(
+        task_id="reply_general_inquiry",
+        python_callable=reply_general_inquiry,
     )
 
     no_email_found_task = PythonOperator(
@@ -346,5 +558,5 @@ with DAG("api_testing_monitor_mailbox",
     )
 
     # Set task dependencies
-    fetch_emails_task >> branch_task
-    branch_task >> [trigger_test_runner, no_email_found_task]
+    fetch_emails_task >> classify_route_task
+    classify_route_task >> [trigger_test_runner, reply_inquiry_task, no_email_found_task]
