@@ -539,7 +539,9 @@ def generate_all_test_files(scenario_data: dict):
         "generated_files": generated_files,
         "total_files": len(generated_files),
         "test_session_id": test_session_id,
-        "email_data": email_data
+        "base_url": base_url,
+        "config_path": config_path,
+        "requires_authentication": requires_auth,
     }
 
 
@@ -553,10 +555,10 @@ def run_all_tests(generation_data: dict):
     Returns structured test results.
     """
     test_session_id = generation_data["test_session_id"]
-    email_data = generation_data["email_data"]
     generated_files = generation_data["generated_files"]
-    base_url = email_data.get("base_url") or "http://connector:8000"
-    config_path = email_data.get("config_path")
+    base_url = generation_data.get("base_url") or "http://connector:8000"
+    config_path = generation_data.get("config_path")
+    requires_auth = generation_data.get("requires_authentication", False)
 
     logging.info(f"Running ALL tests in session: {test_session_id}")
     logging.info(f"Total test files: {len(generated_files)}")
@@ -570,75 +572,82 @@ def run_all_tests(generation_data: dict):
     if config_path:
         config_info = f"Config file: {config_path}"
 
-    execution_prompt = f"""
-    Run pytest on ALL test files in the "{test_session_id}" directory.
+    try:
+        execution_prompt = f"""
+        Run pytest on ALL test files in the "{test_session_id}" directory.
 
-    Use the run_pytest tool with:
-    - target_path: "{test_session_id}"
-    - verbose: True
-    - generate_html_report: True
+        Use the run_pytest tool with:
+        - target_path: "{test_session_id}"
+        - verbose: True
+        - generate_html_report: True
 
-    Base URL: {base_url}
-    {config_info}
+        Base URL: {base_url}
+        {config_info}
 
-    After execution, return STRICT JSON with the results:
-    {{
-        "status": "success" or "error",
-        "summary": {{
-            "total": 0,
-            "passed": 0,
-            "failed": 0,
-            "errors": 0,
-            "skipped": 0,
-            "pass_rate": 0.0,
-            "execution_time_seconds": 0.0
-        }},
-        "failed_tests": [
-            {{
-                "file_name": "test_xxx.py",
-                "test_name": "test_function_name",
-                "error_type": "AssertionError|ImportError|etc",
-                "error_message": "brief error description",
-                "traceback": "relevant traceback snippet"
-            }}
-        ],
-        "report_url": "URL to the generated HTML report",
-        "exit_code": 0
-    }}
+        After execution, return STRICT JSON with the results:
+        {{
+            "status": "success" or "error",
+            "summary": {{
+                "total": 0,
+                "passed": 0,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "pass_rate": 0.0,
+                "execution_time_seconds": 0.0
+            }},
+            "failed_tests": [
+                {{
+                    "file_name": "test_xxx.py",
+                    "test_name": "test_function_name",
+                    "error_type": "AssertionError|ImportError|etc",
+                    "error_message": "brief error description",
+                    "traceback": "relevant traceback snippet"
+                }}
+            ],
+            "report_url": "URL to the generated HTML report",
+            "exit_code": 0
+        }}
 
-    status="success": Tests ran (even if some failed)
-    status="error": Execution itself failed (infrastructure error)
-    """
+        status="success": Tests ran (even if some failed)
+        status="error": Execution itself failed (infrastructure error)
+        """
 
-    exec_response = get_ai_response(execution_prompt, model=MODEL_NAME)
-    logging.info(f"Test execution response: {exec_response[:500]}...")
+        exec_response = get_ai_response(execution_prompt, model=MODEL_NAME)
+        logging.info(f"Test execution response: {exec_response[:500]}...")
 
-    result = extract_json_from_text(exec_response)
+        result = extract_json_from_text(exec_response)
 
-    if not result:
-        result = {
-            "status": "error",
-            "summary": {"total": 0, "passed": 0, "failed": 0, "errors": 0, "skipped": 0, "pass_rate": 0.0},
-            "failed_tests": [],
-            "report_url": "",
-            "exit_code": -1,
-            "raw_response": exec_response[:1000]
+        if not result:
+            result = {
+                "status": "error",
+                "summary": {"total": 0, "passed": 0, "failed": 0, "errors": 0, "skipped": 0, "pass_rate": 0.0},
+                "failed_tests": [],
+                "report_url": "",
+                "exit_code": -1,
+                "raw_response": exec_response[:1000]
+            }
+
+        summary = result.get("summary", {})
+        logging.info(f"=== TEST RESULTS ===")
+        logging.info(f"Total: {summary.get('total', 0)}")
+        logging.info(f"Passed: {summary.get('passed', 0)}")
+        logging.info(f"Failed: {summary.get('failed', 0)}")
+        logging.info(f"Errors: {summary.get('errors', 0)}")
+        logging.info(f"Pass Rate: {summary.get('pass_rate', 0)}%")
+
+        return {
+            "final_results": result,
+            "iterations": 0,
+            "outcome": "single_run",
+            "test_session_id": test_session_id,
+            "report_url": result.get("report_url", ""),
         }
 
-    summary = result.get("summary", {})
-    logging.info(f"=== TEST RESULTS ===")
-    logging.info(f"Total: {summary.get('total', 0)}")
-    logging.info(f"Passed: {summary.get('passed', 0)}")
-    logging.info(f"Failed: {summary.get('failed', 0)}")
-    logging.info(f"Errors: {summary.get('errors', 0)}")
-    logging.info(f"Pass Rate: {summary.get('pass_rate', 0)}%")
-
-    return {
-        "test_results": result,
-        "test_session_id": test_session_id,
-        "generated_files": generated_files,
-        "email_data": email_data
-    }
+    finally:
+        # Clean up .env to avoid leaking credentials on disk
+        _remove_env_file(test_session_id)
+        logging.info("Credential .env cleanup complete")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -653,16 +662,15 @@ def fix_and_retry_loop(run_data: dict):
     test_results = run_data["test_results"]
     test_session_id = run_data["test_session_id"]
     generated_files = run_data["generated_files"]
-    email_data = run_data["email_data"]
-    base_url = email_data.get("base_url") or "http://connector:8000"
-    config_path = email_data.get("config_path")
+    base_url = run_data.get("base_url") or "http://connector:8000"
+    config_path = run_data.get("config_path")
 
     config_info = ""
     if config_path:
         config_info = f"Config file: {config_path}"
 
     auth_instructions = ""
-    if email_data.get("requires_authentication") and config_path:
+    if run_data.get("requires_authentication") and config_path:
         auth_instructions = _build_auth_instructions(config_path)
 
     current_results = test_results
@@ -678,7 +686,6 @@ def fix_and_retry_loop(run_data: dict):
                 "iterations": 0,
                 "outcome": "infrastructure_error",
                 "test_session_id": test_session_id,
-                "email_data": email_data,
                 "report_url": final_report_url
             }
 
@@ -692,7 +699,6 @@ def fix_and_retry_loop(run_data: dict):
                     "iterations": 0,
                     "outcome": "all_passed",
                     "test_session_id": test_session_id,
-                    "email_data": email_data,
                     "report_url": final_report_url
                 }
 
@@ -863,7 +869,6 @@ def fix_and_retry_loop(run_data: dict):
             "iterations": iteration,
             "outcome": outcome,
             "test_session_id": test_session_id,
-            "email_data": email_data,
             "report_url": final_report_url
         }
 
@@ -877,17 +882,17 @@ def fix_and_retry_loop(run_data: dict):
 # STEP 6: Generate Email Content
 # ═══════════════════════════════════════════════════════════════
 @task
-def generate_email_content(fix_loop_data: dict):
+def generate_email_content(run_data: dict, email_data: dict):
     """
     Generates simple HTML email with overall metrics and link to detailed report.
-    Input comes from fix_and_retry_loop output.
+    run_data comes from run_all_tests; email_data comes directly from
+    extract_inputs_from_email (avoids threading large API docs through every task).
     """
-    final_results = fix_loop_data["final_results"]
-    iterations = fix_loop_data["iterations"]
-    outcome = fix_loop_data["outcome"]
-    email_data = fix_loop_data["email_data"]
-    test_session_id = fix_loop_data["test_session_id"]
-    report_url = fix_loop_data.get("report_url", "")
+    final_results = run_data["final_results"]
+    iterations = run_data.get("iterations", 0)
+    outcome = run_data.get("outcome", "single_run")
+    test_session_id = run_data["test_session_id"]
+    report_url = run_data.get("report_url", "")
 
     sender = email_data["sender_email"]
     subject = email_data["email_subject"]
@@ -1029,7 +1034,6 @@ Output ONLY the HTML document."""
     return {
         "subject": f"Re: {subject}",
         "html_body": html,
-        "email_data": email_data,
         "postman_url": postman_url
     }
 
@@ -1038,12 +1042,11 @@ Output ONLY the HTML document."""
 # STEP 7: Send Email
 # ═══════════════════════════════════════════════════════════════
 @task
-def send_response_email(email_content: dict):
+def send_response_email(email_content: dict, email_data: dict):
     """
     Sends the email response.
+    email_data comes directly from extract_inputs_from_email.
     """
-    email_data = email_content["email_data"]
-
     recipient = email_data["sender_email"]
     subject = email_content["subject"]
     html_body = email_content["html_body"]
@@ -1145,17 +1148,16 @@ Generate-all, run-all, fix-and-retry API testing workflow:
     # Step 3: Generate all test files
     generation_data = generate_all_test_files(scenario_data)
 
-    # Step 4: Run all tests together
+    # Step 4: Run all tests together (includes .env cleanup)
     run_data = run_all_tests(generation_data)
 
-    # Step 5: Fix and retry loop
-    fix_loop_data = fix_and_retry_loop(run_data)
+    # Step 5: Fix and retry loop — SKIPPED (function retained for future use)
 
-    # Step 6: Generate email content
-    email_content = generate_email_content(fix_loop_data)
+    # Step 6: Generate email content (email_data passed directly, not through chain)
+    email_content = generate_email_content(run_data, email_data)
 
-    # Step 7: Send email
-    send_result = send_response_email(email_content)
+    # Step 7: Send email (email_data passed directly, not through chain)
+    send_result = send_response_email(email_content, email_data)
 
     # Done
     workflow_complete = EmptyOperator(
