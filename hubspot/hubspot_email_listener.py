@@ -1228,7 +1228,18 @@ def trigger_task_completion_dag(**kwargs):
     
     for email in task_completion_emails:
         task_id = email.get("task_id")
-        
+
+        # Fallback: extract task_id from thread history headers
+        if not task_id:
+            task_id = check_if_task_completion_reply(email)
+            if task_id:
+                email["task_id"] = task_id
+                logging.info(f"Extracted task_id from thread history: {task_id}")
+
+        if not task_id:
+            logging.warning(f"Skipping email {email.get('id', 'unknown')}: no task_id found")
+            continue
+
         trigger_conf = {
             "email_data": email,
             "task_id": task_id,
@@ -1237,8 +1248,8 @@ def trigger_task_completion_dag(**kwargs):
             "thread_id": email.get("threadId", ""),
             "message_id": email.get("id", "")
         }
-        
-        task_id_safe = task_id.replace('-', '_')
+
+        task_id_safe = str(task_id).replace('-', '_')
         trigger_task = TriggerDagRunOperator(
             task_id=f"trigger_task_completion_{task_id_safe}",
             trigger_dag_id="hubspot_task_completion_handler",
@@ -1999,7 +2010,17 @@ def branch_function(**kwargs):
         if email.get("is_reply", False):
             logging.info(f"Email is a reply, checking thread history...")
             thread_history = email.get("thread_history", [])
-            
+            for msg in reversed(thread_history):
+                if msg.get("from_bot", False):
+                    msg_headers = msg.get("headers", {})
+                    t_id = msg_headers.get("X-Task-ID")
+                    t_type = msg_headers.get("X-Task-Type")
+                    if t_id and t_type == "daily-reminder":
+                        is_reply_to_task = True
+                        task_id_from_thread = t_id
+                        logging.info(f"✓ Found task reminder in thread: task_id={t_id}")
+                    break
+
             if not is_reply_to_task:
                 logging.info(f" No task reminder found in thread history")
         else:
@@ -2185,6 +2206,13 @@ Return exactly one valid JSON. No reasoning field. No extra text.
                 search_emails.append(email)
             elif "no_action" in task_type:
                 no_action_emails.append(email)
+            elif "trigger_task_completion" in task_type:
+                if not email.get("task_id"):
+                    extracted_id = check_if_task_completion_reply(email)
+                    if extracted_id:
+                        email["task_id"] = extracted_id
+                        logging.info(f"Extracted task_id from thread: {extracted_id}")
+                task_completion_emails.append(email)
     
     # Push ALL categorized emails
     tasks_to_run = []
@@ -2334,6 +2362,7 @@ def trigger_continuation_dag(**kwargs):
             "thread_id": email.get("threadId", ""),  # ADD THIS
             "message_id": email.get("id", "")
         }
+
         
         task_id = f"trigger_continuation_{email['id'].replace('-', '_')}"
         trigger_task = TriggerDagRunOperator(
