@@ -1561,7 +1561,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
             client = Client(
                 host=OLLAMA_HOST, 
                 headers={'x-ltai-client': 'hubspot-v6af_cl'},
-                timeout=60.0  # Add explicit timeout
+                timeout=300 # Add explicit timeout
             )
             messages = []
 
