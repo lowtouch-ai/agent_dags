@@ -312,11 +312,11 @@ secure, and no action is required from your side. Thank you for your patience an
     retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
     
     # Increment retry count for the next attempt
-    new_retry_count = current_retry_count if is_retry else 0
+    new_retry_count = (current_retry_count + 1) if is_retry else 0
     
     # Update or create tracker entry
     retry_tracker[tracker_key] = {
-        "status": "max_retries_exceeded" if current_retry_count >= 3 else "failed",
+        "status": "max_retries_exceeded" if new_retry_count >= 3 else "failed",
         "thread_id": thread_id,
         "failure_time": existing_entry.get("failure_time", datetime.now(pytz.timezone("Asia/Kolkata")).isoformat()),
         "fallback_sent": email_sent or existing_entry.get("fallback_sent", False),
@@ -325,7 +325,7 @@ secure, and no action is required from your side. Thank you for your patience an
         "failed_task_id": task_id,
         "is_retry_failure": is_retry,
         "retry_count": new_retry_count,  # NEW: Track attempts
-        "max_retries_reached": current_retry_count >= 2,  # NEW: Flag
+        "max_retries_reached": new_retry_count >= 3,  # NEW: Flag
     }
     
     Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
@@ -795,10 +795,11 @@ def send_final_failure_email_to_user(context):
 
 def clear_retry_tracker_on_success(context):
     dag_run = context['dag_run']
-    original_run_id = dag_run.conf.get('original_run_id')
-    original_dag_id = dag_run.conf.get('original_dag_id', dag_run.dag_id)
+    conf = dag_run.conf or {}
+    original_run_id = conf.get('original_run_id')
+    original_dag_id = conf.get('original_dag_id', dag_run.dag_id)
     
-    if not original_run_id or not dag_run.conf.get('retry_attempt'):
+    if not original_run_id or not conf.get('retry_attempt'):
         return  # Not a retry run
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
@@ -812,10 +813,11 @@ def clear_retry_tracker_on_success(context):
 
 def update_retry_tracker_on_failure(context):
     dag_run = context['dag_run']
-    original_run_id = dag_run.conf.get('original_run_id')
-    original_dag_id = dag_run.conf.get('original_dag_id', dag_run.dag_id)
+    conf = dag_run.conf or {}
+    original_run_id = conf.get('original_run_id')
+    original_dag_id = conf.get('original_dag_id', dag_run.dag_id)
     
-    if not original_run_id or not dag_run.conf.get('retry_attempt'):
+    if not original_run_id or not conf.get('retry_attempt'):
         return  # Not a retry run
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
@@ -1978,7 +1980,7 @@ def branch_function(**kwargs):
     if not unread_emails:
         logging.info("No unread emails found")
         ti.xcom_push(key="has_emails", value=False)
-        return
+        return "no_email_found_task"
 
     ti.xcom_push(key="has_emails", value=True)
     
@@ -2305,10 +2307,29 @@ def extract_json_from_text(text):
         text = text.strip()
         text = re.sub(r'```json\s*', '', text)
         text = re.sub(r'```\s*', '', text)
-        
-        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group())
+
+        # Try parsing the whole text first
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Find balanced braces to handle nested JSON
+        start = text.find('{')
+        if start == -1:
+            return None
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i+1])
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    break
         return None
     except Exception as e:
         logging.error(f"Error extracting JSON: {e}")
@@ -4293,8 +4314,8 @@ def trigger_report_dag(**kwargs):
     """Enhanced trigger_report_dag with professional report email formatting"""
     DEAL_STAGE_LABELS = get_deal_stage_labels()
     ti = kwargs['ti']
-    report_emails = ti.xcom_pull(key="report_emails") or []
-    general_report_emails = ti.xcom_pull(key="general_query_report") or []
+    report_emails = ti.xcom_pull(key="report_emails", task_ids="branch_task") or []
+    general_report_emails = ti.xcom_pull(key="general_query_report", task_ids="branch_task") or []
     
     all_report_emails = report_emails + general_report_emails
     
@@ -5127,8 +5148,8 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                 final_response = ai_response
                 log_prefix = "SUCCESS Report"
             else:
-                raise
-                
+                raise ValueError(f"Report generation failed for email {email_id}: report_success={report_success}, ai_response is None")
+
            
             # Build and send email (keep your existing send logic)
             try:

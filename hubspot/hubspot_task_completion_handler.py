@@ -126,10 +126,29 @@ def extract_json_from_text(text):
         text = text.strip()
         text = re.sub(r'```json\s*', '', text)
         text = re.sub(r'```\s*', '', text)
-        
-        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group())
+
+        # Try parsing the whole text first
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Find balanced braces to handle nested JSON
+        start = text.find('{')
+        if start == -1:
+            return None
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i+1])
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    break
         return None
     except Exception as e:
         logging.error(f"Error extracting JSON: {e}")
@@ -504,8 +523,7 @@ def analyze_task_completion_request(**kwargs):
     email_data = kwargs['dag_run'].conf.get('email_data', {})
     
     if not email_data:
-        logging.error("No email data provided")
-        return None
+        raise ValueError("No email data provided in dag_run.conf")
     
     email_content = email_data.get("content", "")
     
@@ -534,8 +552,7 @@ def analyze_task_completion_request(**kwargs):
                     break
     
     if not task_id:
-        logging.warning("No task ID found in email headers or thread history")
-        return None
+        raise ValueError("No task ID found in email headers or thread history")
 
     # Get task details for context
     original_task = get_task_details(task_id)
@@ -651,8 +668,7 @@ Return ONLY valid JSON with NO additional text:
         analysis = extract_json_from_text(ai_response)
     
     if not analysis:
-        logging.error("Failed to parse AI analysis")
-        return None
+        raise ValueError("Failed to parse AI analysis response")
 
     if "deal_updates" not in analysis or not isinstance(analysis["deal_updates"], dict):
         analysis["deal_updates"] = {}
@@ -956,7 +972,7 @@ def send_confirmation_email(**kwargs):
             if "dealstage" in det:
                 lines.append(f"<li>Stage updated</li>")
             if "amount" in det:
-                lines.append(f"<li>Amount updated to ${int(det['amount']):,}</li>")
+                lines.append(f"<li>Amount updated to ${int(float(det.get('amount', 0))):,}</li>")
             if "closedate" in det:
                 try:
                     dt = datetime.fromtimestamp(det["closedate"]/1000, tz=timezone.utc)
@@ -1000,7 +1016,7 @@ def send_confirmation_email(**kwargs):
     try:
         service = authenticate_gmail()
         if not service:
-            return
+            raise ValueError("Gmail authentication failed in send_completion_email")
         
         recipients = extract_all_recipients(email_data)
         msg = MIMEMultipart('alternative')

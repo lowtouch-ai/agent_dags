@@ -29,7 +29,7 @@ hubspot_retry_failed_tasks (every 5 min)
 | `hubspot_create_objects`          | `hubspot_object_creator.py`            | None (triggered) | Creates contacts, companies, deals, meetings, tasks in HubSpot after user confirmation |
 | `hubspot_task_completion_handler` | `hubspot_task_completion_handler.py`   | None (triggered) | Handles task completion and deal stage updates via email |
 | `hubspot_daily_task_reminders`    | `hubspot_task_scheduler.py` | `0 * * * *` | Sends per-task email reminders during each owner's business hours, respects holidays |
-| `hubspot_retry_failed_tasks`      | `hubspot_retry_tasks.py` | 5 min | Auto-retries failed DAG runs (max 3 attempts, 20-min cooldown) |
+| `hubspot_retry_failed_tasks`      | `hubspot_retry_tasks.py` | 5 min | Auto-retries failed DAG runs (max 3 attempts, 20-min cooldown between retries) |
  
 ### Shared module pattern
 
@@ -39,11 +39,11 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from hubspot_email_listener import send_fallback_email_on_failure, send_hubspot_slack_alert
 ```
 
-Exported utilities: `send_fallback_email_on_failure`, `send_hubspot_slack_alert`, `get_email_thread`.
+Exported utilities: `send_fallback_email_on_failure`, `send_hubspot_slack_alert`, `get_email_thread`, `extract_all_recipients`.
 
 ### Common code across DAGs
 
-Each DAG file (except retry) independently defines its own: `authenticate_gmail()`, `get_ai_response()`, `clear_retry_tracker_on_success()`, `update_retry_tracker_on_failure()`, and `default_args`. These are duplicated, not shared.
+Each DAG file (except retry) independently defines its own: `authenticate_gmail()`, `get_ai_response()`, `clear_retry_tracker_on_success()`, `update_retry_tracker_on_failure()`, `extract_json_from_text()`, and `default_args`. These are duplicated, not shared.
 
 ## External Services
 
@@ -70,12 +70,20 @@ Core variables used across DAGs:
 
 Inter-task communication uses **XCom** and **`dag_run.conf`**. When triggering downstream DAGs, `email_data` (containing thread ID, sender, subject, body) is passed via `conf`. The retry system also passes `original_run_id`, `original_dag_id`, and `retry_attempt` through `conf`.
 
+### Retry system
+
+The retry tracker (`hubspot_retry_tracker` Airflow Variable) tracks failed runs as a JSON dict keyed by `"{dag_id}:{run_id}"`. Each entry tracks `retry_count`, `status`, `failure_time`, and `max_retries_reached`. The retry count increments on each failure (`current_retry_count + 1`). After 3 failed attempts, status becomes `"max_retries_exceeded"` and no further retries are attempted. Cooldown between retries is 20 minutes.
+
+`clear_retry_tracker_on_success` and `update_retry_tracker_on_failure` are called from `on_success_callback` / `on_failure_callback` in each DAG's `default_args`. Both guard against `dag_run.conf` being `None` with `conf = dag_run.conf or {}`.
+
 ## Key Patterns
 
-- **Branching**: `BranchPythonOperator` is used extensively in the email listener and search DAGs to route to different task paths based on AI classification
-- **Failure handling**: On failure, a fallback email is sent to the user and a Slack alert fires. The retry tracker (Airflow Variable) coordinates retry state across DAGs
-- **AI JSON extraction**: AI responses often need cleanup - markdown code fences and HTML entities are stripped, then JSON is parsed with regex fallbacks
+- **Branching**: `BranchPythonOperator` is used extensively in the email listener and search DAGs to route to different task paths based on AI classification. `branch_function` returns `"no_email_found_task"` when there are no unread emails.
+- **Failure handling**: On failure, a fallback email is sent to the user and a Slack alert fires. Critical failures raise `ValueError` with descriptive messages rather than returning `None`. The object creator falls back to a structured error result (`status: "failure"`, `user_intent: "error"`) when AI response parsing fails.
+- **AI JSON extraction**: `extract_json_from_text()` strips markdown code fences, tries parsing the full text first, then uses balanced-brace depth tracking to extract nested JSON objects. This handles nested JSON that simple regex cannot match.
+- **Null-safety**: Access `email_data.get("headers", {})` (not `email_data["headers"]`), `dag_run.conf or {}` (not `dag_run.conf` directly), and `msg.get('role', 'unknown')` for chat history entries. Always guard against `None` values from XCom/conf.
 - **Task threshold**: A `TASK_THRESHOLD = 15` limit prevents bulk task creation in a single request
+- **XCom task_ids**: When pulling XCom values, specify `task_ids` explicitly (e.g., `ti.xcom_pull(key="report_emails", task_ids="branch_task")`) to avoid ambiguity when multiple tasks push the same key
 
 ## Task Completion Reply Flow
 
@@ -87,6 +95,57 @@ When a user replies to a daily task reminder email, the flow is:
 4. `trigger_task_completion_dag` reads `task_id` from the email, falls back to `check_if_task_completion_reply()` if missing, and triggers `hubspot_task_completion_handler`
 
 The `check_if_task_completion_reply()` helper extracts `task_id` by checking direct headers first, then scanning thread history for the bot's reminder message. It is used as a fallback in both the AI routing path and the trigger function.
+
+## Deal Stage Validation Flow
+
+The `hubspot_search_entities` DAG validates deal stages via two independent AI calls that run at different points in the pipeline:
+
+1. **`validate_deal_stage`** (runs early) — Parses deal stages from the user's email, validates them against `VALID_DEAL_STAGES`, and defaults invalid/missing stages to `"Lead"`. Pushes result to XCom as `deal_stage_info` with structure:
+   ```json
+   {"deal_stages": [{"deal_index": 1, "deal_name": "...", "validated_stage": "Lead"}]}
+   ```
+
+2. **Deal extraction** (`validate_deals_against_associations`, runs later) — Independently extracts deal details including `dealLabelName` from the email. This AI call may return invalid stages (e.g., "Discovery") and may produce different deal names than step 1.
+
+3. **`compile_search_results`** — Applies the validated stage from step 1 to the deal from step 2. Uses **name match first**, then **index-based fallback** (`deal_index` → array position) to handle cases where the two AI calls return different deal names for the same deal.
+
+### Valid Deal Stages
+
+```python
+VALID_DEAL_STAGES = [
+    "Lead", "Qualified Lead", "Solution Discussion", "Proposal",
+    "Negotiations", "Contracting", "Closed Won", "Closed Lost", "Inactive"
+]
+```
+
+These are defined in `validate_deal_stage()`. Invalid or missing stages default to `"Lead"`.
+
+### Known pattern: AI name mismatch
+
+The two AI calls often return different deal names from the same email (e.g., `"PolicyStream – Policy Automation Program"` vs `"PolicyStream Insurance Technologies-Policy Automation Program"`). The index-based matching in `compile_search_results` handles this by mapping `deal_index` (1-based from `validate_deal_stage`) to array position in `new_deals`.
+
+### Deal creation ownership
+
+New deals are determined by `validate_deals_against_associations` (upstream). The later disambiguation step (`validate_deals_against_associations` → action resolution) **skips** any AI suggestion to "create_new" a deal and defers to the upstream `new_deals` list. This prevents duplicate deal creation from conflicting AI decisions.
+
+### Company name normalization
+
+When normalizing company names for comparison, the result is stored in `company_details["normalized_name"]` — the original `name` field is preserved unchanged.
+
+## Task Reminder Scheduling
+
+The `hubspot_daily_task_reminders` DAG tracks sent reminders **per owner per day** using Airflow Variables keyed as `sent_reminders_{owner_local_date}_{owner_id}`. The sent-today check runs inside the per-owner loop to ensure each owner's reminders are evaluated in their own timezone, preventing duplicate sends when owners span different time zones.
+
+## Common Pitfalls
+
+These bugs have been fixed — avoid reintroducing them:
+
+- **Set literal vs scalar**: `{DEFAULT_OWNER_ID}` creates a Python set, not a string. Use `DEFAULT_OWNER_ID` (no braces) when assigning to variables like `default_task_owner_id`.
+- **Duplicate AI calls**: Do not call `get_ai_response()` twice for the same prompt. Each call is expensive and returns potentially different results.
+- **Bare `raise` in non-except context**: Use `raise ValueError("descriptive message")` instead of bare `raise` — bare `raise` outside an `except` block causes `RuntimeError`.
+- **`get_owner_name_from_id` return**: When an owner is found by ID, return `owner.get("name", DEFAULT_OWNER_NAME)` — not unconditionally `DEFAULT_OWNER_NAME`.
+- **`validate_deal_stage` early return**: On error, push the default result to XCom AND return it. Missing the `return` causes fallthrough to code expecting `parsed_json`.
+- **Amount formatting**: Use `int(float(det.get('amount', 0)))` to handle string amounts like `"50000.0"` — `int("50000.0")` raises `ValueError`.
 
 ## Infrastructure
 

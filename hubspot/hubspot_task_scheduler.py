@@ -191,10 +191,6 @@ def get_sent_reminders_today(ti, owner_id, owner_timezone):
         logging.warning(f"Failed to load sent reminders for owner {owner_id}: {e}")
         return set()
 
-    except Exception as e:
-        logging.warning(f"Failed to load sent reminders, treating as empty: {e}")
-        return set()
-
 def mark_reminder_sent(ti, task_id, owner_id, owner_timezone):
     """Mark that this task was sent today for this owner in THEIR timezone"""
     try:
@@ -697,7 +693,6 @@ def collect_due_tasks(ti, **context):
     for owner in owners:
         mark_owner_initiated(ti, owner["id"], owner["timezone"])
 
-    sent_today = get_sent_reminders_today(ti, owner_id=None, owner_timezone=None)  # Get all sent today across owners
     now_utc = datetime.now(timezone.utc)
     one_month_ago = now_utc - timedelta(days=30)
 
@@ -710,6 +705,7 @@ def collect_due_tasks(ti, **context):
         tz = owner["timezone"]
 
         logging.info(f"Collecting tasks for {owner_name}")
+        sent_today = get_sent_reminders_today(ti, owner_id=owner_id, owner_timezone=tz)
 
         # Calculate date boundaries in OWNER'S timezone
         owner_tz = pytz.timezone(tz)

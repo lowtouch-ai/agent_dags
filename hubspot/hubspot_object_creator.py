@@ -581,7 +581,18 @@ CRITICAL REMINDERS:
         
     except Exception as e:
         logging.info (f"Failed to parse AI response: {e}")
-    
+        results = {
+            "status": "failure",
+            "user_intent": "error",
+            "entities_to_create": {},
+            "entities_to_update": {},
+            "selected_entities": {},
+            "reasoning": f"Failed to parse AI response: {e}",
+            "tasks_to_execute": ["compose_response_html", "collect_and_save_results", "send_final_email"],
+            "should_determine_owner": False,
+            "should_check_task_threshold": False,
+            "casual_comments_detected": False
+        }
     ti.xcom_push(key="analysis_results", value=results)
     logging.info(f"Analysis completed for thread {thread_id}")
     return results
@@ -974,6 +985,7 @@ If no dates found in email, check today's date as default for each owner.
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
+    warnings = []
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
     except Exception as e:
@@ -1174,11 +1186,12 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         # On failure: mark ALL filtered contacts as failed
         failed_list = [
             {
-                "firstname": c.get("firstname", ""),
-                "lastname": c.get("lastname", ""),
-                "email": c.get("email", ""),
+                "firstname": contact.get("firstname", ""),
+                "lastname": contact.get("lastname", ""),
+                "email": contact.get("email", ""),
                 "error": error_msg
             }
+            for contact in to_create_contacts
         ]
 
         fallback = {
@@ -4458,8 +4471,9 @@ def send_final_email(ti, **context):
     
     # Get latest email for headers
     latest_email = email_thread[-1]
-    sender_email = latest_email["headers"].get("From", "")
-    original_subject = latest_email['headers'].get('Subject', 'HubSpot Request')
+    headers = latest_email.get("headers", {})
+    sender_email = headers.get("From", "")
+    original_subject = headers.get('Subject', 'HubSpot Request')
     
     # Extract email address from "From" header (might be "Name <email@domain.com>")
     sender_match = re.search(r'<([^>]+)>', sender_email)
@@ -4469,8 +4483,8 @@ def send_final_email(ti, **context):
         primary_recipient = sender_email
     
     subject = f"Re: {original_subject}" if not original_subject.lower().startswith('re:') else original_subject
-    in_reply_to = latest_email["headers"].get("Message-ID", "")
-    references = latest_email["headers"].get("References", "")
+    in_reply_to = headers.get("Message-ID", "")
+    references = headers.get("References", "")
     
     # Build final CC list (excluding sender and bot)
     final_cc_recipients = []
