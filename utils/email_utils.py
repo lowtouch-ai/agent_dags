@@ -242,14 +242,15 @@ def update_last_checked_timestamp(file_path, timestamp):
         logging.error(f"Error updating timestamp: {str(e)}")
 
 
-def fetch_unread_emails_with_attachments(service, last_checked_timestamp, attachment_dir):
+def fetch_unread_emails_with_attachments(service, attachment_dir, query=None, last_checked_timestamp=None):
     """
     Fetch unread emails with attachments from Gmail.
     
     Args:
         service: Gmail API service object
-        last_checked_timestamp: Timestamp in milliseconds of last check
         attachment_dir: Directory to save attachments
+        query: Custom Gmail search query (optional)
+        last_checked_timestamp: Timestamp in milliseconds of last check (optional)
         
     Returns:
         List of email objects with extracted attachments
@@ -258,8 +259,13 @@ def fetch_unread_emails_with_attachments(service, last_checked_timestamp, attach
         # Ensure attachment directory exists
         os.makedirs(attachment_dir, exist_ok=True)
         
-        # Build search query
-        query = f"is:unread after:{last_checked_timestamp // 1000} has:attachment"
+        # Build default search query if none provided
+        if query is None:
+            if last_checked_timestamp is not None:
+                query = f"is:unread after:{last_checked_timestamp // 1000} has:attachment"
+            else:
+                query = "is:unread has:attachment"
+        
         logging.info(f"Fetching emails with query: {query}")
         
         # Search for emails
@@ -292,8 +298,12 @@ def fetch_unread_emails_with_attachments(service, last_checked_timestamp, attach
                 sender = headers.get("From", "").lower()
                 timestamp = int(msg_data["internalDate"])
                 
-                # Skip no-reply emails and old emails
-                if "no-reply" in sender or timestamp <= last_checked_timestamp:
+                # Skip no-reply emails and old emails (only if last_checked_timestamp provided)
+                if "no-reply" in sender:
+                    logging.info(f"Skipping email from {sender}")
+                    continue
+                
+                if last_checked_timestamp is not None and timestamp <= last_checked_timestamp:
                     logging.info(f"Skipping email from {sender} (timestamp: {timestamp})")
                     continue
                 
