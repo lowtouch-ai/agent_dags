@@ -76,3 +76,20 @@ Inter-task communication uses **XCom** and **`dag_run.conf`**. When triggering d
 - **Failure handling**: On failure, a fallback email is sent to the user and a Slack alert fires. The retry tracker (Airflow Variable) coordinates retry state across DAGs
 - **AI JSON extraction**: AI responses often need cleanup - markdown code fences and HTML entities are stripped, then JSON is parsed with regex fallbacks
 - **Task threshold**: A `TASK_THRESHOLD = 15` limit prevents bulk task creation in a single request
+
+## Task Completion Reply Flow
+
+When a user replies to a daily task reminder email, the flow is:
+
+1. `branch_function` scans thread history for bot messages with `X-Task-ID` + `X-Task-Type: daily-reminder` headers
+2. If found, sets `email["task_id"]` and `is_task_association=True`, routes to `other_emails` → AI classification
+3. AI classifies the reply as `trigger_task_completion` → added to `task_completion_emails` (with `task_id` already set)
+4. `trigger_task_completion_dag` reads `task_id` from the email, falls back to `check_if_task_completion_reply()` if missing, and triggers `hubspot_task_completion_handler`
+
+The `check_if_task_completion_reply()` helper extracts `task_id` by checking direct headers first, then scanning thread history for the bot's reminder message. It is used as a fallback in both the AI routing path and the trigger function.
+
+## Infrastructure
+
+- **Docker containers**: `airflow` (base), `airflowsvr` (webserver), `airflowsch` (scheduler), `airflowwkr` (worker), `agentomatic` (AI model server)
+- **Logs location**: `/appz/home/airflow/logs/dag_id=<dag_id>/run_id=<run_id>/task_id=<task_id>/attempt=N.log` (on `airflowwkr` container)
+- **Airflow CLI**: Must run inside a container with DB access (e.g., `docker exec airflow airflow ...`). The `airflowsvr`/`airflowsch`/`airflowwkr` containers may have DB auth issues with CLI commands
