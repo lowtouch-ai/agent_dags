@@ -1036,22 +1036,11 @@ def generate_email_content(run_data: dict, email_data: dict):
     if total_tests > 0 and pass_rate == 0.0:
         pass_rate = round(passed / total_tests * 100, 2)
 
-    # Generate report link (fallback if not from results)
+    # Generate report link — ensure server_host is always prepended
     if not report_url:
         report_url = f"{server_host}/static/pytest_reports/{test_session_id}/index.html"
-
-    # Try to get Postman collection
-    postman_url = ""
-    try:
-        postman_prompt = (
-            f"Generate postman collection URL for {test_session_id}: "
-            f"{{postman_collection_url: {server_host}/static/postman_reports/xxx.json}}"
-        )
-        postman_resp = get_ai_response(postman_prompt, model=MODEL_NAME)
-        postman_json = extract_json_from_text(postman_resp) or {}
-        postman_url = postman_json.get("postman_collection_url", "")
-    except Exception:
-        pass
+    elif not report_url.startswith(("http://", "https://")):
+        report_url = f"{server_host}/{report_url.lstrip('/')}"
 
     # Determine overall status
     if pass_rate >= 95:
@@ -1116,9 +1105,8 @@ Create a CLEAN, SIMPLE email with:
    {pdf_note}
    {iteration_note}
 
-4. **Links Section** (prominent buttons):
+4. **Links Section** (prominent button):
    - 📊 View Detailed Report: {report_url}
-   - 📦 Download Postman Collection: {postman_url}
 
 5. **Footer**:
    - Professional closing
@@ -1161,7 +1149,6 @@ Output ONLY the HTML document."""
     return {
         "subject": f"Re: {subject}",
         "html_body": html,
-        "postman_url": postman_url
     }
 
 

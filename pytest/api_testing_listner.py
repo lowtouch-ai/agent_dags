@@ -311,8 +311,11 @@ def no_email_found(**kwargs):
     logging.info("No new emails with JSON attachments found to process.")
 
 readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'mailbox_monitor.md')
-with open(readme_path, 'r') as file:
-    readme_content = file.read()
+try:
+    with open(readme_path, 'r') as file:
+        readme_content = file.read()
+except FileNotFoundError:
+    readme_content = None
 
 # Define DAG
 with DAG("api_testing_monitor_mailbox",
