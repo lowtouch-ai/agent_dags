@@ -51,7 +51,7 @@ Email reply with HTML report + Postman collection link
 - **Shared utilities** (`agent_dags/utils/`):
   - `email_utils.py` — `authenticate_gmail`, `send_email`, `mark_email_as_read`, `extract_all_recipients`
   - `agent_utils.py` — `get_ai_response`, `extract_json_from_text`
-- **AI model**: configured via Airflow Variable `ltai.model.name` (default `APITestAgent:5.0` in v2, `PostmanAPITestAgent:3.0` in v1)
+- **AI model**: configured via Airflow Variable `ltai.api.test.model.name` (default `APITestAgent:5.0` in v2, `PostmanAPITestAgent:3.0` in v1)
 - **Gmail**: credentials in `ltai.api.test.gmail_credentials`, address in `ltai.api.test.from_address`
 
 ## Airflow Variables
@@ -60,7 +60,7 @@ Email reply with HTML report + Postman collection link
 |---|---|---|
 | `ltai.api.test.from_address` | Gmail address to monitor | (required) |
 | `ltai.api.test.gmail_credentials` | Gmail API credentials JSON | (required) |
-| `ltai.model.name` | AI model for test generation | `APITestAgent:5.0` |
+| `ltai.api.test.model.name` | AI model for test generation | `APITestAgent:5.0` |
 | `ltai.server.host` | Server host for report URLs | `http://localhost:8080` |
 | `ltai.test.base_dir` | Base directory for test sessions | `/appz/pyunit_testing` |
 | `ltai.api.test.test_mode` | When `"true"`, limits to 1 scenario | `"false"` |
@@ -110,7 +110,7 @@ auth:
 3. The `_create_env_file` helper resolves it at runtime
 
 ### Changing the AI model
-Update `ltai.model.name` in Airflow Variables. Both DAGs pick it up on next run.
+Update `ltai.api.test.model.name` in Airflow Variables. Both DAGs pick it up on next run.
 
 ### Debugging test generation
 - Check Airflow logs for the `generate_all_test_files` task — each file generation is logged with char count

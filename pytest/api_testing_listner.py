@@ -28,7 +28,7 @@ default_args = {
 
 GMAIL_FROM_ADDRESS = Variable.get("ltai.api.test.from_address", default_var="")
 GMAIL_CREDENTIALS = Variable.get("ltai.api.test.gmail_credentials", default_var="")
-MODEL_NAME = Variable.get("ltai.model.name", default_var="APITestAgent:5.0")
+MODEL_NAME = Variable.get("ltai.api.test.model.name", default_var="APITestAgent:5.0")
 LAST_PROCESSED_EMAIL_FILE = "/appz/cache/api_testing_last_processed_email.json"
 ATTACHMENT_DIR = "/appz/data/attachments/"
 
