@@ -34,7 +34,7 @@ The pipeline consists of three interconnected DAGs:
 - **Schedule**: None (triggered by `cv_monitor_mailbox`)
 - **Purpose**: Evaluates candidate responses to initial screening questions
 - **Workflow**:
-  1. Extracts candidate responses from the email body
+  1. Extracts candidate responses from the full email body (sourced from `thread_history.current_message.content`, with fallback to email snippet)
   2. Loads the candidate's saved profile from `/appz/data/recruitment/<email>.json`
   3. Analyzes responses using AI against 7 criteria (work arrangement, availability, salary, location, motivation, technical fit, qualifications)
   4. Updates candidate profile with screening results
@@ -85,6 +85,11 @@ cv_monitor_mailbox (listener)
 ## Scoring System
 
 CV scoring uses a weighted formula:
-- **Must-have skills**: 60% weight (100 if matched, 50 if missing)
+- **Must-have skills**: 60% weight (100 if matched, 0 if missing)
 - **Nice-to-have skills**: 30% weight (100 if matched, 0 if missing)
 - **Other criteria** (experience + education): 10% weight
+- **Eligibility threshold**: Candidates scoring below 50% total are automatically marked ineligible and receive a rejection email
+
+## Shared Utility Notes
+
+- **`extract_json_from_text`** (`agent_utils.py`): Uses balanced-brace parsing (not regex) to handle arbitrarily nested JSON structures. Returns the largest valid JSON object found in text.

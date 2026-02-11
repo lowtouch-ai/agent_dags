@@ -313,14 +313,14 @@ def calculate_candidate_score(analysis_json):
     
     # Track ineligibility reasons
     reasons = []
-    
-    # Score Must-Have Skills
+
+    # Score Must-Have Skills (0 if missing — these are required)
     for skill in must_have_skills:
         match = skill.get('match', False)
         if match:
             must_have_scores.append(100)
         else:
-            must_have_scores.append(50)
+            must_have_scores.append(0)
             reasons.append("missing Must-Have skills")
     
     # Score Nice-to-Have Skills
@@ -345,21 +345,21 @@ def calculate_candidate_score(analysis_json):
     must_have_avg = round(statistics.mean(must_have_scores)) if must_have_scores else 0
     nice_to_have_avg = round(statistics.mean(nice_to_have_scores)) if nice_to_have_scores else 0
     other_avg = round(statistics.mean(other_scores)) if other_scores else 0
-    
-    # Eligibility Check
-    ineligible = False
-    
+
+    # Calculate weighted total
+    must_have_weighted = (must_have_avg / 100) * 60
+    nice_to_have_weighted = (nice_to_have_avg / 100) * 30
+    other_weighted = (other_avg / 100) * 10
+    total_score = round(must_have_weighted + nice_to_have_weighted + other_weighted)
+
+    # Eligibility Check — minimum 50% total score required
+    ineligible = total_score < 50
+
     if ineligible:
-        total_score = 0
-        remarks = "Ineligible due to: " + ", ".join(reasons) + "."
+        unique_reasons = list(dict.fromkeys(reasons))  # Deduplicate while preserving order
+        remarks = "Ineligible due to: " + ", ".join(unique_reasons) + "."
     else:
-        remarks = "Eligible."
-        # If eligible, calculate weighted total
-        must_have_weighted = (must_have_avg / 100) * 60
-        nice_to_have_weighted = (nice_to_have_avg / 100) * 30
-        other_weighted = (other_avg / 100) * 10
-        total_score = round(must_have_weighted + nice_to_have_weighted + other_weighted)
-    
+        remarks = "Eligible."       
     return {
         'must_have_score': must_have_avg,
         'nice_to_have_score': nice_to_have_avg,

@@ -54,7 +54,14 @@ def extract_candidate_response(**kwargs):
     headers = email_data.get('headers', {})
     sender = headers.get('From', 'Unknown')
     subject = headers.get('Subject', 'No Subject')
-    body = email_data.get('body', '')
+
+    # Extract full body from thread history's current message (preferred),
+    # fall back to email content snippet
+    thread_history = email_data.get('thread_history', {})
+    current_message = thread_history.get('current_message', {}) if thread_history else {}
+    body = current_message.get('content', '') if current_message else ''
+    if not body:
+        body = email_data.get('content', '')
     
     _, sender_email = parseaddr(sender)
     

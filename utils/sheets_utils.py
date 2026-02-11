@@ -27,7 +27,7 @@ def authenticate_google_sheets_oauth(credentials_json):
 
         # Build credentials correctly
         credentials = Credentials(
-            token=credentials_dict.get("token"),
+            token=credentials_dict.get("access_token"),
             refresh_token=credentials_dict.get("refresh_token"),
             token_uri=credentials_dict.get("token_uri"),
             client_id=credentials_dict.get("client_id"),

@@ -346,19 +346,46 @@ def get_ai_response(prompt, agent_url="http://agentomatic:8000", conversation_hi
 
 import json
 def extract_json_from_text(text):
-    # Improved regex: Match a standalone JSON object (not nested in larger text)
-    # This looks for { ... } that's not inside quotes or other braces
-    pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
-    matches = re.findall(pattern, text, re.DOTALL)
-    
-    for match in matches:  # Try each potential match
-        try:
-            parsed = json.loads(match)
-            if isinstance(parsed, dict):  # Ensure it's an object, not array/primitive
-                return parsed
-        except json.JSONDecodeError as e:
-            logging.debug(f"JSON parse failed on match '{match[:100]}...': {e}")
-            continue
-    
+    """Extract the largest valid JSON object from text, handling arbitrary nesting depth."""
+    results = []
+    i = 0
+    while i < len(text):
+        if text[i] == '{':
+            # Track balanced braces, accounting for JSON strings
+            depth = 0
+            in_string = False
+            escape_next = False
+            for j in range(i, len(text)):
+                ch = text[j]
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == '\\' and in_string:
+                    escape_next = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if not in_string:
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                    if depth == 0:
+                        candidate = text[i:j+1]
+                        try:
+                            parsed = json.loads(candidate)
+                            if isinstance(parsed, dict):
+                                results.append((len(candidate), parsed))
+                        except json.JSONDecodeError as e:
+                            logging.debug(f"JSON parse failed: {e}")
+                        break
+        i += 1
+
+    if results:
+        # Return the largest valid JSON object (the complete outermost one)
+        results.sort(key=lambda x: x[0], reverse=True)
+        return results[0][1]
+
     logging.warning("No valid JSON object found in text.")
     return None
