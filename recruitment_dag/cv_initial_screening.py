@@ -384,8 +384,24 @@ def notify_recruiter_for_interview(**kwargs):
 
     sender_email = response_data.get('sender_email', 'Unknown')
     candidate_name = candidate_profile.get('candidate_name', 'Unknown Candidate') if candidate_profile else 'Unknown Candidate'
-    overall_score = candidate_profile.get('total_score', 'N/A')
-    position = candidate_profile.get('job_title','N/A') if candidate_profile else 'N/A'
+    cv_score = candidate_profile.get('total_score', 'N/A') if candidate_profile else 'N/A'
+    position = candidate_profile.get('job_title', 'N/A') if candidate_profile else 'N/A'
+
+    # Extract key credentials from candidate profile
+    experience_years = candidate_profile.get('experience_match', {}).get('candidate_experience_years', 'N/A') if candidate_profile else 'N/A'
+    education = candidate_profile.get('education_match', {}).get('candidate_education', 'N/A') if candidate_profile else 'N/A'
+
+    # Get matched must-have skills
+    must_have_skills = candidate_profile.get('must_have_skills', []) if candidate_profile else []
+    matched_must_have = [s.get('skill_name', '') for s in must_have_skills if s.get('match')]
+    must_have_str = ', '.join(matched_must_have) if matched_must_have else 'N/A'
+
+    # Get matched nice-to-have skills
+    nice_to_have_skills = candidate_profile.get('nice_to_have_skills', []) if candidate_profile else []
+    matched_nice_to_have = [s.get('skill_name', '') for s in nice_to_have_skills if s.get('match')]
+    nice_to_have_str = ', '.join(matched_nice_to_have) if matched_nice_to_have else 'N/A'
+
+    
 
     body = f"""
     <h2>Interview Scheduling Request</h2>
@@ -397,7 +413,15 @@ def notify_recruiter_for_interview(**kwargs):
         <li><strong>Name:</strong> {candidate_name}</li>
         <li><strong>Email:</strong> {sender_email}</li>
         <li><strong>Position:</strong> {position}</li>
-        <li><strong>Screening Score:</strong> {overall_score}</li>
+        <li><strong>CV Score:</strong> {cv_score}</li>
+    </ul>
+
+    <h3>Key Credentials:</h3>
+    <ul>
+        <li><strong>Experience:</strong> {experience_years} years</li>
+        <li><strong>Education:</strong> {education}</li>
+        <li><strong>Matched Must-Have Skills:</strong> {must_have_str}</li>
+        <li><strong>Matched Nice-to-Have Skills:</strong> {nice_to_have_str}</li>
     </ul>
 
     <p>Please reach out to the candidate to set up an interview call.</p>
