@@ -294,14 +294,14 @@ def trigger_response_tasks(**kwargs):
         }
         
         logging.info(
-            f"Triggering api_test_case_executor for email {email['id']} with "
+            f"Triggering api_test_case_eapi_test_executor_scenario_based executor for email {email['id']} with "
             f"{len(email['json_attachments'])} JSON file(s) and "
             f"{len(email['pdf_attachments'])} PDF file(s)"
         )
 
         TriggerDagRunOperator(
             task_id=task_id,
-            trigger_dag_id="api_test_case_executor",
+            trigger_dag_id="api_test_executor_scenario_based",
             conf=conf_data,
             wait_for_completion=False,
         ).execute(context=kwargs)
