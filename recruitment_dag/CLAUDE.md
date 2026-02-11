@@ -28,7 +28,7 @@ The pipeline consists of three interconnected DAGs:
   3. Identifies the best matching job for the candidate
   4. Scores the CV against the JD (must-have skills, nice-to-have skills, experience, education)
   5. Saves candidate profile and scores to Google Sheets and local JSON (`/appz/data/recruitment/`)
-  6. Sends response email: rejection or screening questions for eligible candidates
+  6. Sends response email: rejection or screening questions for eligible candidates. The email opening is context-aware — if the candidate applied for a specific role, it acknowledges that role; if the candidate sent a general inquiry (no specific role mentioned), it acknowledges their interest in the company and introduces the best matching role based on their profile.
 
 ### 3. `cv_initial_screening.py` — Screening Response Analysis (DAG ID: `screening_response_analysis`)
 - **Schedule**: None (triggered by `cv_monitor_mailbox`)

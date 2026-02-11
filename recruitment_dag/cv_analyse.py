@@ -556,6 +556,8 @@ def send_response_email(**kwargs):
     score_data = ti.xcom_pull(task_ids='get_the_score_for_cv_analysis', key='score_data')
     cv_data = ti.xcom_pull(task_ids='extract_cv_content', key='cv_data')
     
+    email_content = ti.xcom_pull(task_ids='extract_cv_content', key='email_content')
+
     if not email_data or not score_data or not cv_data:
         logging.warning("Missing data for sending response email")
         return "Missing data for email"
@@ -620,6 +622,11 @@ def send_response_email(**kwargs):
         agent_response_prompt = f"""Compose a personalized response email for a selected candidate after initial screening. Include the following structure in the email body:
 
 - Greeting: Use a professional greeting with the candidate's name if available from the CV data: {cv_data}. If no name is available, use 'Dear Candidate'.
+
+- Opening Paragraph (IMPORTANT — read the candidate's original email carefully):
+    Candidate's original email: {email_content}
+    - If the candidate explicitly mentioned a specific job role or position they are applying for, thank them for their interest in that specific role.
+    - If the candidate did NOT mention any specific role (e.g., they were just enquiring about open positions, looking for any opportunities, or sent a general application), do NOT assume they applied for a specific role. Instead, acknowledge their interest in our company (Lowtouch.ai), and then introduce the potential opening we identified based on their profile and CV.
 
 - Next Steps: Present initial assessment questions:
 
