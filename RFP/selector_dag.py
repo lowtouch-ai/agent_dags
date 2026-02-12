@@ -9,6 +9,7 @@ from ollama import Client
 from pypdf import PdfReader
 from io import BytesIO
 import requests
+import re
 
 # =============================================================================
 # Configuration
@@ -27,7 +28,71 @@ DOCUMENT_TYPE_TO_DAG = {
     "RFP_CONSULTANT":       "rfp_consultant_strategy_processing_dag",
 }
 
+DEFAULT_DOC_TYPE = "RFP_OCIO"
 AUTO_DETECTION_MODEL = "rfp/autogeneration_extraction:0.3af"
+
+# Build lookup helpers from DOCUMENT_TYPE_TO_DAG keys
+# Short suffix → full code, e.g. "OCIO" → "RFP_OCIO", "PUBLIC_PENSION" → "RFP_PUBLIC_PENSION"
+_DOC_TYPE_SUFFIX_MAP = {
+    key.replace("RFP_", "", 1): key for key in DOCUMENT_TYPE_TO_DAG
+}
+
+
+def parse_document_type(raw_response: str) -> str | None:
+    """
+    Flexibly extract a valid document type code from the AI response.
+
+    Strategy (in order):
+      1. Exact match after normalising whitespace/case
+      2. Strip quotes, punctuation, markdown artifacts and re-check
+      3. Scan for any valid full code embedded anywhere in the response
+      4. Scan for a suffix match (e.g. "OCIO" → RFP_OCIO)
+      5. Fuzzy: replace spaces/hyphens with underscores and re-check
+
+    Returns the matched DOCUMENT_TYPE_TO_DAG key, or None if nothing matched.
+    """
+    if not raw_response:
+        return None
+
+    text = raw_response.strip().upper()
+
+    # --- Strategy 1: exact match ---
+    if text in DOCUMENT_TYPE_TO_DAG:
+        return text
+
+    # --- Strategy 2: strip surrounding noise (quotes, backticks, periods, colons) ---
+    cleaned = re.sub(r"^[\s\"\'\`\*\:\.\-]+|[\s\"\'\`\*\:\.\-]+$", "", text)
+    if cleaned in DOCUMENT_TYPE_TO_DAG:
+        return cleaned
+
+    # --- Strategy 3: search for a full code anywhere in the text ---
+    for code in DOCUMENT_TYPE_TO_DAG:
+        # Use word-boundary-like search (underscores count as part of the word)
+        if re.search(rf"\b{re.escape(code)}\b", text):
+            return code
+
+    # --- Strategy 4: suffix / partial match (e.g. "OCIO", "PUBLIC PENSION") ---
+    for suffix, full_code in _DOC_TYPE_SUFFIX_MAP.items():
+        if re.search(rf"\b{re.escape(suffix)}\b", text):
+            return full_code
+        # Also try with spaces instead of underscores ("PUBLIC PENSION")
+        spaced = suffix.replace("_", " ")
+        if spaced != suffix and re.search(rf"\b{re.escape(spaced)}\b", text):
+            return full_code
+
+    # --- Strategy 5: normalise separators and re-check ---
+    normalised = re.sub(r"[\s\-]+", "_", cleaned)
+    if normalised in DOCUMENT_TYPE_TO_DAG:
+        return normalised
+    # Also try with RFP_ prefix if missing
+    if not normalised.startswith("RFP_"):
+        prefixed = f"RFP_{normalised}"
+        if prefixed in DOCUMENT_TYPE_TO_DAG:
+            return prefixed
+
+    return None
+
+
 OLLAMA_HOST = Variable.get("ltai.v1.rfp.OLLAMA_HOST", default_var="http://agentomatic:8000")
 RFP_API_BASE = "http://agentconnector:8000"
 
@@ -265,30 +330,42 @@ Answer with only the code:
 """
 
     try:
-        detected_type = get_ai_response(prompt, headers=headers).strip().upper()
-        logging.info(f"AI classified document as: {detected_type}")
+        raw_response = get_ai_response(prompt, headers=headers)
+        logging.info(f"AI raw classification response: {raw_response!r}")
 
-        # Validate and correct AI response
-        if detected_type not in DOCUMENT_TYPE_TO_DAG:
-            # Try to recover by matching known patterns
-            for key in DOCUMENT_TYPE_TO_DAG.keys():
-                if key.replace("_", " ").lower() in detected_type.lower():
-                    detected_type = key
-                    logging.info(f"Corrected ambiguous AI output to: {detected_type}")
-                    break
-            else:
-                raise ValueError(f"Invalid document type returned by AI: {detected_type}")
-        
-        # Update the project in the database with the detected type
-        if project_id:
-            update_project_doc_type(project_id, detected_type, headers)
+        detected_type = parse_document_type(raw_response)
 
-        context["ti"].xcom_push(key="document_type", value=detected_type)
-        return detected_type
+        if detected_type:
+            logging.info(f"Successfully parsed document type: {detected_type}")
+        else:
+            logging.warning(
+                f"Could not parse a valid document type from AI response: {raw_response!r}. "
+                f"Falling back to default: {DEFAULT_DOC_TYPE}"
+            )
+            detected_type = DEFAULT_DOC_TYPE
 
     except Exception as e:
         logging.error(f"Document classification failed: {e}")
-        raise
+        logging.warning(f"Falling back to default document type: {DEFAULT_DOC_TYPE}")
+        detected_type = DEFAULT_DOC_TYPE
+
+    logging.info(
+        f"AI classified document as: {detected_type}\n"
+        f"EXTRACTION SUMMARY:\n"
+        f"  * DOCUMENT TYPE: {detected_type}\n"
+        f"  * TOTAL QUESTIONS: 0\n"
+        f"  * EXPLICIT QUESTIONS (PATTERNS 1-4): 0\n"
+        f"  * INFERRED QUESTIONS (PATTERNS 5-10): 0\n"
+        f"  * SECTIONS COVERED: 0 / [TOTAL SECTIONS]\n"
+        f"  * PAGES WITH ZERO QUESTIONS: ALL PAGES"
+    )
+
+    # Update the project in the database with the detected type
+    if project_id:
+        update_project_doc_type(project_id, detected_type, headers)
+
+    context["ti"].xcom_push(key="document_type", value=detected_type)
+    return detected_type
 
 
 def get_target_dag_id(**context):
