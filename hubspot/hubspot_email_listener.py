@@ -312,11 +312,11 @@ secure, and no action is required from your side. Thank you for your patience an
     retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
     
     # Increment retry count for the next attempt
-    new_retry_count = (current_retry_count + 1) if is_retry else 0
+    new_retry_count = current_retry_count if is_retry else 0
     
     # Update or create tracker entry
     retry_tracker[tracker_key] = {
-        "status": "max_retries_exceeded" if new_retry_count >= 3 else "failed",
+        "status": "max_retries_exceeded" if current_retry_count >= 3 else "failed",
         "thread_id": thread_id,
         "failure_time": existing_entry.get("failure_time", datetime.now(pytz.timezone("Asia/Kolkata")).isoformat()),
         "fallback_sent": email_sent or existing_entry.get("fallback_sent", False),
@@ -325,7 +325,7 @@ secure, and no action is required from your side. Thank you for your patience an
         "failed_task_id": task_id,
         "is_retry_failure": is_retry,
         "retry_count": new_retry_count,  # NEW: Track attempts
-        "max_retries_reached": new_retry_count >= 3,  # NEW: Flag
+        "max_retries_reached": current_retry_count >= 2,  # NEW: Flag
     }
     
     Variable.set("hubspot_retry_tracker", json.dumps(retry_tracker))
@@ -795,11 +795,10 @@ def send_final_failure_email_to_user(context):
 
 def clear_retry_tracker_on_success(context):
     dag_run = context['dag_run']
-    conf = dag_run.conf or {}
-    original_run_id = conf.get('original_run_id')
-    original_dag_id = conf.get('original_dag_id', dag_run.dag_id)
+    original_run_id = dag_run.conf.get('original_run_id')
+    original_dag_id = dag_run.conf.get('original_dag_id', dag_run.dag_id)
     
-    if not original_run_id or not conf.get('retry_attempt'):
+    if not original_run_id or not dag_run.conf.get('retry_attempt'):
         return  # Not a retry run
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
@@ -813,11 +812,10 @@ def clear_retry_tracker_on_success(context):
 
 def update_retry_tracker_on_failure(context):
     dag_run = context['dag_run']
-    conf = dag_run.conf or {}
-    original_run_id = conf.get('original_run_id')
-    original_dag_id = conf.get('original_dag_id', dag_run.dag_id)
+    original_run_id = dag_run.conf.get('original_run_id')
+    original_dag_id = dag_run.conf.get('original_dag_id', dag_run.dag_id)
     
-    if not original_run_id or not conf.get('retry_attempt'):
+    if not original_run_id or not dag_run.conf.get('retry_attempt'):
         return  # Not a retry run
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
@@ -2000,10 +1998,10 @@ def branch_function(**kwargs):
         
         if task_id_in_header and task_type_in_header == "daily-reminder":
             logging.info(f"DIRECT task email detected (X-Task-ID: {task_id_in_header})")
-            logging.info(f"This is the task reminder itself, not a user reply")
+            logging.info(f"Routing through AI classification to determine user intent")
             email["task_id"] = task_id_in_header
-            email["is_task_reply"] = True
-            task_completion_emails.append(email)
+            email["is_task_association"] = True
+            other_emails.append(email)
             continue
     
         is_reply_to_task = False
@@ -2373,15 +2371,22 @@ def trigger_continuation_dag(**kwargs):
         logging.info("No reply emails to process")
         return
 
+    # Pull search_results from the search DAG so create DAG gets the correct owners
+    search_results = ti.xcom_pull(dag_id="hubspot_search_entities", task_ids="compile_search_results", key="search_results") or {}
+
     for email in reply_emails:
+        # Only use search_results if they belong to this email's thread
+        thread_id = email.get("threadId", "")
+        email_search_results = search_results if search_results.get("thread_id") == thread_id else {}
+
         # Pass email with full chat_history to continuation DAG
         trigger_conf = {
             "email_data": email,
             "chat_history": email.get("chat_history", []),
             "thread_history": email.get("thread_history", []),
-            "thread_id": email.get("threadId"),
-            "thread_id": email.get("threadId", ""),  # ADD THIS
-            "message_id": email.get("id", "")
+            "thread_id": thread_id,
+            "message_id": email.get("id", ""),
+            "search_results": email_search_results
         }
 
         

@@ -283,11 +283,11 @@ def analyze_user_response(ti, **context):
     """Analyze user's message to determine intent and entities using conversation history.
     If AI fails → send polite fallback email to ALL recipients with proper threading."""
    
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    thread_history = ti.xcom_pull(key="thread_history", default=[])
-    thread_id = ti.xcom_pull(key="thread_id")
-    latest_user_message = ti.xcom_pull(key="latest_message", default="")
-    email_data = ti.xcom_pull(key="email_data", default={})
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
+    thread_history = ti.xcom_pull(key="thread_history", task_ids="load_context_from_dag_run", default=[])
+    thread_id = ti.xcom_pull(key="thread_id", task_ids="load_context_from_dag_run")
+    latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="")
+    email_data = ti.xcom_pull(key="email_data", task_ids="load_context_from_dag_run", default={})
     
     if not thread_id:
         logging.error("No thread_id provided")
@@ -603,8 +603,8 @@ def validate_and_clean_analysis(ti, **context):
     This function verifies that the analysis from analyze_user_response is accurate and complete.
     """
     analysis_results = ti.xcom_pull(key="analysis_results", default={})
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    latest_user_message = ti.xcom_pull(key="latest_message", default="")
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
+    latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="")
     
     logging.info("=== VALIDATING AND CLEANING ANALYSIS RESULTS ===")
     
@@ -787,9 +787,9 @@ CRITICAL:
     
 def determine_owner(ti, **context):
     """Determine deal and task owners from conversation"""
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
     analysis_results = ti.xcom_pull(key="analysis_results", default={})
-    latest_user_message = ti.xcom_pull(key="latest_message", default="")
+    latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="")
 
     
     # Get tasks to be created
@@ -894,9 +894,9 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 def check_task_threshold(ti, **context):
     """Check if task volume exceeds threshold"""
     analysis_results = ti.xcom_pull(key="analysis_results", default={})
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
     owner_info = ti.xcom_pull(key="owner_info", default={})
-    latest_user_message = ti.xcom_pull(key="latest_message", default="")
+    latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="")
     
     entities_to_create = analysis_results.get("entities_to_create", {})
     tasks_to_create = entities_to_create.get("tasks", [])
@@ -1019,7 +1019,7 @@ def create_contacts(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_contacts = analysis_results.get("entities_to_create", {}).get("contacts", [])
     logging.info(f"Contacts to create (pre-filter): {to_create_contacts}")
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
     owner_info = ti.xcom_pull(key="owner_info", default={})
 
     # === Retry Context ===
@@ -1216,7 +1216,7 @@ def create_companies(ti, **context):
     """Create new companies in HubSpot with full retry support"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_companies = analysis_results.get("entities_to_create", {}).get("companies", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1396,7 +1396,7 @@ def create_deals(ti, **context):
     """Create new deals in HubSpot with full retry logic"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_deals = analysis_results.get("entities_to_create", {}).get("deals", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
     owner_info = ti.xcom_pull(key="owner_info", default={})
 
     # === Retry Context ===
@@ -1604,7 +1604,7 @@ def create_meetings(ti, **context):
     """Create meetings in HubSpot with full retry logic and clean error handling"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_meetings = analysis_results.get("entities_to_create", {}).get("meetings", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1774,7 +1774,7 @@ def create_notes(ti, **context):
     """Create notes in HubSpot with full retry logic and consistent error handling"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_notes = analysis_results.get("entities_to_create", {}).get("notes", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -2003,7 +2003,7 @@ def create_tasks(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     owner_info = ti.xcom_pull(key="owner_info", default={})
     to_create_tasks = analysis_results.get("entities_to_create", {}).get("tasks", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -2029,16 +2029,23 @@ def create_tasks(ti, **context):
             ti.xcom_push(key=k, value=v)
         return []
 
-    # === Assign correct task owners (critical logic preserved) ===
-    task_owners = owner_info.get("task_owners", [])
+    # === Assign correct task owners ===
+    # Primary: task_owners from search_results (passed via dag_run.conf from search DAG)
+    # Fallback: AI-derived owners from determine_owner task
+    search_results = ti.xcom_pull(key="search_results", task_ids="load_context_from_dag_run", default={})
+    search_task_owners = search_results.get("task_owners", [])
+    task_owners = search_task_owners or owner_info.get("task_owners", [])
+
+    logging.info(f"Using {'search DAG' if search_task_owners else 'AI-derived'} task owners ({len(task_owners)} entries)")
+
     for idx, task in enumerate(to_create_tasks, 1):
         matching_owner = next((o for o in task_owners if o.get("task_index") == idx), None)
         if matching_owner:
-            task["task_owner_id"] = matching_owner.get("task_owner_id", DEFAULT_OWNER_ID)
-            task["task_owner_name"] = matching_owner.get("task_owner_name", DEFAULT_OWNER_NAME)
+            task["task_owner_id"] = matching_owner.get("task_owner_id") or DEFAULT_OWNER_ID
+            task["task_owner_name"] = matching_owner.get("task_owner_name") or DEFAULT_OWNER_NAME
         else:
-            task.setdefault("task_owner_id", DEFAULT_OWNER_ID)
-            task.setdefault("task_owner_name", DEFAULT_OWNER_NAME)
+            task["task_owner_id"] = task.get("task_owner_id") or DEFAULT_OWNER_ID
+            task["task_owner_name"] = task.get("task_owner_name") or DEFAULT_OWNER_NAME
 
     logging.info(f"Tasks prepared with owners: {json.dumps(to_create_tasks, indent=2)}")
 
@@ -2221,7 +2228,7 @@ def update_contacts(ti, **context):
     """Update existing contacts in HubSpot with full retry support"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("contacts", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -2385,7 +2392,7 @@ def update_companies(ti, **context):
     """Update existing companies in HubSpot with full retry support"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("companies", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -2552,7 +2559,7 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
 def update_deals(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("deals", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
     # Get current attempt number
     task_instance = context['task_instance']
     current_try_number = task_instance.try_number
@@ -2782,7 +2789,7 @@ def update_meetings(ti, **context):
     """Update meetings in HubSpot with full retry support"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("meetings", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -2927,7 +2934,7 @@ def update_notes(ti, **context):
     """Update notes in HubSpot with full retry support"""
     analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("notes", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     task_instance = context['task_instance']
     current_try = task_instance.try_number
@@ -3065,7 +3072,7 @@ def update_tasks(ti, **context):
     analysis_results = ti.xcom_pull(key="analysis_results")
     owner_info = ti.xcom_pull(key="owner_info", default={})
     to_update = analysis_results.get("entities_to_update", {}).get("tasks", [])
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -3297,9 +3304,9 @@ def create_associations(ti, **context):
 
     # === Load all data ===
     analysis_results = ti.xcom_pull(key="analysis_results")
-    chat_history = ti.xcom_pull(key="chat_history", default=[])
-    thread_history = ti.xcom_pull(key="thread_history", default=[])
-    latest_user_message = ti.xcom_pull(key="latest_message", default="")
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
+    thread_history = ti.xcom_pull(key="thread_history", task_ids="load_context_from_dag_run", default=[])
+    latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="")
     # Created entities
     created_contacts = ti.xcom_pull(key="created_contacts", default=[])
     created_companies = ti.xcom_pull(key="created_companies", default=[])
@@ -3709,7 +3716,7 @@ def compose_response_html(ti, **context):
     existing_deals = selected_entities.get("deals", [])
     
     thread_id = context['dag_run'].conf.get("thread_id")
-    email_data = ti.xcom_pull(key="email_data", default={})
+    email_data = ti.xcom_pull(key="email_data", task_ids="load_context_from_dag_run", default={})
     from_sender = email_data.get("headers", {}).get("From", "")
     
     # Filter out updated tasks from created tasks to avoid duplication
@@ -4431,7 +4438,7 @@ def send_final_email(ti, **context):
     if analysis_results.get("fallback_email_sent", False):
         logging.info("Fallback email was already sent - skipping send_final_email")
         return None
-    email_data = ti.xcom_pull(key="email_data", default={})
+    email_data = ti.xcom_pull(key="email_data", task_ids="load_context_from_dag_run", default={})
     response_html = ti.xcom_pull(key="response_html")
     
     service = authenticate_gmail()
