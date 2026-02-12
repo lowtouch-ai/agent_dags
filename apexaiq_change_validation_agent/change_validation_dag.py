@@ -25,20 +25,36 @@ Airflow Variables required:
   - ltai.change_validation.me.base_url       (ManageEngine SDP Cloud base URL)
   - APEXAIQ_ZOHO_CLIENT_ID                   (Zoho OAuth2 client ID)
   - APEXAIQ_ZOHO_CLIENT_SECRET               (Zoho OAuth2 client secret)
+  - SMTP_USER                                (SMTP username for sending emails)
+  - SMTP_PASSWORD                            (SMTP password for sending emails)
+  - APEXAIQ_CHANGE_VALIDATION_NOTIFY_EMAIL   (comma-separated recipient emails)
 """
 
 from airflow.sdk import DAG, Variable
-from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import BranchPythonOperator, PythonOperator
 import pendulum
 import json
 import logging
 import requests
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 ME_BASE_URL = Variable.get("ltai.change_validation.me.base_url", default="")
 ZOHO_CLIENT_ID = Variable.get("APEXAIQ_ZOHO_CLIENT_ID", default="")
 ZOHO_CLIENT_SECRET = Variable.get("APEXAIQ_ZOHO_CLIENT_SECRET", default="")
+
+# ---------------------------------------------------------------------------
+# SMTP Email Configuration
+# ---------------------------------------------------------------------------
+SMTP_USER = Variable.get("SMTP_USER", default="")
+SMTP_PASSWORD = Variable.get("SMTP_PASSWORD", default="")
+SMTP_HOST = Variable.get("SMTP_HOST", default="mail.authsmtp.com")
+SMTP_PORT = int(Variable.get("SMTP_PORT", default="2525"))
+SMTP_SUFFIX = Variable.get("SMTP_FROM_SUFFIX", default="via lowtouch.ai <webmaster@ecloudcontrol.com>")
+NOTIFY_EMAIL = Variable.get("APEXAIQ_CHANGE_VALIDATION_NOTIFY_EMAIL", default="")
 
 default_args = {
     "owner": "lowtouch.ai_developers",
@@ -255,10 +271,20 @@ def fetch_change_requests(**kwargs):
             logging.info("  Linked CIs (%d): %s", len(linked_cis), ci_summary)
 
         # Check if any of the target asset IDs are linked to this change
+        # Store only the fields needed by correlate_and_classify
+        slim_cr = {
+            "id": change_detail.get("id"),
+            "display_id": change_detail.get("display_id"),
+            "approval_status": change_detail.get("approval_status"),
+            "scheduled_start_time": change_detail.get("scheduled_start_time"),
+            "scheduled_end_time": change_detail.get("scheduled_end_time"),
+            "_resolved_approval": change_detail.get("_resolved_approval"),
+        }
+
         for asset in linked_assets:
             linked_id = str(asset.get("id", ""))
             if linked_id in asset_id_set:
-                all_changes[linked_id].append(change_detail)
+                all_changes[linked_id].append(slim_cr)
                 logging.info("  MATCH: Change %s is linked to target asset %s", cs_display, linked_id)
 
     logging.info("=== Asset-to-Change matching summary ===")
@@ -268,7 +294,9 @@ def fetch_change_requests(**kwargs):
         )
 
     ti.xcom_push(key="change_requests", value=all_changes)
-    return all_changes
+
+    # Return only the match counts — full data is in XCom
+    return {aid: len(crs) for aid, crs in all_changes.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +369,7 @@ def correlate_and_classify(**kwargs):
             end_val = _safe_ts(cr.get("scheduled_end_time"))
             in_window = _check_time_window(change_ts, start_val, end_val)
 
-            cr_label = cr.get("display_id") or cr.get("id", "unknown")
+            cr_label = _safe_display_id(cr)
 
             # Build approval detail suffix for reason strings
             level_detail = ""
@@ -404,7 +432,9 @@ def correlate_and_classify(**kwargs):
 
     ti.xcom_push(key="validation_results", value=results)
     ti.xcom_push(key="validation_summary", value=summary)
-    return {"summary": summary, "results": results}
+
+    # Return only the summary for auto-logging; full results are in XCom
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +454,15 @@ def _safe_ts(field):
     return field
 
 
+def _safe_display_id(cr):
+    """Extract a human-readable change ID string from a ManageEngine change record.
+    display_id is often a dict like {"value": "9", "display_value": "CH-9"}."""
+    raw = cr.get("display_id")
+    if isinstance(raw, dict):
+        return raw.get("display_value", raw.get("value"))
+    return raw or str(cr.get("id", "unknown"))
+
+
 def _build_result(device_change, classification, reason, matched_cr):
     return {
         "device_id": device_change.get("device_id", "unknown"),
@@ -433,12 +472,8 @@ def _build_result(device_change, classification, reason, matched_cr):
         "classification": classification,
         "reason": reason,
         "matching_change_id": (
-            matched_cr.get("display_id") or matched_cr.get("id") if matched_cr else None
+            _safe_display_id(matched_cr) if matched_cr else None
         ),
-        "evidence": {
-            "device_change": device_change,
-            "matching_crs": [matched_cr] if matched_cr else [],
-        },
     }
 
 
@@ -527,6 +562,413 @@ def _fetch_approval_status(base_url, change_id, headers):
 
 
 # ---------------------------------------------------------------------------
+# SMTP email helper
+# ---------------------------------------------------------------------------
+def _send_smtp_email(recipient, subject, body, cc_emails=None):
+    """Send an SMTP email with an HTML body."""
+    try:
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+
+        msg = MIMEMultipart("related")
+        msg["Subject"] = subject
+        msg["From"] = f"Change Validation Agent {SMTP_SUFFIX}"
+        msg["To"] = recipient
+        if cc_emails:
+            msg["Cc"] = cc_emails
+
+        msg.attach(MIMEText(body, "html"))
+
+        recipients_list = [recipient]
+        if cc_emails:
+            cc_list = [e.strip() for e in cc_emails.split(",") if e.strip()]
+            recipients_list.extend(cc_list)
+
+        server.sendmail("webmaster@ecloudcontrol.com", recipients_list, msg.as_string())
+        logging.info("Email sent successfully to %s", recipient)
+        server.quit()
+        return True
+    except Exception as exc:
+        logging.error("Failed to send email: %s", str(exc))
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Email template helpers
+# ---------------------------------------------------------------------------
+def _notification_css():
+    """Shared CSS for change validation notification emails."""
+    return """
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                         "Helvetica Neue", Arial, sans-serif;
+            margin: 0; padding: 20px;
+            background-color: #f4f7f6; color: #333;
+        }
+        .container {
+            max-width: 850px; margin: 0 auto;
+            background-color: #ffffff; border: 1px solid #e0e0e0;
+            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+            overflow: hidden;
+        }
+        .header { padding: 24px 30px; color: #ffffff; }
+        .header h1 { margin: 0; font-size: 22px; }
+        .content { padding: 30px; }
+        .section { margin-bottom: 28px; }
+        .section h2 {
+            font-size: 18px; margin: 0 0 12px 0; color: #004a99;
+            border-bottom: 2px solid #f0f0f0; padding-bottom: 5px;
+        }
+        .detail-table {
+            width: 100%; border-collapse: collapse; font-size: 13px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        .detail-table th, .detail-table td {
+            padding: 10px 12px; border: 1px solid #ddd; text-align: left;
+        }
+        .detail-table th { background-color: #f9f9f9; font-weight: 600; }
+        .detail-table tr:nth-child(even) { background-color: #fdfdfd; }
+        .footer {
+            padding: 20px 30px; text-align: left; font-size: 14px;
+            color: #fcfcfc; background-color: #1e275d;
+        }
+    </style>
+    """
+
+
+def _build_summary_cards(summary):
+    """Build an email-safe summary table from the validation summary."""
+    cards = [
+        ("#28a745", summary.get("validated", 0), "Validated"),
+        ("#ff8c00", summary.get("partial_approval", 0), "Partial Approval"),
+        ("#dc3545", summary.get("unapproved", 0), "Unapproved"),
+        ("#6c757d", summary.get("inconclusive", 0), "Inconclusive"),
+    ]
+    cells = ""
+    for color, num, label in cards:
+        cells += (
+            f'<td style="text-align:center;padding:14px;border-radius:6px;'
+            f'border:1px solid #e0e0e0;width:25%;">'
+            f'<div style="font-size:28px;font-weight:700;color:{color};">{num}</div>'
+            f'<div style="font-size:12px;color:#666;margin-top:4px;">{label}</div>'
+            f'</td>'
+        )
+    return (
+        f'<table style="width:100%;border-collapse:separate;border-spacing:8px 0;">'
+        f'<tr>{cells}</tr></table>'
+    )
+
+
+def _build_change_detail_table(results):
+    """Build an HTML detail table for a list of validation results."""
+    if not results:
+        return "<p>No changes in this category.</p>"
+    rows = ""
+    for r in results:
+        cr_id = r.get("matching_change_id")
+        cr_display = str(cr_id) if cr_id else "None"
+        rows += f"""
+            <tr>
+                <td>{r.get('device_id', 'N/A')}</td>
+                <td>{r.get('asset_id', 'N/A')}</td>
+                <td>{r.get('change_detected', 'N/A')[:100]}</td>
+                <td>{r.get('change_timestamp', 'N/A')}</td>
+                <td>{r.get('reason', 'N/A')}</td>
+                <td>{cr_display}</td>
+            </tr>"""
+    return f"""
+    <table class="detail-table">
+        <thead>
+            <tr>
+                <th>Device ID</th>
+                <th>Asset ID</th>
+                <th>Change Details</th>
+                <th>Timestamp</th>
+                <th>Reason</th>
+                <th>Matching CR</th>
+            </tr>
+        </thead>
+        <tbody>{rows}</tbody>
+    </table>"""
+
+
+def _compose_notification_html(header_bg, badge_bg, badge_text, title,
+                                intro_text, summary, filtered_results):
+    """Compose a full notification email HTML document."""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+    {_notification_css()}
+</head>
+<body>
+    <div class="container">
+        <div class="header" style="background-color:{header_bg};">
+            <h1>{title}</h1>
+            <span style="display:inline-block;padding:4px 12px;border-radius:4px;
+                         font-size:13px;font-weight:600;margin-top:8px;color:#fff;
+                         background-color:{badge_bg};">{badge_text}</span>
+        </div>
+        <div class="content">
+            <p>{intro_text}</p>
+
+            <div class="section">
+                <h2>Validation Summary</h2>
+                {_build_summary_cards(summary)}
+            </div>
+
+            <div class="section">
+                <h2>Change Details</h2>
+                {_build_change_detail_table(filtered_results)}
+            </div>
+        </div>
+        <div class="footer">
+            Best regards,<br>Change Validation Agent
+            <center>
+                <span style="font-size:14px;opacity:0.9;">
+                    Powered by lowtouch<span style="color:#fb47de;">.ai</span>
+                </span>
+            </center>
+        </div>
+    </div>
+</body>
+</html>"""
+
+
+# ---------------------------------------------------------------------------
+# Task 4a — Compose approved-changes email
+# ---------------------------------------------------------------------------
+def compose_approved_email(**kwargs):
+    """Build HTML notification for validated (fully approved) changes."""
+    ti = kwargs["ti"]
+    logging.info("compose_approved_email: pulling XCom from correlate_and_classify")
+
+    results = ti.xcom_pull(task_ids="correlate_and_classify", key="validation_results")
+    summary = ti.xcom_pull(task_ids="correlate_and_classify", key="validation_summary")
+
+    logging.info("compose_approved_email: results type=%s, summary type=%s",
+                 type(results).__name__, type(summary).__name__)
+
+    if not results:
+        logging.warning("compose_approved_email: no validation_results from XCom")
+        ti.xcom_push(key="approved_email_html", value="")
+        return "No validation results available"
+
+    if not summary:
+        summary = {}
+
+    approved = [r for r in results if r.get("classification") == "Validated Change"]
+    if not approved:
+        ti.xcom_push(key="approved_email_html", value="")
+        return "No validated changes — skipping email"
+
+    html = _compose_notification_html(
+        header_bg="#1b5e20",
+        badge_bg="#28a745",
+        badge_text=f"{len(approved)} Validated",
+        title="Change Validation Report — All Changes Approved",
+        intro_text=(
+            "The following infrastructure changes have been <strong>validated</strong> "
+            "against approved change requests. Each change matches an approved CR "
+            "within the scheduled maintenance window."
+        ),
+        summary=summary,
+        filtered_results=approved,
+    )
+    ti.xcom_push(key="approved_email_html", value=html)
+    logging.info("Composed approved email for %d change(s)", len(approved))
+    return f"Composed approved email for {len(approved)} change(s)"
+
+
+# ---------------------------------------------------------------------------
+# Task 4b — Compose partial-approval email
+# ---------------------------------------------------------------------------
+def compose_partial_approval_email(**kwargs):
+    """Build HTML notification for changes with missing or partial approval."""
+    ti = kwargs["ti"]
+    logging.info("compose_partial_approval_email: pulling XCom from correlate_and_classify")
+
+    results = ti.xcom_pull(task_ids="correlate_and_classify", key="validation_results")
+    summary = ti.xcom_pull(task_ids="correlate_and_classify", key="validation_summary")
+
+    logging.info("compose_partial_approval_email: results type=%s, summary type=%s",
+                 type(results).__name__, type(summary).__name__)
+
+    if not results:
+        logging.warning("compose_partial_approval_email: no validation_results from XCom")
+        ti.xcom_push(key="partial_email_html", value="")
+        return "No validation results available"
+
+    if not summary:
+        summary = {}
+
+    partial = [r for r in results if r.get("classification") == "Missing or Partial Approval"]
+    if not partial:
+        ti.xcom_push(key="partial_email_html", value="")
+        return "No partial-approval changes — skipping email"
+
+    html = _compose_notification_html(
+        header_bg="#e65100",
+        badge_bg="#ff8c00",
+        badge_text=f"{len(partial)} Partial Approval",
+        title="Change Validation Alert — Partial Approval Detected",
+        intro_text=(
+            "The following infrastructure changes have <strong>incomplete or missing "
+            "approvals</strong>. A matching change request was found but either the "
+            "approval workflow is not fully completed or the change occurred outside "
+            "the scheduled maintenance window. Please review and take action."
+        ),
+        summary=summary,
+        filtered_results=partial,
+    )
+    ti.xcom_push(key="partial_email_html", value=html)
+    logging.info("Composed partial-approval email for %d change(s)", len(partial))
+    return f"Composed partial-approval email for {len(partial)} change(s)"
+
+
+# ---------------------------------------------------------------------------
+# Task 4c — Compose no-approval (unapproved) email
+# ---------------------------------------------------------------------------
+def compose_no_approval_email(**kwargs):
+    """Build HTML notification for unapproved changes."""
+    ti = kwargs["ti"]
+    logging.info("compose_no_approval_email: pulling XCom from correlate_and_classify")
+
+    results = ti.xcom_pull(task_ids="correlate_and_classify", key="validation_results")
+    summary = ti.xcom_pull(task_ids="correlate_and_classify", key="validation_summary")
+
+    logging.info("compose_no_approval_email: results type=%s, summary type=%s",
+                 type(results).__name__, type(summary).__name__)
+
+    if not results:
+        logging.warning("compose_no_approval_email: no validation_results from XCom")
+        ti.xcom_push(key="no_approval_email_html", value="")
+        return "No validation results available"
+
+    if not summary:
+        summary = {}
+
+    unapproved = [r for r in results if r.get("classification") == "Unapproved Change"]
+    if not unapproved:
+        ti.xcom_push(key="no_approval_email_html", value="")
+        return "No unapproved changes — skipping email"
+
+    html = _compose_notification_html(
+        header_bg="#b71c1c",
+        badge_bg="#dc3545",
+        badge_text=f"{len(unapproved)} Unapproved",
+        title="Change Validation Alert — Unapproved Changes Detected",
+        intro_text=(
+            "<strong>ATTENTION:</strong> The following infrastructure changes were "
+            "detected <strong>without any matching approved change request</strong>. "
+            "These changes may represent unauthorized modifications and require "
+            "immediate investigation."
+        ),
+        summary=summary,
+        filtered_results=unapproved,
+    )
+    ti.xcom_push(key="no_approval_email_html", value=html)
+    logging.info("Composed no-approval email for %d change(s)", len(unapproved))
+    return f"Composed no-approval email for {len(unapproved)} change(s)"
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — Send notification emails
+# ---------------------------------------------------------------------------
+def send_notification_emails(**kwargs):
+    """Send all composed notification emails to the configured recipient."""
+    ti = kwargs["ti"]
+
+    if not SMTP_USER or not SMTP_PASSWORD:
+        raise ValueError(
+            "SMTP credentials missing — set Airflow Variables "
+            "SMTP_USER and SMTP_PASSWORD"
+        )
+
+    if not NOTIFY_EMAIL:
+        raise ValueError(
+            "Recipient email missing — set Airflow Variable "
+            "APEXAIQ_CHANGE_VALIDATION_NOTIFY_EMAIL"
+        )
+
+    email_configs = [
+        ("approved_email_html", "compose_approved_email",
+         "Change Validation Report — All Changes Approved"),
+        ("partial_email_html", "compose_partial_approval_email",
+         "Change Validation Alert — Partial Approval Detected"),
+        ("no_approval_email_html", "compose_no_approval_email",
+         "Change Validation Alert — Unapproved Changes Detected"),
+    ]
+
+    # Parse recipients: first = TO, rest = CC
+    email_list = [e.strip() for e in NOTIFY_EMAIL.split(",") if e.strip()]
+    if not email_list:
+        raise ValueError("No valid email addresses in APEXAIQ_CHANGE_VALIDATION_NOTIFY_EMAIL")
+
+    to_email = email_list[0]
+    cc_emails = ", ".join(email_list[1:]) if len(email_list) > 1 else None
+
+    sent = []
+    for xcom_key, task_id, subject in email_configs:
+        html = ti.xcom_pull(task_ids=task_id, key=xcom_key)
+        if not html:
+            logging.info("No content for %s — skipping", xcom_key)
+            continue
+
+        result = _send_smtp_email(
+            recipient=to_email,
+            subject=subject,
+            body=html,
+            cc_emails=cc_emails,
+        )
+        if result:
+            sent.append(subject)
+            logging.info("Sent: %s", subject)
+        else:
+            logging.error("Failed to send: %s", subject)
+
+    if not sent:
+        logging.info("No notification emails needed for this run")
+        return "No emails to send"
+
+    return f"Sent {len(sent)} notification email(s)"
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — Branch: pick only the compose task(s) that have results
+# ---------------------------------------------------------------------------
+def choose_email_tasks(**kwargs):
+    """Return the task_id(s) of compose tasks whose classification count > 0.
+    Tasks not returned are marked *skipped* by the BranchPythonOperator."""
+    ti = kwargs["ti"]
+    summary = ti.xcom_pull(task_ids="correlate_and_classify", key="validation_summary")
+
+    if not summary:
+        logging.warning("No validation summary in XCom — defaulting to compose_approved_email")
+        return ["compose_approved_email"]
+
+    tasks = []
+    if summary.get("validated", 0) > 0:
+        tasks.append("compose_approved_email")
+    if summary.get("partial_approval", 0) > 0:
+        tasks.append("compose_partial_approval_email")
+    if summary.get("unapproved", 0) > 0:
+        tasks.append("compose_no_approval_email")
+
+    # Fallback when only inconclusive — run one task that will early-exit
+    if not tasks:
+        logging.info("No actionable classifications — defaulting to compose_approved_email")
+        tasks = ["compose_approved_email"]
+
+    logging.info("Branch decision: %s", tasks)
+    return tasks
+
+
+# ---------------------------------------------------------------------------
 # DAG definition
 # ---------------------------------------------------------------------------
 with DAG(
@@ -558,4 +1000,37 @@ with DAG(
         python_callable=correlate_and_classify,
     )
 
-    token_task >> extract_task >> fetch_task >> classify_task
+    branch_task = BranchPythonOperator(
+        task_id="choose_email_tasks",
+        python_callable=choose_email_tasks,
+    )
+
+    approved_email_task = PythonOperator(
+        task_id="compose_approved_email",
+        python_callable=compose_approved_email,
+    )
+
+    partial_email_task = PythonOperator(
+        task_id="compose_partial_approval_email",
+        python_callable=compose_partial_approval_email,
+    )
+
+    no_approval_email_task = PythonOperator(
+        task_id="compose_no_approval_email",
+        python_callable=compose_no_approval_email,
+    )
+
+    send_email_task = PythonOperator(
+        task_id="send_notification_emails",
+        python_callable=send_notification_emails,
+        trigger_rule="none_failed_min_one_success",
+    )
+
+    # Linear pipeline up to branching point
+    token_task >> extract_task >> fetch_task >> classify_task >> branch_task
+
+    # Fan-out: branch selects only the relevant compose task(s);
+    # unselected tasks are skipped. All three feed into send.
+    branch_task >> approved_email_task >> send_email_task
+    branch_task >> partial_email_task >> send_email_task
+    branch_task >> no_approval_email_task >> send_email_task
