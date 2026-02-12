@@ -3036,58 +3036,41 @@ def compose_validation_error_email(ti, **context):
         requested_entities.append("Company")
     if has_deal:
         requested_entities.append("Deal")
-    
+
+    # Map validation error entity_type values to singular template keys
+    ENTITY_TYPE_TO_SINGULAR = {
+        "Deals": "Deal",
+        "Companies": "Company",
+        "Meeting": "Meeting",
+        "Meetings": "Meeting",
+        "Notes": "Note",
+        "Tasks": "Task",
+    }
+
     # Determine primary entity from what was actually requested
     if len(requested_entities) == 1:
-        primary_entity = requested_entities[0].capitalize()
+        primary_entity = requested_entities[0]
     elif len(requested_entities) > 1:
         # ✅ IMPROVED: Prioritize based on validation errors
         primary_entity = None
         for error in errors:
             entity_type = error.get("entity_type", "")
-            if entity_type == "Deals":
-                primary_entity = "Deal"
+            if entity_type in ENTITY_TYPE_TO_SINGULAR:
+                primary_entity = ENTITY_TYPE_TO_SINGULAR[entity_type]
                 break
-            elif entity_type == "Companies":
-                primary_entity = "Company"
-                break
-            elif entity_type == "Meetings":
-                primary_entity = "Meeting"
-                break
-            elif entity_type == "Notes":
-                primary_entity = "Note"
-                break
-            elif entity_type == "Tasks":
-                primary_entity = "Task"
-                break
-        
-        # If still not found, use first requested entity
+        # If no matching error found, use first requested entity
         if not primary_entity:
             primary_entity = requested_entities[0]
-        else:
-            # ✅ IMPROVED: Fallback based on errors
-            primary_entity = None
-            for error in errors:
-                entity_type = error.get("entity_type", "")
-                if entity_type in ["Tasks", "Meetings", "Notes", "Deals", "Companies"]:
-                    primary_entity = entity_type.rstrip('s')
-                    break
-    
-        if not primary_entity:
-            primary_entity = "entities"
     else:
-        # Fallback: check errors list
+        # No requested entities detected - fallback to errors list
         primary_entity = None
         for error in errors:
             entity_type = error.get("entity_type", "")
-            if entity_type in ["Tasks", "Meetings", "Notes", "Deals", "Companies"]:
-
-                primary_entity = entity_type.rstrip('s')
+            if entity_type in ENTITY_TYPE_TO_SINGULAR:
+                primary_entity = ENTITY_TYPE_TO_SINGULAR[entity_type]
                 break
-        
-        # Default fallback if somehow not detected
         if not primary_entity:
-            primary_entity = "Task"  # or raise/log an error
+            primary_entity = "Task"
     
     # Build error details HTML (kept but not used in these specific templates)
     error_details_html = ""
