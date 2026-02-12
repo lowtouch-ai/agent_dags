@@ -1,45 +1,35 @@
 """
 Change Validation & Compliance Agent (MVP)
-Validates infrastructure device changes against approved ManageEngine
-ServiceDesk Plus change controls. Detects unauthorized or mismatched
-changes and classifies them for compliance review.
+Validates an infrastructure device change against approved ManageEngine
+ServiceDesk Plus change controls. Classifies the change as Validated,
+Unapproved, Partial Approval, or Inconclusive and sends an email notification.
 
-Trigger: Manual only — pass device_changes array via dag_run.conf.
-
-Each entry in device_changes requires only "asset_id". All other fields
-are optional and will use sensible defaults when omitted.
+Trigger: Manual only — pass params via dag_run.conf.
 
 Sample conf (minimal — asset_id only):
 {
-  "device_changes": [
-    { "asset_id": "300000000000001" }
-  ]
+  "asset_id": "300000000000001"
 }
 
 Sample conf (full):
 {
-  "device_changes": [
-    {
-      "asset_id": "300000000000001",
-      "device_name": "router-01",
-      "change_type": "configuration",
-      "change_details": "Modified ACL rules on GigabitEthernet0/1",
-      "previous_state": "permit ip 10.0.0.0/8 any",
-      "current_state": "permit ip 10.0.0.0/8 any; deny ip 192.168.1.0/24 any",
-      "change_timestamp": "2025-12-15T14:30:00Z"
-    }
-  ]
+  "asset_id": "300000000000001",
+  "device_name": "router-01",
+  "change_type": "configuration",
+  "change_details": "Modified ACL rules on GigabitEthernet0/1",
+  "previous_state": "permit ip 10.0.0.0/8 any",
+  "current_state": "permit ip 10.0.0.0/8 any; deny ip 192.168.1.0/24 any",
+  "change_timestamp": "2025-12-15T14:30:00Z"
 }
 
-Fields per device_change entry:
+Params:
   - asset_id         (REQUIRED) ManageEngine asset ID to validate against
-  - device_name      (optional) Human-readable device name, defaults to asset name from API or "unknown"
+  - device_name      (optional) Human-readable device name, defaults to asset name from API
   - change_type      (optional) Type of change, e.g. "configuration"
-  - change_details   (optional) Description of what changed, defaults to ""
+  - change_details   (optional) Description of what changed
   - previous_state   (optional) State before the change
   - current_state    (optional) State after the change
-  - change_timestamp (optional) ISO-8601 timestamp of the change; if omitted,
-                     time-window validation is skipped
+  - change_timestamp (optional) ISO-8601 timestamp; if omitted, time-window validation is skipped
 
 Airflow Variables required:
   - ltai.change_validation.me.base_url       (ManageEngine SDP Cloud base URL)
@@ -50,7 +40,7 @@ Airflow Variables required:
   - APEXAIQ_CHANGE_VALIDATION_NOTIFY_EMAIL   (comma-separated recipient emails)
 """
 
-from airflow.sdk import DAG, Variable
+from airflow.sdk import DAG, Param, Variable
 from airflow.providers.standard.operators.python import BranchPythonOperator, PythonOperator
 import html as html_mod
 import pendulum
@@ -157,20 +147,22 @@ def _fetch_asset_name(base_url, asset_id, headers):
 
 
 def extract_asset_ids(**kwargs):
-    """Parse dag_run.conf, validate each device change entry, and push
-    deduplicated asset_ids plus the validated change list to XCom.
+    """Read flat params from dag_run.conf, validate, and push the asset_id
+    plus the normalised change entry to XCom.
 
-    Only ``asset_id`` is required per entry.  All other fields are optional
-    and receive sensible defaults when missing.  If ``device_name`` is not
-    provided, the asset name is fetched from the ManageEngine API."""
+    ``asset_id`` is required.  All other fields are optional and receive
+    sensible defaults when missing.  If ``device_name`` is not provided,
+    the asset name is fetched from the ManageEngine API."""
 
     ti = kwargs["ti"]
     dag_run = kwargs.get("dag_run")
     conf = dag_run.conf or {}
 
-    device_changes = conf.get("device_changes", [])
-    if not device_changes:
-        raise ValueError("No device_changes provided in DAG conf")
+    asset_id = conf.get("asset_id")
+    if not asset_id:
+        raise ValueError("No asset_id provided in DAG conf")
+
+    asset_id_str = str(asset_id)
 
     # Prepare API access for asset name lookups
     access_token = ti.xcom_pull(task_ids="fetch_zoho_token", key="access_token")
@@ -181,53 +173,29 @@ def extract_asset_ids(**kwargs):
         "Accept": "application/vnd.manageengine.sdp.v3+json",
     } if access_token and base_url else {}
 
-    # Cache asset names to avoid duplicate API calls for the same asset
-    asset_name_cache: dict[str, str | None] = {}
+    # Resolve device_name: use provided value, or fetch asset name from API
+    device_name = conf.get("device_name") or ""
+    if not device_name and headers and base_url:
+        device_name = _fetch_asset_name(base_url, asset_id_str, headers) or ""
 
-    asset_ids = []
-    validated_changes = []
+    change_ts = conf.get("change_timestamp") or None
 
-    for change in device_changes:
-        asset_id = change.get("asset_id")
-        if not asset_id:
-            logging.warning(
-                "Skipping change entry without asset_id — device_name: %s",
-                change.get("device_name", "unknown"),
-            )
-            continue
+    # Normalise into a single-entry list so downstream tasks work unchanged
+    normalised = {
+        "asset_id": asset_id_str,
+        "device_name": device_name or "unknown",
+        "change_type": conf.get("change_type") or "",
+        "change_details": conf.get("change_details") or "",
+        "previous_state": conf.get("previous_state") or "",
+        "current_state": conf.get("current_state") or "",
+        "change_timestamp": change_ts if change_ts else None,
+    }
 
-        asset_id_str = str(asset_id)
-
-        # Resolve device_name: use provided value, or fetch asset name from API
-        device_name = change.get("device_name") or ""
-        if not device_name and headers and base_url:
-            if asset_id_str not in asset_name_cache:
-                asset_name_cache[asset_id_str] = _fetch_asset_name(
-                    base_url, asset_id_str, headers,
-                )
-            device_name = asset_name_cache[asset_id_str] or ""
-
-        # Normalise optional fields so downstream tasks never see KeyError
-        normalised = {
-            "asset_id": asset_id_str,
-            "device_name": device_name or "unknown",
-            "change_type": change.get("change_type") or "",
-            "change_details": change.get("change_details") or "",
-            "previous_state": change.get("previous_state") or "",
-            "current_state": change.get("current_state") or "",
-            "change_timestamp": change.get("change_timestamp") or None,
-        }
-        asset_ids.append(normalised["asset_id"])
-        validated_changes.append(normalised)
-
-    if not asset_ids:
-        raise ValueError("No valid asset_ids found in device_changes")
-
-    unique_asset_ids = list(set(asset_ids))
-    logging.info("Extracted %d unique asset IDs: %s", len(unique_asset_ids), unique_asset_ids)
+    unique_asset_ids = [asset_id_str]
+    logging.info("Extracted asset ID: %s", asset_id_str)
 
     ti.xcom_push(key="asset_ids", value=unique_asset_ids)
-    ti.xcom_push(key="device_changes", value=validated_changes)
+    ti.xcom_push(key="device_changes", value=[normalised])
     return unique_asset_ids
 
 
@@ -1097,10 +1065,51 @@ def choose_email_tasks(**kwargs):
 with DAG(
     dag_id="apexaiq_change_validation_agent",
     default_args=default_args,
-    description="Validates device changes against ManageEngine change requests for compliance",
+    description=(
+        "Validates an infrastructure device change against approved ManageEngine "
+        "ServiceDesk Plus change controls. Classifies the change as Validated, "
+        "Unapproved, Partial Approval, or Inconclusive and sends an email notification. "
+        "Provide the asset_id to validate — all other fields are optional."
+    ),
     schedule=None,
     catchup=False,
     tags=["compliance", "change-validation", "manageengine"],
+    params={
+        "asset_id": Param(
+            type="string",
+            description="ManageEngine ServiceDesk Plus Cloud numeric asset ID to validate (e.g. '300000000000001')",
+        ),
+        "device_name": Param(
+            type=["string", "null"],
+            default=None,
+            description="Human-readable device name (e.g. 'router-01'). If omitted, auto-fetched from ManageEngine.",
+        ),
+        "change_type": Param(
+            type=["string", "null"],
+            default=None,
+            description="Category of change performed (e.g. 'configuration', 'firmware_upgrade', 'hardware_replacement', 'access_change')",
+        ),
+        "change_details": Param(
+            type=["string", "null"],
+            default=None,
+            description="Description of what was changed on the device (e.g. 'Modified ACL rules on GigabitEthernet0/1')",
+        ),
+        "previous_state": Param(
+            type=["string", "null"],
+            default=None,
+            description="Device configuration or state before the change was applied",
+        ),
+        "current_state": Param(
+            type=["string", "null"],
+            default=None,
+            description="Device configuration or state after the change was applied",
+        ),
+        "change_timestamp": Param(
+            type=["string", "null"],
+            default=None,
+            description="ISO-8601 timestamp of when the change occurred (e.g. '2025-12-15T14:30:00Z'). If omitted, time-window validation is skipped.",
+        ),
+    },
 ) as dag:
 
     token_task = PythonOperator(

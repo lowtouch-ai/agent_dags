@@ -11,45 +11,59 @@ Validates infrastructure device changes against approved ManageEngine ServiceDes
 
 ## Trigger Config
 
-The DAG expects this payload in `dag_run.conf`. Only `asset_id` is required per entry — all other fields are optional.
+The DAG expects flat params in `dag_run.conf`. Only `asset_id` is required — all other fields are optional.
 
 Minimal example:
 ```json
 {
-  "device_changes": [
-    { "asset_id": "256963000000366263" }
-  ]
+  "asset_id": "256963000000366263"
 }
 ```
 
 Full example (all fields):
 ```json
 {
-  "device_changes": [
-    {
-      "asset_id": "256963000000366263",
-      "device_name": "SDWAN-Branch-Router-01",
-      "change_type": "configuration",
-      "change_details": "Updated ACL rules on interface GigabitEthernet0/1",
-      "previous_state": "permit ip 10.0.0.0/8 any",
-      "current_state": "permit ip 10.0.0.0/8 any; deny ip 192.168.1.0/24 any",
-      "change_timestamp": "2025-08-10T14:30:00Z"
-    }
-  ]
+  "asset_id": "256963000000366263",
+  "device_name": "SDWAN-Branch-Router-01",
+  "change_type": "configuration",
+  "change_details": "Updated ACL rules on interface GigabitEthernet0/1",
+  "previous_state": "permit ip 10.0.0.0/8 any",
+  "current_state": "permit ip 10.0.0.0/8 any; deny ip 192.168.1.0/24 any",
+  "change_timestamp": "2025-08-10T14:30:00Z"
 }
 ```
 
-### Fields per device change
+### Params
 
-| Field | Required | Default | Description |
+Each param is defined using `Param()` in the DAG. Required params have `type="string"` (no default). Optional params have `type=["string", "null"]` with `default=None` — this allows the `fetch_dag_metadata` function to distinguish required vs optional by checking if `"null"` is in the schema type.
+
+| Param | Required | Default | Description |
 |---|---|---|---|
 | `asset_id` | **Yes** | — | ManageEngine internal asset ID (numeric, e.g. `256963000000366263`) |
-| `device_name` | No | Asset name from API, or `"unknown"` | Human-readable device name for logging/reporting. If omitted, fetched automatically from ManageEngine assets API |
-| `change_type` | No | `""` | Type of change, e.g. `"configuration"` |
-| `change_details` | No | CR description from API | Description of what changed. If omitted, falls back to the matched CR's description or title from ManageEngine |
-| `previous_state` | No | `""` | State before the change |
-| `current_state` | No | `""` | State after the change |
+| `device_name` | No | `null` (auto-fetched from API) | Human-readable device name for logging/reporting. If omitted, fetched automatically from ManageEngine assets API |
+| `change_type` | No | `null` | Type of change, e.g. `"configuration"` |
+| `change_details` | No | `null` (falls back to CR description) | Description of what changed. If omitted, falls back to the matched CR's description or title from ManageEngine |
+| `previous_state` | No | `null` | State before the change |
+| `current_state` | No | `null` | State after the change |
 | `change_timestamp` | No | `null` (skips window check) | ISO-8601 timestamp — used for time-window matching against CRs. If omitted, time-window validation is skipped entirely and approval status alone determines the classification |
+
+### Agent integration (`fetch_dag_metadata`)
+
+The `fetch_dag_metadata` function must use the schema type (not just `value`) to detect required vs optional:
+
+```python
+schema_type = schema.get("type", "string")
+is_nullable = isinstance(schema_type, list) and "null" in schema_type
+param = {
+    "name": param_name,
+    "type": schema_type if not is_nullable else [t for t in schema_type if t != "null"][0],
+    "required": param_schema.get("value") is None and not is_nullable,
+    "description": param_schema.get("description", ""),
+}
+```
+
+- `asset_id`: `schema.type = "string"` → `is_nullable = False` → `required = True`
+- All others: `schema.type = ["string", "null"]` → `is_nullable = True` → `required = False`
 
 ### Auto-enrichment from API
 
@@ -92,7 +106,7 @@ fetch_zoho_token >> extract_asset_ids >> fetch_change_requests >> correlate_and_
 ```
 
 1. **fetch_zoho_token** — Obtains a fresh Zoho OAuth2 access token using `client_credentials` grant and pushes it to XCom
-2. **extract_asset_ids** — Parses `dag_run.conf`, validates entries (only `asset_id` required), normalises optional fields with defaults, deduplicates asset IDs. If `device_name` is missing, fetches asset name from ManageEngine API (results cached per asset)
+2. **extract_asset_ids** — Reads flat params from `dag_run.conf`, validates `asset_id` (required), normalises optional fields with defaults, wraps into a single-entry list for downstream tasks. If `device_name` is missing, fetches asset name from ManageEngine API
 3. **fetch_change_requests** — Three-step correlation against ManageEngine:
    - **Step 1:** `GET /api/v3/changes` — fetches all change summaries (the list endpoint does not return asset associations)
    - **Step 2:** `GET /api/v3/changes/{change_id}` — for each change, fetches full details which includes the `assets` array
