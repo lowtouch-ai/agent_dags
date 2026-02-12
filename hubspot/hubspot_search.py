@@ -943,6 +943,15 @@ def validate_deal_stage(ti, **context):
     """Validate deal stage from conversation and assign default if invalid"""
     chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
     latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run", default="")
+    entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids= "analyze_thread_entities", default={})
+    if not entity_flags.get("search_deals", True):
+        logging.info("No deals are mentioned.")
+        # Push empty result
+        ti.xcom_push(key="deal_info", value={
+            "deal_results": {"total": 0, "results": []},
+            "new_deals": []
+        })
+        return
     
     # Valid deal stages
     VALID_DEAL_STAGES = [
@@ -1451,7 +1460,7 @@ def validate_companies_against_associations(ti, **context):
         return text
     
     entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids= "analyze_thread_entities", default={})
-    if not entity_flags.get("search_contacts", True):
+    if not entity_flags.get("search_companies", True):
         logging.info("Contact search was skipped, so skipping company association validation")
         # Push empty result
         ti.xcom_push(key="company_info", value={
@@ -1619,7 +1628,7 @@ def validate_deals_against_associations(ti, **context):
     Always include ALL associated deals as existing, and add unmatched mentioned as new.
     """
     entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids= "analyze_thread_entities", default={})
-    if not entity_flags.get("search_contacts", True):
+    if not entity_flags.get("search_deals", True):
         logging.info("Contact search was skipped, so skipping deal association validation")
         # Push empty result
         ti.xcom_push(key="deal_info", value={
@@ -1678,7 +1687,6 @@ RULES:
    - Direct deal: <Client Name>-<Deal Name>
    - Partner deal: <Partner Name>-<Client Name>-<Deal Name>
    - Use the Deal Name from the email if specified; otherwise, create a concise one based on the description (e.g., product or service discussed).
-- If the deal name is mentioned by the user, use that as the deal name without fail.
 - Only extract if explicit deal creation requested OR clear buying signals.Do not create any deals if there is no clear buying intent.
 - NOT exploratory conversations
 - Return deal name, stage (default: Lead), amount, close date and deal owner name
@@ -2810,15 +2818,19 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
                 task_index = task.get("task_index", 0)
                 matching_owner = next((owner for owner in task_owners if owner.get("task_index") == task_index), None)
                 if matching_owner:
-                    # Use the validated owner from determine_owner
-                    task["task_owner_id"] = matching_owner.get("task_owner_id", default_task_owner_id)
-                    task["task_owner_name"] = matching_owner.get("task_owner_name", default_task_owner_name)
-                else:
-                    # If no matching owner in the list, keep defaults
-                    if "task_owner_id" not in task or not task["task_owner_id"]:
+                    task_msg = matching_owner.get("task_owner_message", "").lower()
+                    if "not valid" in task_msg or "not specified" in task_msg or "not found" in task_msg:
+                        # AI message says invalid but assigned wrong owner - force default
                         task["task_owner_id"] = default_task_owner_id
-                    if "task_owner_name" not in task or not task["task_owner_name"]:
                         task["task_owner_name"] = default_task_owner_name
+                    else:
+                        # Valid owner from determine_owner
+                        task["task_owner_id"] = matching_owner.get("task_owner_id", default_task_owner_id)
+                        task["task_owner_name"] = matching_owner.get("task_owner_name", default_task_owner_name)
+                else:
+                    # No matching owner from determine_owner - always use defaults
+                    task["task_owner_id"] = default_task_owner_id
+                    task["task_owner_name"] = default_task_owner_name
                 
                 # Ensure task_index is set
                 if "task_index" not in task:
