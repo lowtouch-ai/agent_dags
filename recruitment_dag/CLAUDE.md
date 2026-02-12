@@ -28,7 +28,7 @@ The pipeline consists of three interconnected DAGs:
   3. Identifies the best matching job for the candidate
   4. Scores the CV against the JD (must-have skills, nice-to-have skills, experience, education)
   5. Saves candidate profile and scores to Google Sheets and local JSON (`/appz/data/recruitment/`)
-  6. Sends response email: rejection or screening questions for eligible candidates. The email opening is context-aware — if the candidate applied for a specific role, it acknowledges that role; if the candidate sent a general inquiry (no specific role mentioned), it acknowledges their interest in the company and introduces the best matching role based on their profile.
+  6. Sends response email: rejection or screening questions for eligible candidates. The email opening is context-aware — if the candidate applied for a specific role, it acknowledges that role; if the candidate sent a general inquiry (no specific role mentioned), it acknowledges their interest in the company and introduces the best matching role based on their profile. When a recruiter forwards a CV (detected via `extracted_candidate_email` from the listener), the screening questions are sent directly to the candidate with the recruiter CC'd; otherwise the email goes to the original sender.
 
 ### 3. `cv_initial_screening.py` — Screening Response Analysis (DAG ID: `screening_response_analysis`)
 - **Schedule**: None (triggered by `cv_monitor_mailbox`)
@@ -39,7 +39,7 @@ The pipeline consists of three interconnected DAGs:
   3. Analyzes responses using AI against 7 criteria (work arrangement, availability, salary, location, motivation, technical fit, qualifications)
   4. Updates candidate profile with screening results
   5. Sends acceptance (interview invite) or rejection email to the candidate
-  6. If accepted, notifies the recruiter (Athira) via email to schedule an interview call with the candidate — includes candidate name, email, position (`job_title`), CV score (`total_score`), and key credentials (experience, education, matched must-have and nice-to-have skills) from the saved profile (with configurable CC recipients)
+  6. If accepted, notifies the recruiter (Athira) via email to schedule an interview call with the candidate — includes candidate name, email, position (`job_title`), CV score (`total_score`), screening score (`overall_score`), and key credentials (experience, education, matched must-have and nice-to-have skills) from the saved profile (with configurable CC recipients). The notification also includes an AI-generated concise candidate summary (overall fit assessment), screening insights (strengths, concerns, detailed assessment from the analysis), and 5-6 suggested interview questions tailored to the role and candidate profile with expected answer patterns / what to look for in each answer.
 
 ## Data Flow
 

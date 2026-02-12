@@ -579,6 +579,16 @@ def send_response_email(**kwargs):
         logging.warning(f"Could not parse sender email from {sender}")
         return "Invalid sender email"
     
+    # Determine recipient: if a recruiter forwarded the CV, send to the candidate directly
+    extracted_candidate_email = email_data.get('extracted_candidate_email')
+    if extracted_candidate_email and extracted_candidate_email.lower() != sender_email.lower():
+        recipient = extracted_candidate_email
+        cc = sender_email  # Keep the recruiter/forwarder in the loop
+        logging.info(f"Forwarded CV detected: sending to candidate {recipient}, CC to sender {cc}")
+    else:
+        recipient = sender_email
+        cc = None
+
     # Compose email body based on eligibility
     if not score_data.get("eligible", False):
         # Rejection email
@@ -666,20 +676,19 @@ Use a professional, encouraging tone throughout. Output only clean, valid HTML f
         logging.error("Gmail authentication failed, aborting email response.")
         return "Gmail authentication failed"
     
-    cc = None
     bcc = None
     subject = f"Re: {subject}"
     
     result = send_email(
-        service, sender_email, subject, body, 
-        original_message_id, references, 
-        RECRUITMENT_FROM_ADDRESS, 
+        service, recipient, subject, body,
+        original_message_id, references,
+        RECRUITMENT_FROM_ADDRESS,
         cc=cc, bcc=bcc, thread_id=thread_id
     )
     
     if result:
-        logging.info(f"Email sent successfully to {sender_email}")
-        return f"Email sent successfully to {sender_email}"
+        logging.info(f"Email sent successfully to {recipient}" + (f" (CC: {cc})" if cc else ""))
+        return f"Email sent successfully to {recipient}"
     else:
         logging.error("Failed to send email")
         return "Failed to send email"

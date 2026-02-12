@@ -373,6 +373,8 @@ def notify_recruiter_for_interview(**kwargs):
     """
     Send email to recruiter (Athira) to schedule an interview call
     with the candidate if the screening decision is ACCEPT.
+    Includes AI-generated candidate summary, interview questions,
+    and screening analysis insights.
     """
     ti = kwargs['ti']
     analysis_data = ti.xcom_pull(task_ids='analyze_screening_responses', key='analysis_data')
@@ -408,7 +410,82 @@ def notify_recruiter_for_interview(**kwargs):
     matched_nice_to_have = [s.get('skill_name', '') for s in nice_to_have_skills if s.get('match')]
     nice_to_have_str = ', '.join(matched_nice_to_have) if matched_nice_to_have else 'N/A'
 
-    
+    # Extract screening insights from analysis_data
+    strengths = analysis_data.get('strengths', [])
+    concerns = analysis_data.get('concerns', [])
+    detailed_reason = analysis_data.get('detailed_reason', 'N/A')
+    screening_score = analysis_data.get('overall_score', 'N/A')
+
+    # --- AI call: Generate candidate summary and interview questions ---
+    MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
+
+    interview_prep_prompt = f"""You are helping a recruiter prepare for a candidate interview.
+
+## Candidate Profile:
+- Name: {candidate_name}
+- Position: {position}
+- Experience: {experience_years} years
+- Education: {education}
+- Matched Must-Have Skills: {must_have_str}
+- Matched Nice-to-Have Skills: {nice_to_have_str}
+- CV Score: {cv_score}
+- Screening Score: {screening_score}
+
+## Screening Analysis:
+- Strengths: {json.dumps(strengths)}
+- Concerns: {json.dumps(concerns)}
+- Detailed Reason: {detailed_reason}
+
+## Candidate's Screening Responses:
+{response_data.get('body', 'N/A')}
+
+## Original CV Content:
+{candidate_profile.get('original_cv_content', 'N/A') if candidate_profile else 'N/A'}
+
+## Instructions:
+Generate the following in JSON format:
+1. A concise candidate summary (3-4 sentences covering overall fit, key strengths, and any areas to probe further).
+2. 5-6 suggested interview questions tailored to this specific role and candidate profile. For each question, include what to look for in the candidate's answer (expected answer patterns / green flags / red flags).
+
+## Output format:
+```json
+{{
+    "candidate_summary": "<3-4 sentence summary of the candidate's overall fit>",
+    "interview_questions": [
+        {{
+            "question": "<interview question>",
+            "what_to_look_for": "<expected answer patterns, green flags, and red flags>"
+        }}
+    ]
+}}
+```
+"""
+
+    interview_prep_response = get_ai_response(interview_prep_prompt, stream=False, model=MODEL_NAME)
+    logging.info(f"Interview prep AI response: {interview_prep_response[:500]}...")
+
+    interview_prep_data = extract_json_from_text(interview_prep_response)
+    candidate_summary = interview_prep_data.get('candidate_summary', 'N/A') if interview_prep_data else 'N/A'
+    interview_questions = interview_prep_data.get('interview_questions', []) if interview_prep_data else []
+
+    # Build interview questions HTML
+    questions_html = ""
+    for i, q in enumerate(interview_questions, 1):
+        questions_html += f"""
+        <tr>
+            <td style="padding: 10px; border: 1px solid #ddd; vertical-align: top; font-weight: bold; width: 50%;">
+                {i}. {q.get('question', '')}
+            </td>
+            <td style="padding: 10px; border: 1px solid #ddd; vertical-align: top;">
+                {q.get('what_to_look_for', '')}
+            </td>
+        </tr>"""
+
+    # Build strengths HTML
+    strengths_html = "".join(f"<li>{s}</li>" for s in strengths) if strengths else "<li>N/A</li>"
+
+    # Build concerns HTML
+    concerns_html = "".join(f"<li>{c}</li>" for c in concerns) if concerns else "<li>None identified</li>"
 
     body = f"""
     <h2>Interview Scheduling Request</h2>
@@ -421,7 +498,11 @@ def notify_recruiter_for_interview(**kwargs):
         <li><strong>Email:</strong> {sender_email}</li>
         <li><strong>Position:</strong> {position}</li>
         <li><strong>CV Score:</strong> {cv_score}</li>
+        <li><strong>Screening Score:</strong> {screening_score}</li>
     </ul>
+
+    <h3>Candidate Summary:</h3>
+    <p>{candidate_summary}</p>
 
     <h3>Key Credentials:</h3>
     <ul>
@@ -431,6 +512,27 @@ def notify_recruiter_for_interview(**kwargs):
         <li><strong>Matched Nice-to-Have Skills:</strong> {nice_to_have_str}</li>
     </ul>
 
+    <h3>Screening Insights:</h3>
+    <p><strong>Strengths:</strong></p>
+    <ul>{strengths_html}</ul>
+    <p><strong>Concerns:</strong></p>
+    <ul>{concerns_html}</ul>
+    <p><strong>Detailed Assessment:</strong> {detailed_reason}</p>
+
+    <h3>Suggested Interview Questions:</h3>
+    <table style="border-collapse: collapse; width: 100%; font-size: 14px;">
+        <thead>
+            <tr style="background-color: #f2f2f2;">
+                <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Question</th>
+                <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">What to Look For</th>
+            </tr>
+        </thead>
+        <tbody>
+            {questions_html}
+        </tbody>
+    </table>
+
+    <br>
     <p>Please reach out to the candidate to set up an interview call.</p>
     <p>Best regards,<br>Recruitment Automation System</p>
     """
