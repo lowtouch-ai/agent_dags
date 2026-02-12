@@ -8,7 +8,6 @@ Trigger: Manual only — pass device_changes array via dag_run.conf.
 
 Sample conf:
 {
-  "access_token": "<Zoho OAuth2 access token>",
   "device_changes": [
     {
       "device_id": "router-01",
@@ -24,6 +23,8 @@ Sample conf:
 
 Airflow Variables required:
   - ltai.change_validation.me.base_url       (ManageEngine SDP Cloud base URL)
+  - APEXAIQ_ZOHO_CLIENT_ID                   (Zoho OAuth2 client ID)
+  - APEXAIQ_ZOHO_CLIENT_SECRET               (Zoho OAuth2 client secret)
 """
 
 from airflow.sdk import DAG, Variable
@@ -36,6 +37,8 @@ import requests
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 ME_BASE_URL = Variable.get("ltai.change_validation.me.base_url", default="")
+ZOHO_CLIENT_ID = Variable.get("APEXAIQ_ZOHO_CLIENT_ID", default="")
+ZOHO_CLIENT_SECRET = Variable.get("APEXAIQ_ZOHO_CLIENT_SECRET", default="")
 
 default_args = {
     "owner": "lowtouch.ai_developers",
@@ -44,6 +47,55 @@ default_args = {
     "retries": 1,
     "retry_delay": pendulum.duration(seconds=30),
 }
+
+
+# ---------------------------------------------------------------------------
+# Task 0 — Fetch Zoho OAuth2 access token
+# ---------------------------------------------------------------------------
+ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
+ZOHO_SCOPES = (
+    "SDPOnDemand.requests.ALL,"
+    "SDPOnDemand.requests.READ,"
+    "SDPOnDemand.assets.READ,"
+    "SDPOnDemand.changes.READ,"
+    "SDPOnDemand.requests.CREATE"
+)
+
+
+def fetch_zoho_token(**kwargs):
+    """Obtain a Zoho OAuth2 access token using client_credentials grant
+    and push it to XCom for downstream tasks."""
+
+    if not ZOHO_CLIENT_ID or not ZOHO_CLIENT_SECRET:
+        raise ValueError(
+            "Zoho credentials missing — set Airflow Variables "
+            "APEXAIQ_ZOHO_CLIENT_ID and "
+            "APEXAIQ_ZOHO_CLIENT_SECRET"
+        )
+
+    params = {
+        "client_id": ZOHO_CLIENT_ID,
+        "client_secret": ZOHO_CLIENT_SECRET,
+        "grant_type": "client_credentials",
+        "scope": ZOHO_SCOPES,
+    }
+
+    logging.info("Requesting Zoho OAuth2 token: POST %s", ZOHO_TOKEN_URL)
+    resp = requests.post(ZOHO_TOKEN_URL, params=params, timeout=30)
+    resp.raise_for_status()
+    token_data = resp.json()
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        error = token_data.get("error", "unknown")
+        raise ValueError(f"Zoho token response missing access_token: {error}")
+
+    expires_in = token_data.get("expires_in", "N/A")
+    logging.info("Zoho token acquired (expires_in=%s seconds)", expires_in)
+
+    ti = kwargs["ti"]
+    ti.xcom_push(key="access_token", value=access_token)
+    return access_token
 
 
 # ---------------------------------------------------------------------------
@@ -105,11 +157,9 @@ def fetch_change_requests(**kwargs):
             "ltai.change_validation.me.base_url"
         )
 
-    dag_run = kwargs.get("dag_run")
-    conf = dag_run.conf or {}
-    access_token = conf.get("access_token", "")
+    access_token = ti.xcom_pull(task_ids="fetch_zoho_token", key="access_token")
     if not access_token:
-        raise ValueError("No access_token provided in DAG trigger config")
+        raise ValueError("No access_token received from fetch_zoho_token task")
 
     headers = {
         "Authorization": f"Zoho-oauthtoken {access_token}",
@@ -480,13 +530,18 @@ def _fetch_approval_status(base_url, change_id, headers):
 # DAG definition
 # ---------------------------------------------------------------------------
 with DAG(
-    dag_id="change_validation_agent",
+    dag_id="apexaiq_change_validation_agent",
     default_args=default_args,
     description="Validates device changes against ManageEngine change requests for compliance",
     schedule=None,
     catchup=False,
     tags=["compliance", "change-validation", "manageengine"],
 ) as dag:
+
+    token_task = PythonOperator(
+        task_id="fetch_zoho_token",
+        python_callable=fetch_zoho_token,
+    )
 
     extract_task = PythonOperator(
         task_id="extract_asset_ids",
@@ -503,4 +558,4 @@ with DAG(
         python_callable=correlate_and_classify,
     )
 
-    extract_task >> fetch_task >> classify_task
+    token_task >> extract_task >> fetch_task >> classify_task
