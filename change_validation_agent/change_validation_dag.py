@@ -175,6 +175,12 @@ def fetch_change_requests(**kwargs):
             logging.error("  Failed to fetch details for change %s: %s", cs_display, str(exc))
             continue
 
+        # Resolve approval status via approval_levels API
+        resolved_approval = _fetch_approval_status(base_url, change_id, headers)
+        change_detail["_resolved_approval"] = resolved_approval
+        logging.info("  Resolved approval for %s: %s", cs_display,
+                     resolved_approval.get("status") if resolved_approval else "N/A")
+
         # Log key fields from the change detail
         logging.info("  Title: %s", change_detail.get("title", "N/A"))
         logging.info("  Status: %s", _safe_name(change_detail.get("status")))
@@ -270,8 +276,16 @@ def correlate_and_classify(**kwargs):
         reason = "No matching approved change request found"
 
         for cr in related_crs:
-            approval_name = _safe_name(cr.get("approval_status"))
-            is_approved = approval_name.lower() in ("approved", "pre-approved")
+            resolved = cr.get("_resolved_approval")
+            if resolved and resolved.get("status") == "approved":
+                is_approved = True
+                approval_name = "approved (via approval levels)"
+            elif resolved and resolved.get("status") == "rejected":
+                is_approved = False
+                approval_name = "rejected (via approval levels)"
+            else:
+                approval_name = _safe_name(cr.get("approval_status"))
+                is_approved = approval_name.lower() in ("approved", "pre-approved")
 
             start_val = _safe_ts(cr.get("scheduled_start_time"))
             end_val = _safe_ts(cr.get("scheduled_end_time"))
@@ -279,10 +293,20 @@ def correlate_and_classify(**kwargs):
 
             cr_label = cr.get("display_id") or cr.get("id", "unknown")
 
+            # Build approval detail suffix for reason strings
+            level_detail = ""
+            if resolved and resolved.get("levels"):
+                level_parts = []
+                for lvl in resolved["levels"]:
+                    lvl_num = lvl.get("level", "?")
+                    lvl_status = lvl.get("status", "unknown")
+                    level_parts.append(f"L{lvl_num}={lvl_status}")
+                level_detail = f" [{', '.join(level_parts)}]"
+
             if is_approved and in_window:
                 matched_cr = cr
                 classification = "Validated Change"
-                reason = f"Matches approved CR #{cr_label}"
+                reason = f"Matches approved CR #{cr_label}{level_detail}"
                 break
 
             if is_approved and not in_window:
@@ -290,7 +314,7 @@ def correlate_and_classify(**kwargs):
                 classification = "Missing or Partial Approval"
                 reason = (
                     f"Approved CR #{cr_label} exists but change occurred "
-                    "outside the scheduled window"
+                    f"outside the scheduled window{level_detail}"
                 )
 
             if not is_approved and matched_cr is None:
@@ -298,7 +322,7 @@ def correlate_and_classify(**kwargs):
                 classification = "Missing or Partial Approval"
                 reason = (
                     f"CR #{cr_label} found but approval status is "
-                    f"'{approval_name}'"
+                    f"'{approval_name}'{level_detail}"
                 )
 
         if classification not in ("Validated Change", "Missing or Partial Approval"):
@@ -366,6 +390,90 @@ def _build_result(device_change, classification, reason, matched_cr):
             "matching_crs": [matched_cr] if matched_cr else [],
         },
     }
+
+
+def _fetch_approval_status(base_url, change_id, headers):
+    """Query the approval_levels and approvals sub-resources for a change
+    to determine the real approval state instead of relying on the static
+    approval_status field."""
+    try:
+        levels_url = f"{base_url}/api/v3/changes/{change_id}/approval_levels"
+        logging.info("  Fetching approval levels: GET %s", levels_url)
+        levels_resp = requests.get(levels_url, headers=headers, timeout=30)
+        levels_resp.raise_for_status()
+        levels_data = levels_resp.json()
+        approval_levels = levels_data.get("approval_levels", [])
+
+        if not approval_levels:
+            logging.info("  No approval levels found for change %s", change_id)
+            return {"status": "no_levels", "levels": []}
+
+        all_levels = []
+        any_rejected = False
+        all_levels_approved = True
+
+        for level in approval_levels:
+            level_id = level.get("id")
+            level_number = level.get("level", level.get("id"))
+            level_status = _safe_name(level.get("status"))
+
+            # Fetch individual approvals for this level
+            approvals_url = (
+                f"{base_url}/api/v3/changes/{change_id}"
+                f"/approval_levels/{level_id}/approvals"
+            )
+            logging.info(
+                "  Fetching approvals for level %s: GET %s",
+                level_number, approvals_url,
+            )
+            approvals_resp = requests.get(
+                approvals_url, headers=headers, timeout=30,
+            )
+            approvals_resp.raise_for_status()
+            approvals_data = approvals_resp.json()
+            individual_approvals = approvals_data.get("approvals", [])
+
+            approval_details = []
+            for appr in individual_approvals:
+                appr_status = _safe_name(appr.get("status"))
+                approver = _safe_name(appr.get("approver"))
+                approval_details.append({
+                    "approver": approver,
+                    "status": appr_status,
+                })
+                if "rejected" in appr_status.lower():
+                    any_rejected = True
+
+            if level_status.lower() != "approved":
+                all_levels_approved = False
+
+            level_info = {
+                "level": level_number,
+                "status": level_status,
+                "approvals": approval_details,
+            }
+            all_levels.append(level_info)
+            logging.info(
+                "  Level %s status=%s, approvals=%s",
+                level_number, level_status, json.dumps(approval_details),
+            )
+
+        if any_rejected:
+            resolved = "rejected"
+        elif all_levels_approved:
+            resolved = "approved"
+        else:
+            resolved = "pending"
+
+        logging.info("  Resolved approval status: %s", resolved)
+        return {"status": resolved, "levels": all_levels}
+
+    except Exception as exc:
+        logging.error(
+            "  Failed to fetch approval levels for change %s: %s",
+            change_id, exc,
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------
