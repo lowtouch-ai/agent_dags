@@ -60,15 +60,18 @@ extract_asset_ids >> fetch_change_requests >> correlate_and_classify
 ```
 
 1. **extract_asset_ids** — Parses `dag_run.conf`, validates entries, deduplicates asset IDs
-2. **fetch_change_requests** — Two-step correlation against ManageEngine:
+2. **fetch_change_requests** — Three-step correlation against ManageEngine:
    - **Step 1:** `GET /api/v3/changes` — fetches all change summaries (the list endpoint does not return asset associations)
    - **Step 2:** `GET /api/v3/changes/{change_id}` — for each change, fetches full details which includes the `assets` array
+   - **Step 3:** `GET /api/v3/changes/{change_id}/approval_levels` + `/approval_levels/{level_id}/approvals` — resolves real approval status by walking each approval level and its individual approvals (the top-level `approval_status` field on a change is unreliable)
    - Filters client-side: matches changes where the `assets[]` array contains the target asset ID
-3. **correlate_and_classify** — Matches device changes to CRs and classifies as:
+   - Resolved approval stored as `_resolved_approval` on each change detail: `approved` (all levels approved), `rejected` (any rejected), or `pending`
+3. **correlate_and_classify** — Matches device changes to CRs and classifies using resolved approval status:
    - `Validated Change` — Approved CR found within scheduled window
    - `Unapproved Change` — No matching CR or no CRs at all
    - `Missing or Partial Approval` — CR exists but not approved or outside time window
    - `Data Inconclusive` — CRs exist but could not be matched
+   - Reason strings include per-level detail (e.g. `[L1=approved, L2=pending]`)
 
 ## ManageEngine SDP Cloud API Notes
 
@@ -78,6 +81,8 @@ extract_asset_ids >> fetch_change_requests >> correlate_and_classify
 |---|---|---|
 | List all changes | `GET /api/v3/changes` | Returns summary only — no `assets` field |
 | Get change detail | `GET /api/v3/changes/{id}` | Returns full detail including `assets[]` and `configuration_items[]` |
+| List approval levels | `GET /api/v3/changes/{id}/approval_levels` | Returns approval levels for a change |
+| List approvals per level | `GET /api/v3/changes/{id}/approval_levels/{level_id}/approvals` | Returns individual approvals (approver, status) for a level |
 | List assets | `GET /api/v3/assets` | Use to look up asset IDs by name |
 | Get asset detail | `GET /api/v3/assets/{id}` | Returns asset info (no reverse link to changes) |
 
@@ -90,12 +95,23 @@ extract_asset_ids >> fetch_change_requests >> correlate_and_classify
 - Auth header format: `Authorization: Zoho-oauthtoken {token}`
 - Accept header: `application/vnd.manageengine.sdp.v3+json`
 
+### Approval resolution logic
+
+- The top-level `approval_status` field on a change is **not reliable** — use the approval levels API instead
+- The DAG walks `approval_levels` → `approvals` for each level and resolves:
+  - **approved** — all levels have status `approved`
+  - **rejected** — any individual approval has `rejected` in its status
+  - **pending** — some levels are not yet approved
+  - **no_levels** — no approval levels found for the change
+- The resolved status is used by `correlate_and_classify` to determine the classification; the static `approval_status` field is only used as a fallback when resolved approval data is unavailable
+
 ### Logging
 
 The `fetch_change_requests` task logs detailed debug info for each API call:
 - Request URL and params
 - Response status codes
 - Per-change: title, status, approval status, scheduled window, linked assets, linked CIs
+- Per-change: resolved approval status and per-level breakdown
 - Match/no-match results per asset ID
 
 **Note:** Airflow uses structlog — all logged objects must be serialized via `json.dumps()` or `str()` (raw dicts/lists cause formatting errors).
