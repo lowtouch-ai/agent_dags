@@ -11,34 +11,55 @@ Validates infrastructure device changes against approved ManageEngine ServiceDes
 
 ## Trigger Config
 
-The DAG expects this payload in `dag_run.conf`:
+The DAG expects this payload in `dag_run.conf`. Only `asset_id` is required per entry — all other fields are optional.
 
+Minimal example:
+```json
+{
+  "device_changes": [
+    { "asset_id": "256963000000366263" }
+  ]
+}
+```
+
+Full example (all fields):
 ```json
 {
   "device_changes": [
     {
-      "device_id": "RTR-CORE-01",
       "asset_id": "256963000000366263",
-      "device_ip": "10.0.1.1",
+      "device_name": "SDWAN-Branch-Router-01",
       "change_type": "configuration",
       "change_details": "Updated ACL rules on interface GigabitEthernet0/1",
-      "change_timestamp": "2025-02-10T14:30:00Z",
-      "config_before_hash": "abc123def456",
-      "config_after_hash": "xyz789uvw012",
-      "changed_attributes": ["interface.GigabitEthernet0/1.access-list"]
+      "previous_state": "permit ip 10.0.0.0/8 any",
+      "current_state": "permit ip 10.0.0.0/8 any; deny ip 192.168.1.0/24 any",
+      "change_timestamp": "2025-08-10T14:30:00Z"
     }
   ]
 }
 ```
 
-### Required fields per device change
+### Fields per device change
 
-| Field | Description |
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `asset_id` | **Yes** | — | ManageEngine internal asset ID (numeric, e.g. `256963000000366263`) |
+| `device_name` | No | Asset name from API, or `"unknown"` | Human-readable device name for logging/reporting. If omitted, fetched automatically from ManageEngine assets API |
+| `change_type` | No | `""` | Type of change, e.g. `"configuration"` |
+| `change_details` | No | CR description from API | Description of what changed. If omitted, falls back to the matched CR's description or title from ManageEngine |
+| `previous_state` | No | `""` | State before the change |
+| `current_state` | No | `""` | State after the change |
+| `change_timestamp` | No | `null` (skips window check) | ISO-8601 timestamp — used for time-window matching against CRs. If omitted, time-window validation is skipped entirely and approval status alone determines the classification |
+
+### Auto-enrichment from API
+
+When optional fields are omitted, the DAG enriches them from ManageEngine:
+
+| Field | Enrichment source |
 |---|---|
-| `asset_id` | **ManageEngine internal asset ID** (numeric, e.g. `256963000000366263`) — not a custom tag |
-| `device_id` | Device identifier for logging/reporting |
-| `change_details` | Human-readable description of the change |
-| `change_timestamp` | ISO-8601 timestamp — used for time-window matching against CRs |
+| `device_name` | `GET /api/v3/assets/{asset_id}` → `asset.name` (cached per asset to avoid duplicate calls) |
+| `change_details` | Matched CR's `description` field (HTML-stripped), falling back to CR `title` |
+| Email "Matching CR" column | Shows `{display_id}: {title}` (e.g. `CH-9: SDWAN Branch upgrade`) instead of just the ID |
 
 ### Authentication
 
@@ -71,26 +92,40 @@ fetch_zoho_token >> extract_asset_ids >> fetch_change_requests >> correlate_and_
 ```
 
 1. **fetch_zoho_token** — Obtains a fresh Zoho OAuth2 access token using `client_credentials` grant and pushes it to XCom
-2. **extract_asset_ids** — Parses `dag_run.conf`, validates entries, deduplicates asset IDs
+2. **extract_asset_ids** — Parses `dag_run.conf`, validates entries (only `asset_id` required), normalises optional fields with defaults, deduplicates asset IDs. If `device_name` is missing, fetches asset name from ManageEngine API (results cached per asset)
 3. **fetch_change_requests** — Three-step correlation against ManageEngine:
    - **Step 1:** `GET /api/v3/changes` — fetches all change summaries (the list endpoint does not return asset associations)
    - **Step 2:** `GET /api/v3/changes/{change_id}` — for each change, fetches full details which includes the `assets` array
    - **Step 3:** `GET /api/v3/changes/{change_id}/approval_levels` + `/approval_levels/{level_id}/approvals` — resolves real approval status by walking each approval level and its individual approvals (the top-level `approval_status` field on a change is unreliable)
    - Filters client-side: matches changes where the `assets[]` array contains the target asset ID
    - Resolved approval stored as `_resolved_approval` on each change detail: `approved` (all levels approved), `rejected` (any rejected), or `pending`
-   - Only the 6 fields needed by `correlate_and_classify` are stored in XCom (`id`, `display_id`, `approval_status`, `scheduled_start_time`, `scheduled_end_time`, `_resolved_approval`) — full ManageEngine payloads are not persisted
+   - Stores 8 fields per CR in XCom: `id`, `display_id`, `title`, `description`, `approval_status`, `scheduled_start_time`, `scheduled_end_time`, `_resolved_approval`
 4. **correlate_and_classify** — Matches device changes to CRs and classifies using resolved approval status:
-   - `Validated Change` — Approved CR found within scheduled window
+   - `Validated Change` — Approved CR found; if `change_timestamp` provided, must be within scheduled window
    - `Unapproved Change` — No matching CR or no CRs at all
-   - `Missing or Partial Approval` — CR exists but not approved or outside time window
+   - `Missing or Partial Approval` — CR exists but not approved, or `change_timestamp` provided and falls outside time window
    - `Data Inconclusive` — CRs exist but could not be matched
+   - **Time-window behaviour:** If `change_timestamp` is `null`/omitted, time-window validation is skipped — approval status alone determines the result
    - Reason strings include per-level detail (e.g. `[L1=approved, L2=pending]`)
-   - Pushes lightweight results (no evidence payload) and summary counts to XCom
+   - Falls back to CR description/title for empty `change_details`
 5. **choose_email_tasks** (`BranchPythonOperator`) — Reads `validation_summary` from XCom and returns only the compose task_id(s) whose classification count > 0; unselected compose tasks are marked **skipped**
 6. **compose_approved_email** — Builds a green-themed (`#1b5e20`) HTML email for `Validated Change` results
 7. **compose_partial_approval_email** — Builds an amber-themed (`#e65100`) HTML email for `Missing or Partial Approval` results
 8. **compose_no_approval_email** — Builds a red-themed (`#b71c1c`) HTML email for `Unapproved Change` results
 9. **send_notification_emails** — Sends all non-empty composed emails via SMTP to `APEXAIQ_CHANGE_VALIDATION_NOTIFY_EMAIL` recipients (first = TO, rest = CC); uses `trigger_rule="none_failed_min_one_success"` so it runs even when some compose tasks are skipped
+
+### Email table columns
+
+| Column | Source |
+|---|---|
+| Device Name | `device_name` from conf, or asset name fetched from API |
+| Asset ID | `asset_id` from conf |
+| Change Details | `change_details` from conf, or CR `description`/`title` from API (HTML-stripped) |
+| Timestamp | `change_timestamp` from conf, or `N/A` |
+| Reason | Classification reason with approval level details |
+| Matching CR | `{display_id}: {title}` from ManageEngine (e.g. `CH-9: SDWAN Branch upgrade`) |
+
+All dynamic content in the email table is HTML-escaped via `html.escape()` to prevent broken layout from API responses containing raw HTML (especially ManageEngine `description` fields). The table always renders its full structure — empty results show a colspan placeholder row instead of omitting the table.
 
 ### Branching behaviour
 
@@ -105,11 +140,17 @@ fetch_zoho_token >> extract_asset_ids >> fetch_change_requests >> correlate_and_
 | Purpose | Endpoint | Notes |
 |---|---|---|
 | List all changes | `GET /api/v3/changes` | Returns summary only — no `assets` field |
-| Get change detail | `GET /api/v3/changes/{id}` | Returns full detail including `assets[]` and `configuration_items[]` |
+| Get change detail | `GET /api/v3/changes/{id}` | Returns full detail including `assets[]`, `configuration_items[]`, `title`, `description` |
 | List approval levels | `GET /api/v3/changes/{id}/approval_levels` | Returns approval levels for a change |
 | List approvals per level | `GET /api/v3/changes/{id}/approval_levels/{level_id}/approvals` | Returns individual approvals (approver, status) for a level |
-| List assets | `GET /api/v3/assets` | Use to look up asset IDs by name |
-| Get asset detail | `GET /api/v3/assets/{id}` | Returns asset info (no reverse link to changes) |
+| Get asset detail | `GET /api/v3/assets/{id}` | Returns asset info including `name` — used for `device_name` enrichment |
+
+### Asset API notes
+
+- Assets are organized by **product type** — each type has its own `api_plural_name` (e.g. `asset_mobiles`, `asset_smartphones`)
+- The generic `GET /api/v3/assets` may return a **400 Bad Request** for some product types — use the product-type-specific endpoint instead (e.g. `GET /api/v3/asset_mobiles`)
+- `GET /api/v3/assets/{id}` (direct fetch by ID) works regardless of product type
+- Default list pagination is small — pass `row_count: 100` in `list_info` to get more results
 
 ### Important API constraints
 
@@ -140,6 +181,20 @@ The `fetch_change_requests` task logs detailed debug info for each API call:
 - Match/no-match results per asset ID
 
 **Note:** Airflow uses structlog — all logged objects must be serialized via `json.dumps()` or `str()` (raw dicts/lists cause formatting errors).
+
+## Reference: CH-342 (HDFC AMC test case)
+
+The PDF `#CH-342 Change Details - HDFC Asset Management Company Limited (1).pdf` documents a real-world change request used as the reference for this DAG:
+
+| Field | Value |
+|---|---|
+| Title | HDFC AMC \|\| SDWAN Branch upgrade Version from 17.9.4 to 17.12.5 |
+| Workflow | Network CR |
+| Approval | 1 level — CAB Evaluation, approved by Vikas R Salunkhe |
+| Scheduled window | Aug 6, 2025 05:00 PM → Aug 23, 2025 08:00 PM |
+| Final status | Close / Completed |
+
+**Key observation:** The real CH-342 had no assets linked (`Assets Involved: -`). For the DAG to correlate a change, the **asset must be linked** to the CR in ManageEngine.
 
 ## Postman Collection
 

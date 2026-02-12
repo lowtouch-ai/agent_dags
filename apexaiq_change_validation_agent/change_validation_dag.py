@@ -6,12 +6,22 @@ changes and classifies them for compliance review.
 
 Trigger: Manual only — pass device_changes array via dag_run.conf.
 
-Sample conf:
+Each entry in device_changes requires only "asset_id". All other fields
+are optional and will use sensible defaults when omitted.
+
+Sample conf (minimal — asset_id only):
+{
+  "device_changes": [
+    { "asset_id": "300000000000001" }
+  ]
+}
+
+Sample conf (full):
 {
   "device_changes": [
     {
-      "device_id": "router-01",
       "asset_id": "300000000000001",
+      "device_name": "router-01",
       "change_type": "configuration",
       "change_details": "Modified ACL rules on GigabitEthernet0/1",
       "previous_state": "permit ip 10.0.0.0/8 any",
@@ -20,6 +30,16 @@ Sample conf:
     }
   ]
 }
+
+Fields per device_change entry:
+  - asset_id         (REQUIRED) ManageEngine asset ID to validate against
+  - device_name      (optional) Human-readable device name, defaults to asset name from API or "unknown"
+  - change_type      (optional) Type of change, e.g. "configuration"
+  - change_details   (optional) Description of what changed, defaults to ""
+  - previous_state   (optional) State before the change
+  - current_state    (optional) State after the change
+  - change_timestamp (optional) ISO-8601 timestamp of the change; if omitted,
+                     time-window validation is skipped
 
 Airflow Variables required:
   - ltai.change_validation.me.base_url       (ManageEngine SDP Cloud base URL)
@@ -32,9 +52,11 @@ Airflow Variables required:
 
 from airflow.sdk import DAG, Variable
 from airflow.providers.standard.operators.python import BranchPythonOperator, PythonOperator
+import html as html_mod
 import pendulum
 import json
 import logging
+import re
 import requests
 import smtplib
 from email.mime.text import MIMEText
@@ -117,16 +139,50 @@ def fetch_zoho_token(**kwargs):
 # ---------------------------------------------------------------------------
 # Task 1 — Extract asset IDs from device change input
 # ---------------------------------------------------------------------------
+def _fetch_asset_name(base_url, asset_id, headers):
+    """Fetch the asset name from ManageEngine for a given asset_id.
+    Returns the asset name string or None on failure."""
+    detail_url = f"{base_url}/api/v3/assets/{asset_id}"
+    logging.info("Fetching asset name for %s: GET %s", asset_id, detail_url)
+    try:
+        resp = requests.get(detail_url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        asset_data = resp.json().get("asset", {})
+        name = asset_data.get("name")
+        logging.info("Asset %s name: %s", asset_id, name)
+        return name
+    except requests.exceptions.RequestException as exc:
+        logging.warning("Failed to fetch asset name for %s: %s", asset_id, str(exc))
+        return None
+
+
 def extract_asset_ids(**kwargs):
     """Parse dag_run.conf, validate each device change entry, and push
-    deduplicated asset_ids plus the validated change list to XCom."""
+    deduplicated asset_ids plus the validated change list to XCom.
 
+    Only ``asset_id`` is required per entry.  All other fields are optional
+    and receive sensible defaults when missing.  If ``device_name`` is not
+    provided, the asset name is fetched from the ManageEngine API."""
+
+    ti = kwargs["ti"]
     dag_run = kwargs.get("dag_run")
     conf = dag_run.conf or {}
 
     device_changes = conf.get("device_changes", [])
     if not device_changes:
         raise ValueError("No device_changes provided in DAG conf")
+
+    # Prepare API access for asset name lookups
+    access_token = ti.xcom_pull(task_ids="fetch_zoho_token", key="access_token")
+    base_url = ME_BASE_URL.rstrip("/") if ME_BASE_URL else ""
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {access_token}",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/vnd.manageengine.sdp.v3+json",
+    } if access_token and base_url else {}
+
+    # Cache asset names to avoid duplicate API calls for the same asset
+    asset_name_cache: dict[str, str | None] = {}
 
     asset_ids = []
     validated_changes = []
@@ -135,12 +191,34 @@ def extract_asset_ids(**kwargs):
         asset_id = change.get("asset_id")
         if not asset_id:
             logging.warning(
-                "Skipping change entry without asset_id — device_id: %s",
-                change.get("device_id", "unknown"),
+                "Skipping change entry without asset_id — device_name: %s",
+                change.get("device_name", "unknown"),
             )
             continue
-        asset_ids.append(str(asset_id))
-        validated_changes.append(change)
+
+        asset_id_str = str(asset_id)
+
+        # Resolve device_name: use provided value, or fetch asset name from API
+        device_name = change.get("device_name") or ""
+        if not device_name and headers and base_url:
+            if asset_id_str not in asset_name_cache:
+                asset_name_cache[asset_id_str] = _fetch_asset_name(
+                    base_url, asset_id_str, headers,
+                )
+            device_name = asset_name_cache[asset_id_str] or ""
+
+        # Normalise optional fields so downstream tasks never see KeyError
+        normalised = {
+            "asset_id": asset_id_str,
+            "device_name": device_name or "unknown",
+            "change_type": change.get("change_type") or "",
+            "change_details": change.get("change_details") or "",
+            "previous_state": change.get("previous_state") or "",
+            "current_state": change.get("current_state") or "",
+            "change_timestamp": change.get("change_timestamp") or None,
+        }
+        asset_ids.append(normalised["asset_id"])
+        validated_changes.append(normalised)
 
     if not asset_ids:
         raise ValueError("No valid asset_ids found in device_changes")
@@ -148,7 +226,6 @@ def extract_asset_ids(**kwargs):
     unique_asset_ids = list(set(asset_ids))
     logging.info("Extracted %d unique asset IDs: %s", len(unique_asset_ids), unique_asset_ids)
 
-    ti = kwargs["ti"]
     ti.xcom_push(key="asset_ids", value=unique_asset_ids)
     ti.xcom_push(key="device_changes", value=validated_changes)
     return unique_asset_ids
@@ -275,6 +352,8 @@ def fetch_change_requests(**kwargs):
         slim_cr = {
             "id": change_detail.get("id"),
             "display_id": change_detail.get("display_id"),
+            "title": change_detail.get("title", ""),
+            "description": change_detail.get("description", ""),
             "approval_status": change_detail.get("approval_status"),
             "scheduled_start_time": change_detail.get("scheduled_start_time"),
             "scheduled_end_time": change_detail.get("scheduled_end_time"),
@@ -334,7 +413,7 @@ def correlate_and_classify(**kwargs):
 
     for device_change in device_changes:
         asset_id = str(device_change.get("asset_id"))
-        device_id = device_change.get("device_id", "unknown")
+        device_name = device_change.get("device_name", "unknown")
         change_ts = device_change.get("change_timestamp")
         change_details = device_change.get("change_details", "")
 
@@ -367,7 +446,12 @@ def correlate_and_classify(**kwargs):
 
             start_val = _safe_ts(cr.get("scheduled_start_time"))
             end_val = _safe_ts(cr.get("scheduled_end_time"))
-            in_window = _check_time_window(change_ts, start_val, end_val)
+            # If no change_timestamp was provided, skip time-window
+            # validation — approval status alone determines the result.
+            if not change_ts:
+                in_window = True
+            else:
+                in_window = _check_time_window(change_ts, start_val, end_val)
 
             cr_label = _safe_display_id(cr)
 
@@ -426,7 +510,7 @@ def correlate_and_classify(**kwargs):
     for r in results:
         logging.info(
             "  [%s] Device: %s | Asset: %s | Change: %s",
-            r["classification"], r["device_id"], r["asset_id"],
+            r["classification"], r["device_name"], r["asset_id"],
             r["change_detected"][:80],
         )
 
@@ -463,17 +547,35 @@ def _safe_display_id(cr):
     return raw or str(cr.get("id", "unknown"))
 
 
+def _strip_html(text):
+    """Remove HTML tags and collapse whitespace from a string."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"<[^>]+>", " ", str(text))
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _build_result(device_change, classification, reason, matched_cr):
+    # Use conf-provided change_details; fall back to the matched CR's
+    # description or title so the email column is never blank.
+    change_detected = device_change.get("change_details", "")
+    if not change_detected and matched_cr:
+        raw = matched_cr.get("description") or matched_cr.get("title") or ""
+        change_detected = _strip_html(raw)
+
+    cr_title = _strip_html(matched_cr.get("title", "")) if matched_cr else ""
+
     return {
-        "device_id": device_change.get("device_id", "unknown"),
+        "device_name": device_change.get("device_name", "unknown"),
         "asset_id": str(device_change.get("asset_id")),
-        "change_detected": device_change.get("change_details", ""),
+        "change_detected": change_detected,
         "change_timestamp": device_change.get("change_timestamp"),
         "classification": classification,
         "reason": reason,
         "matching_change_id": (
             _safe_display_id(matched_cr) if matched_cr else None
         ),
+        "matching_change_title": cr_title,
     }
 
 
@@ -662,27 +764,48 @@ def _build_summary_cards(summary):
 
 
 def _build_change_detail_table(results):
-    """Build an HTML detail table for a list of validation results."""
-    if not results:
-        return "<p>No changes in this category.</p>"
+    """Build an HTML detail table for a list of validation results.
+    Always renders the full table structure — shows an empty-state row
+    when there are no results so the table never collapses."""
+    _esc = html_mod.escape
+
     rows = ""
-    for r in results:
-        cr_id = r.get("matching_change_id")
-        cr_display = str(cr_id) if cr_id else "None"
-        rows += f"""
+    if not results:
+        rows = """
             <tr>
-                <td>{r.get('device_id', 'N/A')}</td>
-                <td>{r.get('asset_id', 'N/A')}</td>
-                <td>{r.get('change_detected', 'N/A')[:100]}</td>
-                <td>{r.get('change_timestamp', 'N/A')}</td>
-                <td>{r.get('reason', 'N/A')}</td>
+                <td colspan="6" style="text-align:center;color:#999;padding:18px;">
+                    No changes in this category.
+                </td>
+            </tr>"""
+    else:
+        for r in results:
+            cr_id = r.get("matching_change_id")
+            cr_title = r.get("matching_change_title", "")
+            if cr_id and cr_title:
+                cr_display = f"{_esc(str(cr_id))}: {_esc(cr_title)}"
+            elif cr_id:
+                cr_display = _esc(str(cr_id))
+            else:
+                cr_display = "None"
+
+            change_details = _esc(r.get("change_detected") or "N/A")[:100]
+            timestamp = _esc(str(r.get("change_timestamp") or "N/A"))
+
+            rows += f"""
+            <tr>
+                <td>{_esc(r.get('device_name', 'N/A'))}</td>
+                <td>{_esc(r.get('asset_id', 'N/A'))}</td>
+                <td>{change_details}</td>
+                <td>{timestamp}</td>
+                <td>{_esc(r.get('reason', 'N/A'))}</td>
                 <td>{cr_display}</td>
             </tr>"""
+
     return f"""
     <table class="detail-table">
         <thead>
             <tr>
-                <th>Device ID</th>
+                <th>Device Name</th>
                 <th>Asset ID</th>
                 <th>Change Details</th>
                 <th>Timestamp</th>
