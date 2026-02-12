@@ -114,10 +114,20 @@ def tracker_module():
     python_mod.PythonOperator = _make_python_operator_class()
     operators_mod.python = python_mod
 
+    # Provide a lightweight Param stand-in
+    class FakeParam:
+        def __init__(self, default=None, **kwargs):
+            self.default = default
+            self.kwargs = kwargs
+
+    param_mod = MagicMock()
+    param_mod.Param = FakeParam
+
     # Register fake airflow modules
     sys.modules.setdefault("airflow", airflow_mod)
     sys.modules.setdefault("airflow.models", airflow_mod.models)
     sys.modules["airflow.models"].Variable = mock_variable_cls
+    sys.modules.setdefault("airflow.models.param", param_mod)
     sys.modules.setdefault("airflow.operators", operators_mod)
     sys.modules.setdefault("airflow.operators.python", python_mod)
 
@@ -404,18 +414,30 @@ def mock_ti_with_data(mock_ti, sample_users, sample_week_range):
     return mock_ti
 
 
+class MockDagRun:
+    """Lightweight DagRun stand-in that exposes .conf."""
+
+    def __init__(self, conf=None):
+        self.conf = conf or {}
+
+
 @pytest.fixture
 def airflow_context():
-    """Factory that returns a mock Airflow context dict with pendulum execution_date."""
+    """Factory that returns a mock Airflow context dict with pendulum execution_date.
+
+    Pass ``conf={"week_start": "...", "week_end": "..."}`` to simulate a manual
+    trigger with custom date range via dag_run.conf.
+    """
     import pendulum
 
-    def _make_context(dt_str="2025-01-27T08:30:00", tz="UTC"):
+    def _make_context(dt_str="2025-01-27T08:30:00", tz="UTC", conf=None):
         dt = pendulum.parse(dt_str, tz=tz)
         return {
             "execution_date": dt,
             "logical_date": dt,
             "ds": dt.format("YYYY-MM-DD"),
             "ts": dt.isoformat(),
+            "dag_run": MockDagRun(conf),
         }
 
     return _make_context

@@ -1,5 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.models.param import Param
 from datetime import datetime, timedelta
 import json
 import logging
@@ -91,13 +92,13 @@ Return your analysis in this exact JSON structure:
     "total_hours": "Total logged time is X hours, below the minimum expectation.",
     "task_description": "Descriptions are detailed but lack clear outcomes.",
     "daily_updates": "Entries were made across 4 days, not daily.",
-    "task_granularity": "Multiple tasks exceed 4 hours in single entries.",
+    "task_granularity": "Multiple tasks exceed 4 hours in single entries."
   }},
   "recommendations": {{
     "total_hours": "Target 42–45 hours weekly for consistent compliance.",
     "task_description": "Add objective and result for each task entry.",
     "daily_updates": "Update the timesheet every working day.",
-    "task_granularity": "Split work into smaller subtasks.",
+    "task_granularity": "Split work into smaller subtasks."
   }},
   "final_score": 3.5
 }}
@@ -154,11 +155,11 @@ EMAIL_TEMPLATE = """<!DOCTYPE html>
     <p>Dear {username},</p>
     
     <div class="week-header">
-        <h3>{week_info}</h3>
+        {week_info_heading}
         <p>Review Period: {week_start} to {week_end}</p>
     </div>
     
-    <p>As part of our weekly timesheet review process, your timesheet for the above period has been evaluated based on defined productivity, logging, and reporting standards. Please find the summary below.</p>
+    <p>{intro_text}</p>
     
     <div class="criterion">
         <strong>Total Time Utilization (Min 40 hrs/week):</strong> 
@@ -219,7 +220,6 @@ EMAIL_TEMPLATE = """<!DOCTYPE html>
     <p>Best Regards,<br>
     --<br>
     Tracker Agent<br>
-    HR Manager – (HR & Admin)<br>
     Lowtouch.ai (CLOUD CONTROL SOLUTIONS)<br>
     USA | INDIA | UAE (www.ecloudcontrol.com)</p>
 </body>
@@ -256,6 +256,18 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
     except Exception as e:
         logging.error(f"AI response error: {str(e)}")
         raise
+
+def count_working_days(start_str, end_str):
+    """Count weekdays (Mon-Fri) between two dates inclusive."""
+    start = datetime.strptime(start_str, '%Y-%m-%d')
+    end = datetime.strptime(end_str, '%Y-%m-%d')
+    working_days = 0
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            working_days += 1
+        current += timedelta(days=1)
+    return working_days
 
 def get_week_range(execution_date):
     """Calculate the previous week's date range"""
@@ -620,20 +632,71 @@ def mark_user_initiated(ti, user_id, user_timezone):
 
 def calculate_week_range(ti, **context):
     """
-    Task 2: Calculate the week range to process
+    Task 2: Calculate the week range to process.
+
+    Supports custom date ranges via dag_run.conf for manual triggers:
+      - week_start: YYYY-MM-DD (start of the review period)
+      - week_end:   YYYY-MM-DD (end of the review period)
+    If not provided, falls back to the default previous-week calculation.
     """
+    dag_run = context.get('dag_run')
+    conf = dag_run.conf if dag_run and hasattr(dag_run, 'conf') and dag_run.conf else {}
+
+    custom_start = conf.get('week_start', '').strip() if conf.get('week_start') else ''
+    custom_end = conf.get('week_end', '').strip() if conf.get('week_end') else ''
+
+    if custom_start and custom_end:
+        # Validate date formats
+        try:
+            start_dt = datetime.strptime(custom_start, '%Y-%m-%d')
+            end_dt = datetime.strptime(custom_end, '%Y-%m-%d')
+        except ValueError as e:
+            raise ValueError(f"Invalid date format in dag_run.conf. Use YYYY-MM-DD. Error: {e}")
+
+        if start_dt > end_dt:
+            raise ValueError(f"week_start ({custom_start}) must be before week_end ({custom_end})")
+
+        working_days = count_working_days(custom_start, custom_end)
+        week_of_month = (start_dt.day - 1) // 7 + 1
+        week_range = {
+            'start': custom_start,
+            'end': custom_end,
+            'week_number': week_of_month,
+            'month': start_dt.strftime('%B'),
+            'year': start_dt.year,
+            'week_info': "",
+            'working_days': working_days,
+            'scaled_min_hours': working_days * 8,
+            'scaled_max_hours': working_days * 9,
+        }
+
+        ti.xcom_push(key="week_range", value=week_range)
+        ti.xcom_push(key="custom_date_range", value=True)
+
+        logging.info(f"=" * 80)
+        logging.info(f"WEEK RANGE CALCULATION (CUSTOM via dag_run.conf)")
+        logging.info(f"=" * 80)
+        logging.info(f"Date range: {week_range['start']} to {week_range['end']}")
+        logging.info(f"Working days: {working_days}")
+        logging.info(f"Scaled hour target: {week_range['scaled_min_hours']}-{week_range['scaled_max_hours']} hrs")
+        logging.info(f"=" * 80)
+
+        return week_range
+
+    # Default: calculate previous week from execution_date
     execution_date = context['execution_date']
     week_range = get_week_range(execution_date)
-    
+
     ti.xcom_push(key="week_range", value=week_range)
-    
+    ti.xcom_push(key="custom_date_range", value=False)
+
     logging.info(f"=" * 80)
     logging.info(f"WEEK RANGE CALCULATION")
     logging.info(f"=" * 80)
     logging.info(f"Processing: Week {week_range['week_number']} of {week_range['month']} {week_range['year']}")
     logging.info(f"Date range: {week_range['start']} to {week_range['end']}")
     logging.info(f"=" * 80)
-    
+
     return week_range
 
 def filter_users_by_timezone(ti, **context):
@@ -641,29 +704,44 @@ def filter_users_by_timezone(ti, **context):
     Task 1.5: Filter users whose local time is 8:00 AM or later on MONDAY
     AND who have not been initiated yet today.
     Window: 8 AM - 12 PM IST on Monday (enforced)
+
+    When a custom date range is provided via dag_run.conf (manual trigger),
+    all timezone/day-of-week/hour checks are bypassed and ALL users are processed.
     """
     import pendulum
-    
+
     users = ti.xcom_pull(key="whitelisted_users", task_ids="load_whitelisted_users")
     execution_date = context['execution_date']
-    
+
     if not users:
         logging.warning("No users to filter")
         ti.xcom_push(key="users_to_process", value=[])
         ti.xcom_push(key="total_users_to_process", value=0)
         return []
-    
+
+    # Check if a custom date range was provided (manual trigger override)
+    custom_date_range = ti.xcom_pull(key="custom_date_range", task_ids="calculate_week_range")
+    if custom_date_range:
+        logging.info(f"=" * 80)
+        logging.info(f"MANUAL TRIGGER WITH CUSTOM DATE RANGE — bypassing timezone/day checks")
+        logging.info(f"=" * 80)
+        logging.info(f"Processing ALL {len(users)} whitelisted users")
+        logging.info(f"=" * 80)
+        ti.xcom_push(key="users_to_process", value=users)
+        ti.xcom_push(key="total_users_to_process", value=len(users))
+        return users
+
     # Convert to IST for validation
     ist_tz = pendulum.timezone('Asia/Kolkata')
     ist_time = execution_date.in_timezone(ist_tz)
-    
+
     logging.info(f"=" * 80)
     logging.info(f"FILTERING USERS (IST Window: 8 AM - 12 PM Monday)")
     logging.info(f"=" * 80)
     logging.info(f"Current UTC: {execution_date.format('YYYY-MM-DD HH:mm:ss')}")
     logging.info(f"Current IST: {ist_time.format('YYYY-MM-DD HH:mm:ss')}")
     logging.info(f"")
-    
+
     # CRITICAL SAFEGUARD 1: Ensure we're on Monday in IST
     if ist_time.day_of_week != pendulum.MONDAY:
         day_name = ist_time.format('dddd')
@@ -671,14 +749,14 @@ def filter_users_by_timezone(ti, **context):
         ti.xcom_push(key="users_to_process", value=[])
         ti.xcom_push(key="total_users_to_process", value=0)
         return []
-    
+
     # CRITICAL SAFEGUARD 2: Ensure we're within IST window (8 AM - 12 PM)
     if not (8 <= ist_time.hour < 12):
         logging.warning(f"Outside IST window (8 AM - 12 PM). Current hour: {ist_time.hour}:00. Skipping all users.")
         ti.xcom_push(key="users_to_process", value=[])
         ti.xcom_push(key="total_users_to_process", value=0)
         return []
-    
+
     logging.info(f"✓ IST validation passed: Monday, {ist_time.format('HH:mm:ss')}")
     logging.info(f"Looking for users where:")
     logging.info(f"  1. Local day is MONDAY")
@@ -787,7 +865,7 @@ def fetch_all_timesheets(ti, **context):
             timesheet_data['manager_email'] = user.get('manager_email')
             timesheet_data['admin_name'] = user.get('admin_name')
             timesheet_data['admin_email'] = user.get('admin_email')
-            timesheet_data['week_info'] = f"Week {week_range['week_number']} of {week_range['month']}"
+            timesheet_data['week_info'] = week_range.get('week_info', f"Week {week_range['week_number']} of {week_range['month']}")
             
             # Push individual user data to XCom
             ti.xcom_push(key=f"timesheet_data_{user.get('user_id')}", value=timesheet_data)
@@ -822,7 +900,7 @@ def fetch_all_timesheets(ti, **context):
                 'tasks_over_4_hours': 0,
                 'entry_count': 0,
                 'error': str(e),
-                'week_info': f"Week {week_range['week_number']} of {week_range['month']}"
+                'week_info': week_range.get('week_info', f"Week {week_range['week_number']} of {week_range['month']}")
             }
             ti.xcom_push(key=f"timesheet_data_{user.get('user_id')}", value=error_data)
             all_timesheet_data.append(error_data)
@@ -1176,25 +1254,48 @@ def analyze_all_timesheets_with_ai(ti, **context):
     Task 5: Loop through all enriched timesheets and analyze each with AI
     """
     all_timesheet_data = ti.xcom_pull(key="enriched_timesheet_data_all", task_ids="enrich_timesheets_with_issue_details")
-    
+    week_range = ti.xcom_pull(key="week_range", task_ids="calculate_week_range")
+
     if not all_timesheet_data:
         logging.warning("No timesheet data to analyze")
         ti.xcom_push(key="analysis_results_all", value=[])
         return []
-    
+
+    # Build scaled-hours override note when a custom date range was used
+    scaled_hours_note = ""
+    if week_range and week_range.get('working_days'):
+        wd = week_range['working_days']
+        mn = week_range['scaled_min_hours']
+        mx = week_range['scaled_max_hours']
+        mid = mn + 2 * (wd / 5)  # proportional to 40→42 for 5 days
+        scaled_hours_note = (
+            f"\nIMPORTANT — CUSTOM DATE RANGE OVERRIDE:\n"
+            f"This review covers {week_range['start']} to {week_range['end']} "
+            f"({wd} working days, NOT a standard 5-day week).\n"
+            f"Scale ALL hour-based criteria to {wd} working days:\n"
+            f"  - Minimum expected hours: {mn} (not 40)\n"
+            f"  - Good range: {mn}-{round(mid)} hrs → 3 stars\n"
+            f"  - Target range: {round(mid)}-{mx} hrs → 4-5 stars\n"
+            f"  - Below {mn} hrs → 1-2 stars\n"
+            f"  - Above {mx} hrs → Flag as potential overwork\n"
+            f"  - Expected daily updates: {wd} days (not 5)\n"
+            f"Use THESE thresholds for your ratings, NOT the defaults above.\n"
+        )
+        logging.info(f"Custom range detected: {wd} working days, scaled hours {mn}-{mx}")
+
     logging.info(f"=" * 80)
     logging.info(f"ANALYZING TIMESHEETS - {len(all_timesheet_data)} users")
     logging.info(f"=" * 80)
-    
+
     all_analysis_results = []
-    
+
     # Sequential loop through each user's timesheet
     for idx, timesheet_data in enumerate(all_timesheet_data, 1):
         user_id = timesheet_data.get('user_id')
         username = timesheet_data.get('username')
-        
+
         logging.info(f"[{idx}/{len(all_timesheet_data)}] Analyzing timesheet for {username}")
-        
+
         # Skip if there was an error fetching
         if 'error' in timesheet_data:
             logging.warning(f"  ✗ Skipping analysis - fetch error: {timesheet_data['error']}")
@@ -1210,15 +1311,19 @@ def analyze_all_timesheets_with_ai(ti, **context):
             ti.xcom_push(key=f"analysis_{user_id}", value=error_analysis)
             all_analysis_results.append(error_analysis)
             continue
-        
+
         try:
-            # Prepare prompt with timesheet data
-            full_prompt = f"{EVALUATION_PROMPT_TEMPLATE}\n\nTIMESHEET DATA TO ANALYZE:\n{json.dumps(timesheet_data, indent=2)}"
+            # Prepare prompt with timesheet data (append scaled-hours override if custom range)
+            full_prompt = f"{EVALUATION_PROMPT_TEMPLATE}\n{scaled_hours_note}\nTIMESHEET DATA TO ANALYZE:\n{json.dumps(timesheet_data, indent=2)}"
             
             # Get AI analysis using the get_ai_response function (not direct API call)
             logging.info(f"  Calling AI for analysis...")
             response = get_ai_response(full_prompt, expect_json=True)
-            
+
+            # Extract JSON block and strip trailing commas (common LLM issue)
+            response = extract_json_from_response(response)
+            response = re.sub(r',\s*([}\]])', r'\1', response)
+
             # Parse JSON response
             analysis = json.loads(response)
             
@@ -1339,9 +1444,15 @@ def compose_and_send_all_emails(ti, **context):
             week_start_formatted = datetime.strptime(week_range['start'], '%Y-%m-%d').strftime('%B %d, %Y')
             week_end_formatted = datetime.strptime(week_range['end'], '%Y-%m-%d').strftime('%B %d, %Y')
             # Compose email body
+            week_info_heading = f"<h3>{week_info}</h3>" if week_info else ""
+            if week_info:
+                intro_text = "As part of our weekly timesheet review process, your timesheet for the above period has been evaluated based on defined productivity, logging, and reporting standards. Please find the summary below."
+            else:
+                intro_text = f"Your timesheet for the period {week_start_formatted} to {week_end_formatted} has been evaluated based on defined productivity, logging, and reporting standards. Please find the summary below."
             email_body = EMAIL_TEMPLATE.format(
                 username=username,
-                week_info=week_info,
+                week_info_heading=week_info_heading,
+                intro_text=intro_text,
                 week_start=week_start_formatted,
                 week_end=week_end_formatted,
                 total_hours_stars=stars(ratings.get('total_hours', 0)),
@@ -1374,7 +1485,10 @@ def compose_and_send_all_emails(ti, **context):
             )
             
             # Send email via SMTP with CC to HR, Manager, and Admin
-            subject = f"Weekly Timesheet Review - {week_info} ({week_start_formatted} - {week_end_formatted})"
+            if week_info:
+                subject = f"Weekly Timesheet Review - {week_info} ({week_start_formatted} - {week_end_formatted})"
+            else:
+                subject = f"Timesheet Review - ({week_start_formatted} - {week_end_formatted})"
             
             # Prepare CC list (add HR, Manager, and Admin emails if available)
             cc_list = []
@@ -1519,6 +1633,20 @@ with DAG(
     schedule_interval='30 2-6 * * 1',  # Mon 2:30-6:30 AM UTC = 8:00 AM-12:00 PM IST
     catchup=False,
     tags=['timesheet', 'weekly', 'review', 'mantis', 'timezone'],
+    params={
+        "week_start": Param(
+            default="",
+            type="string",
+            title="Week Start Date",
+            description="Start date for the review period (YYYY-MM-DD). Leave empty for default previous-week calculation.",
+        ),
+        "week_end": Param(
+            default="",
+            type="string",
+            title="Week End Date",
+            description="End date for the review period (YYYY-MM-DD). Leave empty for default previous-week calculation.",
+        ),
+    },
 ) as dag:
     
     # Task 1: Load whitelisted users

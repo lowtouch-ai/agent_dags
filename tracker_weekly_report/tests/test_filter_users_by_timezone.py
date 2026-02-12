@@ -114,6 +114,37 @@ class TestAlreadyInitiated:
         assert "U001" not in user_ids
 
 
+class TestCustomDateRangeBypass:
+    """When custom date range is provided via dag_run.conf, all checks are bypassed."""
+
+    def test_custom_range_bypasses_not_monday(self, tracker_module, mock_ti_with_data, airflow_context):
+        """On a Tuesday with custom_date_range=True, ALL users should be processed."""
+        mock_ti_with_data.xcom_push(key="custom_date_range", value=True)
+        # Tuesday 2025-01-28 08:30 UTC — would normally skip all users
+        ctx = airflow_context("2025-01-28T08:30:00")
+        result = tracker_module.filter_users_by_timezone(ti=mock_ti_with_data, **ctx)
+        assert len(result) == 2
+        user_names = [u["name"] for u in result]
+        assert "Alice" in user_names
+        assert "Dave" in user_names
+
+    def test_custom_range_bypasses_ist_window(self, tracker_module, mock_ti_with_data, airflow_context):
+        """Outside IST window with custom_date_range=True, ALL users should be processed."""
+        mock_ti_with_data.xcom_push(key="custom_date_range", value=True)
+        # Mon 2025-01-27 13:00 UTC = Mon 18:30 IST — outside 8-12 window
+        ctx = airflow_context("2025-01-27T13:00:00")
+        result = tracker_module.filter_users_by_timezone(ti=mock_ti_with_data, **ctx)
+        assert len(result) == 2
+
+    def test_no_custom_range_keeps_original_behavior(self, tracker_module, mock_ti_with_data, airflow_context):
+        """Without custom_date_range, original IST/Monday checks apply."""
+        mock_ti_with_data.xcom_push(key="custom_date_range", value=False)
+        # Tuesday → should skip all
+        ctx = airflow_context("2025-01-28T08:30:00")
+        result = tracker_module.filter_users_by_timezone(ti=mock_ti_with_data, **ctx)
+        assert result == []
+
+
 class TestEdgeCases:
     """Empty/None user list and invalid timezone."""
 
