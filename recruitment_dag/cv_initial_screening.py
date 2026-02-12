@@ -231,7 +231,7 @@ def update_candidate_profile(**kwargs):
     analysis_data = ti.xcom_pull(task_ids='analyze_screening_responses', key='analysis_data')
     candidate_profile = ti.xcom_pull(task_ids='load_candidate_profile', key='candidate_profile')
     
-    if not all([response_data, analysis_data, candidate_profile]):
+    if response_data is None or analysis_data is None or candidate_profile is None:
         logging.warning("Missing data for profile update")
         return None
     
@@ -246,7 +246,7 @@ def update_candidate_profile(**kwargs):
             'completion_date': datetime.now().isoformat(),
             'responses': response_data.get('body', ''),
             'analysis': analysis_data,
-            'decision': analysis_data.get('decision', 'PENDING'),
+            'decision': analysis_data.get('decision') or 'PENDING',
             'overall_score': analysis_data.get('overall_score', 0)
         }
     }
@@ -292,7 +292,7 @@ def send_screening_result_email(**kwargs):
     
     _, sender_email = parseaddr(sender)
     
-    decision = analysis_data.get('decision', 'PENDING')
+    decision = (analysis_data.get('decision') or 'PENDING').upper()
     
     MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
     
@@ -346,8 +346,7 @@ Output clean HTML for the email body using proper tags (<p>, <h2>, etc.). Make i
         logging.error("Gmail authentication failed")
         return "Gmail authentication failed"
     
-    subject = f"Re: {subject}"
-    
+    # send_email() already adds "Re:" prefix if missing, so don't add it here
     result = send_email(
         service, 
         sender_email, 
@@ -385,7 +384,7 @@ def notify_recruiter_for_interview(**kwargs):
         logging.warning("Missing data for recruiter notification")
         return "Missing data - skipped"
 
-    decision = analysis_data.get('decision', 'PENDING')
+    decision = (analysis_data.get('decision') or 'PENDING').upper()
 
     if decision != 'ACCEPT':
         logging.info(f"Decision is {decision} - skipping recruiter notification")
@@ -396,9 +395,9 @@ def notify_recruiter_for_interview(**kwargs):
     cv_score = candidate_profile.get('total_score', 'N/A') if candidate_profile else 'N/A'
     position = candidate_profile.get('job_title', 'N/A') if candidate_profile else 'N/A'
 
-    # Extract key credentials from candidate profile
-    experience_years = candidate_profile.get('experience_match', {}).get('candidate_experience_years', 'N/A') if candidate_profile else 'N/A'
-    education = candidate_profile.get('education_match', {}).get('candidate_education', 'N/A') if candidate_profile else 'N/A'
+    # Extract key credentials from candidate profile (use `or {}` to handle None values)
+    experience_years = (candidate_profile.get('experience_match') or {}).get('candidate_experience_years', 'N/A') if candidate_profile else 'N/A'
+    education = (candidate_profile.get('education_match') or {}).get('candidate_education', 'N/A') if candidate_profile else 'N/A'
 
     # Get matched must-have skills
     must_have_skills = candidate_profile.get('must_have_skills', []) if candidate_profile else []

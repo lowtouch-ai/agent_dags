@@ -93,3 +93,15 @@ CV scoring uses a weighted formula:
 ## Shared Utility Notes
 
 - **`extract_json_from_text`** (`agent_utils.py`): Uses balanced-brace parsing (not regex) to handle arbitrarily nested JSON structures. Returns the largest valid JSON object found in text.
+
+## Testing
+
+- **Unit tests**: `test_cv_initial_screening.py` — 94 edge-case tests for all 6 task functions in `cv_initial_screening.py`. Uses `unittest.mock` to mock Airflow, Gmail API, AI model, and filesystem. Run with: `python3 -m unittest agent_dags.recruitment_dag.test_cv_initial_screening -v` from the `airflow/dags` directory.
+
+## Bug Fixes Applied (cv_initial_screening.py)
+
+1. **Null check uses `is not None`** (`update_candidate_profile`): Changed `not all([...])` truthiness check to explicit `is None` checks so that an empty dict `{}` from the AI is no longer incorrectly rejected.
+2. **Decision `None` defaults to `'PENDING'`** (`update_candidate_profile`): Changed `.get('decision', 'PENDING')` to `.get('decision') or 'PENDING'` so that an explicit `None` value correctly defaults.
+3. **Case-insensitive decision comparisons** (`send_screening_result_email`, `notify_recruiter_for_interview`): Decision strings are now normalized with `.upper()` so `'reject'`/`'accept'` (lowercase from AI) are handled correctly.
+4. **No double `Re:` prefix** (`send_screening_result_email`): Removed the manual `subject = f"Re: {subject}"` line — the `send_email()` utility already adds `Re:` if missing, so the DAG no longer duplicates it.
+5. **Safe chained `.get()` on nullable dicts** (`notify_recruiter_for_interview`): Changed `.get('experience_match', {}).get(...)` to `(.get('experience_match') or {}).get(...)` so that an explicit `None` value for `experience_match` or `education_match` no longer crashes with `AttributeError`.
