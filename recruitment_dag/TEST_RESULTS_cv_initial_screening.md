@@ -121,10 +121,10 @@ For a complete test strategy, the team should complement these unit tests with:
 | `test_missing_response_data` | `response_data = None` | Returns `None` | PASS |
 | `test_missing_analysis_data` | `analysis_data = None` | Returns `None` | PASS |
 | `test_missing_candidate_profile` | `candidate_profile = None` | Returns `None` | PASS |
-| `test_analysis_data_empty_dict_is_falsy` | `analysis_data = {}` | `all()` check fails, returns `None` **(see Bug #1)** | PASS |
+| `test_analysis_data_empty_dict_accepted` | `analysis_data = {}` | Accepted (Bug #1 fixed: uses `is None` check) | PASS |
 | `test_missing_decision_key_defaults_to_pending` | No `decision` key | Defaults to `'PENDING'` | PASS |
 | `test_missing_overall_score_defaults_to_zero` | No `overall_score` key | Defaults to `0` | PASS |
-| `test_decision_value_none_stays_none` | `decision: None` (key present) | Stays `None`, does NOT default **(see Bug #2)** | PASS |
+| `test_decision_value_none_defaults_to_pending` | `decision: None` (key present) | Defaults to `'PENDING'` (Bug #2 fixed: uses `or 'PENDING'`) | PASS |
 | `test_file_write_permission_error` | `PermissionError` on write | Caught, returns `None` | PASS |
 | `test_profile_merge_preserves_existing_keys` | Profile has extra keys | All existing keys preserved | PASS |
 | `test_profile_merge_overwrites_screening_stage` | Profile already has `screening_stage` | Overwritten with new data | PASS |
@@ -142,9 +142,9 @@ For a complete test strategy, the team should complement these unit tests with:
 | `test_accept_decision_uses_acceptance_prompt` | `decision = 'ACCEPT'` | Acceptance email prompt sent to AI | PASS |
 | `test_reject_decision_uses_rejection_prompt` | `decision = 'REJECT'` | Rejection email prompt sent to AI | PASS |
 | `test_pending_decision_falls_to_acceptance` | `decision = 'PENDING'` | Falls to else branch (acceptance) | PASS |
-| `test_lowercase_reject_not_matched` | `decision = 'reject'` | Does NOT match `'REJECT'` **(see Bug #3)** | PASS |
-| `test_subject_gets_re_prefix` | Normal subject | `'Re: '` prepended | PASS |
-| `test_subject_already_has_re_gets_double` | Subject already has `'Re:'` | Becomes `'Re: Re: ...'` **(see Bug #4)** | PASS |
+| `test_lowercase_reject_now_matched` | `decision = 'reject'` (lowercase) | Normalized to `'REJECT'` (Bug #3 fixed: `.upper()`) | PASS |
+| `test_subject_passed_as_is` | Normal subject | Passed as-is to `send_email` (Bug #4 fixed: no manual `Re:`) | PASS |
+| `test_subject_already_has_re_no_double` | Subject already has `'Re:'` | No double `'Re: Re:'` (Bug #4 fixed) | PASS |
 | `test_ai_response_html_fenced` | AI response in ` ```html ``` ` | Regex extracts inner HTML | PASS |
 | `test_ai_response_no_fence` | AI response without fences | Falls back to `response.strip()` | PASS |
 | `test_gmail_auth_failure` | `authenticate_gmail` returns `None` | Returns error, `send_email` NOT called | PASS |
@@ -162,15 +162,15 @@ For a complete test strategy, the team should complement these unit tests with:
 | `test_decision_reject_skips` | `decision = 'REJECT'` | Skips notification | PASS |
 | `test_decision_pending_skips` | `decision = 'PENDING'` | Skips notification | PASS |
 | `test_decision_missing_defaults_pending_skips` | No `decision` key | Defaults to `'PENDING'`, skips | PASS |
-| `test_decision_lowercase_accept_skips` | `decision = 'accept'` (lowercase) | Does NOT match `'ACCEPT'`, skips **(see Bug #3)** | PASS |
+| `test_decision_lowercase_accept_now_proceeds` | `decision = 'accept'` (lowercase) | Normalized to `'ACCEPT'`, proceeds (Bug #3 fixed: `.upper()`) | PASS |
 | `test_decision_accept_proceeds` | `decision = 'ACCEPT'` | Email sent to recruiter | PASS |
 | `test_candidate_profile_is_none` | `candidate_profile = None` | Defaults: `'Unknown Candidate'`, `'N/A'` | PASS |
 | `test_profile_missing_all_keys` | Profile is `{}` (no expected keys) | All fields use defaults | PASS |
 | `test_empty_skills_arrays` | Skills arrays are `[]` | Skills string is `'N/A'` | PASS |
 | `test_skills_with_no_matches` | All skills have `match: False` | Matched list empty, shows `'N/A'` | PASS |
 | `test_skill_missing_skill_name_key` | Skill dict is `{'match': True}` (no name) | Empty string in join, no crash | PASS |
-| `test_experience_match_value_is_none_crashes` | `experience_match: None` | Raises `AttributeError` **(see Bug #5)** | PASS |
-| `test_education_match_value_is_none_crashes` | `education_match: None` | Raises `AttributeError` **(see Bug #5)** | PASS |
+| `test_experience_match_value_is_none_handled` | `experience_match: None` | No crash (Bug #5 fixed: `or {}` pattern) | PASS |
+| `test_education_match_value_is_none_handled` | `education_match: None` | No crash (Bug #5 fixed: `or {}` pattern) | PASS |
 | `test_missing_strengths_concerns` | No strengths/concerns keys | Defaults to `'N/A'` / `'None identified'` | PASS |
 | `test_ai_interview_prep_returns_garbage` | AI returns non-JSON | Summary defaults to `'N/A'`, questions to `[]` | PASS |
 | `test_interview_questions_in_html` | Valid interview questions | Questions appear in HTML body | PASS |
@@ -188,42 +188,39 @@ For a complete test strategy, the team should complement these unit tests with:
 
 ---
 
-## Bugs & Issues Discovered
+## Bugs Discovered & Fixed
 
-### Bug #1: Empty dict `{}` treated as missing data (LOW)
+All 5 bugs discovered during testing have been **fixed** in the source code.
 
-**Location:** `update_candidate_profile` line 234
-**Issue:** `analysis_data = {}` is falsy in Python, so `all([response_data, {}, candidate_profile])` returns `False`, causing the function to skip even though the AI did return a (empty) result.
-**Impact:** If the AI returns `{}` as analysis, the profile won't be updated and no error is raised.
-**Recommended Fix:** Check `is not None` instead of truthiness.
+### Bug #1: Empty dict `{}` treated as missing data — **FIXED** (LOW)
 
-### Bug #2: `.get('decision', 'PENDING')` doesn't default when value is `None` (LOW)
+**Location:** `update_candidate_profile`
+**Issue:** `analysis_data = {}` is falsy in Python, so `all([response_data, {}, candidate_profile])` returned `False`.
+**Fix Applied:** Changed `not all([...])` truthiness check to explicit `is None` checks so that an empty dict `{}` from the AI is no longer incorrectly rejected.
 
-**Location:** `update_candidate_profile` line 249
-**Issue:** When `analysis_data = {'decision': None}`, `.get('decision', 'PENDING')` returns `None` (key exists), not `'PENDING'`.
-**Impact:** `decision` stored as `None` instead of `'PENDING'`.
-**Recommended Fix:** Use `analysis_data.get('decision') or 'PENDING'`.
+### Bug #2: `.get('decision', 'PENDING')` doesn't default when value is `None` — **FIXED** (LOW)
 
-### Bug #3: Case-sensitive decision comparisons (MEDIUM)
+**Location:** `update_candidate_profile`
+**Issue:** When `analysis_data = {'decision': None}`, `.get('decision', 'PENDING')` returned `None` (key exists), not `'PENDING'`.
+**Fix Applied:** Changed `.get('decision', 'PENDING')` to `.get('decision') or 'PENDING'`.
 
-**Location:** `send_screening_result_email` line 299, `notify_recruiter_for_interview` line 390
-**Issue:** `decision == 'REJECT'` and `decision != 'ACCEPT'` are case-sensitive. If the AI returns `'reject'` or `'accept'` (lowercase), the wrong code path executes.
-**Impact:** A rejected candidate could receive an acceptance email; an accepted candidate's recruiter notification could be skipped.
-**Recommended Fix:** Normalize: `decision = analysis_data.get('decision', 'PENDING').upper()`.
+### Bug #3: Case-sensitive decision comparisons — **FIXED** (MEDIUM)
 
-### Bug #4: Double "Re:" prefix on reply subjects (LOW)
+**Location:** `send_screening_result_email`, `notify_recruiter_for_interview`
+**Issue:** `decision == 'REJECT'` and `decision != 'ACCEPT'` were case-sensitive. Lowercase from AI caused wrong code paths.
+**Fix Applied:** Decision strings are now normalized with `.upper()` before comparison.
 
-**Location:** `send_screening_result_email` line 349
-**Issue:** `subject = f"Re: {subject}"` is always applied without checking if the subject already starts with `"Re:"`.
-**Impact:** Reply emails get `"Re: Re: Screening Answers"` as the subject. The `send_email` utility has its own `"Re:"` check (line 95-98 of email_utils.py), but the DAG adds it before calling `send_email`, resulting in double prefix.
-**Recommended Fix:** Remove the `"Re: "` prefix in the DAG; let `send_email` handle it.
+### Bug #4: Double "Re:" prefix on reply subjects — **FIXED** (LOW)
 
-### Bug #5: `experience_match: None` / `education_match: None` crashes (HIGH)
+**Location:** `send_screening_result_email`
+**Issue:** `subject = f"Re: {subject}"` was always applied. The `send_email` utility already adds `Re:`, resulting in double prefix.
+**Fix Applied:** Removed the manual `Re:` prefix — `send_email()` handles it.
 
-**Location:** `notify_recruiter_for_interview` lines 400-401
-**Issue:** Code uses `candidate_profile.get('experience_match', {}).get('candidate_experience_years', 'N/A')`. When the profile has `'experience_match': None`, `.get()` returns `None` (key exists), then `None.get(...)` raises `AttributeError`.
-**Impact:** The entire recruiter notification task crashes if either field is `None` in the saved profile.
-**Recommended Fix:** Use `(candidate_profile.get('experience_match') or {}).get(...)`.
+### Bug #5: `experience_match: None` / `education_match: None` crashes — **FIXED** (HIGH)
+
+**Location:** `notify_recruiter_for_interview`
+**Issue:** `.get('experience_match', {}).get(...)` crashed when the value was explicitly `None` (key existed but value was `null`).
+**Fix Applied:** Changed to `(candidate_profile.get('experience_match') or {}).get(...)` pattern.
 
 ---
 
@@ -246,7 +243,6 @@ python3 -m pytest agent_dags/recruitment_dag/test_cv_initial_screening.py -v
 
 ## Recommended Next Steps for Full Validation
 
-1. **Fix Bug #3 and #5** (highest priority - can cause wrong emails and task crashes)
-2. **Integration test on staging:** Trigger the listener DAG with a real test email to verify the full `cv_listner -> screening_response_analysis` pipeline
-3. **Airflow DAG test:** Run `airflow dags test screening_response_analysis 2024-01-01` with a sample `conf` payload on staging
-4. **AI contract test:** Validate that the AI model consistently returns the expected JSON schema for screening analysis and interview prep prompts
+1. **Integration test on staging:** Trigger the listener DAG with a real test email to verify the full `cv_listner -> screening_response_analysis` pipeline
+2. **Airflow DAG test:** Run `airflow dags test screening_response_analysis 2024-01-01` with a sample `conf` payload on staging
+3. **AI contract test:** Validate that the AI model consistently returns the expected JSON schema for screening analysis and interview prep prompts

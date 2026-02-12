@@ -97,6 +97,8 @@ CV scoring uses a weighted formula:
 ## Testing
 
 - **Unit tests**: `test_cv_initial_screening.py` — 94 edge-case tests for all 6 task functions in `cv_initial_screening.py`. Uses `unittest.mock` to mock Airflow, Gmail API, AI model, and filesystem. Run with: `python3 -m unittest agent_dags.recruitment_dag.test_cv_initial_screening -v` from the `airflow/dags` directory.
+- **Unit tests**: `test_cv_listner.py` — Edge-case tests for all 11 functions in `cv_listner.py`. Run with: `python3 -m unittest agent_dags.recruitment_dag.test_cv_listner -v` from the `airflow/dags` directory.
+- **Unit tests**: `test_cv_analyse.py` — Edge-case tests for all 7 functions in `cv_analyse.py`. Run with: `python3 -m unittest agent_dags.recruitment_dag.test_cv_analyse -v` from the `airflow/dags` directory.
 
 ## Bug Fixes Applied (cv_initial_screening.py)
 
@@ -105,3 +107,17 @@ CV scoring uses a weighted formula:
 3. **Case-insensitive decision comparisons** (`send_screening_result_email`, `notify_recruiter_for_interview`): Decision strings are now normalized with `.upper()` so `'reject'`/`'accept'` (lowercase from AI) are handled correctly.
 4. **No double `Re:` prefix** (`send_screening_result_email`): Removed the manual `subject = f"Re: {subject}"` line — the `send_email()` utility already adds `Re:` if missing, so the DAG no longer duplicates it.
 5. **Safe chained `.get()` on nullable dicts** (`notify_recruiter_for_interview`): Changed `.get('experience_match', {}).get(...)` to `(.get('experience_match') or {}).get(...)` so that an explicit `None` value for `experience_match` or `education_match` no longer crashes with `AttributeError`.
+
+## Bug Fixes Applied (cv_listner.py)
+
+1. **Double-increment bug in `format_history_for_ai`**: The `else` branch (standalone assistant messages) had an extra `i += 1` that, combined with the outer `i += 1`, caused the loop to skip the next message. This meant a user message following a standalone assistant message was silently dropped from the conversation history. Fixed by removing the redundant increment.
+2. **Null check on AI JSON response** (`extract_email_from_cv`): `extract_json_from_text()` can return `None` when the AI response contains no valid JSON. The subsequent `.get('email', 'NOT_FOUND')` call crashed with `AttributeError: 'NoneType' object has no attribute 'get'`. Added explicit `None` guard.
+3. **Safe routing summary counter** (`route_emails_to_dags`): `routing_summary[target_dag] += 1` crashed with `KeyError` if the AI returned an unexpected `target_dag` value not in the pre-initialized dict. This would abort the entire routing function, losing all trigger requests. Added a membership check before incrementing.
+
+## Bug Fixes Applied (cv_analyse.py)
+
+1. **Null/KeyError guard on AI job match** (`get_the_jd_for_cv_analysis`): `matched_job["job_title"]` crashed with `TypeError`/`KeyError` when `extract_json_from_text()` returned `None` or a dict missing the `job_title` key. Changed to `.get()` with defaults and added `None` guard.
+2. **Null handling for skill lists** (`calculate_candidate_score`): Used `.get('must_have_skills', [])` which returns the default `[]` only if the key is missing — but if the AI explicitly returns `null`, it becomes `None` and the `for` loop crashes with `TypeError`. Changed to `.get(...) or []` pattern for all four fields.
+3. **Null check on AI score response** (`get_the_score_for_cv_analysis`): `calculate_candidate_score(score_data)` crashed when `extract_json_from_text()` returned `None`. Added explicit `None` guard.
+4. **Safe chained `.get()` on nullable dicts** (`save_to_google_sheets`): Same pattern as screening DAG bug #5 — `.get('experience_match', {}).get(...)` crashes when `experience_match` is explicitly `None`. Fixed with `(... or {}).get(...)`.
+5. **No double `Re:` prefix** (`send_response_email`): Same pattern as screening DAG bug #4 — removed the manual `subject = f"Re: {subject}"` line since `send_email()` already adds the prefix when missing.

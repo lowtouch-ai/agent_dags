@@ -295,7 +295,6 @@ def format_history_for_ai(history_data):
 
         else:
             logging.debug(f"Skipping standalone assistant {msg.get('message_id')}")
-            i += 1
 
         i += 1
 
@@ -425,7 +424,11 @@ def extract_email_from_cv(cv_text, model_name):
         
         response = get_ai_response(prompt, stream=False, model=model_name)
         result = extract_json_from_text(response)
-        
+
+        if not result:
+            logging.warning("AI response did not contain valid JSON for email extraction")
+            return None
+
         extracted_email = result.get('email', 'NOT_FOUND')
         confidence = result.get('confidence', 0)
         location = result.get('location', 'unknown')
@@ -867,7 +870,10 @@ def route_emails_to_dags(**kwargs):
                 "trigger_dag_id": target_dag,
                 "conf": {"email_data": email}
             })
-            routing_summary[target_dag] += 1
+            if target_dag in routing_summary:
+                routing_summary[target_dag] += 1
+            else:
+                routing_summary[target_dag] = 1
 
             
             logging.info(f"Successfully triggered {target_dag} for email {email_id}")

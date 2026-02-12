@@ -252,8 +252,12 @@ def get_the_jd_for_cv_analysis(**kwargs):
     logging.info(f"Job match response: {match_response[:300]}...")
     matched_job = extract_json_from_text(match_response)
 
-    job_title = matched_job["job_title"]
-    job_summary = matched_job["job_summary"]
+    if not matched_job:
+        logging.error("Failed to extract job match from AI response")
+        return None
+
+    job_title = matched_job.get("job_title", "Unknown Position")
+    job_summary = matched_job.get("job_summary", "")
 
     # ------------------------------------------------------------------
     # AI CALL 2: Enrich job using VectorSearchByUUID
@@ -301,10 +305,10 @@ def calculate_candidate_score(analysis_json):
     Calculate the candidate score based on the provided analysis JSON.
     """
     # Extract data from JSON
-    must_have_skills = analysis_json.get('must_have_skills', [])
-    nice_to_have_skills = analysis_json.get('nice_to_have_skills', [])
-    experience_match = analysis_json.get('experience_match', {})
-    education_match = analysis_json.get('education_match', {})
+    must_have_skills = analysis_json.get('must_have_skills') or []
+    nice_to_have_skills = analysis_json.get('nice_to_have_skills') or []
+    experience_match = analysis_json.get('experience_match') or {}
+    education_match = analysis_json.get('education_match') or {}
     
     # Score arrays
     must_have_scores = []
@@ -424,6 +428,11 @@ def get_the_score_for_cv_analysis(**kwargs):
     logging.info(f"Match Score Response: {score_response}")
     
     score_data = extract_json_from_text(score_response)
+
+    if not score_data:
+        logging.error("Failed to extract score data from AI response")
+        return None
+
     calculated_scores = calculate_candidate_score(score_data)
     
     # Merge score_data with calculated_scores
@@ -509,8 +518,8 @@ def save_to_google_sheets(**kwargs):
         'other_criteria_score': score_data.get('other_criteria_score', 0),
         'eligible': score_data.get('eligible', False),
         'remarks': score_data.get('remarks', ''),
-        'experience_years': score_data.get('experience_match', {}).get('candidate_experience_years', ''),
-        'education': score_data.get('education_match', {}).get('candidate_education', ''),
+        'experience_years': (score_data.get('experience_match') or {}).get('candidate_experience_years', ''),
+        'education': (score_data.get('education_match') or {}).get('candidate_education', ''),
         'email_subject': cv_data.get('subject', ''),
         'sender': cv_data.get('sender', ''),
         'status': 'Email Sent' if score_data.get('eligible') else 'Rejected'
@@ -677,8 +686,8 @@ Use a professional, encouraging tone throughout. Output only clean, valid HTML f
         return "Gmail authentication failed"
     
     bcc = None
-    subject = f"Re: {subject}"
-    
+    # send_email() already adds "Re:" prefix if missing, so don't add it here
+
     result = send_email(
         service, recipient, subject, body,
         original_message_id, references,
