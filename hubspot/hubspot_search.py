@@ -551,7 +551,12 @@ def summarize_engagement_details(ti, **context):
         logging.info("No summary requested, skipping engagement summary")
         ti.xcom_push(key="engagement_summary", value={})
         return
-    
+    # Mutually exclusive: if 360 summary was requested, skip regular summary
+    if entity_flags.get("request_summary_360", False):
+        logging.info("360 summary was requested, skipping regular summary (mutually exclusive)")
+        ti.xcom_push(key="engagement_summary", value={})
+        return
+
     chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
     latest_message = ti.xcom_pull(key="latest_message",  task_ids = "load_context_from_dag_run", default="")
     email_data = ti.xcom_pull(key="email_data", task_ids = "load_context_from_dag_run", default={})
@@ -654,6 +659,10 @@ def summarize_engagement_details_360(ti, **context):
     entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids="analyze_thread_entities", default={})
     if not entity_flags.get("request_summary_360", False):
         logging.info("No 360 summary requested, skipping")
+        return
+    # Mutually exclusive: if regular summary was requested, skip 360
+    if entity_flags.get("request_summary", False):
+        logging.info("Regular summary was requested, skipping 360 (mutually exclusive)")
         return
 
     chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
@@ -4532,7 +4541,11 @@ def send_no_action_email(ti, **context):
 
 def compose_engagement_summary_email(ti, **context):
     """Compose a dedicated email for engagement summary with conditional sections"""
-    engagement_summary = ti.xcom_pull(key="engagement_summary",  task_ids="summarize_engagement_details_360", default={})
+    # Try 360 summary first; if it didn't run, fall back to regular summary
+    engagement_summary = ti.xcom_pull(key="engagement_summary", task_ids="summarize_engagement_details_360", default=None)
+    if not engagement_summary:
+        engagement_summary = ti.xcom_pull(key="engagement_summary", task_ids="summarize_engagement_details", default={})
+    logging.info(f"Engagement summary source: {'360' if ti.xcom_pull(key='engagement_summary', task_ids='summarize_engagement_details_360', default=None) else 'regular'}")
     email_data = ti.xcom_pull(key="email_data",  task_ids = "load_context_from_dag_run", default={})
     entity_flags = ti.xcom_pull(key="entity_search_flags",  task_ids="analyze_thread_entities", default={})
     
