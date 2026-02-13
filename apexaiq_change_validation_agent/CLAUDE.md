@@ -93,7 +93,7 @@ When optional fields are omitted, the DAG enriches them from ManageEngine:
 | `SMTP_PASSWORD` | SMTP password for sending notification emails |
 | `SMTP_HOST` | SMTP server hostname (default: `mail.authsmtp.com`) |
 | `SMTP_PORT` | SMTP server port (default: `2525`) |
-| `SMTP_FROM_SUFFIX` | Email "From" suffix (default: `via lowtouch.ai <webmaster@ecloudcontrol.com>`) |
+| `SMTP_FROM_SUFFIX` | No longer used — From header is hardcoded to `Ask ApexaIQ AI` |
 | `APEXAIQ_CHANGE_VALIDATION_NOTIFY_EMAIL` | Comma-separated recipient email addresses for notifications |
 
 ## Task Pipeline
@@ -184,6 +184,17 @@ All dynamic content in the email table is HTML-escaped via `html.escape()` to pr
   - **pending** — some levels are not yet approved
   - **no_levels** — no approval levels found for the change
 - The resolved status is used by `correlate_and_classify` to determine the classification; the static `approval_status` field is only used as a fallback when resolved approval data is unavailable
+
+### Human-friendly approval reason messages
+
+When a CR exists but is not fully approved, the reason string uses plain-language descriptions:
+
+| Resolved status | Reason message shown |
+|---|---|
+| `pending` | `CR #CH-X found but approval status is 'pending — awaiting approver action'` |
+| `no_levels` | `CR #CH-X found but approval status is 'no approval levels configured'` |
+| API failure + raw field empty | `CR #CH-X found but approval status is 'approval status unavailable'` |
+| API failure + raw field has value | `CR #CH-X found but approval status is '{raw value from ManageEngine}'` |
 
 ### Logging
 
