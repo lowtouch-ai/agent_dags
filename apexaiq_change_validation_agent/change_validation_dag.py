@@ -643,7 +643,7 @@ def _send_smtp_email(recipient, subject, body, cc_emails=None):
 
         msg = MIMEMultipart("related")
         msg["Subject"] = subject
-        msg["From"] = "Ask ApexaIQ AI"
+        msg["From"] = f"Ask ApexaIQ AI <{SMTP_FROM_EMAIL}>"
         msg["To"] = recipient
         if cc_emails:
             msg["Cc"] = cc_emails
