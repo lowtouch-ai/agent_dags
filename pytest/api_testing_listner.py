@@ -321,16 +321,24 @@ def classify_and_route(**kwargs):
 
     CLASSIFICATION_SYSTEM_PROMPT = (
         "You are an email routing assistant for an automated API testing service. "
-        "Classify the email intent into exactly one of two categories:\n"
-        '- "api_testing": The sender wants API tests generated or executed. They may have '
+        "Classify the email intent into exactly one of four categories:\n"
+        '- "scenario_testing": The sender describes a business flow, journey, or end-to-end '
+        "scenario to test (e.g. 'test the buying flow: create product, stock it, buy it, check order'). "
+        "Keywords: workflow, flow, journey, scenario, sequence, end-to-end, step-by-step, pipeline.\n"
+        '- "api_testing": The sender wants standard API tests generated or executed. They may have '
         "attached a Postman collection (JSON), API documentation (PDF), or described APIs to test.\n"
+        '- "postman_export": The sender wants a Postman collection generated from a previous test session. '
+        "They are asking for test results to be exported or converted into a Postman collection. "
+        "Keywords: postman, collection, export, send me the collection, convert to postman, download collection.\n"
         '- "general_inquiry": The sender is asking a general question (what can you do, help, '
         "status, how does this work, etc.) that does not require running the test pipeline.\n\n"
-        'Return ONLY strict JSON: {"intent": "api_testing" or "general_inquiry", "reason": "..."}'
+        "When in doubt between scenario_testing and api_testing, prefer api_testing.\n\n"
+        'Return ONLY strict JSON: {"intent": "scenario_testing" or "api_testing" or "postman_export" or "general_inquiry", "reason": "..."}'
     )
 
     emails_to_test = []
     emails_to_reply = []
+    emails_to_export = []
 
     for email in emails:
         subject = email["headers"].get("Subject", "")
@@ -359,17 +367,25 @@ def classify_and_route(**kwargs):
             )
         except Exception as e:
             logging.error(f"AI classification failed for email {email['id']}: {e}")
-            # Fallback: if there are JSON attachments, assume api_testing
-            intent = "api_testing" if email.get("json_attachments") else "general_inquiry"
+            # Fallback: if there are any attachments (JSON or PDF), assume api_testing
+            has_test_attachments = email.get("json_attachments") or email.get("pdf_attachments")
+            intent = "api_testing" if has_test_attachments else "general_inquiry"
             logging.info(f"Fallback classification for email {email['id']}: {intent}")
 
-        if intent == "api_testing":
+        if intent == "scenario_testing":
+            email["testing_type"] = "scenario"
             emails_to_test.append(email)
+        elif intent == "api_testing":
+            email["testing_type"] = "api_only"
+            emails_to_test.append(email)
+        elif intent == "postman_export":
+            emails_to_export.append(email)
         else:
             emails_to_reply.append(email)
 
     ti.xcom_push(key="emails_to_test", value=emails_to_test)
     ti.xcom_push(key="emails_to_reply", value=emails_to_reply)
+    ti.xcom_push(key="emails_to_export", value=emails_to_export)
 
     # Determine which downstream tasks to activate
     branches = []
@@ -377,13 +393,16 @@ def classify_and_route(**kwargs):
         branches.append("trigger_test_dag")
     if emails_to_reply:
         branches.append("reply_general_inquiry")
+    if emails_to_export:
+        branches.append("trigger_postman_export")
 
     if not branches:
         return "no_email_found_task"
 
     logging.info(
         f"Routing: {len(emails_to_test)} email(s) to testing, "
-        f"{len(emails_to_reply)} email(s) to general reply"
+        f"{len(emails_to_reply)} email(s) to general reply, "
+        f"{len(emails_to_export)} email(s) to postman export"
     )
     return branches
 
@@ -408,7 +427,8 @@ def trigger_response_tasks(**kwargs):
             "config_file": email.get('config'),
             "has_pdf": email.get('has_pdf', False),
             "email_headers": email['headers'],
-            "email_content": email['content']
+            "email_content": email['content'],
+            "testing_type": email.get('testing_type', 'api_only')
         }
         
         logging.info(
@@ -513,6 +533,38 @@ def reply_general_inquiry(**kwargs):
             )
 
 
+def trigger_postman_export_tasks(**kwargs):
+    """Trigger the postman collection exporter DAG for each email requesting an export."""
+    ti = kwargs['ti']
+    emails = ti.xcom_pull(task_ids="classify_and_route", key="emails_to_export")
+
+    if not emails:
+        logging.info("No emails classified for Postman export → nothing to trigger")
+        return
+
+    for email in emails:
+        task_id = f"trigger_postman_export_{email['id'].replace('-','_')}"
+
+        conf_data = {
+            "email_id": email['id'],
+            "thread_id": email['threadId'],
+            "email_headers": email['headers'],
+            "email_content": email.get('content', ''),
+        }
+
+        logging.info(
+            f"Triggering postman_collection_exporter for email {email['id']} "
+            f"(thread: {email['threadId']})"
+        )
+
+        TriggerDagRunOperator(
+            task_id=task_id,
+            trigger_dag_id="postman_collection_exporter",
+            conf=conf_data,
+            wait_for_completion=False,
+        ).execute(context=kwargs)
+
+
 def no_email_found(**kwargs):
     """Log when no emails are found."""
     logging.info("No new emails found to process.")
@@ -552,6 +604,11 @@ with DAG("api_testing_monitor_mailbox",
         python_callable=reply_general_inquiry,
     )
 
+    trigger_postman_export_task = PythonOperator(
+        task_id="trigger_postman_export",
+        python_callable=trigger_postman_export_tasks,
+    )
+
     no_email_found_task = PythonOperator(
         task_id="no_email_found_task",
         python_callable=no_email_found,
@@ -559,4 +616,4 @@ with DAG("api_testing_monitor_mailbox",
 
     # Set task dependencies
     fetch_emails_task >> classify_route_task
-    classify_route_task >> [trigger_test_runner, reply_inquiry_task, no_email_found_task]
+    classify_route_task >> [trigger_test_runner, reply_inquiry_task, trigger_postman_export_task, no_email_found_task]
