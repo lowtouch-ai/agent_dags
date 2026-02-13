@@ -637,7 +637,11 @@ def _fetch_approval_status(base_url, change_id, headers):
 def _send_smtp_email(recipient, subject, body, cc_emails=None):
     """Send an SMTP email with an HTML body."""
     try:
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
+        logging.info(
+            "Connecting to SMTP server %s:%s (from=%s, to=%s)",
+            SMTP_HOST, SMTP_PORT, SMTP_FROM_EMAIL, recipient,
+        )
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
         server.starttls()
         server.login(SMTP_USER, SMTP_PASSWORD)
 
@@ -660,7 +664,10 @@ def _send_smtp_email(recipient, subject, body, cc_emails=None):
         server.quit()
         return True
     except Exception as exc:
-        logging.error("Failed to send email: %s", str(exc))
+        logging.error(
+            "Failed to send email to %s via %s:%s — %s: %s",
+            recipient, SMTP_HOST, SMTP_PORT, type(exc).__name__, str(exc),
+        )
         return None
 
 
@@ -1004,6 +1011,7 @@ def send_notification_emails(**kwargs):
     cc_emails = ", ".join(email_list[1:]) if len(email_list) > 1 else None
 
     sent = []
+    failed = []
     for xcom_key, task_id, subject in email_configs:
         html = ti.xcom_pull(task_ids=task_id, key=xcom_key)
         if not html:
@@ -1020,7 +1028,14 @@ def send_notification_emails(**kwargs):
             sent.append(subject)
             logging.info("Sent: %s", subject)
         else:
+            failed.append(subject)
             logging.error("Failed to send: %s", subject)
+
+    if failed:
+        raise RuntimeError(
+            f"Failed to send {len(failed)} notification email(s): "
+            f"{', '.join(failed)}. Check SMTP configuration and logs."
+        )
 
     if not sent:
         logging.info("No notification emails needed for this run")
