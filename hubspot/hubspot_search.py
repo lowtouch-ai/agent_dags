@@ -236,7 +236,7 @@ def get_owner_name_from_id(owner_id, all_owners_table):
     # Search for matching owner
     for owner in all_owners_table:
         if str(owner.get("id", "")) == str(owner_id):
-            return DEFAULT_OWNER_NAME
+            return owner.get("name", DEFAULT_OWNER_NAME)
     
     return DEFAULT_OWNER_NAME
 
@@ -292,7 +292,7 @@ def load_context_from_dag_run(ti, **context):
     logging.info(f"Thread ID: {thread_id}")
     logging.info(f"Chat history length: {len(chat_history)}")
     logging.info(f"Thread history length: {len(thread_history)}")
-    logging.info(f"Latest message preview: {latest_message[:100]}...")
+    logging.info(f"Latest message preview: {(latest_message or '')[:100]}...")
     
     ti.xcom_push(key="email_data", value=email_data)
     ti.xcom_push(key="chat_history", value=chat_history)
@@ -314,7 +314,7 @@ def generate_and_inject_spelling_variants(ti, **context):
 
     recent_context = ""
     for msg in chat_history[-4:]:  # Last few messages
-        recent_context += f"{msg['role'].upper()}: {msg['content']}\n\n"
+        recent_context += f"{msg.get('role', 'unknown').upper()}: {msg.get('content', '')}\n\n"
     recent_context += f"USER: {latest_message}"
 
     variant_prompt = f"""You are a helpful assistant that detects potential spelling mistakes in names mentioned in business emails.
@@ -930,8 +930,8 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
     except Exception as e:
         logging.error(f"Error processing owner AI response: {e}")
         default_owner = {
-            "deal_owner_id": {DEFAULT_OWNER_ID},
-            "deal_owner_name": {DEFAULT_OWNER_NAME},
+            "deal_owner_id": DEFAULT_OWNER_ID,
+            "deal_owner_name": DEFAULT_OWNER_NAME,
             "deal_owner_message": f"Error occurred: {str(e)}, so assigning to default owner Kishore.",
             "task_owners": [],
             "all_owners_table": []
@@ -943,6 +943,15 @@ def validate_deal_stage(ti, **context):
     """Validate deal stage from conversation and assign default if invalid"""
     chat_history = ti.xcom_pull(key="chat_history", task_ids = "load_context_from_dag_run", default=[])
     latest_message = ti.xcom_pull(key="latest_message", task_ids = "load_context_from_dag_run", default="")
+    entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids= "analyze_thread_entities", default={})
+    if not entity_flags.get("search_deals", True):
+        logging.info("No deals are mentioned.")
+        # Push empty result
+        ti.xcom_push(key="deal_info", value={
+            "deal_results": {"total": 0, "results": []},
+            "new_deals": []
+        })
+        return
     
     # Valid deal stages
     VALID_DEAL_STAGES = [
@@ -1013,6 +1022,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
             "deal_stages": []
         }
         ti.xcom_push(key="deal_stage_info", value=default_result)
+        return default_result
 
     return parsed_json
 
@@ -1318,10 +1328,6 @@ Return ONLY valid JSON:
 """
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    except Exception as e:
-        raise
-    try: 
-        response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"AI response is: {response}")
     except Exception as e:
         raise
@@ -1371,7 +1377,7 @@ Return ONLY valid JSON:
                         if company_details:
                             # 🔹 OPTION 1: normalize company name upstream
                                 original_name = company_details.get("name", "")
-                                company_details["name"] = (
+                                company_details["normalized_name"] = (
                                     original_name
                                     .lower()
                                     .replace(" ", "")
@@ -1454,7 +1460,7 @@ def validate_companies_against_associations(ti, **context):
         return text
     
     entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids= "analyze_thread_entities", default={})
-    if not entity_flags.get("search_contacts", True):
+    if not entity_flags.get("search_companies", True):
         logging.info("Contact search was skipped, so skipping company association validation")
         # Push empty result
         ti.xcom_push(key="company_info", value={
@@ -1622,7 +1628,7 @@ def validate_deals_against_associations(ti, **context):
     Always include ALL associated deals as existing, and add unmatched mentioned as new.
     """
     entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids= "analyze_thread_entities", default={})
-    if not entity_flags.get("search_contacts", True):
+    if not entity_flags.get("search_deals", True):
         logging.info("Contact search was skipped, so skipping deal association validation")
         # Push empty result
         ti.xcom_push(key="deal_info", value={
@@ -1681,7 +1687,6 @@ RULES:
    - Direct deal: <Client Name>-<Deal Name>
    - Partner deal: <Partner Name>-<Client Name>-<Deal Name>
    - Use the Deal Name from the email if specified; otherwise, create a concise one based on the description (e.g., product or service discussed).
-- If the deal name is mentioned by the user, use that as the deal name without fail.
 - Only extract if explicit deal creation requested OR clear buying signals.Do not create any deals if there is no clear buying intent.
 - NOT exploratory conversations
 - Return deal name, stage (default: Lead), amount, close date and deal owner name
@@ -1710,9 +1715,6 @@ Return ONLY valid JSON:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
     except Exception as e:
         raise
-
-    response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
-    logging.info(f"Raw AI response for deal validation: {response[:1000]}...")
     try:
         parsed = json.loads(response.strip())
         mentioned_deals = parsed.get("deals", [])
@@ -2491,7 +2493,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
                     final_existing_contacts.append(contact)
             
             elif action == "create_new":
-                details = val.get("create_new_details") or {}
+                details = val.get("create_new_details", {})
                 firstname = (details.get("firstname") or "").strip()
                 lastname = (details.get("lastname") or "").strip()
                 email = (details.get("email") or "").strip()
@@ -2592,19 +2594,8 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
                     logging.info(f"✓ Keeping existing deal: {deal.get('dealName')}")
             
             elif action == "create_new":
-                name_lower = name.lower()
-                if any(nd.get("dealName","").strip().lower() == name_lower for nd in final_new_deals):
-                    logging.info(f"⚠ Skipping duplicate new deal: {name}")
-                    continue
-                
-                final_new_deals.append({
-                    "dealName": name,
-                    "dealLabelName": "",
-                    "dealAmount": "",
-                    "closeDate": "",
-                    "dealOwnerName": deal_owner_name
-                })
-                logging.info(f"✓ Creating new deal: {name}")
+            
+                logging.info(f"⚠ Skipping AI 'create_new' deal '{name}' — new_deals from upstream already has {len(final_new_deals)} deal(s)")
         
         # Update XCom with validated results
         validated_contact_info = {
@@ -2684,8 +2675,8 @@ def parse_notes_tasks_meeting(ti, **context):
     owner_info = ti.xcom_pull(key="owner_info", task_ids = "determine_owner", default={})
     
     task_owners = owner_info.get('task_owners', [])
-    default_task_owner_id = {DEFAULT_OWNER_ID}
-    default_task_owner_name = {DEFAULT_OWNER_NAME}
+    default_task_owner_id = DEFAULT_OWNER_ID
+    default_task_owner_name = DEFAULT_OWNER_NAME
     
     parsing_instructions = []
     if should_parse_notes:
@@ -2827,15 +2818,19 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
                 task_index = task.get("task_index", 0)
                 matching_owner = next((owner for owner in task_owners if owner.get("task_index") == task_index), None)
                 if matching_owner:
-                    # Use the validated owner from determine_owner
-                    task["task_owner_id"] = matching_owner.get("task_owner_id", default_task_owner_id)
-                    task["task_owner_name"] = matching_owner.get("task_owner_name", default_task_owner_name)
-                else:
-                    # If no matching owner in the list, keep defaults
-                    if "task_owner_id" not in task or not task["task_owner_id"]:
+                    task_msg = matching_owner.get("task_owner_message", "").lower()
+                    if "not valid" in task_msg or "not specified" in task_msg or "not found" in task_msg:
+                        # AI message says invalid but assigned wrong owner - force default
                         task["task_owner_id"] = default_task_owner_id
-                    if "task_owner_name" not in task or not task["task_owner_name"]:
                         task["task_owner_name"] = default_task_owner_name
+                    else:
+                        # Valid owner from determine_owner
+                        task["task_owner_id"] = matching_owner.get("task_owner_id", default_task_owner_id)
+                        task["task_owner_name"] = matching_owner.get("task_owner_name", default_task_owner_name)
+                else:
+                    # No matching owner from determine_owner - always use defaults
+                    task["task_owner_id"] = default_task_owner_id
+                    task["task_owner_name"] = default_task_owner_name
                 
                 # Ensure task_index is set
                 if "task_index" not in task:
@@ -3041,57 +3036,41 @@ def compose_validation_error_email(ti, **context):
         requested_entities.append("Company")
     if has_deal:
         requested_entities.append("Deal")
-    
+
+    # Map validation error entity_type values to singular template keys
+    ENTITY_TYPE_TO_SINGULAR = {
+        "Deals": "Deal",
+        "Companies": "Company",
+        "Meeting": "Meeting",
+        "Meetings": "Meeting",
+        "Notes": "Note",
+        "Tasks": "Task",
+    }
+
     # Determine primary entity from what was actually requested
     if len(requested_entities) == 1:
-        primary_entity = requested_entities[0].capitalize()
+        primary_entity = requested_entities[0]
     elif len(requested_entities) > 1:
         # ✅ IMPROVED: Prioritize based on validation errors
         primary_entity = None
         for error in errors:
             entity_type = error.get("entity_type", "")
-            if entity_type == "Deals":
-                primary_entity = "Deal"
+            if entity_type in ENTITY_TYPE_TO_SINGULAR:
+                primary_entity = ENTITY_TYPE_TO_SINGULAR[entity_type]
                 break
-            elif entity_type == "Companies":
-                primary_entity = "Company"
-                break
-            elif entity_type == "Meetings":
-                primary_entity = "Meeting"
-                break
-            elif entity_type == "Notes":
-                primary_entity = "Note"
-                break
-            elif entity_type == "Tasks":
-                primary_entity = "Task"
-                break
-        
-        # If still not found, use first requested entity
+        # If no matching error found, use first requested entity
         if not primary_entity:
             primary_entity = requested_entities[0]
-        else:
-            # ✅ IMPROVED: Fallback based on errors
-            primary_entity = None
-            for error in errors:
-                entity_type = error.get("entity_type", "")
-                if entity_type in ["Tasks", "Meetings", "Notes", "Deals", "Companies"]:
-                    primary_entity = entity_type.rstrip('s')
-                    break
-    
-        primary_entity = "entities"
     else:
-        # Fallback: check errors list
+        # No requested entities detected - fallback to errors list
         primary_entity = None
         for error in errors:
             entity_type = error.get("entity_type", "")
-            if entity_type in ["Tasks", "Meetings", "Notes", "Deals", "Companies"]:
-
-                primary_entity = entity_type.rstrip('s')
+            if entity_type in ENTITY_TYPE_TO_SINGULAR:
+                primary_entity = ENTITY_TYPE_TO_SINGULAR[entity_type]
                 break
-        
-        # Default fallback if somehow not detected
         if not primary_entity:
-            primary_entity = "Task"  # or raise/log an error
+            primary_entity = "Task"
     
     # Build error details HTML (kept but not used in these specific templates)
     error_details_html = ""
@@ -3527,6 +3506,7 @@ For dates, use YYYY-MM-DD format.
 If no dates found in email, check today's date as default for each owner.
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
+    warnings = []
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
         logging.info(f"Raw AI response for task threshold: {response[:1000]}...")
@@ -3573,18 +3553,32 @@ def compile_search_results(ti, **context):
     logging.info(f"=== COMPILING SEARCH RESULTS ===")
     logging.info(f"Thread ID: {thread_id}")
     
-    # ✅ FIX: Apply validated stages to new deals BEFORE adding to search_results
+    # Apply validated stages from validate_deal_stage to new deals
     new_deals = deal_info.get("new_deals", [])
-    validated_stages = {stage['deal_name']: stage['validated_stage'] 
-                       for stage in deal_stage_info.get('deal_stages', [])}
-    
-    for deal in new_deals:
+    validated_stages_list = deal_stage_info.get('deal_stages', [])
+
+    # Name-based lookup
+    validated_by_name = {stage['deal_name']: stage['validated_stage']
+                        for stage in validated_stages_list}
+
+    # Index-based lookup (deal_index is 1-based from AI, convert to 0-based)
+    validated_by_index = {stage.get('deal_index', 0) - 1: stage.get('validated_stage', 'Lead')
+                         for stage in validated_stages_list}
+
+    for i, deal in enumerate(new_deals):
         deal_name = deal.get("dealName", "")
-        if deal_name in validated_stages:
-            # Apply the validated stage (either user's valid input or default "Lead")
-            deal["dealLabelName"] = validated_stages[deal_name]
-            logging.info(f"Applied validated stage '{validated_stages[deal_name]}' to deal '{deal_name}'")
-    
+
+        # Try 1: exact name match
+        if deal_name in validated_by_name:
+            deal["dealLabelName"] = validated_by_name[deal_name]
+            logging.info(f"Applied validated stage '{validated_by_name[deal_name]}' to deal '{deal_name}' (name match)")
+        # Try 2: index-based match (handles name mismatches between the two AI calls)
+        elif i in validated_by_index:
+            deal["dealLabelName"] = validated_by_index[i]
+            logging.info(f"Applied validated stage '{validated_by_index[i]}' to deal '{deal_name}' (index match, deal_index={i+1})")
+        else:
+            logging.warning(f"No validated stage found for deal '{deal_name}', keeping dealLabelName='{deal.get('dealLabelName', '')}'")
+
     search_results = {
         "thread_id": thread_id,
         "deal_results": deal_info.get("deal_results", {"total": 0, "results": []}),
@@ -3668,8 +3662,9 @@ def compose_confirmation_email(ti, **context):
             return []
         return [entity for entity in entities if has_meaningful_data(entity, required_fields)]
 
-    from_email = email_data["headers"].get("From", "")
-    
+    headers = email_data.get("headers", {})
+    from_email = headers.get("From", "")
+
     email_content = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -4180,7 +4175,7 @@ def compose_confirmation_email(ti, **context):
         for task in corrected_tasks:
             task_index = task.get("task_index", 0)
             task_details = task.get("task_details", "Unknown")
-            task_owner_name = task.get("task_owner_name", {DEFAULT_OWNER_NAME})
+            task_owner_name = task.get("task_owner_name", DEFAULT_OWNER_NAME)
             original_task_owner = next((to for to in task_owners if to.get("task_index") == task_index), None)
             task_owner_msg = original_task_owner.get("task_owner_message", "") if original_task_owner else ""
             task_msg_lower = task_owner_msg.lower()
@@ -4281,14 +4276,15 @@ def send_confirmation_email(ti, **context):
     # Extract all recipients from original email
     all_recipients = extract_all_recipients(email_data)
     
-    sender_email = email_data["headers"].get("From", "")
-    original_message_id = email_data["headers"].get("Message-ID", "")
-    references = email_data["headers"].get("References", "")
+    headers = email_data.get("headers", {})
+    sender_email = headers.get("From", "")
+    original_message_id = headers.get("Message-ID", "")
+    references = headers.get("References", "")
 
     if original_message_id and original_message_id not in references:
         references = f"{references} {original_message_id}".strip()
 
-    subject = f"Re: {email_data['headers'].get('Subject', 'Meeting Minutes Request')}"
+    subject = f"Re: {headers.get('Subject', 'Meeting Minutes Request')}"
 
     # Prepare recipients for reply-all
     primary_recipient = sender_email

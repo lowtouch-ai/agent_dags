@@ -1978,7 +1978,7 @@ def branch_function(**kwargs):
     if not unread_emails:
         logging.info("No unread emails found")
         ti.xcom_push(key="has_emails", value=False)
-        return
+        return "no_email_found_task"
 
     ti.xcom_push(key="has_emails", value=True)
     
@@ -1998,10 +1998,10 @@ def branch_function(**kwargs):
         
         if task_id_in_header and task_type_in_header == "daily-reminder":
             logging.info(f"DIRECT task email detected (X-Task-ID: {task_id_in_header})")
-            logging.info(f"This is the task reminder itself, not a user reply")
+            logging.info(f"Routing through AI classification to determine user intent")
             email["task_id"] = task_id_in_header
-            email["is_task_reply"] = True
-            task_completion_emails.append(email)
+            email["is_task_association"] = True
+            other_emails.append(email)
             continue
     
         is_reply_to_task = False
@@ -2305,10 +2305,29 @@ def extract_json_from_text(text):
         text = text.strip()
         text = re.sub(r'```json\s*', '', text)
         text = re.sub(r'```\s*', '', text)
-        
-        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group())
+
+        # Try parsing the whole text first
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Find balanced braces to handle nested JSON
+        start = text.find('{')
+        if start == -1:
+            return None
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i+1])
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    break
         return None
     except Exception as e:
         logging.error(f"Error extracting JSON: {e}")
@@ -2352,14 +2371,17 @@ def trigger_continuation_dag(**kwargs):
         logging.info("No reply emails to process")
         return
 
+    # Pull search_results from the search DAG so create DAG gets the correct owners
+    search_results = ti.xcom_pull(dag_id="hubspot_search_entities", task_ids="compile_search_results", key="search_results") or {}
+
     for email in reply_emails:
+
         # Pass email with full chat_history to continuation DAG
         trigger_conf = {
             "email_data": email,
             "chat_history": email.get("chat_history", []),
             "thread_history": email.get("thread_history", []),
-            "thread_id": email.get("threadId"),
-            "thread_id": email.get("threadId", ""),  # ADD THIS
+            "thread_id": email.get("threadId", ""),
             "message_id": email.get("id", "")
         }
 
@@ -4293,8 +4315,8 @@ def trigger_report_dag(**kwargs):
     """Enhanced trigger_report_dag with professional report email formatting"""
     DEAL_STAGE_LABELS = get_deal_stage_labels()
     ti = kwargs['ti']
-    report_emails = ti.xcom_pull(key="report_emails") or []
-    general_report_emails = ti.xcom_pull(key="general_query_report") or []
+    report_emails = ti.xcom_pull(key="report_emails", task_ids="branch_task") or []
+    general_report_emails = ti.xcom_pull(key="general_query_report", task_ids="branch_task") or []
     
     all_report_emails = report_emails + general_report_emails
     
@@ -5127,8 +5149,8 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                 final_response = ai_response
                 log_prefix = "SUCCESS Report"
             else:
-                raise
-                
+                raise ValueError(f"Report generation failed for email {email_id}: report_success={report_success}, ai_response is None")
+
            
             # Build and send email (keep your existing send logic)
             try:

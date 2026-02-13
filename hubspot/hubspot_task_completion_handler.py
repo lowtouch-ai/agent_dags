@@ -126,10 +126,29 @@ def extract_json_from_text(text):
         text = text.strip()
         text = re.sub(r'```json\s*', '', text)
         text = re.sub(r'```\s*', '', text)
-        
-        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group())
+
+        # Try parsing the whole text first
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Find balanced braces to handle nested JSON
+        start = text.find('{')
+        if start == -1:
+            return None
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i+1])
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    break
         return None
     except Exception as e:
         logging.error(f"Error extracting JSON: {e}")
@@ -373,6 +392,106 @@ def copy_task_associations(source_task_id, target_task_id):
     except Exception as e:
         logging.warning(f"Failed to copy associations: {e}")
 
+def create_activity_note(task_id, email_data, results, original_task):
+    """Create a HubSpot note logging the user's reply and actions taken, associated with the task and all linked objects."""
+    try:
+        headers_auth = {
+            "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        # Extract sender info
+        email_headers = email_data.get("headers", {})
+        sender_email_raw = email_headers.get("From", "Unknown")
+        name_match = re.search(r'^([^<]+)', sender_email_raw)
+        sender_name = name_match.group(1).strip() if name_match else sender_email_raw
+        email_match = re.search(r'<([^>]+)>', sender_email_raw)
+        sender_email_addr = email_match.group(1) if email_match else sender_email_raw
+
+        email_content = email_data.get("content", "")
+        task_subject = original_task.get("properties", {}).get("hs_task_subject", "Task") if original_task else "Task"
+        timestamp = datetime.now(timezone.utc).strftime("%B %d, %Y at %I:%M %p UTC")
+
+        # Build actions list
+        actions = []
+        if results.get("completed"):
+            actions.append("Task marked as Completed")
+        if results.get("due_date_updated"):
+            actions.append(f"Due date updated to {results.get('new_due_date', 'N/A')}")
+        if results.get("followup_created"):
+            followup_id = results.get("followup_task_id", "N/A")
+            actions.append(f"Follow-up task created (ID: {followup_id})")
+        if results.get("deal_updated"):
+            deal_details = results.get("deal_update_details", {})
+            detail_parts = []
+            if "dealstage" in deal_details:
+                detail_parts.append("stage updated")
+            if "amount" in deal_details:
+                detail_parts.append(f"amount → ${int(deal_details['amount']):,}")
+            if detail_parts:
+                actions.append(f"Deal updated: {', '.join(detail_parts)}")
+            else:
+                actions.append("Deal updated")
+
+        actions_html = "".join(f"<li>{a}</li>" for a in actions) if actions else "<li>No actions taken</li>"
+
+        note_body = (
+            f"<h3>📋 Activity Log — {task_subject}</h3>"
+            f"<p>👤 <strong>Speaker:</strong> {sender_name} ({sender_email_addr})</p>"
+            f"<p>🕐 <strong>Time:</strong> {timestamp}</p>"
+            f"<p>💬 <strong>Reply:</strong> \"{email_content}\"</p>"
+            f"<p>✅ <strong>Actions Taken:</strong></p><ul>{actions_html}</ul>"
+        )
+
+        # Create the note
+        endpoint = f"{HUBSPOT_BASE_URL}/crm/v3/objects/notes"
+        payload = {
+            "properties": {
+                "hs_timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "hs_note_body": note_body,
+            }
+        }
+
+        response = requests.post(endpoint, headers=headers_auth, json=payload, timeout=30)
+        response.raise_for_status()
+
+        note_id = response.json().get("id")
+        logging.info(f"✓ Created activity note {note_id} for task {task_id}")
+
+        # Associate note with the task
+        if note_id and task_id:
+            assoc_endpoint = f"{HUBSPOT_BASE_URL}/crm/v4/objects/notes/{note_id}/associations/tasks/{task_id}"
+            assoc_payload = [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": 202}]
+            requests.put(assoc_endpoint, headers=headers_auth, json=assoc_payload, timeout=30)
+            logging.info(f"✓ Associated note {note_id} with task {task_id}")
+
+        # Associate note with all linked contacts, companies, deals
+        if note_id:
+            assoc_type_map = {"contacts": 190, "companies": 188, "deals": 214}
+            for assoc_type, type_id in assoc_type_map.items():
+                try:
+                    fetch_endpoint = f"{HUBSPOT_BASE_URL}/crm/v4/objects/tasks/{task_id}/associations/{assoc_type}"
+                    fetch_resp = requests.get(fetch_endpoint, headers=headers_auth, timeout=30)
+                    if fetch_resp.status_code == 200:
+                        linked = fetch_resp.json().get("results", [])
+                        for item in linked:
+                            obj_id = item.get("toObjectId")
+                            if obj_id:
+                                link_endpoint = f"{HUBSPOT_BASE_URL}/crm/v4/objects/notes/{note_id}/associations/{assoc_type}/{obj_id}"
+                                link_payload = [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": type_id}]
+                                requests.put(link_endpoint, headers=headers_auth, json=link_payload, timeout=30)
+                        if linked:
+                            logging.info(f"✓ Associated note with {len(linked)} {assoc_type}")
+                except Exception as e:
+                    logging.warning(f"Failed to associate note with {assoc_type}: {e}")
+
+        return note_id
+
+    except Exception as e:
+        logging.warning(f"Failed to create activity note for task {task_id}: {e}")
+        return None
+
+
 def get_associated_deal_id(task_id):
     try:
         endpoint = f"{HUBSPOT_BASE_URL}/crm/v4/objects/tasks/{task_id}/associations/deals"
@@ -504,8 +623,7 @@ def analyze_task_completion_request(**kwargs):
     email_data = kwargs['dag_run'].conf.get('email_data', {})
     
     if not email_data:
-        logging.error("No email data provided")
-        return None
+        raise ValueError("No email data provided in dag_run.conf")
     
     email_content = email_data.get("content", "")
     
@@ -534,8 +652,7 @@ def analyze_task_completion_request(**kwargs):
                     break
     
     if not task_id:
-        logging.warning("No task ID found in email headers or thread history")
-        return None
+        raise ValueError("No task ID found in email headers or thread history")
 
     # Get task details for context
     original_task = get_task_details(task_id)
@@ -577,6 +694,20 @@ Current Close Date: {deal_details.get('current_closedate', 'Not set')}
 Email content: "{email_content}"
 Deal Context:
 {deal_context}
+
+CRITICAL AUTO FOLLOW-UP RULE:
+- When user marks a task as completed (mark_completed: true), ALWAYS set create_followup to true with a default 2-week due date.
+- This is the DEFAULT behavior — a follow-up is ALWAYS created on task completion.
+- EXCEPTION: Set suppress_followup to true (and create_followup to false) ONLY when the user EXPLICITLY says one of the following:
+  * "no follow-up", "no follow-up needed", "done, no more tasks", "no need for another task"
+  * "we lost this deal", "lost this deal", "deal is dead" (deal closure with loss implies no follow-up)
+  * "this is done, nothing more to do", "close this out completely"
+- If user does NOT mention follow-up at all and just says "done" or "completed" → create_followup: true, suppress_followup: false
+
+CRITICAL DEAL CLOSURE AND TASK COMPLETION RULE:
+- If user says "we lost the deal", "lost this deal", "deal is dead" → set mark_completed to true AND update_deal to true with dealstage_label "Closed Lost" AND suppress_followup to true
+- If user says "we won the deal", "closed won", "deal is closed" → set mark_completed to true AND update_deal to true with dealstage_label "Closed Won"
+- Deal closure (won or lost) ALWAYS implies task completion (mark_completed: true)
 
 IMPORTANT TASK DUE DATE RULES:
 - If user says "extend the due date", "postpone to", "move to", "reschedule to" → extract new due date
@@ -629,6 +760,7 @@ Return ONLY valid JSON with NO additional text:
     "update_task_due_date": true/false,
     "new_task_due_date": "YYYY-MM-DD or null",
     "create_followup": true/false,
+    "suppress_followup": true/false,
     "followup_due_date": "YYYY-MM-DD or null",
     "followup_task_subject": "concise action-oriented subject or empty string",
     "followup_owner_name": "name/email or empty",
@@ -651,8 +783,7 @@ Return ONLY valid JSON with NO additional text:
         analysis = extract_json_from_text(ai_response)
     
     if not analysis:
-        logging.error("Failed to parse AI analysis")
-        return None
+        raise ValueError("Failed to parse AI analysis response")
 
     if "deal_updates" not in analysis or not isinstance(analysis["deal_updates"], dict):
         analysis["deal_updates"] = {}
@@ -674,6 +805,7 @@ Return ONLY valid JSON with NO additional text:
         "update_task_due_date": analysis.get("update_task_due_date", False),
         "new_task_due_date": analysis.get("new_task_due_date"),
         "create_followup": analysis.get("create_followup", False),
+        "suppress_followup": analysis.get("suppress_followup", False),
         "followup_due_date": followup_due,
         "followup_task_subject": followup_task_subject,
         "followup_owner_name": analysis.get("followup_owner_name", ""),
@@ -709,6 +841,7 @@ def process_task_completion(**kwargs):
         "deal_updated": False,
         "deal_id": deal_id,
         "deal_update_details": {},
+        "note_id": None,
         "error": None
     }
     
@@ -810,7 +943,24 @@ def process_task_completion(**kwargs):
             # Update error message if follow-up was created successfully despite missing original
             if results["error"] and "not found" in results["error"]:
                 results["error"] = "Original task not found but follow-up created successfully"
-    
+
+    # AUTO FOLLOW-UP SAFETY NET: When task is completed and no follow-up was
+    # explicitly created above, automatically create one unless user suppressed it.
+    # This ensures "done" always produces a follow-up even if AI missed create_followup.
+    if (analysis.get("mark_completed")
+            and not results.get("followup_created")
+            and not analysis.get("suppress_followup", False)):
+        logging.info("Auto-creating follow-up task: task marked completed, no explicit follow-up or suppression")
+        followup_task = create_followup_task(
+            original_task,
+            due_date=None,  # Default 2 weeks
+            task_subject="Follow-Up"
+        )
+        if followup_task:
+            results["followup_created"] = True
+            results["followup_task_id"] = followup_task.get("id")
+            logging.info(f"Auto-created follow-up task {followup_task.get('id')} with 2-week due date")
+
     # Deal Update Logic (unchanged)
     if deal_id and analysis.get("update_deal"):
         updates = analysis.get("deal_updates") or {}
@@ -861,6 +1011,11 @@ def process_task_completion(**kwargs):
         else:
             logging.warning(f"update_deal was TRUE but no valid properties extracted from: {updates}")
     
+    # Create activity note logging the reply and all actions taken
+    email_data = analysis.get("email_data", {})
+    note_id = create_activity_note(task_id, email_data, results, original_task)
+    results["note_id"] = note_id
+
     ti.xcom_push(key="processing_results", value=results)
     logging.info(f"Processing results: {results}")
     
@@ -974,6 +1129,17 @@ def send_confirmation_email(**kwargs):
         elif analysis.get("update_deal"):
             deal_section = "<p><em>Deal update requested but could not be applied.</em></p>"
 
+    note_section = ""
+    note_id = results.get("note_id")
+    if note_id:
+        note_section = f"""
+<p style="margin-top:25px;"><strong>Activity Note Logged:</strong></p>
+<div style="margin-left:20px;">
+    <ul><li>Your reply has been logged as an activity note on the task.</li>
+        <li><strong>Note ID:</strong> {note_id}</li>
+    </ul>
+</div>"""
+
     email_html = f"""<html><head><style>
     body {{font-family:Arial,sans-serif;line-height:1.6;color:#333;max-width:600px;margin:auto;padding:20px;}}
     ul {{padding-left:20px;}}
@@ -992,7 +1158,8 @@ def send_confirmation_email(**kwargs):
     
     {followup_section}
     {deal_section}
-    
+    {note_section}
+
     <p>Reply to this email if you need changes.</p>
     <p>Best Regards,<br>HubSpot Task Assistant<br><a href="http://lowtouch.ai">lowtouch.ai</a></p>
     </body></html>"""
@@ -1000,7 +1167,7 @@ def send_confirmation_email(**kwargs):
     try:
         service = authenticate_gmail()
         if not service:
-            return
+            raise ValueError("Gmail authentication failed in send_completion_email")
         
         recipients = extract_all_recipients(email_data)
         msg = MIMEMultipart('alternative')
