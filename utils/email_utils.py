@@ -14,6 +14,8 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 
 
 def authenticate_gmail(credentials_json, expected_email):
@@ -152,6 +154,108 @@ def send_email(service, recipient, subject, body, in_reply_to, references,
         
     except Exception as e:
         logging.error(f"Failed to send email: {str(e)}", exc_info=True)
+        return None
+
+
+def send_email_with_attachment(
+    service, recipient, subject, body, in_reply_to, references,
+    from_address, attachment_data, attachment_filename,
+    attachment_mime_type="application/json",
+    cc=None, bcc=None, thread_id=None, agent_name="API Test Agent"
+):
+    """
+    Send email reply with a file attachment, maintaining proper thread continuity.
+
+    Args:
+        service: Gmail API service instance
+        recipient: Email address to send to
+        subject: Email subject (should start with "Re:" for replies)
+        body: HTML body content
+        in_reply_to: Message-ID of the email being replied to
+        references: References header from original email
+        from_address: Email address to send from
+        attachment_data: File content as bytes (str will be encoded to UTF-8)
+        attachment_filename: Name for the attached file
+        attachment_mime_type: MIME type of the attachment (default: application/json)
+        cc: Comma-separated string or list of CC recipients (optional)
+        bcc: Comma-separated string or list of BCC recipients (optional)
+        thread_id: Gmail thread ID to maintain conversation
+        agent_name: Display name for the From header
+    """
+    try:
+        logging.debug(f"Preparing email with attachment to {recipient}, file: {attachment_filename}")
+
+        # Outer container: mixed (body + attachment)
+        msg = MIMEMultipart('mixed')
+        msg["From"] = f"{agent_name} via lowtouch.ai <{from_address}>"
+        msg["To"] = recipient
+
+        if cc:
+            if isinstance(cc, list):
+                cc = ', '.join(cc)
+            msg["Cc"] = cc
+
+        if bcc:
+            if isinstance(bcc, list):
+                bcc = ', '.join(bcc)
+            msg["Bcc"] = bcc
+
+        if not subject.lower().startswith("re:"):
+            msg["Subject"] = f"Re: {subject}"
+        else:
+            msg["Subject"] = subject
+
+        # Threading headers
+        if in_reply_to:
+            msg["In-Reply-To"] = in_reply_to
+
+        if references and in_reply_to:
+            if in_reply_to not in references:
+                msg["References"] = f"{references} {in_reply_to}".strip()
+            else:
+                msg["References"] = references
+        elif in_reply_to:
+            msg["References"] = in_reply_to
+        elif references:
+            msg["References"] = references
+
+        # Inner container for the HTML body
+        body_part = MIMEMultipart('alternative')
+        body_part.attach(MIMEText(body, "html", "utf-8"))
+        msg.attach(body_part)
+
+        # Attachment
+        if isinstance(attachment_data, str):
+            attachment_data = attachment_data.encode("utf-8")
+
+        maintype, subtype = attachment_mime_type.split("/", 1)
+        attachment_part = MIMEBase(maintype, subtype)
+        attachment_part.set_payload(attachment_data)
+        encoders.encode_base64(attachment_part)
+        attachment_part.add_header(
+            "Content-Disposition", "attachment", filename=attachment_filename
+        )
+        msg.attach(attachment_part)
+
+        raw_msg = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+
+        request_body = {"raw": raw_msg}
+        if thread_id:
+            request_body["threadId"] = thread_id
+
+        result = service.users().messages().send(
+            userId="me",
+            body=request_body
+        ).execute()
+
+        logging.info(
+            f"Email with attachment sent: {result.get('id')} in thread {result.get('threadId')}, "
+            f"file: {attachment_filename}"
+        )
+        return result
+
+    except Exception as e:
+        logging.error(f"Failed to send email with attachment: {str(e)}", exc_info=True)
         return None
 
 
