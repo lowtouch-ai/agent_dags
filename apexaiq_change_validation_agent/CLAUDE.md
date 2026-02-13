@@ -93,7 +93,7 @@ When optional fields are omitted, the DAG enriches them from ManageEngine:
 | `SMTP_PASSWORD` | SMTP password for sending notification emails |
 | `SMTP_HOST` | SMTP server hostname (default: `mail.authsmtp.com`) |
 | `SMTP_PORT` | SMTP server port (default: `2525`) |
-| `SMTP_FROM_SUFFIX` | No longer used — From header is hardcoded to `Ask ApexaIQ AI` |
+| `SMTP_FROM_EMAIL` | Sender email address for envelope and From header (default: `webmaster@ecloudcontrol.com`) |
 | `APEXAIQ_CHANGE_VALIDATION_NOTIFY_EMAIL` | Comma-separated recipient email addresses for notifications |
 
 ## Task Pipeline
