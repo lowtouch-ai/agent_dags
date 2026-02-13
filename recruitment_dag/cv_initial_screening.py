@@ -291,7 +291,17 @@ def send_screening_result_email(**kwargs):
         references = f"{references} {original_message_id}".strip()
     
     _, sender_email = parseaddr(sender)
-    
+
+    # Determine if a recruiter forwarded the CV — if so, CC them on the result
+    extracted_candidate_email = email_data.get('extracted_candidate_email')
+    if extracted_candidate_email and extracted_candidate_email.lower() != sender_email.lower():
+        recipient = extracted_candidate_email
+        cc = sender_email  # Keep the recruiter/forwarder in the loop
+        logging.info(f"Forwarded CV detected: sending to candidate {recipient}, CC to recruiter {cc}")
+    else:
+        recipient = sender_email
+        cc = None
+
     decision = (analysis_data.get('decision') or 'PENDING').upper()
     
     MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
@@ -348,21 +358,21 @@ Output clean HTML for the email body using proper tags (<p>, <h2>, etc.). Make i
     
     # send_email() already adds "Re:" prefix if missing, so don't add it here
     result = send_email(
-        service, 
-        sender_email, 
-        subject, 
-        body, 
-        original_message_id, 
+        service,
+        recipient,
+        subject,
+        body,
+        original_message_id,
         references,
-        RECRUITMENT_FROM_ADDRESS, 
-        cc=None, 
-        bcc=None, 
+        RECRUITMENT_FROM_ADDRESS,
+        cc=cc,
+        bcc=None,
         thread_id=thread_id
     )
-    
+
     if result:
-        logging.info(f"Screening result email sent to {sender_email} (Decision: {decision})")
-        return f"Email sent successfully to {sender_email}"
+        logging.info(f"Screening result email sent to {recipient} (Decision: {decision}){f', CC: {cc}' if cc else ''}")
+        return f"Email sent successfully to {recipient}"
     else:
         logging.error("Failed to send screening result email")
         return "Failed to send email"
