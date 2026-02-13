@@ -23,7 +23,7 @@ webshop-email-respond.py   (DAG: shared_send_message_email)
 Gmail reply with HTML quote
 
 webshop_reset_data.py      (DAG: webshop_reset_data)
-  │  Daily 2:30 AM UTC — dbt seed (10 tables) → dbt run → dbt test → Elementary report
+  │  Daily 2:30 AM UTC — drop FK tables → dbt seed (10 tables) → dbt run → dbt test → Elementary report
   ▼
 Database refreshed to baseline
 
@@ -44,7 +44,7 @@ The listener fetches unread emails via Gmail API, filters out no-reply addresses
 
 ### Data Reset Pipeline
 
-Uses dbt with Elementary data quality monitoring. Seeds 10 tables in parallel (address, articles, colors, customer, labels, order_positions, order_seed, products, stock, sizes), then runs the `order` model. Elementary report is generated and copied to `/appz/home/airflow/docs/edr_target/` for web access.
+Uses dbt with Elementary data quality monitoring. A `drop_order_tables` task first drops `order` and `order_positions` with `CASCADE` to remove FK constraints that block parallel seed truncation. Then seeds 10 tables in parallel with `--full-refresh` (address, articles, colors, customer, labels, order_positions, order_seed, products, stock, sizes), rebuilds the `order` model via `dbt run`. Elementary report is generated and copied to `/appz/home/airflow/docs/edr_target/` for web access. The drop step uses psycopg2 from the dbt venv (`source /dbt_venv/bin/activate`) since `psql` is not available in the Airflow worker container.
 
 ## Airflow Variables
 
@@ -80,10 +80,18 @@ Uses dbt with Elementary data quality monitoring. Seeds 10 tables in parallel (a
 ## File Paths (on Airflow server)
 
 - **dbt project**: `/appz/home/airflow/dags/agent_dags/dbt/webshop`
+- **dbt venv**: `/dbt_venv/bin/activate` (contains dbt, psycopg2; `psql` is NOT available)
 - **dbt executable**: `/dbt_venv/bin/dbt`
 - **Email timestamp cache**: `/appz/cache/last_processed_email.json`
 - **Elementary report**: `/appz/home/airflow/docs/edr_target/elementary_report.html`
 - **Maven tests**: `/appz/home/airflow/dags/agent_dags/WebshopChatAPIAutomation`
+
+## Local Testing
+
+- DAGs folder is bind-mounted from host: `/mnt/c/Users/krish/git/airflow/dags` → container `/appz/home/airflow/dags`
+- Copy DAG files to the **host mount path** (not via `docker cp` — bind mount overwrites container filesystem)
+- Stop the `gitrunner` container first to prevent it from overwriting local changes with the remote branch
+- Three containers share the same mount: `airflowsvr`, `airflowsch`, `airflowwkr`
 
 ## Conventions
 

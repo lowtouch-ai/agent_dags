@@ -59,6 +59,28 @@ with DAG(
         }
     )
 
+    drop_order_tables = BashOperator(
+        task_id="drop_order_tables",
+        bash_command=(
+            f"source {dbt_venv_path} && "
+            "python3 -c \""
+            "import psycopg2; "
+            "import os; "
+            "conn = psycopg2.connect(host='agentconnector', port=5432, dbname='webshop_v2', "
+            "user=os.environ['WEBSHOP_POSTGRES_USER'], password=os.environ['WEBSHOP_POSTGRES_PASSWORD']); "
+            "conn.autocommit = True; "
+            "cur = conn.cursor(); "
+            "cur.execute('DROP TABLE IF EXISTS webshop.order_positions CASCADE'); "
+            "cur.execute('DROP TABLE IF EXISTS webshop.\\\"order\\\" CASCADE'); "
+            "print('Dropped order_positions and order tables'); "
+            "cur.close(); conn.close()\""
+        ),
+        env={
+            "WEBSHOP_POSTGRES_USER": postgres_user,
+            "WEBSHOP_POSTGRES_PASSWORD": postgres_password,
+        }
+    )
+
     with TaskGroup("dbt_seed") as dbt_seed_group:
         for seed in dbt_seed_commands:
             BashOperator(
@@ -66,7 +88,7 @@ with DAG(
                 bash_command=(
                     f"source {dbt_venv_path} && "
                     f"cd {dbt_project_dir} && "
-                    f"{dbt_executable_path} seed --select {seed} "
+                    f"{dbt_executable_path} seed --select {seed} --full-refresh "
                     f"--vars '{{\\\"orchestrator\\\": \\\"airflow\\\", "
                     f"\\\"job_name\\\": \\\"webshop_reset_data_elementary\\\", "
                     f"\\\"job_id\\\": \\\"{{{{ ti.dag_id }}}}\\\", "
@@ -184,4 +206,4 @@ with DAG(
     )
 
     # DAG dependencies
-    dbt_deps_task >> dbt_seed_group >> dbt_run_group >> dbt_test >> dbt_run_elementary >> elementary_report_task >> copy_elementary_report
+    dbt_deps_task >> drop_order_tables >> dbt_seed_group >> dbt_run_group >> dbt_test >> dbt_run_elementary >> elementary_report_task >> copy_elementary_report
