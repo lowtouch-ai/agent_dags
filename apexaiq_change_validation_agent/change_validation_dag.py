@@ -65,7 +65,7 @@ SMTP_USER = Variable.get("SMTP_USER", default="")
 SMTP_PASSWORD = Variable.get("SMTP_PASSWORD", default="")
 SMTP_HOST = Variable.get("SMTP_HOST", default="mail.authsmtp.com")
 SMTP_PORT = int(Variable.get("SMTP_PORT", default="2525"))
-SMTP_SUFFIX = Variable.get("SMTP_FROM_SUFFIX", default="via lowtouch.ai <webmaster@ecloudcontrol.com>")
+SMTP_FROM_EMAIL = Variable.get("SMTP_FROM_EMAIL", default="webmaster@ecloudcontrol.com")
 NOTIFY_EMAIL = Variable.get("APEXAIQ_CHANGE_VALIDATION_NOTIFY_EMAIL", default="")
 
 default_args = {
@@ -643,7 +643,7 @@ def _send_smtp_email(recipient, subject, body, cc_emails=None):
 
         msg = MIMEMultipart("related")
         msg["Subject"] = subject
-        msg["From"] = f"Change Validation Agent {SMTP_SUFFIX}"
+        msg["From"] = f"Ask ApexaIQ AI <{SMTP_FROM_EMAIL}>"
         msg["To"] = recipient
         if cc_emails:
             msg["Cc"] = cc_emails
@@ -655,7 +655,7 @@ def _send_smtp_email(recipient, subject, body, cc_emails=None):
             cc_list = [e.strip() for e in cc_emails.split(",") if e.strip()]
             recipients_list.extend(cc_list)
 
-        server.sendmail("webmaster@ecloudcontrol.com", recipients_list, msg.as_string())
+        server.sendmail(SMTP_FROM_EMAIL, recipients_list, msg.as_string())
         logging.info("Email sent successfully to %s", recipient)
         server.quit()
         return True
@@ -818,10 +818,10 @@ def _compose_notification_html(header_bg, badge_bg, badge_text, title,
             </div>
         </div>
         <div class="footer">
-            Best regards,<br>Change Validation Agent
+            Best regards,<br>Ask ApexaIQ
             <center>
                 <span style="font-size:14px;opacity:0.9;">
-                    Powered by lowtouch<span style="color:#fb47de;">.ai</span>
+                    Powered by ApexaIQ
                 </span>
             </center>
         </div>
