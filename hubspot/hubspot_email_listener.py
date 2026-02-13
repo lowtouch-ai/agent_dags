@@ -2375,18 +2375,14 @@ def trigger_continuation_dag(**kwargs):
     search_results = ti.xcom_pull(dag_id="hubspot_search_entities", task_ids="compile_search_results", key="search_results") or {}
 
     for email in reply_emails:
-        # Only use search_results if they belong to this email's thread
-        thread_id = email.get("threadId", "")
-        email_search_results = search_results if search_results.get("thread_id") == thread_id else {}
 
         # Pass email with full chat_history to continuation DAG
         trigger_conf = {
             "email_data": email,
             "chat_history": email.get("chat_history", []),
             "thread_history": email.get("thread_history", []),
-            "thread_id": thread_id,
-            "message_id": email.get("id", ""),
-            "search_results": email_search_results
+            "thread_id": email.get("threadId", ""),
+            "message_id": email.get("id", "")
         }
 
         
