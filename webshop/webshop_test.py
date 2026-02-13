@@ -1,15 +1,11 @@
-from airflow import DAG
-from airflow.operators.bash import BashOperator
-from airflow.operators.python import PythonOperator
-from airflow.models import Variable
-from datetime import datetime, timedelta
+from airflow.sdk import DAG, Variable
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import PythonOperator
+from datetime import timedelta
 import pendulum
 import requests
 import os
 import re
-
-# Set IST timezone
-ist = pendulum.timezone("Asia/Kolkata")
 
 # Fetch Airflow variables
 api_token = Variable.get("API_TOKEN")
@@ -20,7 +16,7 @@ server_name = Variable.get("SERVER")
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
-    'start_date': datetime(2025, 8, 12, tzinfo=ist),
+    'start_date': pendulum.datetime(2025, 8, 12, tz="Asia/Kolkata"),
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
 }

@@ -1,8 +1,8 @@
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.models import Variable
-from datetime import datetime, timedelta
+from airflow.sdk import DAG, Variable
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
+import pendulum
+from datetime import timedelta
 import os
 import json
 import time
@@ -14,7 +14,7 @@ from googleapiclient.discovery import build
 default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
-    "start_date": datetime(2024, 2, 24),
+    "start_date": pendulum.datetime(2024, 2, 24),
     "retries": 1,
     "retry_delay": timedelta(seconds=15),
 }

@@ -1,12 +1,11 @@
-from airflow import DAG
-from airflow.models.param import Param
-from airflow.operators.python import PythonOperator
-from datetime import datetime
+from airflow.sdk import DAG, Param
+from airflow.providers.standard.operators.python import PythonOperator
+import pendulum
 import requests, json, logging
 
 logger = logging.getLogger(__name__)
 
-default_args = {"owner": "webshop", "start_date": datetime(2025, 1, 1), "retries": 1}
+default_args = {"owner": "webshop", "start_date": pendulum.datetime(2025, 1, 1), "retries": 1}
 
 def generate_sales_report(**context):
     conf = context["dag_run"].conf or {}

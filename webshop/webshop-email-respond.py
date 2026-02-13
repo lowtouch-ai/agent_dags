@@ -1,7 +1,7 @@
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.models import Variable
-from datetime import datetime, timedelta
+from airflow.sdk import DAG, Variable
+from airflow.providers.standard.operators.python import PythonOperator
+import pendulum
+from datetime import timedelta
 import base64
 import json
 import logging
@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
-    "start_date": datetime(2024, 2, 18),
+    "start_date": pendulum.datetime(2024, 2, 18),
     "retries": 0,
     "retry_delay": timedelta(seconds=15),
 }
