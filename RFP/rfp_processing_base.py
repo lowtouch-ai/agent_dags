@@ -326,167 +326,512 @@ EXTRACTION_PROMPT_TEMPLATE = """
 **CONTEXT**: You are extracting questions from **PART {chunk_index}** of a larger RFP document.
 **CRITICAL**: Apply the extraction rules below STRICTLY to the provided text segment.
 
-You are a **Senior RFP Structuring Analyst** specializing in extracting vendor response requirements from complex government and enterprise RFP documents.
+You are a **Senior RFP Structuring Analyst** specializing in extracting vendor response requirements from complex government and enterprise RFP documents across all industries.
 Your task is to **identify, normalize, and extract EVERY vendor response requirement ("question") from the provided text block**, regardless of how it is phrased or formatted.
-* * *
-## 1. WHAT COUNTS AS A QUESTION (NON-NEGOTIABLE)
-A **question** is **ANY requirement that expects the vendor to provide information, confirmation, data, documentation, or a declaration**, even if:
-   _It is_ _not written as a question_*
-   _It appears as a_ _form field, table, checklist, checkbox, or declaration_*
-   _It is phrased as an_ _instruction or statement_*
-   _It is_ _implicitly requesting information_* (e.g., blank fields, column headers, labels)
-If a vendor would reasonably be expected to respond to it, **it IS a question**.
-
-### IMPORTANT EXCLUSION RULE
-
-Do NOT extract the following as questions:
-- General procedural rules, policies, or conditions of participation
-- Instructions that explain HOW the RFP process operates (e.g. submission mechanics, evaluation process, probity rules)
-- Obligations that do NOT require the vendor to provide a response, field entry, document, confirmation, or declaration
-- If a requirement cannot be answered with text, a document, a completed field, or a Yes/No response, it MUST NOT be extracted.
-
-Only extract items where the Respondent is required to:
-- Actively provide information
-- Complete a form, table, or schedule
-- Submit a document or declaration
-- Explicitly confirm or acknowledge something as part of their Proposal response
 
 * * *
-## 2. QUESTION FORMATS YOU MUST RECOGNISE
-You MUST actively look for and extract questions posed in **all of the following formats**:
-### A. Narrative / Instructional Requests
-Examples:
-*   "Please describe..."
-*   "Provide details of..."
-*   "Demonstrate your ability to..."
-### B. Yes / No Questions (Binary)
-Examples:
-*   "Do you have...?"
-*   "Has your organisation...?"
-### C. Yes / No with Conditional Detail
-Examples:
-*   "If Yes, please provide details..."
-*   "If selected, will your organisation be in a position to..."
-:arrow_right: These MUST be extracted as **two questions**:
-1.  The Yes/No confirmation
-2.  The conditional explanation
-### D. Form Fields / Fill-in-the-Blank Items
-Examples:
-*   "Name of Respondent"
-*   "ACN / ABN"
-*   "Registered office address"
-These are **implicit questions** and MUST be converted into explicit requests:
-> "Provide the Name of Respondent."
-### E. Tables Requiring Vendor Input
-If a table has:
-*   Column headers
-*   Empty cells
-*   "Respondent to populate"
-:arrow_right: Treat the **entire table as ONE question**, unless the rows clearly represent unrelated requests.
-### F. Checklists / Tick-Box Confirmations
-Examples:
-*   "Please confirm the following documents are attached"
-*   Lists of items with checkboxes
-### G. Declarations / Certifications / Acknowledgements
-Examples:
-*   "The Respondent acknowledges and agrees that..."
-*   Undertakings, signatures, certifications
-These are **mandatory confirmation questions**, even if phrased declaratively.
+## 1. WHAT COUNTS AS A QUESTION (UNIVERSAL DEFINITION)
+
+A **question** is **ANY requirement that expects the vendor/respondent to provide information, confirmation, data, documentation, or a declaration IN THEIR PROPOSAL**, even if:
+   - It is not written as a question
+   - It appears as a form field, table, checklist, checkbox, or declaration
+   - It is phrased as an instruction or statement
+   - It is implicitly requesting information (e.g., blank fields, column headers, labels)
+
+**Core Test:** If a vendor would reasonably be expected to respond to it **in their proposal submission**, it IS a question.
+
 * * *
-## 3. SECTION IDENTIFICATION RULES (UPDATED - LOGICAL HEADERS ONLY)
-Each extracted question MUST be assigned a **single logical section string** that reflects the **actual requirement heading**, not the page or schedule container.
+## 2. CRITICAL EXCLUSION RULES (UNIVERSAL)
+
+**DO NOT EXTRACT** the following categories:
+
+### A. RFP ADMINISTRATIVE INSTRUCTIONS
+Instructions about **HOW** to participate in the RFP process itself:
+
+**Indicators to EXCLUDE:**
+- Contains specific dates/deadlines for RFP submission or clarification questions
+- References RFP administrators, coordinators, or procurement officers by name/contact
+- Describes WHERE or HOW to submit (email addresses, physical locations, portals)
+- Explains the RFP timeline, evaluation process, or selection methodology
+- Mentions pre-bid meetings, site visits, or mandatory attendances
+- Instructions to acknowledge addenda or amendments
+
+**Examples (Industry-Agnostic):**
+   ✗ "Submit questions to [name/email] by [date]"
+   ✗ "Proposals must be received by [time] on [date]"
+   ✗ "Respondents must attend the mandatory pre-bid conference"
+   ✗ "Email responses to procurement@agency.gov"
+   ✗ "Late submissions will not be accepted"
+   ✗ "The evaluation committee will score proposals based on..."
+
+### B. PROCUREMENT RULES & BOILERPLATE
+Standard terms, conditions, and agency policies that don't require vendor-specific responses:
+
+**Indicators to EXCLUDE:**
+- Rights reserved by the issuing agency (to reject, cancel, modify RFP, request clarifications)
+- Standard indemnification, insurance, or liability clauses stating requirements
+- Equal opportunity, non-discrimination, or compliance statements
+- General legal terms that apply uniformly to all respondents
+- Clauses beginning with "The Agency reserves the right to..."
+- Statements about contract terms AFTER award (payment terms, dispute resolution)
+
+**Examples:**
+   ✗ "The Agency reserves the right to reject any or all proposals"
+   ✗ "All respondents must comply with applicable federal, state, and local laws"
+   ✗ "The selected vendor will be required to maintain insurance coverage of..."
+   ✗ "This RFP does not commit the Agency to award a contract"
+   ✗ "Payment will be made within 30 days of invoice receipt"
+
+**Exception:** If followed by "Confirm your understanding and agreement" or similar → Extract as question
+
+### C. SCOPE-OF-WORK DESCRIPTIONS
+Statements describing **WHAT WORK** will be performed AFTER contract award, not what vendors must provide IN the proposal.
+
+**Key Distinction:**
+- **Scope Description** (DON'T extract): "The contractor will deliver X, Y, Z" (describes post-award deliverables)
+- **Qualification Question** (DO extract): "Describe your approach to delivering X, Y, Z" (asks about capability/methodology)
+
+**Ambiguity Resolution - Use these signals:**
+
+**EXTRACT if:**
+   - Phrased as "Describe your approach/methodology/experience with..."
+   - Asks for "examples," "past performance," "qualifications," or "demonstrated capability"
+   - Includes phrases like "Respondent must demonstrate..." or "Proposer shall describe..."
+   - Requests specific information about HOW the vendor will accomplish the work
+   - Located in sections titled: Qualifications, Questionnaire, Response Requirements, Vendor Information
+
+**DON'T EXTRACT if:**
+   - States "The contractor will..." or "The vendor shall..." without asking for a response
+   - Lists deliverables or performance requirements without requesting vendor input
+   - Describes service levels, KPIs, or metrics the vendor must meet (unless asking "Can you meet these?")
+   - Located in sections titled: Scope of Work, Statement of Work, Technical Requirements, Deliverables (and no response is requested)
+
+**Examples:**
+   ✓ "Describe your experience with [specific service/technology]" → Question
+   ✓ "Provide examples of similar projects you have completed" → Question
+   ✓ "Explain your proposed methodology for [task]" → Question
+   ✗ "The contractor will provide monthly status reports" → Scope description
+   ✗ "Services must be available 24/7 with 99.9% uptime" → Requirement (unless followed by "Confirm you can meet this")
+   ? "Develop and deliver training materials for staff" → **AMBIGUOUS**
+     - If in "Scope" section with no request for response → DON'T extract
+     - If in "Qualifications" section OR followed by "Describe your approach" → Extract
+     - **When genuinely ambiguous and context is unclear → Extract** (err on the side of inclusion)
+
+### D. CLIENT/AGENCY RESPONSIBILITIES
+Statements describing what the CLIENT/AGENCY/ISSUER will provide or do:
+
+**Indicators to EXCLUDE:**
+- "The Agency will provide..."
+- "The Client shall supply..."
+- "Access to [resource] will be granted by..."
+- Describes agency's obligations under the contract
+
+**Examples:**
+   ✗ "The Agency will provide office space for on-site personnel"
+   ✗ "The Client will designate a project manager within 10 days of award"
+   ✗ "Access to systems will be granted after security clearance"
+
+* * *
+## 3. WHAT TO EXTRACT (UNIVERSAL)
+
+**ALWAYS EXTRACT** when the text requires the vendor/respondent to:
+
+1. **Provide Information About Themselves:**
+   - Company/firm details (name, address, structure, ownership)
+   - Contact information, authorized signatories
+   - Financial information, certifications, registrations
+   - History, organizational structure, key personnel
+
+2. **Demonstrate Qualifications:**
+   - Past experience, case studies, client references
+   - Technical capabilities, expertise, certifications
+   - Team qualifications, resumes, staff experience
+   - Similar project examples or portfolio items
+
+3. **Describe Their Approach:**
+   - Proposed methodology, work plan, or implementation strategy
+   - Project timeline, milestones, or phasing
+   - Quality assurance or risk management plans
+   - Tools, technologies, or processes they will use
+
+4. **Complete Forms/Tables/Schedules:**
+   - Pricing tables, cost breakdowns, fee schedules
+   - Staffing matrices, resource allocation tables
+   - Compliance checklists or requirement matrices
+   - Any form with blank fields to be populated
+
+5. **Submit Documents/Attachments:**
+   - Insurance certificates, bonds, financial statements
+   - Licenses, certifications, registrations
+   - Sample deliverables, work products, or templates
+   - Signed declarations, affidavits, or acknowledgments
+
+6. **Confirm/Acknowledge/Declare:**
+   - Confirm understanding of requirements
+   - Acknowledge compliance with specifications
+   - Declare no conflicts of interest
+   - Certify information accuracy or completeness
+
+7. **Answer Direct Questions:**
+   - Yes/No questions about capabilities or compliance
+   - Conditional questions ("If yes, explain...")
+   - Open-ended questions seeking detailed responses
+
+* * *
+## 4. QUESTION FORMATS (UNIVERSAL PATTERNS)
+
+You MUST actively look for and extract questions in **all of the following formats**, regardless of industry:
+
+### A. NARRATIVE / INSTRUCTIONAL REQUESTS
+**Pattern:** Imperative verb + request for information/description
+**Signal Words:** Describe, Explain, Discuss, Outline, Detail, Summarize, Elaborate
+
+**Examples (Cross-Industry):**
+   - "Describe your quality assurance methodology"
+   - "Explain your approach to [requirement]"
+   - "Provide details of your implementation timeline"
+   - "Outline your staffing model"
+   - "Summarize your relevant experience"
+
+### B. YES/NO QUESTIONS (BINARY)
+**Pattern:** Direct question requiring binary response
+**Signal Words:** Do you, Does your, Has your, Will you, Can you, Is your, Are you
+
+**Examples:**
+   - "Do you have experience with [technology/method]?"
+   - "Has your firm completed projects of similar scope?"
+   - "Will you be able to meet the required timeline?"
+   - "Is your company certified as [type]?"
+
+### C. YES/NO + CONDITIONAL DETAIL
+**Pattern:** Binary question followed by conditional elaboration request
+**Signal Words:** If yes, If so, If applicable, If selected
+
+**Extraction Rule:** These MUST be extracted as **TWO separate questions**:
+   1. The primary Yes/No question
+   2. The conditional follow-up
+
+**Examples:**
+   - Q1: "Do you subcontract any services?"
+   - Q2: "If yes, provide details of subcontractors and services they will perform"
+
+   - Q1: "Has your firm been involved in litigation in the past 5 years?"
+   - Q2: "If yes, describe the nature and outcome of the litigation"
+
+### D. FORM FIELDS / DATA ENTRY ITEMS
+**Pattern:** Label or field name without explicit instruction
+**Common Contexts:** Registration forms, vendor information sheets, contact details
+
+**Extraction Rule:** Convert implicit fields into explicit requests
+
+**Examples:**
+   - "Company Name" → "Provide the Company Name"
+   - "Tax ID / EIN" → "Provide your Tax ID or Employer Identification Number"
+   - "Primary Contact: Name / Email / Phone" → "Provide Primary Contact information including Name, Email, and Phone"
+   - "Date of Incorporation" → "Provide the Date of Incorporation"
+
+**Multi-Field Groups:** When multiple related fields appear together (e.g., address fields), combine into one question:
+   - "Street Address, City, State, ZIP" → "Provide your complete business address including Street, City, State, and ZIP code"
+
+### E. TABLES REQUIRING VENDOR INPUT
+**Pattern:** Table with column headers and empty rows for respondent to complete
+**Indicators:** Column headers, blank cells, instructions like "Complete the table below" or "Respondent to populate"
+
+**Extraction Rule:**
+   - If table rows represent **related information** (e.g., pricing line items, staff qualifications) → Extract as **ONE question** describing the entire table
+   - If table rows represent **distinct unrelated questions** → Extract each row as a **separate question**
+
+**Examples:**
+   - Pricing Table → ONE question: "Complete the pricing table including Item Description, Quantity, Unit Price, and Total Cost"
+   - Staff Qualifications Table → ONE question: "Provide staff details by completing the table with Name, Role, Years of Experience, and Relevant Certifications"
+   - Multi-Topic Checklist → SEPARATE questions if each row is a distinct compliance item
+
+### F. CHECKLISTS / TICK-BOX CONFIRMATIONS
+**Pattern:** List of items with checkboxes or requirement to confirm each item
+**Indicators:** □ symbols, "Check all that apply", "Confirm the following"
+
+**Extraction Rule:**
+   - If items are **closely related** (e.g., list of documents to attach) → Extract as **ONE question**
+   - If items are **distinct requirements** (e.g., compliance with different regulations) → Extract as **separate questions**
+
+**Examples:**
+   - Document Submission Checklist → ONE question: "Confirm and submit the following required documents: [list]"
+   - Compliance Confirmations → SEPARATE questions: Each distinct compliance requirement becomes its own question
+
+### G. DECLARATIONS / CERTIFICATIONS / ACKNOWLEDGMENTS
+**Pattern:** Statement requiring signature, confirmation, or formal acknowledgment
+**Indicators:** "The Respondent certifies/declares/acknowledges/agrees that...", Signature lines
+
+**Extraction Rule:** These ARE questions even if phrased as declarative statements, because they require the vendor to formally confirm/sign
+
+**Examples:**
+   - "The Respondent certifies that all information provided is accurate and complete" → Extract
+   - "The undersigned acknowledges receipt and understanding of the RFP requirements" → Extract
+   - "By signing below, the Respondent agrees to comply with all terms and conditions" → Extract
+
+**Note:** Include signature/date fields as part of the declaration question
+* * *
+## 5. SECTION IDENTIFICATION RULES (UNIVERSAL)
+
+Each extracted question MUST be assigned a **single logical section string** that reflects the **most specific, descriptive heading** under which it appears.
+
 ### Section Resolution Priority (STRICT ORDER)
-1.  **Nearest titled subsection with both number and name**
-    Examples:
-    *   `1.2 Respondent's details`
-    *   `1.3 Disclosure of Conflicts of Interest`
-    *   `14.18 Legal complaints and inquiries`
-2.  **Nearest titled numbered section**
-    Examples:
-    *   `Section 1 - Respondent's details`
-    *   `Section 3 - Required attachments`
-3.  **Named schedule ONLY if no titled section exists below it**
-    Examples:
-    *   `Returnable Schedule 14`
-    *   `Returnable Schedule 7 - Price`
-4.  If none apply -> `"General Requirements"`
+
+Apply the first matching rule:
+
+1. **Most Specific Numbered Subsection**
+   - Use the deepest-level numbered subsection with a descriptive name
+   - **Examples:** `3.2.1 Technical Qualifications`, `II.B Project Experience`, `4.5 Insurance Requirements`
+
+2. **Numbered Section with Title**
+   - Use numbered main sections when no subsection exists
+   - **Examples:** `Section 5 - Pricing`, `Part III - References`, `Item 7: Compliance`
+
+3. **Named Heading (Non-Numbered)**
+   - Use descriptive headings even if not numbered
+   - **Examples:** `Company Information`, `Past Performance`, `Pricing Schedule`
+
+4. **Schedule/Attachment/Appendix Title** (ONLY if no more specific heading exists)
+   - Use schedule/attachment names as last resort
+   - **Examples:** `Attachment A - Vendor Questionnaire`, `Schedule 2 - Technical Specifications`
+
+5. **Fallback**
+   - If none of the above apply: `"General Requirements"`
+
+### Critical Rules (Universal):
+
+**Specificity:** Always prefer the MOST SPECIFIC heading:
+   ✓ If question is under "3.2.1 Cloud Security Experience", use that
+   ✗ Don't use parent "Section 3 - Technical Qualifications" if a more specific subsection exists
+
+**Consistency:** All questions under the SAME heading MUST use IDENTICAL section strings:
+   - If three questions appear under "5.2 Financial Capacity", all three must have section: "5.2 Financial Capacity"
+
+**Exact Wording:** Use the heading EXACTLY as written in the document:
+   ✓ "Part II: Vendor Qualifications" (if that's how it appears)
+   ✗ Don't change to "Section 2 - Qualifications"
+
+**No Page Headers:** Do NOT use page-level headers or document metadata:
+   ✗ "Page 5", "Continued from previous page", "RFP #2024-12"
+   ✓ Use the actual section heading instead
+
+**No Invention:** Do NOT create or summarize section names:
+   ✗ "Questions about experience" (your summary)
+   ✓ "Prior Experience and References" (actual heading)
+
+**Hierarchy Awareness:** Recognize common RFP section structures (but don't assume they'll always be present):
+   - Company/Vendor Information
+   - Qualifications & Experience
+   - Technical Approach/Methodology
+   - Staffing & Key Personnel
+   - Past Performance/References
+   - Pricing/Cost Proposal
+   - Compliance & Certifications
+   - Attachments/Appendices
+* * *
+## 6. HOW TO WRITE THE QUESTION TEXT (CRITICAL)
+
+The `"text"` field must be **self-contained and unambiguous**.
+
+**Golden Rule:**
+> If this question were given alone to an LLM or person who has never seen the RFP, they should understand EXACTLY what information to provide.
+
+### Normalization Rules (Universal):
+
+1. **Convert Implicit to Explicit:** Transform labels, field names, and table headers into clear instructions
+   - "Company Name:" → "Provide your company name"
+   - "[ ] ISO 9001 Certified" → "Confirm whether your company is ISO 9001 certified"
+
+2. **Consolidate Related Items:** Merge bullet points, sub-fields, and related elements into one coherent request
+   - Multiple related form fields → Single question listing all required information
+   - Table with multiple columns → One question describing what the complete table should contain
+
+3. **Preserve Critical Context:** Include specifications, constraints, or legal language that affects how the question must be answered
+   - Keep word/page limits: "Provide a statement of qualifications (maximum 2 pages)"
+   - Keep format requirements: "Submit a pricing table in Excel format"
+   - Keep compliance references: "Certify compliance with section 508 accessibility standards"
+
+4. **Remove Layout Artifacts:** Strip out document formatting and navigation elements
+   - Remove: "Response", "Vendor to complete", "See page X", "Information requested:", "Answer below:"
+   - Remove: Column labels like "Respondent Response", "Your Answer Here"
+   - Keep: Actual content and requirements
+
+5. **Maintain Specificity:** Don't make questions vaguer than the original
+   - ✓ "Provide detailed project plan including timeline, milestones, resource allocation, and risk management strategy"
+   - ✗ "Describe your project plan" (too vague if original was more specific)
+
+### Transformation Examples (Cross-Industry):
+
+#### Example 1: Form Fields
+**Original:**
+```
+Company Legal Name: _______________
+DUNS Number: _______________
+Primary Business Address: _______________
+```
+
+**Extracted Question Text:**
+```
+Provide the following company information: Legal Name, DUNS Number, and Primary Business Address.
+```
+
+#### Example 2: Table
+**Original:**
+```
+Key Personnel Table
+Name | Title | Years Exp. | Relevant Certifications | % Time on Project
+[Vendor to complete]
+```
+
+**Extracted Question Text:**
+```
+Complete the Key Personnel Table including Name, Title, Years of Experience, Relevant Certifications, and Percentage of Time Dedicated to this Project for each team member.
+```
+
+#### Example 3: Declaration
+**Original:**
+```
+The undersigned certifies that:
+□ All information in this proposal is true and accurate
+□ No conflict of interest exists
+□ Company complies with equal employment opportunity requirements
+```
+
+**Extracted Question Text:**
+```
+Certify and confirm the following by checking each item: (1) all information in this proposal is true and accurate, (2) no conflict of interest exists, and (3) your company complies with equal employment opportunity requirements.
+```
+
+#### Example 4: Conditional Question
+**Original:**
+```
+11.a. Has your firm been debarred or suspended from government contracting in the past 5 years?
+      Yes [ ]  No [ ]
+11.b. If yes, provide full details including agency, dates, and current status.
+```
+
+**Extracted as TWO Questions:**
+```
+Question 11.a: "Has your firm been debarred or suspended from government contracting in the past 5 years?"
+Question 11.b: "If your firm has been debarred or suspended from government contracting in the past 5 years, provide full details including the agency name, dates of debarment/suspension, and current status."
+```
+
+#### Example 5: Narrative Request
+**Original:**
+```
+Section 4.2 - Implementation Approach
+Describe your proposed approach to implementing the solution. Your response should address:
+• Migration strategy
+• Testing and validation
+• Training plan
+• Go-live support
+(Maximum 5 pages)
+```
+
+**Extracted Question Text:**
+```
+Describe your proposed approach to implementing the solution, addressing the following elements: migration strategy, testing and validation procedures, training plan, and go-live support. Response must not exceed 5 pages.
+```
+* * *
+## 7. QUESTION NUMBERING RULES (UNIVERSAL)
+
+**Objective:** Create unique, logical identifiers for each question that preserve the document's structure.
+
+### Numbering Priority (Apply First Matching Rule):
+
+1. **Use Document's Explicit Numbering** (if present)
+   - Extract the exact question number/identifier from the document
+   - **Examples:** `1.1`, `Q-5`, `3.2.1`, `II.B.4`, `A-7`, `Item 12`
+   - ✓ Use as-is: `1.1`, `Q-5`, `3.2.1`
+   - ✗ Don't modify: Don't change `Q-5` to `5` or `II.B.4` to `2.2.4`
+
+2. **Infer Numbering for Unnumbered Questions** (if no explicit number)
+   - If questions appear under a numbered section without individual numbers, assign sequential numbers
+   - **Pattern:** `{{section_number}}.{{sequential_number}}`
+   - **Example:** Under "Section 3 - Qualifications", unnumbered questions become `3.1`, `3.2`, `3.3`, etc.
+
+3. **Handle Conditional/Sub-Questions** (Yes/No + follow-up)
+   - Use `.a`, `.b`, `.c` suffixes for related conditional questions
+   - **Example:**
+     - Main question: `5.2` → "Do you have experience with X?"
+     - Conditional follow-up: `5.2.a` → "If yes, describe your experience"
+
+4. **Fallback for Completely Unnumbered Documents**
+   - If no numbering system exists, create simple sequential numbers: `1`, `2`, `3`, etc.
+
 ### Critical Rules:
-+ If a numbered subsection (e.g. "1.2 Respondent's details") exists, you MUST use that subsection and MUST NOT use the enclosing Schedule or Form title.
-   Prefer descriptive section headings over schedule or page titles
-   Do NOT use page-level headers like:
-     X Returnable Schedule 14 if 14.1 Information Security Questionnaire exists
 
-   _Use the_ _exact wording_* of the section as written
-   _All questions under the same heading MUST use_ _identical section strings_*
-*   Do NOT invent or summarize section names
-* * *
-## 4. HOW TO WRITE THE QUESTION TEXT (CRITICAL)
-The `"text"` field must be written so that:
-> **If this question were given alone to an LLM, the LLM could answer it correctly without seeing the original document.**
-### Normalization Rules:
-*   Convert labels, blanks, and table headers into explicit instructions
-*   Merge bullet points, sub-fields, and table columns into one coherent request
-*   Preserve legal, compliance, and contractual intent
-*   Remove layout artifacts such as "Response", "Information requested", or column labels like "Respondent response"
-### Examples:
-**Form fields**
-```
-Name of Respondent
-ACN/ABN
-Registered office address
-```
-:arrow_right:
-```
-Provide the following Respondent details: Name of Respondent, ACN/ABN, and Registered office address.
-```
-**Table**
-```
-Name | Role | Position | Start Date
-[Respondent to populate]
-```
-:arrow_right:
-```
-Provide details of the proposed resources by completing a table including Name, Role, Position, and Available Start Date.
-```
-**Declaration**
-```
-The Respondent acknowledges and agrees that it will comply with privacy legislation.
-```
-:arrow_right:
-```
-Confirm and acknowledge that the Respondent will comply with all applicable privacy legislation, including the Privacy and Personal Information Protection Act and the Health Records and Information Privacy Act.
-```
-* * *
-## 5. QUESTION NUMBERING RULES (UPDATED - CLEAN KEYS)
-   _Use_ _only the document's numeric or alphanumeric identifiers_*
-    *   :white_check_mark: `1.1`
-    *   :white_check_mark: `1.3.a`
-    *   :white_check_mark: `14.18.b`
-*   :x: Do NOT prefix keys with `"Section"` or other text
-*   If a question is unnumbered but clearly under a numbered section, infer logically:
-    *   Under `Section 2 - Proposal details` -> `2.1`, `2.2`
-*   For Yes/No + conditional pairs, use `.a`, `.b`
-Each key in the JSON MUST be unique.
-* * *
-## EXECUTION MODE
+**Uniqueness:** Each key in the JSON MUST be unique
+   - If collision would occur (same number used twice), append `_1`, `_2`, etc. (system will handle this)
 
-* **DISABLE RAG**: No external tools.
-* **IGNORE CUT-OFFS**: If a question is clearly cut off at the start/end of this text block, IGNORE IT (it is handled in adjacent chunks).
+**No Text Prefixes:** Use ONLY numbers, letters, and separators (`.`, `-`, `_`)
+   - ✓ `1.1`, `Q-5`, `II.B.4`, `3.2.a`
+   - ✗ `Section 1.1`, `Question 5`, `Part II.B.4`
+
+**Preserve Original Format:** Don't change the document's numbering style
+   - If document uses `Q-1`, `Q-2`, keep that format
+   - If document uses Roman numerals `I`, `II`, `III`, keep that format
+
+**Alpha-Numeric Handling:**
+   - Accept mixed formats: `1.a`, `A.1`, `II.3.b`
+   - Keep original case: `A` vs `a` may have meaning in the document
+* * *
+## 8. EXECUTION INSTRUCTIONS
+
+### Processing Rules:
+- **DISABLE RAG**: Do not use external tools or knowledge retrieval
+- **CHUNK BOUNDARIES**: If a question is clearly cut off at the start/end of this text block, IGNORE IT
+  - It will be captured in adjacent chunks with full context
+  - Only extract questions that are reasonably complete within this chunk
+- **OVERLAP HANDLING**: The text block may overlap with previous/next chunks (1,500 character overlap)
+  - Pay attention to the "already extracted" list below to avoid duplicates
 
 {previous_keys_section}
 
-**TEXT TO ANALYZE**:
+### Quality Checks Before Extraction:
+For each potential question, ask yourself:
+1. ✓ **Is this asking the VENDOR for information in their PROPOSAL?** (If no → likely not a question)
+2. ✓ **Could a vendor provide a substantive answer to this?** (If no → likely procedural/scope)
+3. ✓ **Does this require vendor action/response/confirmation?** (If no → exclude)
+4. ✓ **Is this about how to participate in the RFP process?** (If yes → exclude)
+
+**TEXT TO ANALYZE:**
 {chunk_text}
 
-# FINAL OUTPUT FORMAT (UNCHANGED)
-Return **ONLY valid JSON** in the following format:
+* * *
+## 9. OUTPUT FORMAT
+
+Return **ONLY valid JSON** with no additional commentary, explanation, or markdown formatting.
+
+**Structure:**
 ```json
 {{
-  "{{Question number}}": {{
-    "section": "{{Exact logical section header this question belongs to}}",
-    "text": "{{A fully self-contained question written as a single, answerable instruction}}"
+  "{{question_number}}": {{
+    "section": "{{section_name}}",
+    "text": "{{question_text}}"
+  }},
+  "{{question_number}}": {{
+    "section": "{{section_name}}",
+    "text": "{{question_text}}"
   }}
 }}
+```
+
+**Field Requirements:**
+- **question_number**: String - The unique identifier following numbering rules in Section 7
+- **section**: String - The section name following identification rules in Section 5
+- **text**: String - The self-contained question following normalization rules in Section 6
+
+**If NO questions found in this chunk** (after applying all exclusion rules), return:
+```json
+{{}}
+```
+
+**DO NOT return:**
+- Explanatory text like "Here are the extracted questions..."
+- Markdown code fences (no triple backticks)
+- Comments or notes about your extraction process
+- Error messages (return empty JSON {{}} instead)
 
 """
 
@@ -584,47 +929,69 @@ VALIDATION_PROMPT_TEMPLATE = """
 **ALREADY EXTRACTED QUESTIONS**: The following question identifiers have already been extracted from the full document:
 {known_keys_json}
 
-**YOUR TASK**: Carefully read the text block below and identify any questions or vendor response requirements that exist in this text but are MISSING from the already-extracted list above.
+**YOUR TASK**: Carefully read the text block below and identify any vendor response requirements that exist in this text but are MISSING from the already-extracted list above.
 
-**WHAT COUNTS AS A QUESTION**:
-A question is ANY requirement that expects the vendor to provide information, confirmation, data, documentation, or a declaration, even if:
+* * *
+## WHAT COUNTS AS A MISSING QUESTION
+
+A question is ANY requirement that expects the vendor/respondent to provide information, confirmation, data, documentation, or a declaration IN THEIR PROPOSAL, even if:
 - It is not written as a question
 - It appears as a form field, table, checklist, checkbox, or declaration
 - It is phrased as an instruction or statement
 
-**IMPORTANT EXCLUSION RULE**:
-Do NOT extract the following as questions:
-- General procedural rules, policies, or conditions of participation
-- Instructions explaining how the RFP process operates
-- Obligations that do NOT require the vendor to provide a response, field entry, document, confirmation, or declaration
+## CRITICAL EXCLUSIONS (Do NOT Flag as Missing)
 
-**RULES**:
-1. Compare the content of this text block against the extracted keys above.
-2. Look for numbering gaps (e.g., "1.1" and "1.3" exist but "1.2" is in this chunk and missing).
-3. Look for questions that may have been completely missed during initial extraction.
-4. Do NOT re-extract questions that already appear in the extracted list.
-5. If a question is clearly cut off at the start/end of this text block, IGNORE IT.
-6. Do NOT hallucinate or invent questions that don't exist in the text.
+**DO NOT extract** the following:
+1. **RFP Process Instructions**: Submission deadlines, where/how to submit, contact info for RFP administrators, evaluation process descriptions
+2. **Procurement Boilerplate**: Agency rights, standard terms, insurance requirements (unless asking for confirmation), legal disclaimers
+3. **Scope-of-Work Descriptions**: Statements about what work will be done AFTER award (unless asking vendor to describe their approach)
+4. **Client/Agency Responsibilities**: What the client will provide or do
 
-**OUTPUT FORMAT**:
-- If NO missing questions found in this chunk, respond with exactly: "COMPLETE"
-- If missing questions found, return ONLY valid JSON:
+**Examples to EXCLUDE:**
+   ✗ "Submit questions to [contact] by [date]"
+   ✗ "Proposals are due on [date]"
+   ✗ "The Agency reserves the right to reject any proposal"
+   ✗ "The selected vendor will provide monthly reports" (scope description)
+
+## VALIDATION RULES
+
+1. **Gap Analysis**: Look for numbering gaps in the extracted list
+   - Example: If "3.1" and "3.3" exist but "3.2" appears in this chunk → Flag "3.2" as missing
+
+2. **Completeness Check**: Look for legitimate questions completely missed during initial extraction
+   - Apply same question criteria as above
+
+3. **No Duplicates**: Do NOT re-extract questions already in the extracted list
+   - Check both question numbers AND content
+
+4. **Boundary Handling**: If a question is clearly cut off at chunk boundaries, IGNORE IT
+   - It will be complete in another chunk
+
+5. **No Hallucinations**: Only flag questions that ACTUALLY exist in the text
+   - Do not invent or infer questions not present
+
+## OUTPUT FORMAT
+
+**If NO missing questions found:**
+```
+COMPLETE
+```
+
+**If missing questions found:**
+Return ONLY valid JSON (no markdown fences, no commentary):
+```json
 {{
-  "{{Question Identifier}}": {{
-    "section": "{{Exact logical section header}}",
-    "text": "{{A fully self-contained question written as a single, answerable instruction}}"
+  "{{question_number}}": {{
+    "section": "{{section_name}}",
+    "text": "{{question_text}}"
   }}
 }}
+```
 
-**QUESTION NUMBERING RULES**:
-- Use only the document's numeric or alphanumeric identifiers (e.g., "1.1", "1.3.a", "14.18.b")
-- Do NOT prefix keys with "Section" or other text
-- For Yes/No + conditional pairs, use ".a", ".b"
-
-**QUESTION TEXT RULES**:
-- The text field must be self-contained so an LLM could answer it without seeing the original document
-- Convert labels, blanks, and table headers into explicit instructions
-- Preserve legal, compliance, and contractual intent
+**Field Requirements:**
+- **question_number**: Use document's numbering or infer logically
+- **section**: Most specific section heading where question appears
+- **text**: Self-contained question that can be answered without seeing original document
 
 * **DISABLE RAG**: No external tools.
 

@@ -84,3 +84,33 @@ All API calls require `WORKSPACE_UUID` and `x-ltai-user-email` headers.
 - Key collision handling: if two chunks produce the same question key, the later one is suffixed (`_1`, `_2`, …) instead of overwriting
 - Question extraction retries 3 times per chunk; answer generation retries 3 times per question
 - `handle_task_failure` callback sets project status to `failed` on any task error
+
+## Extraction Logic
+
+### Design Principles
+
+The extraction prompts (`EXTRACTION_PROMPT_TEMPLATE` and `VALIDATION_PROMPT_TEMPLATE`) are **industry-agnostic** and work across all RFP types (software, construction, professional services, equipment, etc.).
+
+**Core Approach:**
+- Universal question patterns (narrative requests, form fields, tables, declarations, checkboxes, conditionals)
+- Explicit exclusion rules to prevent false positives
+- Context-aware handling of scope-of-work vs. vendor questions
+
+### What Gets Excluded
+
+**Not Extracted:**
+- RFP process instructions (submission deadlines, how to submit, pre-bid meetings)
+- Procurement boilerplate (agency rights, standard terms, legal disclaimers)
+- Scope-of-work descriptions (work to be done after award, unless asking for vendor's approach)
+- Client responsibilities (what the agency will provide)
+
+**Extracted:**
+- Vendor information requests (firm details, qualifications, certifications)
+- Approach/methodology questions (describe your approach to...)
+- Forms, tables, and data entry requirements
+- Document submissions and confirmations
+
+### Known Limitations
+
+- **Duplicate detection**: Questions spanning chunk boundaries may be extracted twice (once partial, once complete). Key-based deduplication prevents duplicate keys but not duplicate content.
+- **Scope ambiguity**: Statements like "Develop X" may be scope descriptions or capability questions depending on context. Prompt includes decision framework but edge cases remain.
