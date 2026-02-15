@@ -269,13 +269,20 @@ def discover_channels_and_videos(**context):
             channel_map[cid] = {
                 "channel_id": cid,
                 "title": v["channel_title"],
+                "subscriber_count": 0,
+                "video_count": 0,
+                "weekly_views": 0,
             }
             channel_views[cid] = 0
         channel_views[cid] += v["view_count"]
 
+    # Set weekly_views from video data first (before API call, so it's always populated)
+    for cid in channel_map:
+        channel_map[cid]["weekly_views"] = channel_views.get(cid, 0)
+
     lot.info(f"extracted {len(channel_map)} unique channels, fetching channel statistics...")
 
-    # Fetch channel stats in batches of 50
+    # Fetch channel stats in batches of 50 (enriches with subscriber_count)
     channel_ids = list(channel_map.keys())
     for i in range(0, len(channel_ids), 50):
         batch = channel_ids[i : i + 50]
@@ -292,9 +299,9 @@ def discover_channels_and_videos(**context):
                     channel_map[cid]["title"] = item["snippet"]["title"]
                 channel_map[cid]["subscriber_count"] = int(stats.get("subscriberCount", 0))
                 channel_map[cid]["video_count"] = int(stats.get("videoCount", 0))
-                channel_map[cid]["weekly_views"] = channel_views.get(cid, 0)
         except Exception as e:
             logger.warning(f"Channel stats fetch failed for batch: {e}")
+            lot.info(f"warning: could not fetch stats for {len(batch)} channels, subscriber counts may show 0")
 
     # Sort channels by total weekly views from discovered videos, take top 30
     channels = sorted(channel_map.values(), key=lambda c: c.get("weekly_views", 0), reverse=True)

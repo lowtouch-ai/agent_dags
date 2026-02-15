@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This directory contains the **specification for lowtouch.ai's Weekly Content Engine** — an intelligence-to-content pipeline that monitors the enterprise agentic AI landscape and produces multi-channel thought leadership content. Part of a larger `agent_dags` repository (~62 production Airflow 3.x DAGs).
 
-**Status:** First cut implemented. YouTube-only data source, GPT-4o for analysis/drafting, XCom output (no email). See `pulse_content_engine.py`.
+**Status:** First cut implemented. YouTube-only data source, GPT-4o for analysis/drafting, XCom output (no email). See `pulse_content_engine.py`. Article creator DAG (`pulse_article_creator.py`) expands report items into full LinkedIn articles with AI graphics.
 
 **Owner:** Rejith Krishnan, Founder/CEO
 
@@ -61,6 +61,103 @@ All generated content must map to one or more of these five pillars:
 - LinkedIn: no external links in post body (kills reach ~30%); links go in first comment.
 - Instagram Reels: hook must land in first 1.5 seconds. Teleprompter-formatted (no line > 10 words).
 - YouTube: first 30 seconds must state what the viewer will learn and why it matters.
+
+## LinkedIn Article Best Practices
+
+These guidelines are baked into `pulse_article_creator.py`'s `write_article` and `humanize_article` prompts. Any changes here should be reflected in those prompts.
+
+### Article Length
+
+- Target: **1,500-1,800 words** (sweet spot for LinkedIn dwell time and completion rate)
+- Viable range: 1,200-2,000 words
+- LinkedIn's algorithm measures completion rate, not raw length. Substantive 1,200-word articles outperform padded 2,000-word ones.
+- Dwell time is the **#1 ranking factor** in LinkedIn's algorithm.
+
+### 7-Part Article Structure
+
+| Section | Purpose | Share |
+|---------|---------|-------|
+| Headline | Capture attention, include keywords | N/A |
+| Hook (first 2-3 sentences) | Create urgency or curiosity | 5% |
+| Context | Establish the problem and relevance | 10% |
+| Core Insights (3-5 sections) | The substance | 50% |
+| Proof/Evidence | Data, case examples, metrics | 20% |
+| Takeaway | Key learning in 1-2 sentences | 5% |
+| Call-to-Action | Specific, question-based ending | 10% |
+
+### Headline
+
+- **Under 60 characters** for mobile visibility (LinkedIn's max is 150)
+- Include 1-2 target keywords (LinkedIn articles rank in Google; domain authority 98/100)
+- Strong patterns: "Why [common belief] is wrong", "[Number] [things] that [outcome]", "We [did X]. Here is what [happened]."
+- Avoid generic headlines: "AI in Enterprise", "Thoughts on Automation"
+
+### Hook (First 200 Characters)
+
+The first 200 characters are the **LinkedIn preview** that appears in the feed. This is the single most important part of the article for distribution.
+
+**Proven techniques:**
+- Surprising statistic: "63% of the people who kill your B2B deals never appear on your buying committee."
+- Contrarian claim: "Most enterprise AI pilots fail not because of technology, but because of architecture decisions made in week one."
+- Specific problem with stakes: "Your team spent six months building an AI agent. It works in the demo. It fails in production. Here is why."
+
+**Never open with:** "In today's rapidly evolving...", "As we navigate...", "It's no secret that...", or any throat-clearing.
+
+### Formatting for Mobile (60%+ of LinkedIn readers)
+
+- Paragraphs: **1-3 sentences max** (long paragraphs become walls of text on mobile)
+- Sentences: **under 20 words** on average
+- **Bold** key phrases (not full sentences) for scanners
+- Bullet points and numbered lists for sequences, comparisons, takeaways
+- ## headers every **200-300 words** for scannability
+- Tables produce **40% more engagement** than equivalent text
+- Charts/data visualizations generate **3x more comments**
+- One image per 300-400 words produces **2x more saves**
+- Generous whitespace between paragraphs
+
+### Call-to-Action
+
+- End with a **specific, answerable question** that invites comments
+- Ask about the reader's experience, a specific challenge, or whether they agree/disagree with a clear position
+- Comments count **2x as much as likes** in the algorithm
+- High comment velocity in the first 60-90 minutes ("golden hour") dramatically boosts reach
+- **Never use:** "share if you agree", "like and follow for more", generic "let me know your thoughts" (engagement bait is penalized)
+
+### SEO and Discoverability
+
+- LinkedIn articles are **indexed by Google** (posts are rarely indexed)
+- Front-load target keywords in the first 200 words (2-3 times)
+- Include keyword variations in ## subheadings
+- Use **3-5 hashtags**: 1-2 high-volume + 2-3 niche
+- External links within articles do NOT carry the same algorithmic penalty as links in posts
+
+### AI-isms to Remove (Humanize Pass)
+
+These phrases signal AI-generated content and reduce engagement by ~43%:
+
+| AI-ism | Replacement |
+|--------|-------------|
+| "In today's rapidly evolving landscape" | Cut entirely or replace with specific context |
+| "It's worth noting" | Just state the point |
+| "Let's dive in" | Cut |
+| "At the end of the day" | "Practically" or "in production" |
+| "Holistic approach" | Be specific about what the approach includes |
+| "Robust solution" | Describe what makes it reliable |
+| "Seamlessly integrate" | Describe the actual integration |
+| "The reality is" | Just state the reality |
+| "Here's the thing" | Cut |
+| "Needless to say" | Cut, or just state it directly |
+
+### Key Statistics (2025 Edelman-LinkedIn B2B Thought Leadership Report)
+
+| Metric | Value |
+|--------|-------|
+| Hidden buyers spending 1+ hr/week on thought leadership | 63% |
+| Hidden buyers more receptive to outreach after strong thought leadership | 95% |
+| CEO-shared content engagement multiplier vs company page | 4x |
+| CTA impact on click-through rates | Up to 285% improvement |
+| AI-only content engagement penalty vs hybrid (AI-drafted + human-refined) | -43% |
+| External links reach reduction in posts (not articles) | 25-40% |
 
 ## DAG Creation Guidelines
 
@@ -196,13 +293,23 @@ with TaskGroup("analysis") as analysis_tg:
 
 ### Deployment
 
-- DAGs folder bind-mounted from host to container — copy files to **host mount path** (not `docker cp`)
-- Stop `gitrunner` container first to prevent overwriting local changes
+**DAG files** (Airflow):
+- DAGs folder bind-mounted from host to container: `/mnt/c/Users/krish/git/airflow/dags` → `/appz/home/airflow/dags`
+- Copy DAG `.py` files to: `cp pulse_*.py /mnt/c/Users/krish/git/airflow/dags/agent_dags/pulse/`
+- Stop `gitrunner` container first to prevent overwriting local changes: `docker stop gitrunner`
+- Three containers share the mount: `airflowsvr`, `airflowsch`, `airflowwkr`
 - Airflow server: `airflow-server.lowtouchcloud.io`
+
+**Agent files** (agentomatic tools, prompts, YAML):
+- Scripts folder bind-mounted: `/home/krish/git/AppZ-Images/agentomatic-3.1/scripts` → `/appz/docker/agentomatic-3.1/scripts` (dev mode) and `/appz/dev`
+- Agent prompts bind-mounted: `scripts/agents/` → `/appz/agents/`
+- In dev mode (`APPZ_DEV_MODE`), uvicorn runs with `--reload` — editing files on the host auto-reloads the agent. No container restart needed.
+- To force reload: `docker exec agentomatic touch /appz/docker/agentomatic-3.1/scripts/agent.py`
+- In production (no `APPZ_DEV_MODE`): must restart the container: `docker restart agentomatic`
 
 ## Agentomatic Integration (DAG-as-Tool)
 
-The agent is defined in `scripts/agents/pulse.yaml` as model `pulse:0.3` with RAG optimizer enabled (following the `webshop:0.5o` pattern). At startup, agentomatic's `generate_tools_from_dag()` fetches the DAG's metadata (description, params) from the Airflow REST API and dynamically creates `run_pulse_content_engine` and `check_pulse_content_engine_status` tools.
+The agent is defined in `scripts/agents/pulse.yaml` as model `pulse:0.3` with RAG optimizer enabled (following the `webshop:0.5o` pattern). At startup, agentomatic's `generate_tools_from_dag()` fetches each DAG's metadata (description, params) from the Airflow REST API and dynamically creates tools. For `pulse_content_engine`: `run_pulse_content_engine` and `check_pulse_content_engine_status`. For `pulse_article_creator`: `run_pulse_article_creator` and `check_pulse_article_creator_status`.
 
 ### Agent YAML (`scripts/agents/pulse.yaml`)
 
@@ -240,7 +347,7 @@ The `opt` config enables RAG-based prompt optimization: each markdown `#` headin
 
 ```
 User (WebUI) → pulse:0.3 agent → RunJobTool._run()
-  │  injects __request_id into conf
+  │  injects __request_id and __user_query into conf
   ▼
 Airflow REST API → triggers pulse_content_engine DAG
   │
@@ -265,9 +372,11 @@ XCom ← task return      agentomatic AsyncRedisThoughtListener
 
 3. **`__request_id` passthrough** — `RunJobTool` injects `__request_id` into `dag_run.conf` automatically. DAG tasks must call `set_request_id(context)` to pick it up. The `AsyncRedisThoughtListener` in agent.py already subscribes to `think:*`, so no listener changes are needed.
 
-4. **Thought logging payload** — messages published by `lot.info()` include `"source": "airflow_dag"` (vs `"agent_connector"` for connector logs). This allows the WebUI to distinguish DAG progress from other system logs.
+4. **`__user_query` passthrough** — `RunJobTool` injects `__user_query` (the user's exact WebUI message) into `dag_run.conf` automatically. DAGs can read this via `context["dag_run"].conf.get("__user_query")` to get the real user prompt, bypassing any LLM rephrasing in the agent's `instructions` param. This is critical for edit flows where the agent historically fails to pass the user's verbatim message.
 
-5. **Return value** — the final assembly task should push the complete report to XCom. The agent can then use `check_pulse_content_engine_status` to poll for completion and retrieve the result.
+5. **Thought logging payload** — messages published by `lot.info()` include `"source": "airflow_dag"` (vs `"agent_connector"` for connector logs). This allows the WebUI to distinguish DAG progress from other system logs.
+
+6. **Return value** — the final assembly task should push the complete report to XCom. The agent can then use `check_pulse_content_engine_status` to poll for completion and retrieve the result.
 
 ### Prompt Files (`scripts/agents/pulse/`)
 
@@ -275,6 +384,65 @@ Prompt markdown files live in `scripts/agents/pulse/` inside the agentomatic con
 
 - **`role.md`** — agent identity, purpose, positioning pillars, voice rules
 - **`instructions.md`** — behavioral guidelines, content format specs, DAG usage instructions
+
+## Article Creator DAG (`pulse_article_creator.py`)
+
+**Version:** Pulse Article Creator v0.3
+
+A second DAG that expands any content item from a weekly report into a full LinkedIn article with AI-generated header graphic. Supports iterative editing with smart auto-detection.
+
+### Pipeline
+
+```
+load_context → deep_research → write_article → humanize_article → generate_graphics → assemble_article
+```
+
+### Params
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `report_id` | string | required | UUID of the content report to pull source data from |
+| `content_type` | string | `"blog_outline"` | Which content section: `blog_outline`, `linkedin_post`, `youtube_idea`, `carousel`, `reel`, `founders_notebook` |
+| `content_index` | integer | `0` | 0-based index of the item within that content section |
+| `article_id` | `["string", "null"]` | null | If editing an existing article, pass its UUID. Auto-resolved from Redis index if not provided. |
+| `instructions` | string | required | User's message (fallback; DAG prefers `__user_query` from conf) |
+| `regenerate_graphic` | boolean | `false` | Hint to regenerate graphic. DAG auto-detects this from user prompt too. |
+
+### Auto-Detection (Smart Defaults)
+
+The DAG minimizes reliance on the agent passing correct parameters:
+
+- **`__user_query`**: The DAG reads the user's exact prompt from `dag_run.conf["__user_query"]` (injected by `RunJobTool`), overriding whatever the agent passes as `instructions`. This solves the problem of agents rephrasing or passing stale prompts.
+- **Create vs edit**: Auto-detected via Redis index key (`pulse:article_index:{report_id}:{content_type}:{content_index}`). If an article exists for that slot, it's an edit. No agent logic needed.
+- **`article_id` resolution**: Auto-resolved from the same Redis index key if not explicitly provided.
+- **LLM intent classification**: On every run, `_classify_intent()` sends the user prompt to GPT-4o to determine: (1) whether to regenerate the graphic, (2) whether it's a graphic-only request, and (3) cleaned edit instructions. This replaces brittle keyword matching and handles any phrasing naturally (e.g., "redo the header", "give me a fresh banner", "new image and shorten the intro").
+- **Graphic-only mode**: If the LLM classifies the request as purely about graphics, the DAG skips `write_article` and `humanize_article` entirely, preserving the existing article text and only regenerating the graphic.
+- **Base64 stripping**: During edits, the stored `article_md` (which includes the full base64 graphic blob from `assemble_article`) is stripped of image data before being sent to GPT-4o, preventing context length overflow.
+
+### How It Works
+
+**New article flow:** `report_id` + `content_type` + `content_index` → DAG loads report from Redis, extracts the content item, runs deep research using report trends and source videos, writes a 1,200-2,000 word article via GPT-4o (following LinkedIn best practices: 7-part structure, hook-first opening, mobile-optimized formatting), humanizes it (removes AI-isms, validates hook and CTA, enforces voice rules), generates a header graphic via `gpt-image-1`, assembles everything, and persists to Redis under `pulse:article:{article_id}` with 7-day TTL.
+
+**Edit flow:** Auto-detected when an article already exists. Loads existing article from Redis, skips deep research (reuses existing research), rewrites applying user instructions, re-humanizes, reuses existing graphic by default, saves as new version under same `article_id`.
+
+**Graphic-only flow:** Auto-detected when user prompt contains only graphic-related keywords. Skips `write_article` and `humanize_article`, keeps existing article text, regenerates only the header graphic.
+
+### Article Output Footer
+
+```
+*Article ID: {uuid} | Report: {report_id} | {word_count} words | Generated: {timestamp} | v{version} | Pulse Article Creator v0.3*
+```
+
+### Storage
+
+- Articles persisted to Redis: `pulse:article:{article_id}` (7-day TTL)
+- Article index keys: `pulse:article_index:{report_id}:{content_type}:{content_index}` → `article_id` (enables auto-resolution)
+- Each edit increments the version number
+- Stored data includes: article markdown (with base64 graphic inline), header graphic (base64), graphic prompt, research data, metadata
+
+### Agent Tools
+
+agentomatic generates `run_pulse_article_creator` and `check_pulse_article_creator_status` tools from this DAG. The agent uses these when the user says "create the article on blog outline 1" or "make it shorter".
 
 ## Weekly Output Targets
 
