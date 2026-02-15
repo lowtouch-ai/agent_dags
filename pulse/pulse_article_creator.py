@@ -1050,11 +1050,19 @@ def assemble_article(**context):
 # DAG definition
 # ---------------------------------------------------------------------------
 
+_readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "README.md")
+try:
+    with open(_readme_path, "r") as _f:
+        _readme_content = _f.read()
+except Exception:
+    _readme_content = ""
+
 with DAG(
     "pulse_article_creator",
     default_args=default_args,
     schedule=None,
     catchup=False,
+    doc_md=_readme_content,
     tags=["pulse", "content", "article"],
     description=(
         "Creates or edits a LinkedIn article from a Pulse weekly report content item. "

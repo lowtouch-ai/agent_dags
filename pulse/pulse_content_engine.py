@@ -2044,12 +2044,19 @@ def assemble_report(**context):
 # DAG definition
 # ---------------------------------------------------------------------------
 
+_readme_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "README.md")
+try:
+    with open(_readme_path, "r") as _f:
+        _readme_content = _f.read()
+except Exception:
+    _readme_content = ""
 
 with DAG(
     "pulse_content_engine",
     default_args=default_args,
     schedule=None,
     catchup=False,
+    doc_md=_readme_content,
     tags=["pulse", "content", "weekly"],
     description=(
         "Weekly content engine that monitors enterprise agentic AI trends on YouTube "
