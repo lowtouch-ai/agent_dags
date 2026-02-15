@@ -7,7 +7,10 @@ import logging
 import random
 import time
 
+from agent_dags.utils.think_logging import get_logger, set_request_id
+
 logger = logging.getLogger(__name__)
+lot = get_logger("webshop_sales_report")
 
 BASE_URL = "http://agentconnector:8000/webshop"
 
@@ -44,14 +47,19 @@ def api_get(endpoint, params=None, description="API call"):
 # ---------------------------------------------------------------------------
 
 def fetch_categories(**context):
+    set_request_id(context)
+    lot.info("fetching product categories...")
     data = api_get("category", description="Fetch categories")
     categories = [item["name"] for item in data] if isinstance(data, list) else []
     logger.info(f"Fetched {len(categories)} categories: {categories}")
+    lot.info(f"fetched {len(categories)} categories")
     return categories
 
 
 def sales_overview(**context):
+    set_request_id(context)
     p = context["params"]
+    lot.info(f"fetching sales overview ({p['sales_aggregation']})...")
     data = api_get(
         "analytics/sales",
         params={
@@ -67,12 +75,14 @@ def sales_overview(**context):
 
 
 def sales_by_category(**context):
+    set_request_id(context)
     p = context["params"]
     categories = context["ti"].xcom_pull(task_ids="fetch_categories")
     if not categories:
         logger.warning("No categories available — skipping per-category breakdown")
         return []
 
+    lot.info(f"analyzing sales for {len(categories)} categories...")
     results = []
     for cat in categories:
         data = api_get(
@@ -96,11 +106,14 @@ def sales_by_category(**context):
         row["rank"] = i
 
     logger.info(f"Sales by category computed for {len(results)} categories")
+    lot.info("category breakdown complete")
     return results
 
 
 def top_products(**context):
+    set_request_id(context)
     p = context["params"]
+    lot.info(f"fetching top {p['top_n']} products...")
     overall = api_get(
         "product/top-selling/",
         params={
@@ -130,12 +143,15 @@ def top_products(**context):
         result["female"] = []
 
     logger.info(f"Top products fetched (gender_breakdown={p.get('include_gender_breakdown', False)})")
+    lot.info("top products fetched")
     return result
 
 
 def slow_movers(**context):
     """Fetch all ranked products and return the bottom N as slow movers."""
+    set_request_id(context)
     p = context["params"]
+    lot.info("identifying slow-moving products...")
     # Request a large number to get the full product list
     data = api_get(
         "product/top-selling/",
@@ -155,11 +171,14 @@ def slow_movers(**context):
     bottom_n = p["top_n"]
     slow = list(reversed(all_products[-bottom_n:])) if len(all_products) > bottom_n else all_products
     logger.info(f"Slow movers: {len(slow)} out of {len(all_products)} total products")
+    lot.info(f"{len(slow)} slow movers found")
     return {"total_products": len(all_products), "slow_movers": slow}
 
 
 def top_buyers(**context):
+    set_request_id(context)
     p = context["params"]
+    lot.info(f"fetching top {p['top_n']} buyers...")
     data = api_get(
         f"customer/top_{p['top_n']}_buyers/",
         description=f"Top {p['top_n']} buyers",
@@ -169,18 +188,24 @@ def top_buyers(**context):
 
 
 def frequent_buyers(**context):
+    set_request_id(context)
+    lot.info("fetching frequent buyers...")
     data = api_get("customer/frequent_buyers/", description="Frequent buyers")
     logger.info("Frequent buyers fetched")
     return data
 
 
 def customer_roi(**context):
+    set_request_id(context)
+    lot.info("fetching customer ROI data...")
     data = api_get("analytics/customer_roi", description="Customer ROI")
     logger.info("Customer ROI fetched")
     return data
 
 
 def assemble_report(**context):
+    set_request_id(context)
+    lot.info("assembling final report...")
     demo_delay()
     p = context["params"]
     ti = context["ti"]
@@ -273,6 +298,11 @@ def assemble_report(**context):
         f"{len(products_data.get('overall', []))} top products, "
         f"{len(slow_data.get('slow_movers', []))} slow movers, "
         f"{len(buyers_list)} top buyers"
+    )
+    lot.info(
+        f"report ready: {len(time_series)} periods, "
+        f"{len(by_category_data)} categories, "
+        f"{len(products_data.get('overall', []))} top products"
     )
     return report
 

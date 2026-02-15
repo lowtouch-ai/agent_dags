@@ -64,6 +64,29 @@ Uses dbt with Elementary data quality monitoring. A `drop_order_tables` task fir
 
 - **`email_utils.py`** — `authenticate_gmail`, `send_email` (with thread continuity), `fetch_unread_emails_with_attachments`, `mark_email_as_read`, `get_last_checked_timestamp`/`update_last_checked_timestamp`
 - **`agent_utils.py`** — `get_ai_response` (Ollama client with streaming and conversation history), `extract_json_from_text`, `sanitize_text`, PDF/image processing
+- **`think_logging.py`** — Redis thought logging for real-time DAG progress in the WebUI
+
+### Thought Logging (`utils/think_logging.py`)
+
+When agentomatic triggers a DAG via `RunJobTool`, it passes `__request_id` in the DAG conf. DAG tasks use `think_logging` to publish per-task progress messages to Redis `think:{request_id}` channels, which agentomatic streams to the WebUI's `<think>` output.
+
+**Usage in a task callable:**
+```python
+from agent_dags.utils.think_logging import get_logger, set_request_id
+
+lot = get_logger("my_dag")
+
+def my_task(**context):
+    set_request_id(context)       # extract __request_id from dag_run.conf
+    lot.info("doing something...")  # published to Redis think:{request_id}
+```
+
+**Key details:**
+- `set_request_id(context)` must be called at the start of each task callable (Celery workers use separate contexts)
+- `get_logger(name)` returns a logger with `propagate=False` — messages go only to Redis, not Airflow's root logger. Keep the regular `logger` for standard Airflow logs
+- Graceful no-op when `__request_id` is absent (manual Airflow trigger) — no errors, no Redis traffic
+- Payload format matches agentconnector's `RedisThinkLogHandler` with `"source": "airflow_dag"`
+- `webshop_sales_report.py` is the first DAG instrumented with thought logging
 
 ## Key Patterns (Airflow 3.x)
 
