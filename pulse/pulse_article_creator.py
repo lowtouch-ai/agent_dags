@@ -876,9 +876,21 @@ for an AI image generator.
 
 {branding_block}
 
+POSITIONING PILLARS (choose the one that best fits the article):
+1. Private by Architecture
+2. No-Code
+3. Production in 4-6 Weeks
+4. Governed Autonomy
+5. Enterprise Architecture
+
+TEXT OVERLAY REQUIREMENTS (must be included in the prompt):
+- The positioning pillar that best matches the article must appear as bold text in bright green (#7FFF00),
+  placed prominently in the image as the thematic anchor
+- "lowtouch.ai" must appear in the bottom-right corner: "lowtouch" in white (#FFFFFF),
+  ".ai" in hot pink/magenta (#FF00FF), bold sans-serif
+- No other text, words, letters, or numbers in the image besides the pillar label and brand mark
+
 ADDITIONAL RULES:
-- No text, words, letters, or numbers in the image
-- No logos or brand marks (the logo will be composited separately)
 - If the user provides creative direction, incorporate it into the prompt while staying
   within the brand guidelines above
 - Keep it appropriate for a professional LinkedIn article header
