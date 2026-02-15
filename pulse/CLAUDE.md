@@ -282,7 +282,12 @@ with TaskGroup("analysis") as analysis_tg:
 - **YouTube Data API v3** for channel discovery and video metrics
 - **Gmail API** for HTML email delivery (auto mode) — use `utils/email_utils.py`
 - **Ollama** for trend analysis and content drafting — use `utils/agent_utils.py`
+- **Gemini 2.5 Flash Image** (Nano Banana) for article header graphics — uses `google-genai` SDK with `GEMINI_API_KEY` Airflow Variable
 - **Redis thought logging** for WebUI progress — use `utils/think_logging.py`
+
+### Branding
+
+All generated PNGs (article header graphics) must follow the brand style guide in **`../branding.md`** (the repo root). The DAG loads this file at runtime via `_load_branding()` in `pulse_article_creator.py`, so changes to `branding.md` take effect on the next DAG run without code changes. Do not duplicate branding rules in DAG code or in this file.
 
 ### Email Design (Auto Mode)
 
@@ -405,14 +410,12 @@ load_context → deep_research → write_article → humanize_article → genera
 | `content_type` | string | `"blog_outline"` | Which content section: `blog_outline`, `linkedin_post`, `youtube_idea`, `carousel`, `reel`, `founders_notebook` |
 | `content_index` | integer | `0` | 0-based index of the item within that content section |
 | `article_id` | `["string", "null"]` | null | If editing an existing article, pass its UUID. Auto-resolved from Redis index if not provided. |
-| `instructions` | string | required | User's message (fallback; DAG prefers `__user_query` from conf) |
-| `regenerate_graphic` | boolean | `false` | Hint to regenerate graphic. DAG auto-detects this from user prompt too. |
 
 ### Auto-Detection (Smart Defaults)
 
 The DAG minimizes reliance on the agent passing correct parameters:
 
-- **`__user_query`**: The DAG reads the user's exact prompt from `dag_run.conf["__user_query"]` (injected by `RunJobTool`), overriding whatever the agent passes as `instructions`. This solves the problem of agents rephrasing or passing stale prompts.
+- **`__user_query`**: The DAG reads the user's exact prompt from `dag_run.conf["__user_query"]` (injected by `RunJobTool`). No `instructions` param needed. Falls back to `conf["instructions"]` for manual Airflow UI triggers.
 - **Create vs edit**: Auto-detected via Redis index key (`pulse:article_index:{report_id}:{content_type}:{content_index}`). If an article exists for that slot, it's an edit. No agent logic needed.
 - **`article_id` resolution**: Auto-resolved from the same Redis index key if not explicitly provided.
 - **LLM intent classification**: On every run, `_classify_intent()` sends the user prompt to GPT-4o to determine: (1) whether to regenerate the graphic, (2) whether it's a graphic-only request, and (3) cleaned edit instructions. This replaces brittle keyword matching and handles any phrasing naturally (e.g., "redo the header", "give me a fresh banner", "new image and shorten the intro").

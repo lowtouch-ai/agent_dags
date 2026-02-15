@@ -45,6 +45,24 @@ Content Voice Rules:
 - Skip jargon: no "synergy," "paradigm shift," "leverage AI."
 """
 
+AI_ISMS = """
+AI-isms to REMOVE (these reduce engagement by ~43%):
+- "In today's rapidly evolving landscape" -> Cut entirely or replace with specific context
+- "It's worth noting" -> Just state the point
+- "Let's dive in" -> Cut
+- "At the end of the day" -> "Practically" or "in production"
+- "Holistic approach" -> Be specific about what the approach includes
+- "Robust solution" -> Describe what makes it reliable
+- "Seamlessly integrate" -> Describe the actual integration
+- "The reality is" -> Just state the reality
+- "Here's the thing" -> Cut
+- "Needless to say" -> Cut, or just state it directly
+- "Leverage" -> "Use"
+- "Utilize" -> "Use"
+- "Delve into" -> "Explore" or "Look at"
+- "It goes without saying" -> Cut
+"""
+
 REDIS_ARTICLE_TTL = 86400 * 7  # 7 days
 
 # Content type param -> (report section key, inner array key)
@@ -159,27 +177,30 @@ def gpt4o_text(system_message, user_message, max_retries=3):
                 raise
 
 
-def _generate_image(prompt, size="1536x1024", max_retries=2):
-    """Generate an image via OpenAI gpt-image-1, return base64 string."""
-    import requests as req
+def _generate_image(prompt, aspect_ratio="3:2", max_retries=2):
+    """Generate an image via Gemini 2.5 Flash Image (Nano Banana), return base64 string."""
+    from google import genai
+    from google.genai import types
 
-    client = _get_openai_client()
+    api_key = _get_variable("GEMINI_API_KEY")
+    client = genai.Client(api_key=api_key)
+
     for attempt in range(max_retries):
         try:
-            response = client.images.generate(
-                model="gpt-image-1",
-                prompt=prompt,
-                size=size,
-                n=1,
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-image",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE"],
+                    image_config=types.ImageConfig(
+                        aspect_ratio=aspect_ratio,
+                    ),
+                ),
             )
-            image_data = response.data[0]
-            # gpt-image-1 may return b64_json directly or a URL
-            if hasattr(image_data, "b64_json") and image_data.b64_json:
-                return image_data.b64_json
-            if hasattr(image_data, "url") and image_data.url:
-                img_bytes = req.get(image_data.url, timeout=60).content
-                return base64.b64encode(img_bytes).decode("utf-8")
-            raise ValueError("No image data in response")
+            for part in response.parts:
+                if part.inline_data is not None:
+                    return base64.b64encode(part.inline_data.data).decode("utf-8")
+            raise ValueError("No image data in Gemini response")
         except Exception as e:
             if attempt < max_retries - 1:
                 logger.warning(f"Image generation attempt {attempt + 1} failed: {e}")
@@ -205,6 +226,17 @@ def _extract_title(item, content_type):
     elif content_type == "founders_notebook":
         return item.get("trending_topic", "Founder's Notebook")
     return "Untitled"
+
+
+def _load_branding():
+    """Load branding guidelines from branding.md (relative to this DAG file)."""
+    branding_path = os.path.join(os.path.dirname(__file__), "..", "branding.md")
+    try:
+        with open(branding_path, "r") as f:
+            return f.read()
+    except Exception as e:
+        logger.warning(f"Could not load branding.md from {branding_path}: {e}")
+        return ""
 
 
 def _classify_intent(user_prompt):
@@ -259,17 +291,16 @@ def load_context(**context):
     content_type = p.get("content_type", "blog_outline")
     content_index = p.get("content_index", 0)
     article_id = p.get("article_id")
-    instructions = p.get("instructions")
-    regenerate_graphic = p.get("regenerate_graphic", False)
 
-    # Prefer __user_query (injected by RunJobTool from the actual user prompt)
-    # over instructions (which the agent may rephrase or pass incorrectly)
-    user_query = context["dag_run"].conf.get("__user_query")
-    if user_query:
-        instructions = user_query
-        lot.info(f"user prompt: {instructions}")
-    else:
-        lot.info(f"user request: {instructions or '(new article)'}")
+    # Read user prompt from __user_query (injected by RunJobTool) with conf fallback
+    # for manual Airflow UI triggers that pass instructions via conf JSON
+    instructions = (
+        context["dag_run"].conf.get("__user_query")
+        or context["dag_run"].conf.get("instructions", "")
+    )
+    regenerate_graphic = False
+
+    lot.info(f"user prompt: {instructions or '(new article)'}")
 
     # Use LLM to classify user intent from the prompt
     graphic_only = False
@@ -344,7 +375,27 @@ def load_context(**context):
     # Extract trends and top videos for research context
     trends = report.get("analysis", {}).get("trends", {})
     all_videos = report.get("source", {}).get("videos", [])
+    emerging_videos = report.get("source", {}).get("emerging_videos", [])
+    combined_videos = all_videos + emerging_videos
     top_videos = sorted(all_videos, key=lambda v: v.get("view_count", 0), reverse=True)[:15]
+
+    # Resolve inspired_by videos — match content item's inspired_by URLs to full video data
+    inspired_by = content_item.get("inspired_by", [])
+    inspired_videos = []
+    if inspired_by:
+        video_by_id = {v.get("video_id"): v for v in combined_videos if v.get("video_id")}
+        for ib in inspired_by:
+            url = ib.get("url", "")
+            # Extract video_id from URL like https://youtube.com/watch?v=VIDEO_ID
+            vid_id = ""
+            if "v=" in url:
+                vid_id = url.split("v=")[-1].split("&")[0]
+            if vid_id and vid_id in video_by_id:
+                inspired_videos.append(video_by_id[vid_id])
+            else:
+                # Keep the basic info even if we can't resolve full data
+                inspired_videos.append({"title": ib.get("title", ""), "url": url, "video_id": vid_id})
+        lot.info(f"article inspired by {len(inspired_videos)} video(s): {', '.join(ib.get('title', '')[:50] for ib in inspired_by)}")
 
     # If editing, load existing article from Redis
     existing_article = None
@@ -363,6 +414,8 @@ def load_context(**context):
     ti.xcom_push(key="content_title", value=title)
     ti.xcom_push(key="trends", value=trends)
     ti.xcom_push(key="top_videos", value=top_videos)
+    ti.xcom_push(key="inspired_by", value=inspired_by)
+    ti.xcom_push(key="inspired_videos", value=inspired_videos)
     ti.xcom_push(key="existing_article", value=existing_article)
     ti.xcom_push(key="instructions", value=instructions)
     ti.xcom_push(key="report_id", value=report_id)
@@ -384,6 +437,8 @@ def deep_research(**context):
     title = ti.xcom_pull(task_ids="load_context", key="content_title") or "Untitled"
     trends = ti.xcom_pull(task_ids="load_context", key="trends") or {}
     top_videos = ti.xcom_pull(task_ids="load_context", key="top_videos") or []
+    inspired_by = ti.xcom_pull(task_ids="load_context", key="inspired_by") or []
+    inspired_videos = ti.xcom_pull(task_ids="load_context", key="inspired_videos") or []
     existing_article = ti.xcom_pull(task_ids="load_context", key="existing_article")
     instructions = ti.xcom_pull(task_ids="load_context", key="instructions")
 
@@ -396,13 +451,29 @@ def deep_research(**context):
 
     lot.info(f"researching topic: {title}...")
 
-    # Build video context for the prompt
+    # Build inspired video context (primary source — the video that sparked this article)
+    inspired_lines = []
+    for v in inspired_videos:
+        url = v.get("url", f"https://youtube.com/watch?v={v.get('video_id', '')}")
+        line = f"- \"{v.get('title', '')}\" by {v.get('channel_title', 'unknown')} ({v.get('view_count', 0):,} views) URL: {url}"
+        desc = v.get("description", "").strip()
+        if desc:
+            line += f"\n  Description: {desc[:800]}"
+        transcript = v.get("transcript", "").strip()
+        if transcript:
+            line += f"\n  Transcript: {transcript[:3000]}"
+        inspired_lines.append(line)
+    inspired_text = "\n".join(inspired_lines) if inspired_lines else "No specific video source."
+
+    # Build broader video context
     vid_lines = []
     for v in top_videos:
         tags = ", ".join(v.get("tags", [])[:5])
+        desc_preview = (v.get("description", "") or "")[:200]
         vid_lines.append(
             f"- \"{v.get('title', '')}\" by {v.get('channel_title', '')} "
             f"({v.get('view_count', 0):,} views) [tags: {tags}]"
+            f"{f' | {desc_preview}' if desc_preview else ''}"
         )
     vid_text = "\n".join(vid_lines) if vid_lines else "No video data available."
 
@@ -411,7 +482,11 @@ def deep_research(**context):
 {POSITIONING_PILLARS}
 
 Given the content outline below and the market intelligence data, produce deep research to support
-writing a comprehensive LinkedIn article. Structure your response as JSON with these keys:
+writing a comprehensive LinkedIn article. The article is inspired by specific YouTube video(s) listed
+under INSPIRED BY. Use the video description and transcript as primary source material. The article
+should build on, extend, or offer a practitioner's perspective on the ideas discussed in those videos.
+
+Structure your response as JSON with these keys:
 
 1. "key_arguments" - array of 4-6 objects, each with "argument" (string), "evidence" (string),
    and "data_point" (string, a specific statistic or fact from the source data)
@@ -422,6 +497,8 @@ writing a comprehensive LinkedIn article. Structure your response as JSON with t
    the topic (be specific to the platform's architecture, not generic)
 5. "headline_options" - array of 3 headline options for the article, each clear and professional
 6. "key_statistics" - array of 4-6 relevant statistics drawn from the source video data and trends
+7. "source_video_insights" - array of 2-4 specific claims, insights, or data points from the
+   inspired video's transcript that the article should reference or build upon
 
 Return valid JSON only."""
 
@@ -429,11 +506,23 @@ Return valid JSON only."""
 Type: {content_type}
 {json.dumps(content_item, indent=2)}
 
+INSPIRED BY (primary source video):
+{inspired_text}
+
 TOP PERFORMING VIDEOS THIS WEEK:
 {vid_text}
 
 TREND ANALYSIS:
-{json.dumps(trends, indent=2)}"""
+{json.dumps(trends, indent=2)}
+
+TOP-PERFORMING CONTENT PATTERNS:
+{json.dumps(trends.get("top_patterns", []), indent=2)}
+
+COMPETITOR SIGNALS:
+{json.dumps(trends.get("competitor_signals", []), indent=2)}
+
+EMERGING CHANNEL SIGNALS:
+{json.dumps(trends.get("emerging_signals", []), indent=2)}"""
 
     try:
         result = gpt4o_json(system_msg, user_msg)
@@ -462,6 +551,7 @@ def write_article(**context):
     existing_article = ti.xcom_pull(task_ids="load_context", key="existing_article")
     instructions = ti.xcom_pull(task_ids="load_context", key="instructions")
     graphic_only = ti.xcom_pull(task_ids="load_context", key="graphic_only") or False
+    inspired_by = ti.xcom_pull(task_ids="load_context", key="inspired_by") or []
     research = ti.xcom_pull(task_ids="deep_research") or {}
 
     is_edit = existing_article is not None
@@ -521,7 +611,13 @@ HOOK (first 200 characters are the LinkedIn preview, this determines if anyone r
 CTA (last paragraph):
 - End with a specific question that invites comments (not "share if you agree")
 - Ask about the reader's experience, a specific challenge, or whether they agree/disagree with a clear position
-- Comments count 2x as much as likes in the LinkedIn algorithm"""
+- Comments count 2x as much as likes in the LinkedIn algorithm
+
+SEO (LinkedIn articles rank in Google, domain authority 98/100):
+- Front-load target keywords in the first 200 words (2-3 times)
+- Use keyword variations in ## subheadings
+
+{AI_ISMS}"""
 
         current_md = existing_article.get("article_md", "")
         # Strip base64 image data to avoid blowing up GPT-4o's context limit
@@ -586,19 +682,46 @@ WRITING GUIDELINES:
 - Do not start any section with "In today's...", "As we navigate...", or similar AI-isms
 - Write for a specific reader: a VP or CTO at a mid-to-large enterprise evaluating AI agents
 
+INSPIRED BY ATTRIBUTION (REQUIRED):
+- This article is inspired by a specific YouTube video (provided below).
+- Include a natural "Inspired by" line near the end of the article, before the CTA, in this format:
+  *Inspired by [Video Title](video_url) by Channel Name*
+- The article should build on, extend, or offer a practitioner's counter-perspective to the video's content.
+- Do NOT just summarize the video. Add original insight from Rejith's experience building lowtouch.ai.
+- Reference specific points or claims from the video where relevant (e.g., "As [creator] pointed out in
+  their recent video..."), but the article must stand on its own.
+
 FORMATTING FOR LINKEDIN:
 - Short paragraphs with whitespace between them (critical for mobile readability)
 - **Bold** key phrases (not full sentences) so scanners catch the main points
 - Use bullet points and numbered lists liberally
 - If comparing options or showing data, use a markdown table (40% more engagement than text)
 
+SEO (LinkedIn articles rank in Google, domain authority 98/100):
+- Front-load target keywords in the first 200 words (2-3 times)
+- Use keyword variations in ## subheadings
+- External links in articles do NOT carry the same algorithmic penalty as in posts
+
+{AI_ISMS}
+
 Return the complete article as markdown (not JSON)."""
+
+        # Build inspired_by context for the user message
+        inspired_context = ""
+        if inspired_by:
+            ib_lines = []
+            for ib in inspired_by:
+                ib_lines.append(f"- \"{ib.get('title', '')}\" — {ib.get('url', '')}")
+            inspired_context = f"""
+INSPIRED BY VIDEO(S):
+{chr(10).join(ib_lines)}
+"""
 
         user_msg = f"""CONTENT OUTLINE:
 Type: {content_type}
 Title: {title}
 {json.dumps(content_item, indent=2)}
-
+{inspired_context}
 DEEP RESEARCH:
 {json.dumps(research, indent=2)}
 
@@ -640,22 +763,11 @@ who has personally built and deployed an enterprise Agentic AI platform (lowtouc
 
 SPECIFIC EDITING INSTRUCTIONS:
 
-1. REMOVE these AI-isms and replace with natural phrasing:
-   - "In today's rapidly evolving landscape" -> cut entirely or replace with specific context
-   - "It's worth noting" -> just state the point directly
-   - "Let's dive in" -> cut
-   - "In the ever-evolving" -> cut
-   - "At the end of the day" -> cut or use "practically" / "in production"
-   - "Moving forward" -> cut
-   - "Holistic approach" -> be specific about what the approach actually includes
-   - "Robust solution" -> describe what makes it reliable
-   - "Seamlessly integrate" -> describe the actual integration
-   - "It's important to note that" -> just state it
-   - "As we navigate" -> cut
-   - "The reality is" -> just state the reality
-   - "Think of it this way" -> cut, just make the point
-   - "Here's the thing" -> cut
-   - "Needless to say" -> then don't say it, or just state it directly
+1. REMOVE AI-ISMS:
+{AI_ISMS}
+   Also remove: "In the ever-evolving" -> cut, "Moving forward" -> cut,
+   "It's important to note that" -> just state it, "As we navigate" -> cut,
+   "Think of it this way" -> cut, just make the point.
 
 2. VOICE CHECK:
    - Does this sound like a person who has built production AI systems, or like a marketing brief?
@@ -690,6 +802,7 @@ SPECIFIC EDITING INSTRUCTIONS:
    - The article length (1200-2000 words)
    - Any specific data points, examples, or technical details
    - The headline and subtitle (unless the headline exceeds 60 characters, in which case tighten it)
+   - The "Inspired by" attribution line with video link (must be preserved exactly as-is)
 
 Return the complete polished article as markdown."""
 
@@ -720,6 +833,7 @@ def generate_graphics(**context):
     title = ti.xcom_pull(task_ids="load_context", key="content_title") or "Untitled"
     existing_article = ti.xcom_pull(task_ids="load_context", key="existing_article")
     regenerate_graphic = ti.xcom_pull(task_ids="load_context", key="regenerate_graphic") or False
+    instructions = ti.xcom_pull(task_ids="load_context", key="instructions") or ""
 
     # In edit mode, reuse existing graphic unless regenerate_graphic is true
     if existing_article and not regenerate_graphic:
@@ -736,31 +850,49 @@ def generate_graphics(**context):
 
     lot.info("generating article header graphic...")
 
+    # Load branding guidelines from branding.md (single source of truth)
+    branding = _load_branding()
+    if branding:
+        lot.info("loaded branding guidelines")
+    else:
+        lot.info("branding.md not found, using defaults")
+
     # Use GPT-4o to create an image generation prompt from the article
-    prompt_system = """You are an art director creating image prompts for LinkedIn article headers.
-
-Given an article title and opening text, create a descriptive prompt for an AI image generator.
-
-STYLE GUIDELINES:
+    branding_block = f"""
+BRAND STYLE GUIDE (follow these rules strictly):
+{branding}
+""" if branding else """
+STYLE GUIDELINES (fallback, branding.md not available):
 - Professional, clean, modern
-- Abstract or conceptual, NOT literal (no people, no screenshots, no text)
-- Enterprise-appropriate, sophisticated
-- Color palette: navy (#1B2A4A), teal, white, with subtle accent colors
-- Think: geometric patterns, abstract data flows, architectural forms, network visualizations
-- Style reference: high-end consulting firm report covers
+- Dark navy background (#0A1128)
+- Accent colors: hot pink/magenta (#FF00FF), bright green (#7FFF00)
+- Abstract or conceptual, enterprise-appropriate
+"""
 
-IMPORTANT:
+    prompt_system = f"""You are an art director creating image prompts for LinkedIn article headers.
+
+Given an article title, opening text, and optional user direction, create a descriptive prompt
+for an AI image generator.
+
+{branding_block}
+
+ADDITIONAL RULES:
 - No text, words, letters, or numbers in the image
-- No faces or human figures
-- No logos or brand marks
-- Keep it abstract enough to pair with any enterprise AI article
+- No logos or brand marks (the logo will be composited separately)
+- If the user provides creative direction, incorporate it into the prompt while staying
+  within the brand guidelines above
+- Keep it appropriate for a professional LinkedIn article header
 
 Return ONLY the image generation prompt, nothing else."""
+
+    user_direction = ""
+    if instructions and regenerate_graphic:
+        user_direction = f"\n\nUser's creative direction:\n{instructions}"
 
     prompt_user = f"""Article title: {title}
 
 Article opening:
-{article_md[:500]}
+{article_md[:500]}{user_direction}
 
 Create an image generation prompt for the header graphic."""
 
@@ -794,6 +926,7 @@ def assemble_article(**context):
     content_type = ti.xcom_pull(task_ids="load_context", key="content_type") or "blog_outline"
     title = ti.xcom_pull(task_ids="load_context", key="content_title") or "Untitled"
     existing_article = ti.xcom_pull(task_ids="load_context", key="existing_article")
+    inspired_by = ti.xcom_pull(task_ids="load_context", key="inspired_by") or []
     research = ti.xcom_pull(task_ids="deep_research") or {}
     report_id = ti.xcom_pull(task_ids="load_context", key="report_id") or p["report_id"]
     content_index = p.get("content_index", 0)
@@ -859,6 +992,7 @@ def assemble_article(**context):
         "graphic_base64": graphic_b64,
         "graphic_prompt": graphic_data.get("prompt_used"),
         "research": research,
+        "inspired_by": inspired_by,
         "version": version,
     }
 
@@ -912,10 +1046,8 @@ with DAG(
     tags=["pulse", "content", "article"],
     description=(
         "Creates or edits a LinkedIn article from a Pulse weekly report content item. "
-        "IMPORTANT: Always pass the user's message/prompt as the 'instructions' parameter. "
-        "The DAG auto-detects whether to create a new article or edit an existing one. "
-        "Examples: instructions='create an article on blog outline 2', "
-        "instructions='expand the case studies', instructions='make it shorter'."
+        "The DAG reads the user's prompt automatically. It auto-detects whether to "
+        "create a new article or edit an existing one, and whether to regenerate the graphic."
     ),
     params={
         "report_id": Param(
@@ -937,20 +1069,6 @@ with DAG(
             default=None,
             type=["string", "null"],
             description="If editing an existing article, pass its UUID to load and revise it",
-        ),
-        "instructions": Param(
-            type="string",
-            description=(
-                "REQUIRED. Copy-paste the user's EXACT message here, word for word. "
-                "Do NOT rephrase, summarize, or substitute the article title. "
-                "WRONG: 'write the article on topic X'. "
-                "RIGHT: 'expand each bullet under case studies to be more descriptive'."
-            ),
-        ),
-        "regenerate_graphic": Param(
-            default=False,
-            type="boolean",
-            description="Set to true to generate a fresh header graphic. Default false (reuses existing graphic during edits).",
         ),
     },
 ) as dag:
