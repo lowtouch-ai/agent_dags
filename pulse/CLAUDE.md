@@ -281,7 +281,7 @@ with TaskGroup("analysis") as analysis_tg:
 
 - **YouTube Data API v3** for channel discovery and video metrics
 - **Gmail API** for HTML email delivery (auto mode) — use `utils/email_utils.py`
-- **Ollama** for trend analysis and content drafting — use `utils/agent_utils.py`
+- **OpenAI GPT-4o** for trend analysis, content drafting, article writing, humanization, and intent classification — used directly via `openai` SDK with `OPENAI_API_KEY` Airflow Variable
 - **Gemini 2.5 Flash Image** (Nano Banana) for article header graphics — uses `google-genai` SDK with `GEMINI_API_KEY` Airflow Variable
 - **Redis thought logging** for WebUI progress — use `utils/think_logging.py`
 
@@ -424,7 +424,7 @@ The DAG minimizes reliance on the agent passing correct parameters:
 
 ### How It Works
 
-**New article flow:** `report_id` + `content_type` + `content_index` → DAG loads report from Redis, extracts the content item, runs deep research using report trends and source videos, writes a 1,200-2,000 word article via GPT-4o (following LinkedIn best practices: 7-part structure, hook-first opening, mobile-optimized formatting), humanizes it (removes AI-isms, validates hook and CTA, enforces voice rules), generates a header graphic via `gpt-image-1`, assembles everything, and persists to Redis under `pulse:article:{article_id}` with 7-day TTL.
+**New article flow:** `report_id` + `content_type` + `content_index` → DAG loads report from Redis, extracts the content item, runs deep research using report trends and source videos, writes a 1,200-2,000 word article via GPT-4o (following LinkedIn best practices: 7-part structure, hook-first opening, mobile-optimized formatting), humanizes it (removes AI-isms, validates hook and CTA, enforces voice rules), generates a header graphic via Gemini 2.5 Flash Image, assembles everything, and persists to Redis under `pulse:article:{article_id}` with 7-day TTL.
 
 **Edit flow:** Auto-detected when an article already exists. Loads existing article from Redis, skips deep research (reuses existing research), rewrites applying user instructions, re-humanizes, reuses existing graphic by default, saves as new version under same `article_id`.
 
