@@ -2,7 +2,9 @@
 Shared base module for all RFP processing DAGs.
 
 All 10 document-type-specific DAGs share identical pipeline logic:
-  fetch_pdf -> extract_questions -> validate_questions -> generate_answers -> log_completion
+  fetch_pdf -> extract_questions -> validate_questions -> generate_answers -> log_completion -> trigger_quality_audit
+
+Quality audit runs as a background process to validate Q&A pairs for duplicates, completeness, and formatting.
 
 Each DAG file calls `create_rfp_processing_dag()` with its unique dag_id and description.
 """
@@ -10,6 +12,7 @@ Each DAG file calls `create_rfp_processing_dag()` with its unique dag_id and des
 from datetime import datetime
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.task.trigger_rule import TriggerRule
 from airflow.models import Variable, Param
 import logging
@@ -1367,6 +1370,16 @@ def create_rfp_processing_dag(dag_id, description, tags):
             trigger_rule=TriggerRule.ALL_SUCCESS,
         )
 
-        fetch_pdf >> extract_questions >> validate_fix_questions >> generate_answers >> finalize
+        # Trigger quality audit DAG as a background process
+        trigger_quality_audit = TriggerDagRunOperator(
+            task_id="trigger_quality_audit",
+            trigger_dag_id="rfp_quality_audit_dag",
+            wait_for_completion=False,  # Run in background
+            reset_dag_run=False,
+            conf="{{ dag_run.conf }}",  # Pass same config (project_id, workspace_uuid, email)
+            trigger_rule=TriggerRule.ALL_SUCCESS,
+        )
+
+        fetch_pdf >> extract_questions >> validate_fix_questions >> generate_answers >> finalize >> trigger_quality_audit
 
     return dag
