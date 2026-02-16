@@ -97,8 +97,8 @@ CV scoring uses a weighted formula:
 ## Testing
 
 - **Unit tests**: `test_cv_initial_screening.py` — 93 edge-case tests for all 6 task functions in `cv_initial_screening.py`. Uses `unittest.mock` to mock Airflow, Gmail API, AI model, and filesystem. Run with: `python3 -m unittest agent_dags.recruitment_dag.test_cv_initial_screening -v` from the `airflow/dags` directory.
-- **Unit tests**: `test_cv_listner.py` — Edge-case tests for all 11 functions in `cv_listner.py`. Run with: `python3 -m unittest agent_dags.recruitment_dag.test_cv_listner -v` from the `airflow/dags` directory.
-- **Unit tests**: `test_cv_analyse.py` — Edge-case tests for all 7 functions in `cv_analyse.py`. Run with: `python3 -m unittest agent_dags.recruitment_dag.test_cv_analyse -v` from the `airflow/dags` directory.
+- **Unit tests**: `test_cv_listner.py` — 75 edge-case tests for all 11 functions in `cv_listner.py`. Run with: `python3 -m unittest agent_dags.recruitment_dag.test_cv_listner -v` from the `airflow/dags` directory.
+- **Unit tests**: `test_cv_analyse.py` — 52 edge-case tests for all 7 functions in `cv_analyse.py`. Run with: `python3 -m unittest agent_dags.recruitment_dag.test_cv_analyse -v` from the `airflow/dags` directory.
 
 ## Bug Fixes Applied (cv_initial_screening.py)
 
@@ -122,4 +122,29 @@ CV scoring uses a weighted formula:
 4. **Safe chained `.get()` on nullable dicts** (`save_to_google_sheets`): Same pattern as screening DAG bug #5 — `.get('experience_match', {}).get(...)` crashes when `experience_match` is explicitly `None`. Fixed with `(... or {}).get(...)`.
 5. **No double `Re:` prefix** (`send_response_email`): Same pattern as screening DAG bug #4 — removed the manual `subject = f"Re: {subject}"` line since `send_email()` already adds the prefix when missing.
 6. **Job list silently truncated to single entry** (`retrive_jd_from_web`): The output format template asked the AI to return a JSON array `[{...}, {...}]`, but `extract_json_from_text()` only extracts JSON **objects** (`{...}`), not arrays. When the AI returned an array of matching jobs, the function found the individual objects inside and returned the **largest** one by text size — silently discarding the rest. This caused a DevOps candidate to be matched against a Project Manager role (the PM entry had a longer description). Fixed by wrapping the array in an object (`{"jobs": [...]}`) so `extract_json_from_text` captures the entire structure, and added unwrapping logic in `get_the_jd_for_cv_analysis`.
+
+## Failure Resilience
+
+### Alerting (`recruitment_alerts.py`)
+Shared `on_failure_callback` used by all 3 DAGs. When any task fails (after exhausting retries), it sends an alert email to the recruiter (`recruiter_email` variable) with:
+- DAG name, task name, and error message
+- Candidate context (email, name, subject) extracted from `dag_run.conf` and XCom
+- Link to the Airflow task log
+
+The callback is wrapped in try/except so it never masks the original error.
+
+### Retry Configuration
+| DAG | Retries | Initial Delay | Exponential Backoff | Max Delay |
+|-----|---------|---------------|---------------------|-----------|
+| `cv_monitor_mailbox` (listener) | 2 | 2 min | Yes | 10 min |
+| `cv_analyse` | 3 | 1 min | Yes | 15 min |
+| `screening_response_analysis` | 3 | 1 min | Yes | 15 min |
+
+### Timestamp Safety (`cv_listner.py`)
+The last-processed timestamp (`/appz/cache/cv_last_processed_email.json`) is updated in `route_emails_to_dags` (after successful routing), not in `fetch_cv_emails`. This ensures that if classification or routing fails, the emails are re-fetched on the next run rather than being permanently lost. Duplicate processing is mitigated by `TriggerDagRunOperator(reset_dag_run=True)` and the `find_candidate_in_sheet()` duplicate check in child DAGs.
+
+### Explicit Failure on Errors
+All critical task functions raise exceptions instead of silently returning `None` or error strings. This ensures Airflow treats them as failures, triggering retries and the `on_failure_callback`:
+- **`cv_analyse.py`**: `get_the_jd_for_cv_analysis`, `get_the_score_for_cv_analysis`, `save_to_google_sheets`, `send_response_email` — raise `RuntimeError`
+- **`cv_initial_screening.py`**: `load_candidate_profile` (raises `FileNotFoundError`), `analyze_screening_responses`, `send_screening_result_email`, `notify_recruiter_for_interview` — raise `RuntimeError`
 

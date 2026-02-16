@@ -274,7 +274,7 @@ class TestLoadCandidateProfile(unittest.TestCase):
         self.assertEqual(result, profile)
 
     def test_path_traversal_attempt(self):
-        """Path traversal in email is partially sanitized (/ -> _)."""
+        """Path traversal in email is partially sanitized (/ -> _). File not found raises."""
         kwargs = make_kwargs(xcom_data={
             ('extract_candidate_response', 'response_data'): {
                 'sender_email': '../../etc/passwd@evil.com'
@@ -282,8 +282,8 @@ class TestLoadCandidateProfile(unittest.TestCase):
         })
         # The / chars get replaced, but .. stays -> .._.._ etc
         with patch.object(Path, 'exists', return_value=False):
-            result = load_candidate_profile(**kwargs)
-        self.assertIsNone(result)
+            with self.assertRaises(FileNotFoundError):
+                load_candidate_profile(**kwargs)
 
     def test_plus_addressing(self):
         """+ is NOT sanitized in email."""
@@ -299,18 +299,18 @@ class TestLoadCandidateProfile(unittest.TestCase):
         self.assertEqual(result, profile)
 
     def test_profile_file_not_found(self):
-        """Profile file doesn't exist -> returns None."""
+        """Profile file doesn't exist -> raises FileNotFoundError."""
         kwargs = make_kwargs(xcom_data={
             ('extract_candidate_response', 'response_data'): {
                 'sender_email': 'nofile@example.com'
             }
         })
         with patch.object(Path, 'exists', return_value=False):
-            result = load_candidate_profile(**kwargs)
-        self.assertIsNone(result)
+            with self.assertRaises(FileNotFoundError):
+                load_candidate_profile(**kwargs)
 
     def test_profile_file_invalid_json(self):
-        """Profile file has invalid JSON -> caught by except, returns None."""
+        """Profile file has invalid JSON -> re-raised."""
         kwargs = make_kwargs(xcom_data={
             ('extract_candidate_response', 'response_data'): {
                 'sender_email': 'bad@example.com'
@@ -318,11 +318,11 @@ class TestLoadCandidateProfile(unittest.TestCase):
         })
         with patch.object(Path, 'exists', return_value=True):
             with patch('builtins.open', mock_open(read_data='not json at all')):
-                result = load_candidate_profile(**kwargs)
-        self.assertIsNone(result)
+                with self.assertRaises(Exception):
+                    load_candidate_profile(**kwargs)
 
     def test_profile_file_empty(self):
-        """Empty profile file -> JSON parse fails, returns None."""
+        """Empty profile file -> JSON parse fails, re-raised."""
         kwargs = make_kwargs(xcom_data={
             ('extract_candidate_response', 'response_data'): {
                 'sender_email': 'empty@example.com'
@@ -330,11 +330,11 @@ class TestLoadCandidateProfile(unittest.TestCase):
         })
         with patch.object(Path, 'exists', return_value=True):
             with patch('builtins.open', mock_open(read_data='')):
-                result = load_candidate_profile(**kwargs)
-        self.assertIsNone(result)
+                with self.assertRaises(Exception):
+                    load_candidate_profile(**kwargs)
 
     def test_profile_file_permission_error(self):
-        """Permission denied on file open -> caught, returns None."""
+        """Permission denied on file open -> re-raised."""
         kwargs = make_kwargs(xcom_data={
             ('extract_candidate_response', 'response_data'): {
                 'sender_email': 'perm@example.com'
@@ -342,8 +342,8 @@ class TestLoadCandidateProfile(unittest.TestCase):
         })
         with patch.object(Path, 'exists', return_value=True):
             with patch('builtins.open', side_effect=PermissionError("denied")):
-                result = load_candidate_profile(**kwargs)
-        self.assertIsNone(result)
+                with self.assertRaises(PermissionError):
+                    load_candidate_profile(**kwargs)
 
     def test_profile_is_json_array(self):
         """Profile file is a JSON array (not dict) -> loaded as-is (no type check)."""
@@ -373,14 +373,15 @@ class TestLoadCandidateProfile(unittest.TestCase):
         )
 
     def test_xcom_push_not_called_on_file_not_found(self):
-        """xcom_push NOT called when profile file not found."""
+        """xcom_push NOT called when profile file not found (raises FileNotFoundError)."""
         kwargs = make_kwargs(xcom_data={
             ('extract_candidate_response', 'response_data'): {
                 'sender_email': 'missing@example.com'
             }
         })
         with patch.object(Path, 'exists', return_value=False):
-            load_candidate_profile(**kwargs)
+            with self.assertRaises(FileNotFoundError):
+                load_candidate_profile(**kwargs)
         kwargs['ti'].xcom_push.assert_not_called()
 
 
@@ -394,7 +395,7 @@ class TestAnalyzeScreeningResponses(unittest.TestCase):
     """Edge cases for analyze_screening_responses."""
 
     def test_no_response_data(self):
-        """response_data is None -> returns None."""
+        """response_data is None -> raises RuntimeError."""
         kwargs = make_kwargs(
             conf={'email_data': {}},
             xcom_data={
@@ -402,11 +403,11 @@ class TestAnalyzeScreeningResponses(unittest.TestCase):
                 ('load_candidate_profile', 'candidate_profile'): {'name': 'X'},
             }
         )
-        result = analyze_screening_responses(**kwargs)
-        self.assertIsNone(result)
+        with self.assertRaises(RuntimeError):
+            analyze_screening_responses(**kwargs)
 
     def test_no_candidate_profile(self):
-        """candidate_profile is None -> returns None."""
+        """candidate_profile is None -> raises RuntimeError."""
         kwargs = make_kwargs(
             conf={'email_data': {}},
             xcom_data={
@@ -414,11 +415,11 @@ class TestAnalyzeScreeningResponses(unittest.TestCase):
                 ('load_candidate_profile', 'candidate_profile'): None,
             }
         )
-        result = analyze_screening_responses(**kwargs)
-        self.assertIsNone(result)
+        with self.assertRaises(RuntimeError):
+            analyze_screening_responses(**kwargs)
 
     def test_both_inputs_none(self):
-        """Both response_data and candidate_profile are None -> returns None."""
+        """Both response_data and candidate_profile are None -> raises RuntimeError."""
         kwargs = make_kwargs(
             conf={'email_data': {}},
             xcom_data={
@@ -426,8 +427,8 @@ class TestAnalyzeScreeningResponses(unittest.TestCase):
                 ('load_candidate_profile', 'candidate_profile'): None,
             }
         )
-        result = analyze_screening_responses(**kwargs)
-        self.assertIsNone(result)
+        with self.assertRaises(RuntimeError):
+            analyze_screening_responses(**kwargs)
 
     @patch(f'{MODULE}.extract_json_from_text')
     @patch(f'{MODULE}.get_ai_response')
@@ -995,11 +996,11 @@ class TestSendScreeningResultEmail(unittest.TestCase):
     @patch(f'{MODULE}.get_ai_response', return_value='<p>X</p>')
     @patch(f'{MODULE}.Variable')
     def test_gmail_auth_failure(self, mock_var, mock_ai, mock_auth, mock_send):
-        """authenticate_gmail returns None -> returns error, send_email NOT called."""
+        """authenticate_gmail returns None -> raises RuntimeError, send_email NOT called."""
         mock_var.get.return_value = 'test-model'
         kwargs = self._base_kwargs()
-        result = send_screening_result_email(**kwargs)
-        self.assertEqual(result, "Gmail authentication failed")
+        with self.assertRaises(RuntimeError):
+            send_screening_result_email(**kwargs)
         mock_send.assert_not_called()
 
     @patch(f'{MODULE}.send_email', return_value=None)
@@ -1007,11 +1008,11 @@ class TestSendScreeningResultEmail(unittest.TestCase):
     @patch(f'{MODULE}.get_ai_response', return_value='<p>X</p>')
     @patch(f'{MODULE}.Variable')
     def test_send_email_failure(self, mock_var, mock_ai, mock_auth, mock_send):
-        """send_email returns None -> 'Failed to send email'."""
+        """send_email returns None -> raises RuntimeError."""
         mock_var.get.return_value = 'test-model'
         kwargs = self._base_kwargs()
-        result = send_screening_result_email(**kwargs)
-        self.assertEqual(result, "Failed to send email")
+        with self.assertRaises(RuntimeError):
+            send_screening_result_email(**kwargs)
 
     @patch(f'{MODULE}.send_email', return_value={'id': 'ok'})
     @patch(f'{MODULE}.authenticate_gmail', return_value=MagicMock())
@@ -1457,11 +1458,11 @@ class TestNotifyRecruiterForInterview(unittest.TestCase):
     @patch(f'{MODULE}.get_ai_response', return_value='{}')
     @patch(f'{MODULE}.Variable')
     def test_gmail_auth_failure(self, mock_var, mock_ai, mock_json, mock_auth, mock_send):
-        """Gmail auth fails -> returns error, send_email not called."""
+        """Gmail auth fails -> raises RuntimeError, send_email not called."""
         mock_var.get.return_value = 'test-model'
         kwargs = self._base_kwargs()
-        result = notify_recruiter_for_interview(**kwargs)
-        self.assertEqual(result, "Gmail authentication failed")
+        with self.assertRaises(RuntimeError):
+            notify_recruiter_for_interview(**kwargs)
         mock_send.assert_not_called()
 
     @patch(f'{MODULE}.send_email', return_value=None)
@@ -1470,11 +1471,11 @@ class TestNotifyRecruiterForInterview(unittest.TestCase):
     @patch(f'{MODULE}.get_ai_response', return_value='{}')
     @patch(f'{MODULE}.Variable')
     def test_send_email_failure(self, mock_var, mock_ai, mock_json, mock_auth, mock_send):
-        """send_email returns None -> failure message."""
+        """send_email returns None -> raises RuntimeError."""
         mock_var.get.return_value = 'test-model'
         kwargs = self._base_kwargs()
-        result = notify_recruiter_for_interview(**kwargs)
-        self.assertEqual(result, "Failed to send recruiter notification")
+        with self.assertRaises(RuntimeError):
+            notify_recruiter_for_interview(**kwargs)
 
     @patch(f'{MODULE}.send_email', return_value={'id': 'ok'})
     @patch(f'{MODULE}.authenticate_gmail', return_value=MagicMock())
@@ -1589,21 +1590,21 @@ class TestCrossCutting(unittest.TestCase):
 
     def test_pipeline_early_none_from_extract(self):
         """
-        extract returns None -> downstream functions handle gracefully.
+        extract returns None -> downstream functions raise on missing data.
         """
         # extract with empty data
         kwargs = make_kwargs(conf={})
         result = extract_candidate_response(**kwargs)
         self.assertIsNone(result)
 
-        # load_candidate_profile with None response_data
+        # load_candidate_profile with None response_data -> returns None early
         kwargs2 = make_kwargs(xcom_data={
             ('extract_candidate_response', 'response_data'): None,
         })
         result2 = load_candidate_profile(**kwargs2)
         self.assertIsNone(result2)
 
-        # analyze with None inputs
+        # analyze with None inputs -> raises RuntimeError
         kwargs3 = make_kwargs(
             conf={},
             xcom_data={
@@ -1611,8 +1612,8 @@ class TestCrossCutting(unittest.TestCase):
                 ('load_candidate_profile', 'candidate_profile'): None,
             }
         )
-        result3 = analyze_screening_responses(**kwargs3)
-        self.assertIsNone(result3)
+        with self.assertRaises(RuntimeError):
+            analyze_screening_responses(**kwargs3)
 
         # update with None inputs
         kwargs4 = make_kwargs(xcom_data={

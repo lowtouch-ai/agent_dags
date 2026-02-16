@@ -43,6 +43,7 @@ from agent_dags.utils.sheets_utils import (
     find_candidate_in_sheet,
     get_candidate_details
 )
+from agent_dags.recruitment_dag.recruitment_alerts import recruitment_failure_callback
 
 
 # ============================================================================
@@ -384,8 +385,11 @@ default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 24),
-    "retries": 1,
-    "retry_delay": timedelta(seconds=15),
+    "retries": 2,
+    "retry_delay": timedelta(minutes=2),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=10),
+    "on_failure_callback": recruitment_failure_callback,
 }
 
 
@@ -474,12 +478,6 @@ def fetch_cv_emails(**kwargs):
         )
         
         logging.info(f"Found {len(unread_emails)} unread emails with attachments")
-        
-        # Update last processed timestamp if emails were found
-        if unread_emails:
-            max_timestamp = max(email['timestamp'] for email in unread_emails)
-            update_last_checked_timestamp(LAST_PROCESSED_FILE, max_timestamp)
-            logging.info(f"Updated last processed timestamp to: {max_timestamp}")
         
         # Push to XCom for downstream tasks
         kwargs['ti'].xcom_push(key='unread_emails', value=unread_emails)
@@ -892,7 +890,15 @@ def route_emails_to_dags(**kwargs):
     logging.info(f"  - Emails with thread context: {routing_summary['emails_with_thread_context']}")
     logging.info(f"  - Skipped/Other: {routing_summary['skipped']}")
     logging.info("=" * 60)
-       
+
+    # Update last processed timestamp after successful routing
+    # (Moved from fetch_cv_emails so timestamp isn't advanced if routing fails)
+    unread_emails = ti.xcom_pull(task_ids='fetch_cv_emails', key='unread_emails')
+    if unread_emails:
+        max_timestamp = max(email['timestamp'] for email in unread_emails)
+        update_last_checked_timestamp(LAST_PROCESSED_FILE, max_timestamp)
+        logging.info(f"Updated last processed timestamp to: {max_timestamp}")
+
     ti.xcom_push(key="routing_summary", value=routing_summary)
     return trigger_requests
 

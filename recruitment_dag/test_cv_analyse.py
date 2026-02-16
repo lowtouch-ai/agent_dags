@@ -348,7 +348,7 @@ class TestGetTheJdForCvAnalysis(unittest.TestCase):
     @patch('agent_dags.recruitment_dag.cv_analyse.extract_json_from_text')
     @patch('agent_dags.recruitment_dag.cv_analyse.get_ai_response')
     def test_regression_ai_returns_none_for_match(self, mock_ai, mock_json, mock_var):
-        """REGRESSION: AI returns non-JSON for match → should return None.
+        """REGRESSION: AI returns non-JSON for match → raises RuntimeError.
 
         Bug: matched_job["job_title"] crashed with TypeError when
         extract_json_from_text returned None.
@@ -362,8 +362,8 @@ class TestGetTheJdForCvAnalysis(unittest.TestCase):
             ('extract_cv_content', 'cv_data'): {'attachments': []},
             ('extract_cv_content', 'email_content'): 'Test',
         })
-        result = get_the_jd_for_cv_analysis(**kwargs)
-        self.assertIsNone(result)
+        with self.assertRaises(RuntimeError):
+            get_the_jd_for_cv_analysis(**kwargs)
 
     @patch('agent_dags.recruitment_dag.cv_analyse.Variable')
     @patch('agent_dags.recruitment_dag.cv_analyse.extract_json_from_text')
@@ -670,31 +670,31 @@ class TestGetTheScoreForCvAnalysis(unittest.TestCase):
 
     @patch('agent_dags.recruitment_dag.cv_analyse.Variable')
     def test_missing_cv_data(self, mock_var):
-        """Missing cv_data returns None."""
+        """Missing cv_data raises RuntimeError."""
         mock_var.get.return_value = "model:test"
         kwargs = make_kwargs(xcom_data={
             ('extract_cv_content', 'cv_data'): None,
             ('get_the_jd_for_cv_analysis', 'jd_data'): {'job_title': 'X'},
         })
-        result = get_the_score_for_cv_analysis(**kwargs)
-        self.assertIsNone(result)
+        with self.assertRaises(RuntimeError):
+            get_the_score_for_cv_analysis(**kwargs)
 
     @patch('agent_dags.recruitment_dag.cv_analyse.Variable')
     def test_missing_jd_data(self, mock_var):
-        """Missing jd_data returns None."""
+        """Missing jd_data raises RuntimeError."""
         mock_var.get.return_value = "model:test"
         kwargs = make_kwargs(xcom_data={
             ('extract_cv_content', 'cv_data'): {'attachments': []},
             ('get_the_jd_for_cv_analysis', 'jd_data'): None,
         })
-        result = get_the_score_for_cv_analysis(**kwargs)
-        self.assertIsNone(result)
+        with self.assertRaises(RuntimeError):
+            get_the_score_for_cv_analysis(**kwargs)
 
     @patch('agent_dags.recruitment_dag.cv_analyse.Variable')
     @patch('agent_dags.recruitment_dag.cv_analyse.extract_json_from_text')
     @patch('agent_dags.recruitment_dag.cv_analyse.get_ai_response')
     def test_regression_ai_returns_none(self, mock_ai, mock_json, mock_var):
-        """REGRESSION: AI returns non-JSON → should return None.
+        """REGRESSION: AI returns non-JSON → raises RuntimeError.
 
         Bug: calculate_candidate_score(None) crashed with AttributeError.
         """
@@ -706,8 +706,8 @@ class TestGetTheScoreForCvAnalysis(unittest.TestCase):
             ('extract_cv_content', 'cv_data'): {'attachments': []},
             ('get_the_jd_for_cv_analysis', 'jd_data'): {'job_title': 'X'},
         })
-        result = get_the_score_for_cv_analysis(**kwargs)
-        self.assertIsNone(result)
+        with self.assertRaises(RuntimeError):
+            get_the_score_for_cv_analysis(**kwargs)
 
     @patch('pathlib.Path.mkdir', side_effect=PermissionError("No write access"))
     @patch('agent_dags.recruitment_dag.cv_analyse.Variable')
@@ -800,27 +800,27 @@ class TestSaveToGoogleSheets(unittest.TestCase):
         mock_update.assert_called_once()
 
     def test_missing_score_data(self):
-        """Missing score_data returns 'Missing data'."""
+        """Missing score_data raises RuntimeError."""
         kwargs = make_kwargs(xcom_data={
             ('get_the_score_for_cv_analysis', 'score_data'): None,
             ('extract_cv_content', 'cv_data'): {'subject': 'CV'},
         })
-        result = save_to_google_sheets(**kwargs)
-        self.assertEqual(result, "Missing data")
+        with self.assertRaises(RuntimeError):
+            save_to_google_sheets(**kwargs)
 
     def test_missing_cv_data(self):
-        """Missing cv_data returns 'Missing data'."""
+        """Missing cv_data raises RuntimeError."""
         kwargs = make_kwargs(xcom_data={
             ('get_the_score_for_cv_analysis', 'score_data'): {'candidate_email': 'x'},
             ('extract_cv_content', 'cv_data'): None,
         })
-        result = save_to_google_sheets(**kwargs)
-        self.assertEqual(result, "Missing data")
+        with self.assertRaises(RuntimeError):
+            save_to_google_sheets(**kwargs)
 
     @patch('agent_dags.recruitment_dag.cv_analyse.authenticate_google_sheets')
     @patch('agent_dags.recruitment_dag.cv_analyse.Variable')
     def test_auth_failure(self, mock_var, mock_auth):
-        """Auth failure returns 'Authentication failed'."""
+        """Auth failure raises RuntimeError."""
         mock_var.get.return_value = "oauth"
         mock_auth.return_value = None
 
@@ -829,8 +829,8 @@ class TestSaveToGoogleSheets(unittest.TestCase):
             ('get_the_score_for_cv_analysis', 'score_data'): score_data,
             ('extract_cv_content', 'cv_data'): {'subject': 'CV'},
         })
-        result = save_to_google_sheets(**kwargs)
-        self.assertEqual(result, "Authentication failed")
+        with self.assertRaises(RuntimeError):
+            save_to_google_sheets(**kwargs)
 
     @patch('agent_dags.recruitment_dag.cv_analyse.append_candidate_to_sheet')
     @patch('agent_dags.recruitment_dag.cv_analyse.find_candidate_in_sheet')
@@ -1001,7 +1001,7 @@ class TestSendResponseEmail(unittest.TestCase):
         self.assertEqual(call_args[1]['cc'], 'recruiter@company.com')
 
     def test_missing_data(self):
-        """Missing data returns error message."""
+        """Missing data raises RuntimeError."""
         kwargs = make_kwargs(
             xcom_data={
                 ('get_the_score_for_cv_analysis', 'score_data'): None,
@@ -1011,12 +1011,12 @@ class TestSendResponseEmail(unittest.TestCase):
             },
             conf={'email_data': {}},
         )
-        result = send_response_email(**kwargs)
-        self.assertIn('Missing data', result)
+        with self.assertRaises(RuntimeError):
+            send_response_email(**kwargs)
 
     @patch('agent_dags.recruitment_dag.cv_analyse.authenticate_gmail')
     def test_auth_failure(self, mock_auth):
-        """Gmail auth failure returns error."""
+        """Gmail auth failure raises RuntimeError."""
         mock_auth.return_value = None
 
         email_data, score_data, cv_data = self._base_setup(eligible=False)
@@ -1029,8 +1029,8 @@ class TestSendResponseEmail(unittest.TestCase):
             },
             conf={'email_data': email_data},
         )
-        result = send_response_email(**kwargs)
-        self.assertEqual(result, "Gmail authentication failed")
+        with self.assertRaises(RuntimeError):
+            send_response_email(**kwargs)
 
     @patch('agent_dags.recruitment_dag.cv_analyse.send_email')
     @patch('agent_dags.recruitment_dag.cv_analyse.authenticate_gmail')
@@ -1091,7 +1091,7 @@ class TestSendResponseEmail(unittest.TestCase):
     @patch('agent_dags.recruitment_dag.cv_analyse.send_email')
     @patch('agent_dags.recruitment_dag.cv_analyse.authenticate_gmail')
     def test_send_email_failure(self, mock_auth, mock_send):
-        """send_email returns None → returns failure message."""
+        """send_email returns None → raises RuntimeError."""
         mock_auth.return_value = MagicMock()
         mock_send.return_value = None
 
@@ -1105,8 +1105,8 @@ class TestSendResponseEmail(unittest.TestCase):
             },
             conf={'email_data': email_data},
         )
-        result = send_response_email(**kwargs)
-        self.assertEqual(result, "Failed to send email")
+        with self.assertRaises(RuntimeError):
+            send_response_email(**kwargs)
 
     @patch('agent_dags.recruitment_dag.cv_analyse.send_email')
     @patch('agent_dags.recruitment_dag.cv_analyse.authenticate_gmail')

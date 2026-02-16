@@ -428,12 +428,11 @@ class TestExtractEmailFromCv(unittest.TestCase):
 
 class TestFetchCvEmails(unittest.TestCase):
 
-    @patch('agent_dags.recruitment_dag.cv_listner.update_last_checked_timestamp')
     @patch('agent_dags.recruitment_dag.cv_listner.fetch_unread_emails_with_attachments')
     @patch('agent_dags.recruitment_dag.cv_listner.get_last_checked_timestamp')
     @patch('agent_dags.recruitment_dag.cv_listner.authenticate_gmail')
-    def test_successful_fetch(self, mock_auth, mock_ts, mock_fetch, mock_update):
-        """Successful fetch pushes emails to xcom and updates timestamp."""
+    def test_successful_fetch(self, mock_auth, mock_ts, mock_fetch):
+        """Successful fetch pushes emails to xcom."""
         mock_auth.return_value = MagicMock()
         mock_ts.return_value = 1000000
         emails = [
@@ -447,16 +446,12 @@ class TestFetchCvEmails(unittest.TestCase):
 
         self.assertEqual(len(result), 2)
         kwargs['ti'].xcom_push.assert_called_once_with(key='unread_emails', value=emails)
-        mock_update.assert_called_once_with(
-            "/appz/cache/cv_last_processed_email.json", 3000000
-        )
 
-    @patch('agent_dags.recruitment_dag.cv_listner.update_last_checked_timestamp')
     @patch('agent_dags.recruitment_dag.cv_listner.fetch_unread_emails_with_attachments')
     @patch('agent_dags.recruitment_dag.cv_listner.get_last_checked_timestamp')
     @patch('agent_dags.recruitment_dag.cv_listner.authenticate_gmail')
-    def test_empty_mailbox(self, mock_auth, mock_ts, mock_fetch, mock_update):
-        """No emails → doesn't update timestamp."""
+    def test_empty_mailbox(self, mock_auth, mock_ts, mock_fetch):
+        """No emails → empty list returned."""
         mock_auth.return_value = MagicMock()
         mock_ts.return_value = 1000000
         mock_fetch.return_value = []
@@ -465,7 +460,6 @@ class TestFetchCvEmails(unittest.TestCase):
         result = fetch_cv_emails(**kwargs)
 
         self.assertEqual(result, [])
-        mock_update.assert_not_called()
 
     @patch('agent_dags.recruitment_dag.cv_listner.authenticate_gmail')
     def test_auth_failure(self, mock_auth):
@@ -781,6 +775,37 @@ class TestRouteEmailsToDags(unittest.TestCase):
         push_call = kwargs['ti'].xcom_push.call_args
         summary = push_call[1]['value'] if push_call[1] else push_call[0][1]
         self.assertEqual(summary['emails_with_thread_context'], 1)
+
+    @patch('agent_dags.recruitment_dag.cv_listner.update_last_checked_timestamp')
+    def test_timestamp_updated_after_routing(self, mock_update):
+        """Timestamp is updated after successful routing (moved from fetch_cv_emails)."""
+        email = self._make_email('e1', 'NEW_CV_APPLICATION', 'cv_analyse')
+        unread_emails = [
+            {'id': 'e1', 'timestamp': 2000000},
+            {'id': 'e2', 'timestamp': 3000000},
+        ]
+        kwargs = make_kwargs(
+            xcom_data={
+                ('classify_email_type', 'classified_emails'): [email],
+                ('fetch_cv_emails', 'unread_emails'): unread_emails,
+            }
+        )
+        route_emails_to_dags(**kwargs)
+        mock_update.assert_called_once_with(
+            "/appz/cache/cv_last_processed_email.json", 3000000
+        )
+
+    @patch('agent_dags.recruitment_dag.cv_listner.update_last_checked_timestamp')
+    def test_timestamp_not_updated_when_no_emails(self, mock_update):
+        """Timestamp NOT updated when no classified emails to route."""
+        kwargs = make_kwargs(
+            xcom_data={
+                ('classify_email_type', 'classified_emails'): None,
+                ('fetch_cv_emails', 'unread_emails'): None,
+            }
+        )
+        route_emails_to_dags(**kwargs)
+        mock_update.assert_not_called()
 
 
 # ════════════════════════════════════════════════════════════════════════════

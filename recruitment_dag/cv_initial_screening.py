@@ -23,6 +23,7 @@ except Exception as e:
 
 from agent_dags.utils.email_utils import authenticate_gmail, send_email, mark_email_as_read
 from agent_dags.utils.agent_utils import get_ai_response, extract_json_from_text
+from agent_dags.recruitment_dag.recruitment_alerts import recruitment_failure_callback
 
 # Configuration constants
 GMAIL_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.email_credentials", default_var=None)
@@ -35,8 +36,11 @@ default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 24),
-    "retries": 1,
-    "retry_delay": timedelta(seconds=15),
+    "retries": 3,
+    "retry_delay": timedelta(minutes=1),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=15),
+    "on_failure_callback": recruitment_failure_callback,
 }
 
 
@@ -110,8 +114,7 @@ def load_candidate_profile(**kwargs):
         profile_path = Path(f"/appz/data/recruitment/{safe_email}.json")
         
         if not profile_path.exists():
-            logging.error(f"Candidate profile not found: {profile_path}")
-            return None
+            raise FileNotFoundError(f"Candidate profile not found: {profile_path}")
         
         with open(profile_path, 'r', encoding='utf-8') as f:
             candidate_profile = json.load(f)
@@ -123,7 +126,7 @@ def load_candidate_profile(**kwargs):
         
     except Exception as e:
         logging.error(f"Failed to load candidate profile: {str(e)}")
-        return None
+        raise
 
 
 def analyze_screening_responses(**kwargs):
@@ -135,8 +138,7 @@ def analyze_screening_responses(**kwargs):
     candidate_profile = ti.xcom_pull(task_ids='load_candidate_profile', key='candidate_profile')
     
     if not response_data or not candidate_profile:
-        logging.warning("Missing response or candidate profile data")
-        return None
+        raise RuntimeError("Missing response or candidate profile data")
     
     candidate_responses = response_data.get('body', '')
     
@@ -364,9 +366,8 @@ Output clean HTML for the email body using proper tags (<p>, <h2>, etc.). Make i
     # Authenticate
     service = authenticate_gmail(GMAIL_CREDENTIALS, RECRUITMENT_FROM_ADDRESS)
     if not service:
-        logging.error("Gmail authentication failed")
-        return "Gmail authentication failed"
-    
+        raise RuntimeError("Gmail authentication failed for screening result email")
+
     # send_email() already adds "Re:" prefix if missing, so don't add it here
     result = send_email(
         service,
@@ -385,8 +386,7 @@ Output clean HTML for the email body using proper tags (<p>, <h2>, etc.). Make i
         logging.info(f"Screening result email sent to {recipient} (Decision: {decision}){f', CC: {cc}' if cc else ''}")
         return f"Email sent successfully to {recipient}"
     else:
-        logging.error("Failed to send screening result email")
-        return "Failed to send email"
+        raise RuntimeError("Failed to send screening result email")
 
 
 def notify_recruiter_for_interview(**kwargs):
@@ -537,8 +537,7 @@ Generate the following in JSON format:
 
     service = authenticate_gmail(GMAIL_CREDENTIALS, RECRUITMENT_FROM_ADDRESS)
     if not service:
-        logging.error("Gmail authentication failed for recruiter notification")
-        return "Gmail authentication failed"
+        raise RuntimeError("Gmail authentication failed for recruiter notification")
 
     subject = f"Interview Scheduling Request - {candidate_name} ({position})"
 
@@ -559,8 +558,7 @@ Generate the following in JSON format:
         logging.info(f"Recruiter notification sent to {RECRUITER_EMAIL} (CC: {RECRUITER_CC_EMAILS}) for candidate {sender_email}")
         return f"Recruiter notified for interview with {sender_email}"
     else:
-        logging.error("Failed to send recruiter notification email")
-        return "Failed to send recruiter notification"
+        raise RuntimeError("Failed to send recruiter notification email")
 
 
 # Define the DAG

@@ -33,6 +33,7 @@ from agent_dags.utils.sheets_utils import (
     update_candidate_status,
     find_candidate_in_sheet
 )
+from agent_dags.recruitment_dag.recruitment_alerts import recruitment_failure_callback
 
 # Configuration constants
 GMAIL_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.email_credentials", default_var=None)
@@ -45,8 +46,11 @@ default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
     "start_date": datetime(2024, 2, 24),
-    "retries": 1,
-    "retry_delay": timedelta(seconds=15),
+    "retries": 3,
+    "retry_delay": timedelta(minutes=1),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=15),
+    "on_failure_callback": recruitment_failure_callback,
 }
 
 
@@ -263,8 +267,7 @@ def get_the_jd_for_cv_analysis(**kwargs):
     matched_job = extract_json_from_text(match_response)
 
     if not matched_job:
-        logging.error("Failed to extract job match from AI response")
-        return None
+        raise RuntimeError("Failed to extract job match from AI response")
 
     job_title = matched_job.get("job_title", "Unknown Position")
     job_summary = matched_job.get("job_summary", "")
@@ -393,8 +396,7 @@ def get_the_score_for_cv_analysis(**kwargs):
     jd_data = ti.xcom_pull(task_ids='get_the_jd_for_cv_analysis', key='jd_data')
     
     if not cv_data or not jd_data:
-        logging.warning("Missing CV or JD data for scoring")
-        return None
+        raise RuntimeError("Missing CV or JD data for scoring")
     
     prompt = f"""Match the CV with the Job Description (JD). Also extract the candidate's name from the CV.
     CV: {cv_data}
@@ -440,8 +442,7 @@ def get_the_score_for_cv_analysis(**kwargs):
     score_data = extract_json_from_text(score_response)
 
     if not score_data:
-        logging.error("Failed to extract score data from AI response")
-        return None
+        raise RuntimeError("Failed to extract score data from AI response")
 
     calculated_scores = calculate_candidate_score(score_data)
     
@@ -501,8 +502,7 @@ def save_to_google_sheets(**kwargs):
     cv_data = ti.xcom_pull(task_ids='extract_cv_content', key='cv_data')
     
     if not score_data or not cv_data:
-        logging.warning("Missing score or CV data for Google Sheets")
-        return "Missing data"
+        raise RuntimeError("Missing score or CV data for Google Sheets")
     
     # Get authentication type (default to oauth)
     auth_type = Variable.get(
@@ -514,8 +514,7 @@ def save_to_google_sheets(**kwargs):
     service = authenticate_google_sheets(GOOGLE_SHEETS_CREDENTIALS, auth_type=auth_type)
     
     if not service:
-        logging.error("Failed to authenticate with Google Sheets")
-        return "Authentication failed"
+        raise RuntimeError("Failed to authenticate with Google Sheets")
     
     # Prepare candidate data for Google Sheets
     candidate_data = {
@@ -562,8 +561,7 @@ def save_to_google_sheets(**kwargs):
         logging.info(f"Successfully saved candidate data to Google Sheets")
         return "Success"
     else:
-        logging.error("Failed to save candidate data to Google Sheets")
-        return "Failed"
+        raise RuntimeError("Failed to save candidate data to Google Sheets")
 
 
 def send_response_email(**kwargs):
@@ -578,8 +576,7 @@ def send_response_email(**kwargs):
     email_content = ti.xcom_pull(task_ids='extract_cv_content', key='email_content')
 
     if not email_data or not score_data or not cv_data:
-        logging.warning("Missing data for sending response email")
-        return "Missing data for email"
+        raise RuntimeError("Missing data for sending response email")
     
     headers = email_data.get('headers', {})
     sender = headers.get('From', 'Unknown')
@@ -692,8 +689,7 @@ Use a professional, encouraging tone throughout. Output only clean, valid HTML f
     service = authenticate_gmail(GMAIL_CREDENTIALS, RECRUITMENT_FROM_ADDRESS)
     
     if not service:
-        logging.error("Gmail authentication failed, aborting email response.")
-        return "Gmail authentication failed"
+        raise RuntimeError("Gmail authentication failed, aborting email response")
     
     bcc = None
     # send_email() already adds "Re:" prefix if missing, so don't add it here
@@ -709,8 +705,7 @@ Use a professional, encouraging tone throughout. Output only clean, valid HTML f
         logging.info(f"Email sent successfully to {recipient}" + (f" (CC: {cc})" if cc else ""))
         return f"Email sent successfully to {recipient}"
     else:
-        logging.error("Failed to send email")
-        return "Failed to send email"
+        raise RuntimeError("Failed to send response email")
 
 
 # Define the DAG
