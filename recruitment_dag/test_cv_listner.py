@@ -29,15 +29,15 @@ _mock_variable.get = MagicMock(side_effect=lambda key, default_var=None: {
     "ltai.v3.lowtouch.recruitment.model_name": "test-model",
 }.get(key, default_var))
 
-# Airflow modules
+# Airflow modules (Airflow 3.0 import paths)
 sys.modules.setdefault('airflow', MagicMock())
-sys.modules.setdefault('airflow.models', MagicMock(Variable=_mock_variable))
-sys.modules.setdefault('airflow.operators', MagicMock())
-sys.modules.setdefault('airflow.operators.python', MagicMock())
-sys.modules.setdefault('airflow.operators.trigger_dagrun', MagicMock())
-sys.modules['airflow'].DAG = MagicMock()
-sys.modules['airflow'].models = sys.modules['airflow.models']
-sys.modules['airflow.models'].Variable = _mock_variable
+sys.modules.setdefault('airflow.sdk', MagicMock(DAG=MagicMock(), Variable=_mock_variable))
+sys.modules.setdefault('airflow.providers', MagicMock())
+sys.modules.setdefault('airflow.providers.standard', MagicMock())
+sys.modules.setdefault('airflow.providers.standard.operators', MagicMock())
+sys.modules.setdefault('airflow.providers.standard.operators.python', MagicMock())
+sys.modules.setdefault('airflow.providers.standard.operators.trigger_dagrun', MagicMock())
+sys.modules['airflow.sdk'].Variable = _mock_variable
 
 # External dependencies that may not be installed
 sys.modules.setdefault('bs4', MagicMock())

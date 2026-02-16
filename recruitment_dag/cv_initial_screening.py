@@ -3,9 +3,8 @@ Airflow DAG for analyzing candidate responses to screening questions.
 Processes email responses and determines acceptance/rejection for next round.
 """
 
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.models import Variable
+from airflow.sdk import DAG, Variable
+from airflow.providers.standard.operators.python import PythonOperator
 from datetime import datetime, timedelta
 import logging
 import json

@@ -31,14 +31,14 @@ mock_variable.get = MagicMock(side_effect=lambda key, default_var=None: {
     "ltai.v3.lowtouch.recruitment.model_name": "test-model",
 }.get(key, default_var))
 
-# Inject mocked airflow modules into sys.modules
+# Inject mocked airflow modules into sys.modules (Airflow 3.0 import paths)
 sys.modules.setdefault('airflow', MagicMock())
-sys.modules.setdefault('airflow.models', MagicMock(Variable=mock_variable))
-sys.modules.setdefault('airflow.operators', MagicMock())
-sys.modules.setdefault('airflow.operators.python', MagicMock())
-sys.modules['airflow'].DAG = MagicMock()
-sys.modules['airflow'].models = sys.modules['airflow.models']
-sys.modules['airflow.models'].Variable = mock_variable
+sys.modules.setdefault('airflow.sdk', MagicMock(DAG=MagicMock(), Variable=mock_variable))
+sys.modules.setdefault('airflow.providers', MagicMock())
+sys.modules.setdefault('airflow.providers.standard', MagicMock())
+sys.modules.setdefault('airflow.providers.standard.operators', MagicMock())
+sys.modules.setdefault('airflow.providers.standard.operators.python', MagicMock())
+sys.modules['airflow.sdk'].Variable = mock_variable
 
 # Also mock the utility modules so we control their behavior per-test
 mock_email_utils = MagicMock()

@@ -5,7 +5,7 @@ Sends email alerts via Gmail API when tasks fail after all retries are exhausted
 
 import logging
 from email.utils import parseaddr
-from airflow.models import Variable
+from airflow.sdk import Variable
 
 from agent_dags.utils.email_utils import authenticate_gmail, send_email
 

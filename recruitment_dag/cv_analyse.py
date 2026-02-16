@@ -4,9 +4,8 @@ Processes PDF resumes and extracts candidate information.
 Stores results in Google Sheets.
 """
 
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.models import Variable
+from airflow.sdk import DAG, Variable
+from airflow.providers.standard.operators.python import PythonOperator
 from datetime import datetime, timedelta
 import logging
 import json

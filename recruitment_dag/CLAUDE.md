@@ -75,6 +75,8 @@ cv_monitor_mailbox (listener)
 
 - **External Services**: Gmail API, Google Sheets API, AI model endpoint (via `get_ai_response`), Vector database (via `VectorSearchByUUID`)
 
+- **Airflow 3.0 Imports**: All DAGs use the Airflow 3.0 import paths — `DAG` and `Variable` from `airflow.sdk`, operators from `airflow.providers.standard.operators.*`. The old `airflow.models.Variable` / `airflow.operators.*` paths are deprecated.
+
 ## Storage
 
 - **Google Sheets**: Primary candidate tracking (name, email, job, scores, status)
