@@ -35,11 +35,11 @@ The pipeline consists of three interconnected DAGs:
 - **Purpose**: Evaluates candidate responses to initial screening questions
 - **Workflow**:
   1. Extracts candidate responses from the full email body (sourced from `thread_history.current_message.content`, with fallback to email snippet)
-  2. Loads the candidate's saved profile from `/appz/data/recruitment/<email>.json`
+  2. Loads the candidate's saved profile from `/appz/data/recruitment/<email>.json` — uses `extracted_candidate_email` (from the listener) when available to look up the profile under the candidate's own email, falling back to the sender's email. This is critical for the forwarded-CV workflow where the sender is the recruiter but the profile was saved under the candidate's email.
   3. Analyzes responses using AI against 7 criteria (work arrangement, availability, salary, location, motivation, technical fit, qualifications)
   4. Updates candidate profile with screening results
   5. Sends acceptance (interview invite) or rejection email to the candidate. When a recruiter forwarded the CV (detected via `extracted_candidate_email` from the listener), the result email is sent directly to the candidate with the recruiter CC'd; otherwise the email goes to the original sender. This applies to both acceptance and rejection outcomes.
-  6. If accepted, notifies the recruiter (Athira) via email to schedule an interview call with the candidate — includes candidate name, email, position (`job_title`), CV score (`total_score`), screening score (`overall_score`), and key credentials (experience, education, matched must-have and nice-to-have skills) from the saved profile (with configurable CC recipients via `recruiter_cc_emails`). The notification also includes an AI-generated concise candidate summary (overall fit assessment), screening insights (strengths, concerns, detailed assessment from the analysis), and 5-6 suggested interview questions tailored to the role and candidate profile with expected answer patterns / what to look for in each answer. No separate recruiter notification is sent for rejected candidates.
+  6. If accepted, notifies the recruiter (Athira) via email to schedule an interview call with the candidate — includes candidate name, email, position (`job_title`), CV score (`total_score`), screening score (`overall_score`), and key credentials (experience, education, matched must-have and nice-to-have skills) from the saved profile (with configurable CC recipients via `recruiter_cc_emails`). The notification also includes an AI-generated concise candidate summary (overall fit assessment) and 5-6 suggested interview questions tailored to the role and candidate profile with expected answer patterns / what to look for in each answer. No separate recruiter notification is sent for rejected candidates.
 
 ## Data Flow
 
@@ -88,7 +88,7 @@ CV scoring uses a weighted formula:
 - **Must-have skills**: 60% weight (100 if matched, 0 if missing)
 - **Nice-to-have skills**: 30% weight (100 if matched, 0 if missing)
 - **Other criteria** (experience + education): 10% weight
-- **Eligibility threshold**: Candidates scoring below 50% total are automatically marked ineligible and receive a rejection email
+- **Eligibility threshold**: Candidates scoring below 80% total are automatically marked ineligible and receive a rejection email
 
 ## Shared Utility Notes
 
@@ -96,7 +96,7 @@ CV scoring uses a weighted formula:
 
 ## Testing
 
-- **Unit tests**: `test_cv_initial_screening.py` — 94 edge-case tests for all 6 task functions in `cv_initial_screening.py`. Uses `unittest.mock` to mock Airflow, Gmail API, AI model, and filesystem. Run with: `python3 -m unittest agent_dags.recruitment_dag.test_cv_initial_screening -v` from the `airflow/dags` directory.
+- **Unit tests**: `test_cv_initial_screening.py` — 93 edge-case tests for all 6 task functions in `cv_initial_screening.py`. Uses `unittest.mock` to mock Airflow, Gmail API, AI model, and filesystem. Run with: `python3 -m unittest agent_dags.recruitment_dag.test_cv_initial_screening -v` from the `airflow/dags` directory.
 - **Unit tests**: `test_cv_listner.py` — Edge-case tests for all 11 functions in `cv_listner.py`. Run with: `python3 -m unittest agent_dags.recruitment_dag.test_cv_listner -v` from the `airflow/dags` directory.
 - **Unit tests**: `test_cv_analyse.py` — Edge-case tests for all 7 functions in `cv_analyse.py`. Run with: `python3 -m unittest agent_dags.recruitment_dag.test_cv_analyse -v` from the `airflow/dags` directory.
 
@@ -121,3 +121,5 @@ CV scoring uses a weighted formula:
 3. **Null check on AI score response** (`get_the_score_for_cv_analysis`): `calculate_candidate_score(score_data)` crashed when `extract_json_from_text()` returned `None`. Added explicit `None` guard.
 4. **Safe chained `.get()` on nullable dicts** (`save_to_google_sheets`): Same pattern as screening DAG bug #5 — `.get('experience_match', {}).get(...)` crashes when `experience_match` is explicitly `None`. Fixed with `(... or {}).get(...)`.
 5. **No double `Re:` prefix** (`send_response_email`): Same pattern as screening DAG bug #4 — removed the manual `subject = f"Re: {subject}"` line since `send_email()` already adds the prefix when missing.
+6. **Job list silently truncated to single entry** (`retrive_jd_from_web`): The output format template asked the AI to return a JSON array `[{...}, {...}]`, but `extract_json_from_text()` only extracts JSON **objects** (`{...}`), not arrays. When the AI returned an array of matching jobs, the function found the individual objects inside and returned the **largest** one by text size — silently discarding the rest. This caused a DevOps candidate to be matched against a Project Manager role (the PM entry had a longer description). Fixed by wrapping the array in an object (`{"jobs": [...]}`) so `extract_json_from_text` captures the entire structure, and added unwrapping logic in `get_the_jd_for_cv_analysis`.
+

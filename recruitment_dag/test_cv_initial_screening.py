@@ -1089,8 +1089,6 @@ class TestNotifyRecruiterForInterview(unittest.TestCase):
         """Helper to build kwargs with common defaults."""
         analysis_data = analysis_data if analysis_data is not None else {
             'decision': 'ACCEPT', 'overall_score': 85,
-            'strengths': ['Strong Python'], 'concerns': ['Short experience'],
-            'detailed_reason': 'Good fit overall'
         }
         response_data = response_data if response_data is not None else {
             'sender_email': 'cand@test.com', 'body': 'My answers'
@@ -1173,8 +1171,7 @@ class TestNotifyRecruiterForInterview(unittest.TestCase):
         Now proceeds to send recruiter notification.
         """
         mock_var.get.return_value = 'test-model'
-        kwargs = self._base_kwargs(analysis_data={'decision': 'accept', 'overall_score': 80,
-            'strengths': [], 'concerns': [], 'detailed_reason': 'ok'})
+        kwargs = self._base_kwargs(analysis_data={'decision': 'accept', 'overall_score': 80})
         result = notify_recruiter_for_interview(**kwargs)
         self.assertIn("Recruiter notified", result)
 
@@ -1210,7 +1207,6 @@ class TestNotifyRecruiterForInterview(unittest.TestCase):
             xcom_data={
                 ('analyze_screening_responses', 'analysis_data'): {
                     'decision': 'ACCEPT', 'overall_score': 80,
-                    'strengths': [], 'concerns': [], 'detailed_reason': 'ok'
                 },
                 ('extract_candidate_response', 'response_data'): {
                     'sender_email': 'c@d.com', 'body': 'ans'
@@ -1238,7 +1234,6 @@ class TestNotifyRecruiterForInterview(unittest.TestCase):
         kwargs = self._base_kwargs(
             analysis_data={
                 'decision': 'ACCEPT', 'overall_score': 80,
-                'strengths': [], 'concerns': [], 'detailed_reason': 'ok'
             },
             candidate_profile={}
         )
@@ -1267,7 +1262,6 @@ class TestNotifyRecruiterForInterview(unittest.TestCase):
         kwargs['ti'].xcom_pull.side_effect = lambda task_ids=None, key=None: {
             ('analyze_screening_responses', 'analysis_data'): {
                 'decision': 'ACCEPT', 'overall_score': 60,
-                'strengths': ['Eager'], 'concerns': [], 'detailed_reason': 'Promising'
             },
             ('extract_candidate_response', 'response_data'): {
                 'sender_email': 'jane@test.com', 'body': 'answers'
@@ -1309,7 +1303,6 @@ class TestNotifyRecruiterForInterview(unittest.TestCase):
         kwargs['ti'].xcom_pull.side_effect = lambda task_ids=None, key=None: {
             ('analyze_screening_responses', 'analysis_data'): {
                 'decision': 'ACCEPT', 'overall_score': 60,
-                'strengths': [], 'concerns': [], 'detailed_reason': 'ok'
             },
             ('extract_candidate_response', 'response_data'): {
                 'sender_email': 'x@test.com', 'body': 'ans'
@@ -1351,7 +1344,6 @@ class TestNotifyRecruiterForInterview(unittest.TestCase):
         kwargs['ti'].xcom_pull.side_effect = lambda task_ids=None, key=None: {
             ('analyze_screening_responses', 'analysis_data'): {
                 'decision': 'ACCEPT', 'overall_score': 60,
-                'strengths': [], 'concerns': [], 'detailed_reason': 'ok'
             },
             ('extract_candidate_response', 'response_data'): {
                 'sender_email': 'x@t.com', 'body': 'ans'
@@ -1384,7 +1376,6 @@ class TestNotifyRecruiterForInterview(unittest.TestCase):
         kwargs = self._base_kwargs(
             analysis_data={
                 'decision': 'ACCEPT', 'overall_score': 80,
-                'strengths': [], 'concerns': [], 'detailed_reason': 'ok'
             },
             candidate_profile={
                 'candidate_name': 'Fixed', 'total_score': 50, 'job_title': 'Dev',
@@ -1413,7 +1404,6 @@ class TestNotifyRecruiterForInterview(unittest.TestCase):
         kwargs = self._base_kwargs(
             analysis_data={
                 'decision': 'ACCEPT', 'overall_score': 80,
-                'strengths': [], 'concerns': [], 'detailed_reason': 'ok'
             },
             candidate_profile={
                 'candidate_name': 'Fixed', 'total_score': 50, 'job_title': 'Dev',
@@ -1425,25 +1415,6 @@ class TestNotifyRecruiterForInterview(unittest.TestCase):
         )
         result = notify_recruiter_for_interview(**kwargs)
         self.assertIn("Recruiter notified", result)
-
-    @patch(f'{MODULE}.send_email', return_value={'id': 'ok'})
-    @patch(f'{MODULE}.authenticate_gmail', return_value=MagicMock())
-    @patch(f'{MODULE}.extract_json_from_text', return_value={
-        'candidate_summary': 'Sum', 'interview_questions': []
-    })
-    @patch(f'{MODULE}.get_ai_response', return_value='{}')
-    @patch(f'{MODULE}.Variable')
-    def test_missing_strengths_concerns(self, mock_var, mock_ai, mock_json, mock_auth, mock_send):
-        """analysis_data has no strengths/concerns -> defaults to empty lists."""
-        mock_var.get.return_value = 'test-model'
-        kwargs = self._base_kwargs(analysis_data={
-            'decision': 'ACCEPT',
-            # no strengths, concerns, detailed_reason, overall_score
-        })
-        result = notify_recruiter_for_interview(**kwargs)
-        body_sent = mock_send.call_args[0][3]
-        self.assertIn('N/A', body_sent)  # strengths default
-        self.assertIn('None identified', body_sent)  # concerns default
 
     @patch(f'{MODULE}.send_email', return_value={'id': 'ok'})
     @patch(f'{MODULE}.authenticate_gmail', return_value=MagicMock())
@@ -1602,8 +1573,6 @@ class TestCrossCutting(unittest.TestCase):
         # 3. analyze_screening_responses
         analysis = {
             'decision': 'ACCEPT', 'overall_score': 88,
-            'strengths': ['Strong Python'], 'concerns': [],
-            'detailed_reason': 'Excellent fit'
         }
         mock_ai.return_value = json.dumps(analysis)
         mock_json.return_value = analysis

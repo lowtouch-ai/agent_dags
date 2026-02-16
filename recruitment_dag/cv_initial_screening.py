@@ -95,10 +95,16 @@ def load_candidate_profile(**kwargs):
         return None
     
     sender_email = response_data.get('sender_email', '')
-    
+
+    # When a recruiter forwarded the CV, the profile was saved under the
+    # candidate's email (extracted from the CV), not the sender's email.
+    email_data = kwargs['dag_run'].conf.get('email_data', {})
+    extracted_candidate_email = email_data.get('extracted_candidate_email')
+    lookup_email = extracted_candidate_email if extracted_candidate_email else sender_email
+
     # Sanitize email for filename
-    safe_email = sender_email.replace('@', '_at_').replace('/', '_').replace('\\', '_')
-    
+    safe_email = lookup_email.replace('@', '_at_').replace('/', '_').replace('\\', '_')
+
     # Load candidate profile from file
     try:
         profile_path = Path(f"/appz/data/recruitment/{safe_email}.json")
@@ -236,8 +242,13 @@ def update_candidate_profile(**kwargs):
         return None
     
     sender_email = response_data.get('sender_email', '')
-    safe_email = sender_email.replace('@', '_at_').replace('/', '_').replace('\\', '_')
-    
+
+    # Use candidate email (from forwarded CV) if available, same as load_candidate_profile
+    email_data = kwargs['dag_run'].conf.get('email_data', {})
+    extracted_candidate_email = email_data.get('extracted_candidate_email')
+    lookup_email = extracted_candidate_email if extracted_candidate_email else sender_email
+    safe_email = lookup_email.replace('@', '_at_').replace('/', '_').replace('\\', '_')
+
     # Update profile with screening results
     updated_profile = {
         **candidate_profile,
@@ -419,10 +430,6 @@ def notify_recruiter_for_interview(**kwargs):
     matched_nice_to_have = [s.get('skill_name', '') for s in nice_to_have_skills if s.get('match')]
     nice_to_have_str = ', '.join(matched_nice_to_have) if matched_nice_to_have else 'N/A'
 
-    # Extract screening insights from analysis_data
-    strengths = analysis_data.get('strengths', [])
-    concerns = analysis_data.get('concerns', [])
-    detailed_reason = analysis_data.get('detailed_reason', 'N/A')
     screening_score = analysis_data.get('overall_score', 'N/A')
 
     # --- AI call: Generate candidate summary and interview questions ---
@@ -439,11 +446,6 @@ def notify_recruiter_for_interview(**kwargs):
 - Matched Nice-to-Have Skills: {nice_to_have_str}
 - CV Score: {cv_score}
 - Screening Score: {screening_score}
-
-## Screening Analysis:
-- Strengths: {json.dumps(strengths)}
-- Concerns: {json.dumps(concerns)}
-- Detailed Reason: {detailed_reason}
 
 ## Candidate's Screening Responses:
 {response_data.get('body', 'N/A')}
@@ -490,12 +492,6 @@ Generate the following in JSON format:
             </td>
         </tr>"""
 
-    # Build strengths HTML
-    strengths_html = "".join(f"<li>{s}</li>" for s in strengths) if strengths else "<li>N/A</li>"
-
-    # Build concerns HTML
-    concerns_html = "".join(f"<li>{c}</li>" for c in concerns) if concerns else "<li>None identified</li>"
-
     body = f"""
     <h2>Interview Scheduling Request</h2>
     <p>Hi Athira,</p>
@@ -520,13 +516,6 @@ Generate the following in JSON format:
         <li><strong>Matched Must-Have Skills:</strong> {must_have_str}</li>
         <li><strong>Matched Nice-to-Have Skills:</strong> {nice_to_have_str}</li>
     </ul>
-
-    <h3>Screening Insights:</h3>
-    <p><strong>Strengths:</strong></p>
-    <ul>{strengths_html}</ul>
-    <p><strong>Concerns:</strong></p>
-    <ul>{concerns_html}</ul>
-    <p><strong>Detailed Assessment:</strong> {detailed_reason}</p>
 
     <h3>Suggested Interview Questions:</h3>
     <table style="border-collapse: collapse; width: 100%; font-size: 14px;">

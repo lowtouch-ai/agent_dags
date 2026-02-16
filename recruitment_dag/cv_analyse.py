@@ -175,7 +175,7 @@ def retrive_jd_from_web(**kwargs):
     logging.info("Retrieving Job Description from web source...")
     prompt = f"""
     # Task
-    Identify the jobs matching for this candidate using VectorSearchByUUID tool; give the output in the bellow json format
+    Identify the jobs matching for this candidate using VectorSearchByUUID tool; give the output in the below json format
     ## Candidate Info
     {cv_data}
     ## Email data
@@ -183,11 +183,13 @@ def retrive_jd_from_web(**kwargs):
     ## Output format
     ```json
     {{
-    [{{
-        "job_name": "<job_title from vector database>",
-        "summary": "<short job summary>",
-        "experience": "<experience requiered for the job>"
-    }}, {{...}}, {{...}}]
+        "jobs": [
+            {{
+                "job_name": "<job_title from vector database>",
+                "summary": "<short job summary>",
+                "experience": "<experience required for the job>"
+            }}
+        ]
     }}
     ```
     """
@@ -209,9 +211,17 @@ def get_the_jd_for_cv_analysis(**kwargs):
     ti = kwargs['ti']
 
     # Pull data from XCom
-    jd_list = ti.xcom_pull(task_ids='retrive_jd_from_web', key='jd_data')
+    jd_raw = ti.xcom_pull(task_ids='retrive_jd_from_web', key='jd_data')
     cv_data = ti.xcom_pull(task_ids='extract_cv_content', key='cv_data')
     email_content = ti.xcom_pull(task_ids='extract_cv_content', key='email_content')
+
+    # extract_json_from_text returns an object; unwrap the "jobs" array
+    if isinstance(jd_raw, dict):
+        jd_list = jd_raw.get('jobs', [jd_raw])   # fallback: treat single object as one-item list
+    elif isinstance(jd_raw, list):
+        jd_list = jd_raw
+    else:
+        jd_list = []
 
     MODEL_NAME = Variable.get(
         "ltai.v3.lowtouch.recruitment.model_name",
@@ -356,8 +366,8 @@ def calculate_candidate_score(analysis_json):
     other_weighted = (other_avg / 100) * 10
     total_score = round(must_have_weighted + nice_to_have_weighted + other_weighted)
 
-    # Eligibility Check — minimum 50% total score required
-    ineligible = total_score < 50
+    # Eligibility Check — minimum 80% total score required
+    ineligible = total_score < 80
 
     if ineligible:
         unique_reasons = list(dict.fromkeys(reasons))  # Deduplicate while preserving order
