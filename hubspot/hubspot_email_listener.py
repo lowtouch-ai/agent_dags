@@ -1562,7 +1562,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
         try:
             client = Client(
                 host=OLLAMA_HOST, 
-                headers={'x-ltai-cient':f'{HUBSPOT_MODEL}'},
+                headers={'x-ltai-client':f'{HUBSPOT_MODEL}'},
                 timeout=300 # Add explicit timeout
             )
             messages = []
