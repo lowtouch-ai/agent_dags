@@ -35,6 +35,7 @@ Airflow Variables required:
   - ltai.change_validation.me.base_url       (ManageEngine SDP Cloud base URL)
   - APEXAIQ_ZOHO_CLIENT_ID                   (Zoho OAuth2 client ID)
   - APEXAIQ_ZOHO_CLIENT_SECRET               (Zoho OAuth2 client secret)
+  - APEXAIQ_ZOHO_TOKEN_URL                   (Zoho OAuth2 token endpoint; default: https://accounts.zoho.com/oauth/v2/token)
   - SMTP_USER                                (SMTP username for sending emails)
   - SMTP_PASSWORD                            (SMTP password for sending emails)
   - APEXAIQ_CHANGE_VALIDATION_NOTIFY_EMAIL   (comma-separated recipient emails)
@@ -80,7 +81,7 @@ default_args = {
 # ---------------------------------------------------------------------------
 # Task 0 — Fetch Zoho OAuth2 access token
 # ---------------------------------------------------------------------------
-ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
+ZOHO_TOKEN_URL = Variable.get("APEXAIQ_ZOHO_TOKEN_URL", default="https://accounts.zoho.com/oauth/v2/token")
 ZOHO_SCOPES = (
     "SDPOnDemand.requests.ALL,"
     "SDPOnDemand.requests.READ,"
