@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an **Apache Airflow 3.x DAG repository** containing ~62 production DAGs for workflow orchestration. The DAGs integrate with Gmail, HubSpot, Ollama (local AI), BigQuery, Akamai, and dbt. Dependencies are managed at the parent Airflow deployment level — there is no `requirements.txt` in this directory.
+This is an **Apache Airflow 2.x DAG repository** containing ~62 production DAGs for workflow orchestration. The DAGs integrate with Gmail, HubSpot, Ollama (local AI), BigQuery, Akamai, and dbt. Dependencies are managed at the parent Airflow deployment level — there is no `requirements.txt` in this directory.
+
+An Airflow 3.1.3 migration is in progress. Use the `/airflow3x-upgrade <filename>` slash command to upgrade individual DAG files.
 
 ## Architecture
 
@@ -25,36 +27,36 @@ This is an **Apache Airflow 3.x DAG repository** containing ~62 production DAGs 
 
 Both utilities pull config from `Variable.get()` and log at DEBUG/INFO levels.
 
-### Key Patterns (Airflow 3.x)
+### Key Patterns
 
-- **Imports**: `from airflow.providers.standard.operators.python import PythonOperator`, `from airflow.sdk import Variable, Param`
-- **Configuration**: `Variable.get()` with `default=` (not `default_var=`) for all secrets and config, with `deserialize_json=True` for complex values.
-- **Scheduling**: `schedule=` (not `schedule_interval=`)
-- **Context**: `logical_date` (not `execution_date`)
-- **No `provide_context`**: Removed in Airflow 3.x (raises `TypeError`)
-- **Branching**: `BranchPythonOperator` for conditional task routing.
+- **Configuration**: Airflow `Variable.get()` for all secrets and config, with `deserialize_json=True` for complex values.
+- **Branching**: `BranchPythonOperator` for conditional task routing (15 DAGs).
 - **DAG triggering**: `TriggerDagRunOperator` passes data between DAGs via `conf`.
 - **Retry tracking**: JSON-serialized retry state stored in Airflow Variables.
 - **Email threading**: Proper RFC 5322 `In-Reply-To` / `References` headers for Gmail thread continuity.
 - **AI calls**: `ollama.Client` with conversation history lists (`{"role": ..., "content": ...}`).
 - **Timezone handling**: `pendulum` for timezone-aware `start_date` and scheduling.
 
+## Airflow 2.x → 3.x Migration
+
+The codebase is currently Airflow 2.x. The full migration checklist is in `.claude/commands/airflow3x-upgrade.md`. Key changes needed across the codebase:
+
+| Pattern | Files affected | Change |
+|---|---|---|
+| `provide_context=True` | 54 | Remove entirely (raises `TypeError` in 3.x) |
+| `schedule_interval=` | 47 | Rename to `schedule=` |
+| `DummyOperator` | 9 | Replace with `EmptyOperator` |
+| `execution_date` in context | 7 | Replace with `logical_date` |
+| `default_var=` in `Variable.get()` | Many | Rename to `default=` |
+| All `airflow.operators.*` imports | All | Move to `airflow.providers.standard.operators.*` |
+| `from airflow import DAG` | All | Change to `from airflow.sdk import DAG` |
+| `from airflow.models import Variable` | All | Change to `from airflow.sdk import Variable` |
+
 ## Tracker Weekly Report DAG (`tracker_weekly_report/`)
 
 ### Overview
 
 DAG ID: `weekly_timesheet_review`. Runs every Monday 2:30–6:30 AM UTC (8 AM–12 PM IST). Fetches Mantis timesheets, enriches with issue details, analyzes via Ollama AI, and emails review reports with CC to HR/Manager/Admin.
-
-### Airflow 3.x Specifics
-
-This DAG uses Airflow 3.x patterns:
-- `from airflow.providers.standard.operators.python import PythonOperator`
-- `from airflow.sdk import Variable, Param`
-- `schedule='30 2-6 * * 1'` (not `schedule_interval=`)
-- `context['logical_date']` (not `execution_date`)
-- No `provide_context=True` on PythonOperator
-- `Variable.get(..., default=...)` (not `default_var=`)
-- IST window: 8 AM – 11:59 PM (wider than 2.x's 8 AM – 12 PM)
 
 ### Task Pipeline
 
@@ -89,9 +91,9 @@ Tests live in `tracker_weekly_report/tests/` (ignored by Airflow via `.airflowig
 cd tracker_weekly_report && python3 -m pytest tests/ -v
 ```
 
-The test suite uses a session-scoped `tracker_module` fixture that patches Airflow modules (both 2.x and 3.x paths) and imports the DAG module via `importlib`. Key test fixtures:
+The test suite uses a session-scoped `tracker_module` fixture that patches `airflow.models.Variable.get` and imports the DAG module via `importlib`. Key test fixtures:
 - `mock_ti` — in-memory XCom store (`MockTaskInstance`)
-- `airflow_context(dt_str, tz, conf)` — factory for mock Airflow context with optional `dag_run.conf` (provides both `execution_date` and `logical_date`)
+- `airflow_context(dt_str, tz, conf)` — factory for mock Airflow context with optional `dag_run.conf`
 - `mock_ti_with_data` — pre-populated with Task 1 & 2 outputs
 - `SAMPLE_USERS`, `SAMPLE_WEEK_RANGE`, `SAMPLE_TIMESHEET_DATA`, `SAMPLE_AI_ANALYSIS` — shared test data in `conftest.py`
 
