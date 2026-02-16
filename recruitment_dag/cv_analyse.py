@@ -738,25 +738,21 @@ with DAG(
     extract_cv_task = PythonOperator(
         task_id="extract_cv_content",
         python_callable=extract_cv_content,
-        
     )
 
     retrieve_jd_task = PythonOperator(
         task_id="retrive_jd_from_web",
         python_callable=retrive_jd_from_web,
-        
     )
 
     get_jd_task = PythonOperator(
         task_id="get_the_jd_for_cv_analysis",
         python_callable=get_the_jd_for_cv_analysis,
-        
     )
 
     score_cv_task = PythonOperator(
         task_id="get_the_score_for_cv_analysis",
         python_callable=get_the_score_for_cv_analysis,
-        
     )
 
     save_sheets_task = PythonOperator(
@@ -768,7 +764,6 @@ with DAG(
     send_response_task = PythonOperator(
         task_id="send_response_email",
         python_callable=send_response_email,
-        
     )
 
     # Set task dependencies
