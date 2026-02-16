@@ -83,11 +83,8 @@ default_args = {
 # ---------------------------------------------------------------------------
 ZOHO_TOKEN_URL = Variable.get("APEXAIQ_ZOHO_TOKEN_URL", default="https://accounts.zoho.com/oauth/v2/token")
 ZOHO_SCOPES = (
-    "SDPOnDemand.requests.ALL,"
-    "SDPOnDemand.requests.READ,"
     "SDPOnDemand.assets.READ,"
     "SDPOnDemand.changes.READ,"
-    "SDPOnDemand.requests.CREATE"
 )
 
 
