@@ -8,9 +8,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import pytz
 import requests
-from airflow import DAG
-from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.models import Variable
+from airflow.sdk import DAG, Variable
+from airflow.providers.standard.operators.python import PythonOperator, BranchPythonOperator
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
@@ -77,7 +76,7 @@ def is_business_day(owner_country, check_date):
 def get_holiday_countries():
     """Load holiday country config from Airflow Variable (optional override)"""
     try:
-        config_json = Variable.get("ltai.v3.hubspot.task.holiday_countries", default_var="{}")
+        config_json = Variable.get("ltai.v3.hubspot.task.holiday_countries", default="{}")
         config = json.loads(config_json)
         logging.info(f"Loaded holiday config for countries: {list(config.keys())}")
         return config

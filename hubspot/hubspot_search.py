@@ -1,7 +1,7 @@
-from airflow import DAG
-from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.dummy import DummyOperator
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.sdk import DAG
+from airflow.providers.standard.operators.python import PythonOperator, BranchPythonOperator
+from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from datetime import datetime, timedelta
 import base64
 import logging
@@ -15,8 +15,7 @@ from email import message_from_bytes
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
-from airflow.models import Variable
-from airflow.api.common.trigger_dag import trigger_dag
+from airflow.sdk import Variable
 import requests
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -33,7 +32,7 @@ def clear_retry_tracker_on_success(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         del retry_tracker[tracker_key]
@@ -50,7 +49,7 @@ def update_retry_tracker_on_failure(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         retry_tracker[tracker_key]["status"] = "failed"
@@ -5118,7 +5117,7 @@ with DAG(
         provide_context=True
     )
 
-    validation_end_task = DummyOperator(
+    validation_end_task = EmptyOperator(
         task_id="validation_end"
     )
 
@@ -5134,7 +5133,7 @@ with DAG(
         provide_context=True
     )
 
-    end_task = DummyOperator(
+    end_task = EmptyOperator(
         task_id="end_workflow"
     )
 

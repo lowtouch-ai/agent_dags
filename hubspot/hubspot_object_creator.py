@@ -2,9 +2,9 @@ import logging
 import json
 from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
-from airflow import DAG
-from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.sdk import DAG
+from airflow.providers.standard.operators.python import PythonOperator, BranchPythonOperator
+from airflow.providers.standard.operators.empty import EmptyOperator
 import base64
 import os
 import re
@@ -15,7 +15,7 @@ from email import message_from_bytes
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from googleapiclient.errors import HttpError
-from airflow.models import Variable
+from airflow.sdk import Variable
 import time
 import html
 import sys
@@ -46,7 +46,7 @@ def clear_retry_tracker_on_success(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         del retry_tracker[tracker_key]
@@ -63,7 +63,7 @@ def update_retry_tracker_on_failure(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         retry_tracker[tracker_key]["status"] = "failed"
@@ -4577,7 +4577,7 @@ with DAG(
     on_failure_callback=update_retry_tracker_on_failure
 ) as dag:
 
-    start_task = DummyOperator(task_id="start_workflow")
+    start_task = EmptyOperator(task_id="start_workflow")
 
     load_context_task = PythonOperator(
         task_id="load_context_from_dag_run",
@@ -4700,7 +4700,7 @@ with DAG(
     )
 
     # New join task to handle branching and skip propagation
-    join_creations = DummyOperator(
+    join_creations = EmptyOperator(
         task_id="join_creations",
         trigger_rule="none_failed_min_one_success"
     )
@@ -4730,7 +4730,7 @@ with DAG(
         provide_context=True
     )
 
-    end_task = DummyOperator(
+    end_task = EmptyOperator(
         task_id="end_workflow"
     )
 

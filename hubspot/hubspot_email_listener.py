@@ -1,12 +1,10 @@
 import base64
 from email import message_from_bytes
-from airflow import DAG
-from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.decorators import task
+from airflow.sdk import DAG, Variable, task
+from airflow.providers.standard.operators.python import PythonOperator, BranchPythonOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from airflow.models import Variable
 from datetime import datetime, timedelta, timezone
 import os
 import json
@@ -103,7 +101,7 @@ def send_fallback_email_on_failure(context):
         logging.warning("Could not find email data in XCom for fallback - skipping email send")
         
         # 🔥 STILL TRACK THE FAILURE even without email_data
-        retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+        retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
         
         retry_tracker[tracker_key] = {
             "status": "failed",
@@ -133,7 +131,7 @@ def send_fallback_email_on_failure(context):
     # STEP 3: Check retry count and max retries
     # ============================================================
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     existing_entry = retry_tracker.get(tracker_key, {})
     current_retry_count = existing_entry.get("retry_count", 0)
     
@@ -309,7 +307,7 @@ secure, and no action is required from your side. Thank you for your patience an
     # STEP 5: ALWAYS UPDATE RETRY TRACKER (critical fix)
     # ============================================================
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     # Increment retry count for the next attempt
     new_retry_count = current_retry_count if is_retry else 0
@@ -360,8 +358,8 @@ secure, and no action is required from your side. Thank you for your patience an
     except Exception as e:
         logging.warning(f"Could not push failure metadata: {e}")
 
-SLACK_WEBHOOK_URL = Variable.get("ltai.v3.hubspot.slack_webhook_url", default_var=None)
-SERVER_NAME = Variable.get("ltai.v3.hubspot.server_name", default_var="UNKNOWN")
+SLACK_WEBHOOK_URL = Variable.get("ltai.v3.hubspot.slack_webhook_url", default=None)
+SERVER_NAME = Variable.get("ltai.v3.hubspot.server_name", default="UNKNOWN")
 
 def send_hubspot_slack_alert(context):
     """
@@ -409,7 +407,7 @@ def send_hubspot_slack_alert(context):
     # STEP 2: Get retry tracker info
     # ============================================================
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     existing_entry = retry_tracker.get(tracker_key, {})
     current_retry_count = existing_entry.get("retry_count", 0)
     max_retries_reached = existing_entry.get("max_retries_reached", False)
@@ -643,7 +641,7 @@ def send_final_failure_email_to_user(context):
         tracker_key = f"{dag_id}:{run_id}"
     
     # Get retry tracker
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     existing_entry = retry_tracker.get(tracker_key, {})
     current_retry_count = existing_entry.get("retry_count", 0)
     
@@ -803,7 +801,7 @@ def clear_retry_tracker_on_success(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         del retry_tracker[tracker_key]
@@ -820,7 +818,7 @@ def update_retry_tracker_on_failure(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         retry_tracker[tracker_key]["status"] = "failed"
@@ -926,8 +924,8 @@ def is_email_authorized(raw_email: str) -> bool:
     """
     try:
         # Load both whitelists once
-        company_raw = Variable.get("ltai.v3.hubspot.email.whitelist", default_var="[]")
-        external_raw = Variable.get("hubspot.email.whitelist.external", default_var="[]")
+        company_raw = Variable.get("ltai.v3.hubspot.email.whitelist", default="[]")
+        external_raw = Variable.get("hubspot.email.whitelist.external", default="[]")
         
         company_list = json.loads(company_raw)
         external_list = json.loads(external_raw)
