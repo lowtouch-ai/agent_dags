@@ -285,6 +285,48 @@ with TaskGroup("analysis") as analysis_tg:
 - **Gemini 2.5 Flash Image** (Nano Banana) for article header graphics — uses `google-genai` SDK with `GEMINI_API_KEY` Airflow Variable
 - **Redis thought logging** for WebUI progress — use `utils/think_logging.py`
 
+### YouTube Video Discovery
+
+The `discover_channels_and_videos` task uses keyword-based search via YouTube Data API v3, not a fixed channel list. It discovers relevant content dynamically each week.
+
+**Search queries** (15 keywords):
+
+```
+agentic AI, AI agents enterprise, building AI agents, AI automation workflow,
+LangChain AI agents, CrewAI AutoGen agents, Claude AI coding, enterprise AI strategy,
+AI governance compliance, multi-agent orchestration, no-code AI platform,
+AI agents production deployment, Airflow AI orchestration, AI copilot enterprise,
+RAG retrieval augmented generation
+```
+
+**API call per keyword:**
+```python
+youtube.search().list(
+    q=query, type="video", part="id",
+    order="viewCount",              # top-viewed first
+    publishedAfter=7_days_ago,      # rolling 7-day window
+    maxResults=15,                  # up to 15 per keyword
+    relevanceLanguage="en",
+)
+```
+
+**Pipeline:**
+1. Run all 15 keyword searches, deduplicate video IDs across results
+2. Batch-fetch full video details (snippet, statistics, contentDetails) in groups of 50
+3. Fetch transcripts via `youtube-transcript-api` for every video (auto-generated captions)
+4. Extract unique channels from discovered videos, fetch channel stats (subscribers, video count)
+5. Sort videos by `view_count` descending, channels by weekly views descending (top 30)
+
+**Data collected per video:** `video_id`, `title`, `description`, `channel_id`, `channel_title`, `published_at`, `view_count`, `like_count`, `comment_count`, `tags`, `category_id`, `duration`, `duration_seconds`, `has_captions`, `definition`, `transcript`
+
+**Caching (Redis):**
+- Cache key: `pulse:youtube_cache` (7-day TTL)
+- Freshness window: 6 hours (`YOUTUBE_FRESHNESS_HOURS`) — if data is less than 6h old, skip API calls entirely
+- Incremental fetch: if data is older than 6h, fetch only videos published after `last_fetched_at`, merge with existing data, prune videos older than 7 days
+- `use_cache` DAG param can bypass cache entirely for a full fresh pull
+
+**Emerging channels** (`discover_emerging_channels`): A parallel task that uses the same keyword searches but filters for channels with 5k-50k subscribers. Cached separately under `pulse:youtube_cache:emerging`.
+
 ### Branding
 
 All generated PNGs (article header graphics) must follow the brand style guide in **`../branding.md`** (the repo root). The DAG loads this file at runtime via `_load_branding()` in `pulse_article_creator.py`, so changes to `branding.md` take effect on the next DAG run without code changes. Do not duplicate branding rules in DAG code or in this file.

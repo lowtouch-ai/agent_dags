@@ -5,8 +5,12 @@ import pendulum
 import json
 import logging
 import os
+import smtplib
 import time
 import uuid
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 import redis as redis_lib
 
@@ -66,13 +70,23 @@ AI-isms to REMOVE (these reduce engagement by ~43%):
 # ---------------------------------------------------------------------------
 
 
-def _get_variable(key):
-    """Get an Airflow Variable, trying PULSE_ prefix first then unprefixed."""
+_NO_DEFAULT = object()
+
+
+def _get_variable(key, default=_NO_DEFAULT):
+    """Get an Airflow Variable, trying PULSE_ prefix first then unprefixed.
+
+    If *default* is provided and neither PULSE_{key} nor {key} exists,
+    return the default instead of raising.
+    """
     prefixed = f"PULSE_{key}"
     try:
         return Variable.get(prefixed)
     except Exception:
+        pass
+    if default is _NO_DEFAULT:
         return Variable.get(key)
+    return Variable.get(key, default=default)
 
 
 REDIS_CACHE_TTL = 604800  # 7 days — data persists across incremental refreshes
@@ -112,6 +126,21 @@ def _cache_set(key, value, ttl=REDIS_CACHE_TTL):
         logger.info(f"Cached {key} with {ttl}s TTL")
     except Exception as e:
         logger.warning(f"Redis cache write failed: {e}")
+
+
+def _is_interactive(context):
+    """Auto-detect mode: interactive (agent trigger) vs auto (cron/manual).
+
+    When agentomatic triggers via RunJobTool it always injects __request_id
+    into dag_run.conf.  Cron-scheduled and manual Airflow UI triggers never
+    have it.
+    """
+    conf = context.get("dag_run")
+    if conf is not None:
+        conf = conf.conf or {}
+    else:
+        conf = {}
+    return bool(conf.get("__request_id"))
 
 
 def _parse_duration(iso_duration):
@@ -1373,7 +1402,7 @@ def generate_posting_calendar(**context):
     yt_ideas = youtube_ideas.get("ideas", [])
 
     calendar = {
-        "week_of": pendulum.now("Asia/Kolkata").start_of("week").add(days=1).format("YYYY-MM-DD"),
+        "week_of": pendulum.now("Asia/Kolkata").start_of("week").add(days=1).format("D MMM, YYYY"),
         "schedule": [
             {
                 "day": "Tuesday",
@@ -1488,12 +1517,12 @@ def _render_markdown(channels, videos, trends, youtube_ideas, linkedin_posts,
                      report_id=None, emerging_channels=None, emerging_videos=None):
     """Render the full report as markdown."""
     md = []
-    week_of = calendar.get("week_of", pendulum.now("Asia/Kolkata").format("YYYY-MM-DD"))
+    week_of = calendar.get("week_of", pendulum.now("Asia/Kolkata").format("D MMM, YYYY"))
 
     # --- Header ---
     md.append(f"# Weekly Content Report for lowtouch.ai")
     md.append(f"**Week of:** {week_of}  ")
-    md.append(f"**Generated:** {pendulum.now('Asia/Kolkata').format('YYYY-MM-DD h:mm A')} IST  ")
+    md.append(f"**Generated:** {pendulum.now('Asia/Kolkata').format('D MMM, YYYY h:mm A')} IST  ")
     if report_id:
         md.append(f"**Report ID:** `{report_id}`  ")
     md.append("")
@@ -1946,6 +1975,1316 @@ def _render_markdown(channels, videos, trends, youtube_ideas, linkedin_posts,
     return "\n".join(md)
 
 
+# ---------------------------------------------------------------------------
+# PDF renderer — branded landscape PDF following branding.md
+# ---------------------------------------------------------------------------
+
+
+
+def _render_report_pdf(out_path, channels, videos, trends, youtube_ideas,
+                       linkedin_posts, carousels, reels, blog_outlines,
+                       engagement, founders, calendar, report_id=None,
+                       emerging_channels=None, emerging_videos=None):
+    """Render the weekly report as a McKinsey-style presentation deck PDF.
+
+    Uses BaseDocTemplate with dark/light page templates, one topic per page,
+    interactive AcroForm checkboxes, and clickable links.
+    """
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        BaseDocTemplate, Frame, NextPageTemplate, PageBreak, PageTemplate,
+        Paragraph, Spacer, Table, TableStyle, Flowable,
+    )
+    import xml.sax.saxutils as saxutils
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    # Register Roboto (brand font)
+    _font_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "fonts")
+    pdfmetrics.registerFont(TTFont("Roboto", os.path.join(_font_dir, "Roboto-Regular.ttf")))
+    pdfmetrics.registerFont(TTFont("Roboto-Bold", os.path.join(_font_dir, "Roboto-Bold.ttf")))
+    pdfmetrics.registerFontFamily("Roboto", normal="Roboto", bold="Roboto-Bold")
+
+    # 16:9 widescreen (13.333" x 7.5" = standard presentation size)
+    page_w, page_h = 960, 540
+
+    # --- Brand colours (dual system) ---
+    NAVY = colors.HexColor("#0A1128")
+    NAVY_LIGHT = colors.HexColor("#111B3C")
+    LIGHT_CARD = colors.HexColor("#F5F5F5")
+    PINK = colors.HexColor("#E930CF")       # accent on dark backgrounds only
+    GREEN = colors.HexColor("#7FFF00")      # accent on dark backgrounds only
+    ACCENT = colors.HexColor("#1B2A4A")     # accent on light backgrounds (dark navy)
+    WHITE = colors.white
+    GRAY_DARK = colors.HexColor("#A0A0C0")
+    GRAY_LIGHT = colors.HexColor("#666666")
+    NAVY_TEXT = colors.HexColor("#0A1128")
+    BODY_TEXT = colors.HexColor("#333333")
+    LIGHT_PINK_BG = colors.HexColor("#FFF0FB")
+    HAIRLINE = colors.HexColor("#E0E0E0")
+
+    # --- Margins ---
+    LEFT_M, RIGHT_M, TOP_M, BOTTOM_M = 50, 50, 40, 45
+    CONTENT_W = page_w - LEFT_M - RIGHT_M
+
+    # --- Custom Flowables for interactive PDF form fields ---
+    class CheckboxFlowable(Flowable):
+        def __init__(self, name, size=12):
+            Flowable.__init__(self)
+            self.name = name
+            self.cb_size = size
+            self.width = size
+            self.height = size
+
+        def draw(self):
+            self.canv.acroForm.checkbox(
+                name=self.name, relative=True, x=0, y=0,
+                size=self.cb_size, borderColor=PINK,
+                fillColor=WHITE, textColor=PINK, buttonStyle="check",
+            )
+
+    class TextFieldFlowable(Flowable):
+        def __init__(self, name, width=40, height=14):
+            Flowable.__init__(self)
+            self.name = name
+            self.width = width
+            self.height = height
+
+        def draw(self):
+            self.canv.acroForm.textfield(
+                name=self.name, relative=True, x=0, y=0,
+                width=self.width, height=self.height,
+                borderColor=GRAY_LIGHT, fillColor=LIGHT_CARD,
+                textColor=BODY_TEXT, fontSize=8, borderWidth=0.5,
+            )
+
+    # --- Page background callbacks ---
+    FOOTER_BAR_H = 32
+
+    def _dark_page_bg(canvas, doc):
+        canvas.saveState()
+        canvas.setFillColor(NAVY)
+        canvas.rect(0, 0, page_w, page_h, fill=True, stroke=False)
+        canvas.setFont("Roboto", 9)
+        canvas.setFillColor(WHITE)
+        canvas.drawString(LEFT_M, 10, f"Page {canvas.getPageNumber()}")
+        canvas.setFont("Roboto-Bold", 12)
+        x = page_w - RIGHT_M - 85
+        canvas.drawString(x, 10, "lowtouch")
+        w = canvas.stringWidth("lowtouch", "Roboto-Bold", 12)
+        canvas.setFillColor(PINK)
+        canvas.drawString(x + w, 10, ".ai")
+        canvas.restoreState()
+
+    def _light_page_bg(canvas, doc):
+        canvas.saveState()
+        # Dark navy footer bar
+        canvas.setFillColor(NAVY)
+        canvas.rect(0, 0, page_w, FOOTER_BAR_H, fill=True, stroke=False)
+        # Page number
+        canvas.setFont("Roboto", 9)
+        canvas.setFillColor(WHITE)
+        canvas.drawString(LEFT_M, 10, f"Page {canvas.getPageNumber()}")
+        # Logo
+        canvas.setFont("Roboto-Bold", 12)
+        x = page_w - RIGHT_M - 85
+        canvas.drawString(x, 10, "lowtouch")
+        w = canvas.stringWidth("lowtouch", "Roboto-Bold", 12)
+        canvas.setFillColor(PINK)
+        canvas.drawString(x + w, 10, ".ai")
+        canvas.restoreState()
+
+    # --- Styles ---
+    styles = getSampleStyleSheet()
+
+    s_cover_title = ParagraphStyle(
+        "CoverTitle", parent=styles["Heading1"],
+        fontName="Roboto-Bold", fontSize=32, leading=38,
+        alignment=TA_CENTER, textColor=PINK, spaceAfter=8,
+    )
+    s_cover_sub = ParagraphStyle(
+        "CoverSub", parent=styles["Normal"],
+        fontName="Roboto", fontSize=16, leading=22,
+        alignment=TA_CENTER, textColor=GRAY_DARK, spaceAfter=4,
+    )
+    s_cover_meta = ParagraphStyle(
+        "CoverMeta", parent=styles["Normal"],
+        fontName="Roboto", fontSize=12, leading=16,
+        alignment=TA_CENTER, textColor=GRAY_DARK, spaceAfter=4,
+    )
+    s_divider_title = ParagraphStyle(
+        "DividerTitle", parent=styles["Heading1"],
+        fontName="Roboto-Bold", fontSize=28, leading=34,
+        alignment=TA_CENTER, textColor=PINK, spaceAfter=8,
+    )
+    s_divider_sub = ParagraphStyle(
+        "DividerSub", parent=styles["Normal"],
+        fontName="Roboto", fontSize=14, leading=20,
+        alignment=TA_CENTER, textColor=GREEN, spaceAfter=4,
+    )
+    s_h2 = ParagraphStyle(
+        "LightH2", parent=styles["Heading2"],
+        fontName="Roboto-Bold", fontSize=20, leading=26,
+        textColor=NAVY_TEXT, spaceAfter=10, spaceBefore=0,
+    )
+    s_h3 = ParagraphStyle(
+        "LightH3", parent=styles["Heading3"],
+        fontName="Roboto-Bold", fontSize=15, leading=20,
+        textColor=NAVY_TEXT, spaceAfter=6, spaceBefore=8,
+    )
+    s_body = ParagraphStyle(
+        "LightBody", parent=styles["BodyText"],
+        fontName="Roboto", fontSize=12, leading=16,
+        textColor=BODY_TEXT, spaceAfter=4,
+    )
+    s_body_sm = ParagraphStyle(
+        "LightBodySm", parent=s_body, fontSize=10, leading=14, textColor=GRAY_LIGHT,
+    )
+    s_bold = ParagraphStyle(
+        "LightBold", parent=s_body, fontName="Roboto-Bold",
+    )
+    s_bold_sm = ParagraphStyle(
+        "LightBoldSm", parent=s_bold, fontSize=10, leading=14,
+    )
+    s_tag = ParagraphStyle(
+        "LightTag", parent=s_body, fontSize=10, leading=14, textColor=NAVY_TEXT,
+    )
+    s_stat_num = ParagraphStyle(
+        "StatNum", parent=styles["Normal"],
+        fontName="Roboto-Bold", fontSize=28, leading=32,
+        alignment=TA_CENTER, textColor=ACCENT, spaceAfter=2,
+    )
+    s_stat_label = ParagraphStyle(
+        "StatLabel", parent=styles["Normal"],
+        fontName="Roboto", fontSize=10, leading=14,
+        alignment=TA_CENTER, textColor=GRAY_LIGHT,
+    )
+    s_card_label = ParagraphStyle(
+        "CardLabel", parent=styles["Normal"],
+        fontName="Roboto-Bold", fontSize=10, leading=14,
+        textColor=ACCENT, spaceAfter=4,
+    )
+    s_tbl_header = ParagraphStyle(
+        "TblHeader", parent=styles["Normal"],
+        fontName="Roboto-Bold", fontSize=10, leading=14,
+        textColor=WHITE,
+    )
+    s_card_body = ParagraphStyle(
+        "CardBody", parent=s_body, fontSize=12, leading=17,
+    )
+    s_dark_body = ParagraphStyle(
+        "DarkBody", parent=s_body, textColor=WHITE,
+    )
+    s_dark_gray = ParagraphStyle(
+        "DarkGray", parent=s_body, textColor=GRAY_DARK, fontSize=10, alignment=TA_CENTER,
+    )
+
+    # --- Helper functions ---
+    def _p(text, style=None):
+        safe = saxutils.escape(str(text)).replace("\n", "<br/>")
+        return Paragraph(safe, style or s_body)
+
+    def _pm(markup, style=None):
+        """Paragraph with pre-formatted markup (no escaping)."""
+        return Paragraph(str(markup).replace("\n", "<br/>"), style or s_body)
+
+    def _heading_with_rule(text, style=None):
+        return [
+            _p(text, style or s_h2),
+            Table([[""]], colWidths=[CONTENT_W], rowHeights=[2],
+                  style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), NAVY_TEXT)])),
+            Spacer(1, 10),
+        ]
+
+    def _tbl_style_light(nrows):
+        cmds = [
+            ("BACKGROUND", (0, 0), (-1, 0), NAVY_TEXT),
+            ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
+            ("FONTNAME", (0, 0), (-1, 0), "Roboto-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 10),
+            ("FONTNAME", (0, 1), (-1, -1), "Roboto"),
+            ("FONTSIZE", (0, 1), (-1, -1), 10),
+            ("TEXTCOLOR", (0, 1), (-1, -1), BODY_TEXT),
+            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("LINEBELOW", (0, 0), (-1, 0), 1, ACCENT),
+            ("LINEBELOW", (0, 1), (-1, -2), 0.5, HAIRLINE),
+            ("LINEBELOW", (0, -1), (-1, -1), 0.5, HAIRLINE),
+        ]
+        for i in range(1, nrows + 1):
+            bg = LIGHT_CARD if i % 2 == 1 else WHITE
+            cmds.append(("BACKGROUND", (0, i), (-1, i), bg))
+        return TableStyle(cmds)
+
+    def _build_table_light(headers, rows, col_widths=None):
+        data = [[_p(h, s_tbl_header) for h in headers]]
+        for row in rows:
+            data.append([_p(c, s_body_sm) if not isinstance(c, Paragraph) else c for c in row])
+        tbl = Table(data, repeatRows=1, colWidths=col_widths)
+        tbl.setStyle(_tbl_style_light(len(rows)))
+        return tbl
+
+    def _stat_card(number, label, accent=None):
+        accent = accent or ACCENT
+        num_s = ParagraphStyle("_sn", parent=s_stat_num, textColor=accent)
+        card = Table(
+            [[_p(str(number), num_s)], [_p(label, s_stat_label)]],
+            colWidths=[CONTENT_W / 4 - 10], rowHeights=[38, 22],
+        )
+        card.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), LIGHT_CARD),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        return card
+
+    def _content_card(label, text, bg=None, label_color=None, border_color=None, width=None):
+        bg = bg or LIGHT_CARD
+        label_color = label_color or ACCENT
+        card_w = width if width is not None else (CONTENT_W - 20)
+        cl_s = ParagraphStyle("_cl", parent=s_card_label, textColor=label_color)
+        card_data = [[_p(label, cl_s)], [_p(str(text)[:800], s_card_body)]]
+        card = Table(card_data, colWidths=[card_w])
+        cmds = [
+            ("BACKGROUND", (0, 0), (-1, -1), bg),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("LEFTPADDING", (0, 0), (-1, -1), 12),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ]
+        if border_color:
+            cmds.append(("LINEBEFORE", (0, 0), (0, -1), 3, border_color))
+        card.setStyle(TableStyle(cmds))
+        return card
+
+    def _link(text, url, light=True):
+        safe_text = saxutils.escape(str(text))
+        safe_url = saxutils.escape(str(url))
+        clr = "#1B2A4A" if light else "#7FFF00"
+        return f'<a href="{safe_url}" color="{clr}">{safe_text}</a>'
+
+    def _truncate(text, max_len):
+        text = str(text)
+        return text[:max_len - 3] + "..." if len(text) > max_len else text
+
+    # === Prepare data ===
+    sp = lambda pts: Spacer(1, pts)
+    week_of = calendar.get("week_of", pendulum.now("Asia/Kolkata").format("D MMM, YYYY"))
+    gen_ts = pendulum.now("Asia/Kolkata").format("D MMM, YYYY h:mm A")
+    em_channels = emerging_channels or []
+    em_videos = emerging_videos or []
+    yt_ideas = youtube_ideas.get("ideas", [])
+    li_posts = linkedin_posts.get("posts", [])
+    car_list = carousels.get("carousels", [])
+    reel_list = reels.get("reels", [])
+    outlines = blog_outlines.get("outlines", [])
+    targets = engagement.get("targets", [])
+    schedule = calendar.get("schedule", [])
+    keywords = trends.get("keywords", [])
+    themes = trends.get("themes", [])
+    transcript_count = sum(1 for v in videos if v.get("transcript"))
+    em_transcript_count = sum(1 for v in em_videos if v.get("transcript"))
+
+    flowables = []
+
+
+    # =================================================================
+    # PAGE 1: COVER (DARK)
+    # =================================================================
+    flowables.append(Spacer(1, page_h * 0.25))
+    flowables.append(_p("PULSE WEEKLY CONTENT REPORT", s_cover_title))
+    flowables.append(sp(6))
+    flowables.append(_p(f"Week of {week_of}", s_cover_sub))
+    flowables.append(_p(f"Generated {gen_ts} IST", s_cover_meta))
+    if report_id:
+        flowables.append(_p(f"Report ID: {report_id}", s_cover_meta))
+    flowables.append(sp(16))
+    pink_rule = Table([[""]], colWidths=[200], rowHeights=[2],
+                      style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), PINK)]))
+    pink_rule.hAlign = "CENTER"
+    flowables.append(pink_rule)
+
+    # =================================================================
+    # PAGE 2: EXECUTIVE SUMMARY (LIGHT)
+    # =================================================================
+    flowables.append(NextPageTemplate("light"))
+    flowables.append(PageBreak())
+    flowables.extend(_heading_with_rule("Executive Summary"))
+    flowables.append(sp(6))
+
+    main_stats = [
+        _stat_card(len(channels) + len(em_channels), "Channels Tracked"),
+        _stat_card(len(videos) + len(em_videos), "Videos Analyzed"),
+        _stat_card(transcript_count + em_transcript_count, "Transcripts Processed"),
+        _stat_card(len(themes), "Themes Identified"),
+    ]
+    stat_row = Table([main_stats], colWidths=[CONTENT_W / 4] * 4)
+    stat_row.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    flowables.append(stat_row)
+    flowables.append(sp(12))
+
+    DARK_GREEN = colors.HexColor("#2E7D32")
+    em_stats = [
+        _stat_card(len(em_channels), "Emerging Channels", DARK_GREEN),
+        _stat_card(len(em_videos), "Emerging Videos", DARK_GREEN),
+        _stat_card(em_transcript_count, "Emerging Transcripts", DARK_GREEN),
+    ]
+    em_row = Table([em_stats], colWidths=[CONTENT_W / 3] * 3)
+    em_row.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    flowables.append(em_row)
+    flowables.append(sp(12))
+
+    if themes:
+        for t in themes[:3]:
+            if isinstance(t, dict):
+                name = t.get("name", "")
+                direction = t.get("trend_direction", "")
+                arrow = {"rising": "\u2191", "stable": "\u2192", "declining": "\u2193"}.get(direction, "")
+                flowables.append(_pm(
+                    f"<b>{saxutils.escape(arrow)} {saxutils.escape(name)}</b>: "
+                    f"{saxutils.escape(t.get('description', ''))}",
+                    s_body,
+                ))
+
+    # =================================================================
+    # PAGE 3: TOP 10 CHANNELS BY WEEKLY VIEWS (LIGHT)
+    # =================================================================
+    if channels:
+        # Build top-video lookup per channel
+        channel_top_video = {}
+        for v in videos:
+            ct = v.get("channel_title", "")
+            if ct not in channel_top_video or v.get("view_count", 0) > channel_top_video[ct].get("view_count", 0):
+                channel_top_video[ct] = v
+
+        top_channels = sorted(channels, key=lambda c: c.get("weekly_views", 0), reverse=True)[:10]
+        flowables.append(PageBreak())
+        flowables.extend(_heading_with_rule("Top 10 Channels by Weekly Views"))
+
+        ch_headers = ["#", "Channel", "Subscribers", "Weekly Views", "Top Video This Week", "Views"]
+        ch_rows = []
+        for i, c in enumerate(top_channels, 1):
+            ch_name = _truncate(c.get("title", ""), 25)
+            ch_id = c.get("channel_id", "")
+            ch_cell = Paragraph(
+                _link(ch_name, f"https://youtube.com/channel/{ch_id}") if ch_id else saxutils.escape(ch_name),
+                s_body_sm,
+            )
+            subs = c.get("subscriber_count", 0)
+            wv = c.get("weekly_views", 0)
+            tv = channel_top_video.get(c.get("title", ""))
+            if tv:
+                tv_title = _truncate(tv.get("title", ""), 35)
+                tv_id = tv.get("video_id", "")
+                tv_cell = Paragraph(
+                    _link(tv_title, f"https://youtube.com/watch?v={tv_id}") if tv_id else saxutils.escape(tv_title),
+                    s_body_sm,
+                )
+                tv_views = tv.get("view_count", 0)
+            else:
+                tv_cell = _p("-", s_body_sm)
+                tv_views = "-"
+
+            ch_rows.append([
+                _p(str(i), s_body_sm), ch_cell,
+                _p(f"{subs:,}" if isinstance(subs, (int, float)) else str(subs), s_body_sm),
+                _p(f"{wv:,}" if isinstance(wv, (int, float)) else str(wv), s_body_sm),
+                tv_cell,
+                _p(f"{tv_views:,}" if isinstance(tv_views, (int, float)) else str(tv_views), s_body_sm),
+            ])
+
+        tbl_data = [[_p(h, s_tbl_header) for h in ch_headers]] + ch_rows
+        cw = [CONTENT_W * w for w in [0.04, 0.22, 0.14, 0.14, 0.32, 0.11]]
+        tbl = Table(tbl_data, repeatRows=1, colWidths=cw)
+        tbl.setStyle(_tbl_style_light(len(ch_rows)))
+        flowables.append(tbl)
+
+    # =================================================================
+    # PAGES 4-5: TOP 10 VIDEOS (LIGHT, 5 per page)
+    # =================================================================
+    top_videos = sorted(videos, key=lambda v: v.get("view_count", 0), reverse=True)[:10]
+    if top_videos:
+        for page_idx in range(2):
+            page_vids = top_videos[page_idx * 5:(page_idx + 1) * 5]
+            if not page_vids:
+                break
+            flowables.append(PageBreak())
+            suffix = " (continued)" if page_idx > 0 else ""
+            flowables.extend(_heading_with_rule(f"Top Performing Videos{suffix}"))
+
+            vid_headers = ["#", "Video", "Channel", "Views", "Likes", "Comments", "Duration", "Age"]
+            vid_rows = []
+            for i, v in enumerate(page_vids, page_idx * 5 + 1):
+                vid_id = v.get("video_id", "")
+                vid_title = _truncate(v.get("title", "Untitled"), 45)
+                vid_cell = Paragraph(
+                    _link(vid_title, f"https://youtube.com/watch?v={vid_id}") if vid_id else saxutils.escape(vid_title),
+                    s_body_sm,
+                )
+                ch_id = v.get("channel_id", "")
+                ch_name = v.get("channel_title", "")
+                ch_cell = Paragraph(
+                    _link(ch_name, f"https://youtube.com/channel/{ch_id}") if ch_id else saxutils.escape(ch_name),
+                    s_body_sm,
+                )
+                views = v.get("view_count", 0)
+                likes = v.get("like_count", 0)
+                cmt = v.get("comment_count", 0)
+                vid_rows.append([
+                    _p(str(i), s_body_sm), vid_cell, ch_cell,
+                    _p(f"{views:,}" if isinstance(views, (int, float)) else str(views), s_body_sm),
+                    _p(f"{likes:,}" if isinstance(likes, (int, float)) else str(likes), s_body_sm),
+                    _p(f"{cmt:,}" if isinstance(cmt, (int, float)) else str(cmt), s_body_sm),
+                    _p(_fmt_duration(v.get("duration_seconds", 0)), s_body_sm),
+                    _p(_age(v.get("published_at", "")), s_body_sm),
+                ])
+
+            tbl_data = [[_p(h, s_tbl_header) for h in vid_headers]] + vid_rows
+            cw = [CONTENT_W * w for w in [0.04, 0.28, 0.15, 0.10, 0.08, 0.10, 0.12, 0.10]]
+            tbl = Table(tbl_data, repeatRows=1, colWidths=cw)
+            tbl.setStyle(_tbl_style_light(len(vid_rows)))
+            flowables.append(tbl)
+
+    # =================================================================
+    # PAGES 5-6: EMERGING CHANNELS (LIGHT, ~7 per page)
+    # =================================================================
+    if em_channels:
+        # Build top-video lookup per channel
+        em_top_video = {}
+        for v in em_videos:
+            ct = v.get("channel_title", "")
+            if ct not in em_top_video or v.get("view_count", 0) > em_top_video[ct].get("view_count", 0):
+                em_top_video[ct] = v
+
+        em_display = em_channels[:15]
+        per_page = 7
+        for page_idx in range(0, len(em_display), per_page):
+            page_chs = em_display[page_idx:page_idx + per_page]
+            if not page_chs:
+                break
+            flowables.append(PageBreak())
+            suffix = " (continued)" if page_idx > 0 else ""
+            flowables.extend(_heading_with_rule(f"Emerging Channels (5K-50K Subscribers){suffix}"))
+
+            em_headers = ["#", "Channel", "Subscribers", "Weekly Views", "Top Video", "Views"]
+            em_rows = []
+            for i, c in enumerate(page_chs, page_idx + 1):
+                ch_name = _truncate(c.get("title", ""), 25)
+                ch_id = c.get("channel_id", "")
+                ch_cell = Paragraph(
+                    _link(ch_name, f"https://youtube.com/channel/{ch_id}") if ch_id else saxutils.escape(ch_name),
+                    s_body_sm,
+                )
+                subs = c.get("subscriber_count", 0)
+                wv = c.get("weekly_views", 0)
+                tv = em_top_video.get(c.get("title", ""))
+                if tv:
+                    tv_title = _truncate(tv.get("title", ""), 35)
+                    tv_id = tv.get("video_id", "")
+                    tv_cell = Paragraph(
+                        _link(tv_title, f"https://youtube.com/watch?v={tv_id}") if tv_id else saxutils.escape(tv_title),
+                        s_body_sm,
+                    )
+                    tv_views = tv.get("view_count", 0)
+                else:
+                    tv_cell = _p("-", s_body_sm)
+                    tv_views = "-"
+
+                em_rows.append([
+                    _p(str(i), s_body_sm), ch_cell,
+                    _p(f"{subs:,}" if isinstance(subs, (int, float)) else str(subs), s_body_sm),
+                    _p(f"{wv:,}" if isinstance(wv, (int, float)) else str(wv), s_body_sm),
+                    tv_cell,
+                    _p(f"{tv_views:,}" if isinstance(tv_views, (int, float)) else str(tv_views), s_body_sm),
+                ])
+
+            tbl_data = [[_p(h, s_tbl_header) for h in em_headers]] + em_rows
+            cw = [CONTENT_W * w for w in [0.04, 0.22, 0.14, 0.14, 0.32, 0.11]]
+            tbl = Table(tbl_data, repeatRows=1, colWidths=cw)
+            tbl.setStyle(_tbl_style_light(len(em_rows)))
+            flowables.append(tbl)
+
+    # =================================================================
+    # TRENDING KEYWORDS (LIGHT)
+    # =================================================================
+    if keywords:
+        flowables.append(PageBreak())
+        flowables.extend(_heading_with_rule("Trending Keywords"))
+        flowables.append(sp(6))
+
+        kw_cells = []
+        for idx, k in enumerate(keywords[:20]):
+            if isinstance(k, dict):
+                text = (k.get("keyword") or k.get("name") or k.get("phrase")
+                        or k.get("term") or k.get("text")
+                        or next((v for v in k.values() if isinstance(v, str)), ""))
+                count = k.get("count") or k.get("frequency") or k.get("mentions") or ""
+                display = f"<b>{saxutils.escape(str(text))}</b> ({count})" if count else f"<b>{saxutils.escape(str(text))}</b>"
+            else:
+                display = f"<b>{saxutils.escape(str(k))}</b>"
+            kw_cells.append(Paragraph(display, s_body_sm))
+
+        while len(kw_cells) % 4 != 0:
+            kw_cells.append(_p("", s_body_sm))
+
+        kw_rows = [kw_cells[i:i + 4] for i in range(0, len(kw_cells), 4)]
+        kw_tbl = Table(kw_rows, colWidths=[CONTENT_W / 4] * 4)
+        kw_cmds = [
+            ("BACKGROUND", (0, 0), (-1, -1), LIGHT_CARD),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+            ("INNERGRID", (0, 0), (-1, -1), 1, WHITE),
+        ]
+        for idx in range(min(5, len(keywords))):
+            r, c = divmod(idx, 4)
+            kw_cmds.append(("LINEBEFORE", (c, r), (c, r), 3, ACCENT))
+        kw_tbl.setStyle(TableStyle(kw_cmds))
+        flowables.append(kw_tbl)
+
+    # =================================================================
+    # PAGE 6: THEME CLUSTERS (LIGHT)
+    # =================================================================
+    if themes:
+        flowables.append(PageBreak())
+        flowables.extend(_heading_with_rule("Theme Clusters"))
+        flowables.append(sp(6))
+
+        theme_headers = ["", "Theme", "Description"]
+        theme_rows = []
+        for t in themes:
+            if isinstance(t, dict):
+                direction = t.get("trend_direction", "")
+                arrow = {"rising": "\u2191", "stable": "\u2192", "declining": "\u2193"}.get(direction, "")
+                theme_rows.append([arrow, t.get("name", ""), t.get("description", "")])
+
+        if theme_rows:
+            tbl_data = [[_p(h, s_tbl_header) for h in theme_headers]]
+            for idx, row in enumerate(theme_rows):
+                tbl_data.append([_p(row[0], s_body_sm), _p(row[1], s_bold_sm), _p(row[2], s_body_sm)])
+
+            cw = [CONTENT_W * 0.05, CONTENT_W * 0.25, CONTENT_W * 0.70]
+            tbl = Table(tbl_data, colWidths=cw)
+            cmds = [
+                ("BACKGROUND", (0, 0), (-1, 0), NAVY_TEXT),
+                ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
+                ("FONTNAME", (0, 0), (-1, 0), "Roboto-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 10),
+                ("LINEBELOW", (0, 0), (-1, 0), 1, ACCENT),
+                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("LINEBELOW", (0, 1), (-1, -1), 0.5, HAIRLINE),
+            ]
+            for idx, t in enumerate(themes):
+                if isinstance(t, dict) and t.get("trend_direction") == "rising":
+                    cmds.append(("BACKGROUND", (0, idx + 1), (-1, idx + 1), colors.HexColor("#F0FFF0")))
+                else:
+                    bg = LIGHT_CARD if (idx + 1) % 2 == 1 else WHITE
+                    cmds.append(("BACKGROUND", (0, idx + 1), (-1, idx + 1), bg))
+            tbl.setStyle(TableStyle(cmds))
+            flowables.append(tbl)
+
+
+    # =================================================================
+    # PAGE 7: SECTION DIVIDER - CONTENT RECOMMENDATIONS (DARK)
+    # =================================================================
+    has_yt = bool(yt_ideas)
+    has_li = bool(li_posts)
+    has_car = bool(car_list)
+    has_reel = bool(reel_list)
+    has_blog = bool(outlines)
+    has_eng = bool(targets)
+
+    if has_yt or has_li or has_car:
+        parts = []
+        if has_yt:
+            parts.append("YouTube")
+        if has_li:
+            parts.append("LinkedIn")
+        if has_car:
+            parts.append("Carousels")
+        if has_reel:
+            parts.append("Instagram")
+        if has_blog:
+            parts.append("Blog")
+        flowables.append(NextPageTemplate("dark"))
+        flowables.append(PageBreak())
+        flowables.append(Spacer(1, page_h * 0.30))
+        flowables.append(_p("CONTENT RECOMMENDATIONS", s_divider_title))
+        flowables.append(sp(8))
+        flowables.append(_p(" | ".join(parts), s_divider_sub))
+        flowables.append(sp(12))
+        dr = Table([[""]], colWidths=[200], rowHeights=[2],
+                   style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), PINK)]))
+        dr.hAlign = "CENTER"
+        flowables.append(dr)
+        flowables.append(NextPageTemplate("light"))
+
+    # =================================================================
+    # PAGES 8-10: YOUTUBE IDEAS (LIGHT, 1 per page, two-column layout)
+    # =================================================================
+    LEFT_COL_W = CONTENT_W * 0.56
+    RIGHT_COL_W = CONTENT_W * 0.42
+    COL_GAP = CONTENT_W * 0.02  # absorbed by padding
+
+    s_outline = ParagraphStyle("OutlineBody", parent=s_body, fontSize=11, leading=15, spaceAfter=2)
+    s_outline_sm = ParagraphStyle("OutlineSm", parent=s_body_sm, fontSize=10, leading=14, spaceAfter=1)
+
+    for idx, idea in enumerate(yt_ideas):
+        flowables.append(PageBreak())
+        flowables.extend(_heading_with_rule(f"YouTube Idea {idx + 1}"))
+
+        badge = f"{idea.get('type', 'Video')} | {idea.get('target_length', '')} | Pillar: {idea.get('pillar', '')}"
+        flowables.append(_p(badge, s_body_sm))
+
+        title = idea.get("title", "Untitled")
+        title_row = Table(
+            [[CheckboxFlowable(f"yt_{idx}"), _p(f"  {_truncate(title, 80)}", s_bold)]],
+            colWidths=[20, CONTENT_W - 20],
+            style=TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]),
+        )
+        flowables.append(title_row)
+        flowables.append(sp(3))
+
+        # --- LEFT COLUMN: hook + outline ---
+        left_parts = []
+
+        hook = idea.get("hook_first_30_seconds", idea.get("hook", ""))
+        if hook:
+            hook_card = Table(
+                [[_p("FIRST 30 SECONDS", s_card_label)], [_p(_truncate(hook, 300), s_card_body)]],
+                colWidths=[LEFT_COL_W - 8],
+            )
+            hook_card.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), LIGHT_CARD),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ]))
+            left_parts.append(hook_card)
+            left_parts.append(sp(4))
+
+        outline = idea.get("outline", [])
+        if outline:
+            for si, seg in enumerate(outline[:6]):
+                if isinstance(seg, dict):
+                    seg_title = seg.get("segment_title", f"Segment {si + 1}")
+                    pts = seg.get("talking_points", [])
+                    pts_str = ", ".join(pts) if isinstance(pts, list) else str(pts)
+                    left_parts.append(_pm(f"<b>{si + 1}. {saxutils.escape(seg_title)}</b>", s_outline))
+                    if pts_str:
+                        left_parts.append(_p(f"    {saxutils.escape(_truncate(pts_str, 120))}", s_outline_sm))
+
+        # --- RIGHT COLUMN: thumbnail, SEO, inspired by ---
+        right_parts = []
+
+        thumb = idea.get("thumbnail_concept", "")
+        if thumb:
+            thumb_card = Table(
+                [[_p("THUMBNAIL CONCEPT", s_card_label)], [_p(_truncate(thumb, 200), s_card_body)]],
+                colWidths=[RIGHT_COL_W - 8],
+            )
+            thumb_card.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), LIGHT_CARD),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ]))
+            right_parts.append(thumb_card)
+            right_parts.append(sp(4))
+
+        seo_kw = idea.get("seo_keywords", [])
+        if seo_kw:
+            kw_card = Table(
+                [[_p("SEO KEYWORDS", s_card_label)], [_p(", ".join(seo_kw), s_card_body)]],
+                colWidths=[RIGHT_COL_W - 8],
+            )
+            kw_card.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), LIGHT_CARD),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ]))
+            right_parts.append(kw_card)
+            right_parts.append(sp(4))
+
+        inspired = idea.get("inspired_by", [])
+        if inspired:
+            for ref in inspired[:3]:
+                if isinstance(ref, dict):
+                    rt = ref.get("title", ref.get("video_title", ""))
+                    rv = ref.get("video_id", "")
+                    if rv and rt:
+                        right_parts.append(Paragraph(
+                            f'Inspired by: {_link(_truncate(rt, 45), f"https://youtube.com/watch?v={rv}")}', s_body_sm))
+                elif isinstance(ref, str):
+                    right_parts.append(_p(f"Inspired by: {_truncate(ref, 45)}", s_body_sm))
+
+        # Pad shorter column so table doesn't complain about empty cells
+        if not left_parts:
+            left_parts.append(_p("", s_body_sm))
+        if not right_parts:
+            right_parts.append(_p("", s_body_sm))
+
+        left_cell = Table([[item] for item in left_parts], colWidths=[LEFT_COL_W])
+        left_cell.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        right_cell = Table([[item] for item in right_parts], colWidths=[RIGHT_COL_W])
+        right_cell.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+
+        two_col = Table([[left_cell, right_cell]], colWidths=[LEFT_COL_W, RIGHT_COL_W])
+        two_col.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        flowables.append(two_col)
+
+    # =================================================================
+    # PAGES 11-13: LINKEDIN POSTS (LIGHT, 1 per page)
+    # =================================================================
+    for idx, post in enumerate(li_posts):
+        flowables.append(PageBreak())
+        flowables.extend(_heading_with_rule(f"LinkedIn Post {idx + 1}"))
+
+        badge = f"{post.get('type', 'Post')} | Slot: {post.get('posting_slot', '')} | Pillar: {post.get('pillar', '')}"
+        flowables.append(_p(badge, s_body_sm))
+        flowables.append(sp(4))
+
+        hook_preview = _truncate(post.get("hook", ""), 50)
+        flowables.append(Table(
+            [[CheckboxFlowable(f"li_{idx}"), _p(f"  Publish: {hook_preview}", s_bold)]],
+            colWidths=[20, CONTENT_W - 20],
+            style=TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]),
+        ))
+        flowables.append(sp(8))
+
+        hook = post.get("hook", "")
+        if hook:
+            flowables.append(_content_card("HOOK", hook))
+            flowables.append(sp(8))
+
+        body_text = post.get("body", "")
+        if body_text:
+            li_body_s = ParagraphStyle("_lib", parent=s_body, fontSize=11, leading=16)
+            for para in _truncate(body_text, 800).split("\n\n"):
+                if para.strip():
+                    flowables.append(_p(para.strip(), li_body_s))
+            flowables.append(sp(6))
+
+        if post.get("cta"):
+            flowables.append(_content_card("CALL TO ACTION", post["cta"],
+                                           bg=WHITE, border_color=ACCENT))
+            flowables.append(sp(6))
+
+        tags = post.get("hashtags", [])
+        if tags:
+            flowables.append(_p(" ".join(tags), s_tag))
+
+        inspired = post.get("inspired_by", [])
+        if inspired:
+            flowables.append(sp(4))
+            for ref in inspired[:3]:
+                if isinstance(ref, dict):
+                    rt = ref.get("title", ref.get("video_title", ""))
+                    rv = ref.get("video_id", "")
+                    if rv and rt:
+                        flowables.append(Paragraph(
+                            f'Inspired by: {_link(rt, f"https://youtube.com/watch?v={rv}")}', s_body_sm))
+
+    # =================================================================
+    # PAGES 14-15: LINKEDIN CAROUSELS (LIGHT, 1 per page)
+    # =================================================================
+    half_w = CONTENT_W * 0.48
+    for idx, car in enumerate(car_list):
+        flowables.append(PageBreak())
+        flowables.extend(_heading_with_rule(f"LinkedIn Carousel {idx + 1}"))
+
+        badge = f"{car.get('type', 'Carousel')} | Pillar: {car.get('pillar', '')}"
+        flowables.append(_p(badge, s_body_sm))
+        flowables.append(sp(4))
+
+        flowables.append(Table(
+            [[CheckboxFlowable(f"car_{idx}"),
+              _p(f"  Create: {_truncate(car.get('title_slide', ''), 60)}", s_bold)]],
+            colWidths=[20, CONTENT_W - 20],
+            style=TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]),
+        ))
+        flowables.append(sp(8))
+
+        title_slide = car.get("title_slide", "")
+        if title_slide:
+            flowables.append(_p(title_slide, s_h3))
+            flowables.append(sp(6))
+
+        slides = car.get("slides", [])
+        if slides:
+            slide_rows = []
+            for s in slides:
+                if isinstance(s, dict):
+                    slide_rows.append([
+                        str(s.get("slide_number", "")),
+                        s.get("heading", ""),
+                        _truncate(s.get("body_text", ""), 80),
+                    ])
+            if slide_rows:
+                cw = [CONTENT_W * 0.08, CONTENT_W * 0.30, CONTENT_W * 0.62]
+                flowables.append(_build_table_light(["Slide", "Heading", "Body Text"], slide_rows, cw))
+                flowables.append(sp(8))
+
+        vis_dir = car.get("visual_direction", "")
+        caption = car.get("caption", "")
+        if vis_dir and caption:
+            vc = _content_card("VISUAL DIRECTION", vis_dir, width=half_w)
+            cc = _content_card("CAPTION", caption, width=half_w)
+            pair = Table([[vc, cc]], colWidths=[CONTENT_W * 0.50, CONTENT_W * 0.50])
+            pair.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ]))
+            flowables.append(pair)
+        elif vis_dir:
+            flowables.append(_content_card("VISUAL DIRECTION", vis_dir))
+        elif caption:
+            flowables.append(_content_card("CAPTION", caption))
+
+
+    # =================================================================
+    # PAGE 16: SECTION DIVIDER - SHORT-FORM CONTENT (DARK)
+    # =================================================================
+    if has_reel:
+        flowables.append(NextPageTemplate("dark"))
+        flowables.append(PageBreak())
+        flowables.append(Spacer(1, page_h * 0.30))
+        flowables.append(_p("SHORT-FORM CONTENT", s_divider_title))
+        flowables.append(sp(8))
+        flowables.append(_p("Instagram Reels", s_divider_sub))
+        flowables.append(sp(12))
+        dr = Table([[""]], colWidths=[200], rowHeights=[2],
+                   style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), PINK)]))
+        dr.hAlign = "CENTER"
+        flowables.append(dr)
+        flowables.append(NextPageTemplate("light"))
+
+    # =================================================================
+    # PAGES 17-19: INSTAGRAM REELS (LIGHT, 1 per page)
+    # =================================================================
+    for idx, reel in enumerate(reel_list):
+        flowables.append(PageBreak())
+        flowables.extend(_heading_with_rule(f"Instagram Reel {idx + 1}"))
+
+        badge = (f"{reel.get('type', 'Reel')} | {reel.get('duration_seconds', '')}s"
+                 f" | Pillar: {reel.get('pillar', '')}")
+        flowables.append(_p(badge, s_body_sm))
+        flowables.append(sp(4))
+
+        flowables.append(Table(
+            [[CheckboxFlowable(f"reel_{idx}"), _p(f"  Shoot: Reel {idx + 1}", s_bold)]],
+            colWidths=[20, CONTENT_W - 20],
+            style=TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]),
+        ))
+        flowables.append(sp(8))
+
+        teaching = reel.get("teaching_point", "")
+        if teaching:
+            flowables.append(_content_card("VIEWER LEARNS", teaching, bg=LIGHT_PINK_BG))
+            flowables.append(sp(8))
+
+        hook = reel.get("hook", {})
+        body = reel.get("body", {})
+        close = reel.get("close", {})
+        hook_text = hook.get("spoken_line", "") if isinstance(hook, dict) else str(hook)
+        body_lines = body.get("spoken_lines", []) if isinstance(body, dict) else []
+        body_text = "\n".join(body_lines) if body_lines else (str(body) if not isinstance(body, dict) else "")
+        close_text = close.get("spoken_line", "") if isinstance(close, dict) else str(close)
+
+        col_w = CONTENT_W / 3 - 8
+        def _mini_card(label, text, border_clr):
+            cd = [[_p(label, s_card_label)], [_p(_truncate(str(text), 200), s_body_sm)]]
+            c = Table(cd, colWidths=[col_w])
+            c.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), LIGHT_CARD),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("LINEBEFORE", (0, 0), (0, -1), 3, border_clr),
+            ]))
+            return c
+
+        three_col = Table(
+            [[_mini_card("HOOK", hook_text, PINK),
+              _mini_card("BODY", body_text, GREEN),
+              _mini_card("CLOSE", close_text, NAVY_TEXT)]],
+            colWidths=[col_w + 6] * 3,
+        )
+        three_col.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
+        flowables.append(three_col)
+        flowables.append(sp(8))
+
+        caption = reel.get("caption_text", "")
+        if caption:
+            flowables.append(_p(f"Caption: {saxutils.escape(caption)}", s_body_sm))
+        reel_tags = reel.get("hashtags", [])
+        if reel_tags:
+            flowables.append(_p(" ".join(reel_tags), s_tag))
+
+    # =================================================================
+    # PAGE 20: SECTION DIVIDER - LONG-FORM CONTENT (DARK)
+    # =================================================================
+    if has_blog:
+        flowables.append(NextPageTemplate("dark"))
+        flowables.append(PageBreak())
+        flowables.append(Spacer(1, page_h * 0.30))
+        flowables.append(_p("LONG-FORM CONTENT", s_divider_title))
+        flowables.append(sp(8))
+        flowables.append(_p("Blog and Article Outlines", s_divider_sub))
+        flowables.append(sp(12))
+        dr = Table([[""]], colWidths=[200], rowHeights=[2],
+                   style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), PINK)]))
+        dr.hAlign = "CENTER"
+        flowables.append(dr)
+        flowables.append(NextPageTemplate("light"))
+
+    # =================================================================
+    # PAGES 21-22: BLOG OUTLINES (LIGHT, 1 per page)
+    # =================================================================
+    for idx, o in enumerate(outlines):
+        flowables.append(PageBreak())
+        flowables.extend(_heading_with_rule(f"Blog Outline {idx + 1}"))
+
+        meta = (f"Audience: {o.get('target_audience', '')} | Pillar: {o.get('pillar', '')}"
+                f" | Est. words: {o.get('estimated_word_count', '')}")
+        flowables.append(_p(meta, s_body_sm))
+        flowables.append(sp(4))
+
+        title = o.get("title", "Untitled")
+        flowables.append(Table(
+            [[CheckboxFlowable(f"blog_{idx}"), _p(f"  Write: {_truncate(title, 60)}", s_bold)]],
+            colWidths=[20, CONTENT_W - 20],
+            style=TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]),
+        ))
+        flowables.append(sp(8))
+
+        flowables.append(_p(title, s_h3))
+        flowables.append(sp(6))
+
+        thesis = o.get("thesis", "")
+        if thesis:
+            flowables.append(_content_card("THESIS", thesis))
+            flowables.append(sp(8))
+
+        sections = o.get("sections", [])
+        if sections:
+            for si, s in enumerate(sections):
+                if isinstance(s, dict):
+                    desc = _truncate(s.get("description", ""), 200)
+                    flowables.append(_pm(
+                        f"<b>{si + 1}. {saxutils.escape(s.get('heading', ''))}</b>: "
+                        f"{saxutils.escape(desc)}", s_body))
+            flowables.append(sp(6))
+
+        data_pts = o.get("key_data_points", [])
+        seo_kw = o.get("seo_keywords", [])
+        if data_pts or seo_kw:
+            dp_text = ", ".join(str(d) for d in data_pts[:5]) if data_pts else "N/A"
+            seo_text = ", ".join(seo_kw) if seo_kw else "N/A"
+            dc = _content_card("KEY DATA POINTS", dp_text, width=half_w)
+            sc = _content_card("SEO KEYWORDS", seo_text, width=half_w)
+            pair = Table([[dc, sc]], colWidths=[CONTENT_W * 0.50, CONTENT_W * 0.50])
+            pair.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ]))
+            flowables.append(pair)
+
+    # =================================================================
+    # PAGE 23: SECTION DIVIDER - ENGAGEMENT STRATEGY (DARK)
+    # =================================================================
+    if has_eng:
+        flowables.append(NextPageTemplate("dark"))
+        flowables.append(PageBreak())
+        flowables.append(Spacer(1, page_h * 0.30))
+        flowables.append(_p("ENGAGEMENT STRATEGY", s_divider_title))
+        flowables.append(sp(8))
+        flowables.append(_p("Strategic Commenting Targets", s_divider_sub))
+        flowables.append(sp(12))
+        dr = Table([[""]], colWidths=[200], rowHeights=[2],
+                   style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), PINK)]))
+        dr.hAlign = "CENTER"
+        flowables.append(dr)
+        flowables.append(NextPageTemplate("light"))
+
+    # =================================================================
+    # PAGES 24-25: ENGAGEMENT TARGETS (LIGHT, ~7 per page)
+    # =================================================================
+    if targets:
+        per_page = 7
+        for pg in range(0, len(targets), per_page):
+            page_tgts = targets[pg:pg + per_page]
+            flowables.append(PageBreak())
+            suffix = " (continued)" if pg > 0 else ""
+            flowables.extend(_heading_with_rule(f"Engagement Targets{suffix}"))
+
+            eng_headers = ["", "#", "Topic", "Author Type", "Priority", "Pillar", "Comment"]
+            eng_data = [[_p(h, s_tbl_header) for h in eng_headers]]
+            for i, t in enumerate(page_tgts, pg + 1):
+                eng_data.append([
+                    CheckboxFlowable(f"eng_{i}"),
+                    _p(str(i), s_body_sm),
+                    _p(t.get("topic", ""), s_body_sm),
+                    _p(t.get("author_type", ""), s_body_sm),
+                    _p(t.get("priority", ""), s_body_sm),
+                    _p(t.get("pillar_connection", ""), s_body_sm),
+                    _p(_truncate(t.get("suggested_comment", ""), 150), s_body_sm),
+                ])
+
+            cw = [20, CONTENT_W * 0.04, CONTENT_W * 0.15, CONTENT_W * 0.11,
+                  CONTENT_W * 0.08, CONTENT_W * 0.14, CONTENT_W * 0.42]
+            tbl = Table(eng_data, repeatRows=1, colWidths=cw)
+            cmds = list(_tbl_style_light(len(page_tgts)).getCommands())
+            for i, t in enumerate(page_tgts):
+                if isinstance(t, dict) and str(t.get("priority", "")).lower() == "high":
+                    cmds.append(("LINEBEFORE", (0, i + 1), (0, i + 1), 3, ACCENT))
+            tbl.setStyle(TableStyle(cmds))
+            flowables.append(tbl)
+
+    # =================================================================
+    # PAGE 26: FOUNDER'S NOTEBOOK (LIGHT)
+    # =================================================================
+    if founders and founders.get("prompt"):
+        flowables.append(PageBreak())
+        flowables.extend(_heading_with_rule("Founder's Notebook"))
+
+        series = founders.get("series_name", "Friday Field Notes")
+        slot = founders.get("posting_slot", "Friday 10:00 AM IST")
+        flowables.append(_p(f"{series} | {slot}", s_body_sm))
+        flowables.append(sp(8))
+
+        topic = founders.get("trending_topic", "")
+        if topic:
+            topic_s = ParagraphStyle("_ft", parent=s_bold, fontSize=16, leading=22)
+            td = [[_p("THIS WEEK'S TOPIC", s_card_label)], [_p(topic, topic_s)]]
+            tc = Table(td, colWidths=[CONTENT_W - 20])
+            tc.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), LIGHT_CARD),
+                ("TOPPADDING", (0, 0), (-1, -1), 10),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+                ("LEFTPADDING", (0, 0), (-1, -1), 14),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+            ]))
+            flowables.append(tc)
+            flowables.append(sp(10))
+
+        prompt_s = ParagraphStyle("_fp", parent=s_body, fontSize=13, leading=19)
+        flowables.append(_p(founders.get("prompt", ""), prompt_s))
+        flowables.append(sp(8))
+
+        angles = founders.get("example_angles", [])
+        if angles:
+            for ai, a in enumerate(angles, 1):
+                flowables.append(_p(f"{ai}. {a}", s_body))
+            flowables.append(sp(6))
+
+        pillar = founders.get("pillar_connection", founders.get("pillar", ""))
+        if pillar:
+            flowables.append(_content_card("PILLAR CONNECTION", pillar, border_color=ACCENT))
+
+    # =================================================================
+    # PAGE 27: SECTION DIVIDER - PUBLISHING CALENDAR (DARK)
+    # =================================================================
+    if schedule:
+        flowables.append(NextPageTemplate("dark"))
+        flowables.append(PageBreak())
+        flowables.append(Spacer(1, page_h * 0.30))
+        flowables.append(_p("PUBLISHING CALENDAR", s_divider_title))
+        flowables.append(sp(8))
+        flowables.append(_p(f"Week of {week_of}", s_divider_sub))
+        flowables.append(sp(12))
+        dr = Table([[""]], colWidths=[200], rowHeights=[2],
+                   style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), PINK)]))
+        dr.hAlign = "CENTER"
+        flowables.append(dr)
+        flowables.append(NextPageTemplate("light"))
+
+    # =================================================================
+    # PAGE 28: POSTING CALENDAR (LIGHT)
+    # =================================================================
+    if schedule:
+        flowables.append(PageBreak())
+        flowables.extend(_heading_with_rule("Posting Calendar"))
+
+        cal_headers = ["", "Day", "Time", "Channel", "Type", "Content"]
+        cal_data = [[_p(h, s_tbl_header) for h in cal_headers]]
+
+        slot_idx = 0
+        for day in schedule:
+            day_name = day.get("day", "")
+            slots = day.get("slots", [])
+            for si, slot in enumerate(slots):
+                cal_data.append([
+                    CheckboxFlowable(f"cal_{slot_idx}"),
+                    _p(day_name if si == 0 else "", s_bold_sm if si == 0 else s_body_sm),
+                    _p(slot.get("time", ""), s_body_sm),
+                    _p(slot.get("channel", ""), s_body_sm),
+                    _p(slot.get("type", ""), s_body_sm),
+                    _p(_truncate(slot.get("content", ""), 60), s_body_sm),
+                ])
+                slot_idx += 1
+
+        cw = [20, CONTENT_W * 0.10, CONTENT_W * 0.14, CONTENT_W * 0.12,
+              CONTENT_W * 0.16, CONTENT_W * 0.42]
+        tbl = Table(cal_data, repeatRows=1, colWidths=cw)
+        n_rows = len(cal_data) - 1
+        cmds = list(_tbl_style_light(n_rows).getCommands())
+        row_idx = 1
+        for day in schedule:
+            slots = day.get("slots", [])
+            if slots and row_idx > 1:
+                cmds.append(("LINEABOVE", (0, row_idx), (-1, row_idx), 1.5, ACCENT))
+            row_idx += len(slots)
+        tbl.setStyle(TableStyle(cmds))
+        flowables.append(tbl)
+
+
+    # =================================================================
+    # PAGES 29-30: MASTER CHECKLIST (LIGHT)
+    # =================================================================
+    checklist_items = []
+    for i, idea in enumerate(yt_ideas):
+        checklist_items.append(("YouTube", _truncate(idea.get("title", "Untitled"), 50),
+                                idea.get("pillar", ""), f"master_yt_{i}"))
+    for i, post in enumerate(li_posts):
+        checklist_items.append(("LinkedIn Post", _truncate(post.get("hook", "Post"), 50),
+                                post.get("pillar", ""), f"master_li_{i}"))
+    for i, car in enumerate(car_list):
+        checklist_items.append(("Carousel", _truncate(car.get("title_slide", "Carousel"), 50),
+                                car.get("pillar", ""), f"master_car_{i}"))
+    for i, reel in enumerate(reel_list):
+        checklist_items.append(("Reel", f"Reel {i + 1}: {_truncate(reel.get('type', ''), 40)}",
+                                reel.get("pillar", ""), f"master_reel_{i}"))
+    for i, o in enumerate(outlines):
+        checklist_items.append(("Blog", _truncate(o.get("title", "Untitled"), 50),
+                                o.get("pillar", ""), f"master_blog_{i}"))
+    for i, t in enumerate(targets):
+        checklist_items.append(("Engagement", _truncate(t.get("topic", "Target"), 50),
+                                t.get("pillar_connection", ""), f"master_eng_{i}"))
+
+    if checklist_items:
+        items_per_page = 15
+        for pg in range(0, len(checklist_items), items_per_page):
+            flowables.append(PageBreak())
+            suffix = " (continued)" if pg > 0 else ""
+            flowables.extend(_heading_with_rule(f"Action Item Checklist{suffix}"))
+
+            page_items = checklist_items[pg:pg + items_per_page]
+            cl_headers = ["", "Type", "Item", "Pillar", "Initials"]
+            cl_data = [[_p(h, s_tbl_header) for h in cl_headers]]
+
+            for type_label, desc, pillar, cb_name in page_items:
+                cl_data.append([
+                    CheckboxFlowable(cb_name),
+                    _p(type_label, s_bold_sm),
+                    _p(desc, s_body_sm),
+                    _p(pillar, s_body_sm),
+                    TextFieldFlowable(f"init_{cb_name}", width=40, height=14),
+                ])
+
+            cw = [20, CONTENT_W * 0.12, CONTENT_W * 0.45, CONTENT_W * 0.20, 50]
+            tbl = Table(cl_data, repeatRows=1, colWidths=cw)
+            tbl.setStyle(_tbl_style_light(len(page_items)))
+            flowables.append(tbl)
+
+            is_last = (pg + items_per_page >= len(checklist_items))
+            if is_last:
+                flowables.append(sp(20))
+                review = Table(
+                    [[_p("Reviewed by:", s_bold),
+                      TextFieldFlowable("reviewed_by", width=150, height=16),
+                      _p(""),
+                      _p("Date:", s_bold),
+                      TextFieldFlowable("review_date", width=100, height=16)]],
+                    colWidths=[80, 160, 30, 40, 110],
+                )
+                review.setStyle(TableStyle([
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                ]))
+                flowables.append(review)
+
+    # =================================================================
+    # LAST PAGE: BACK COVER (DARK)
+    # =================================================================
+    flowables.append(NextPageTemplate("dark"))
+    flowables.append(PageBreak())
+    flowables.append(Spacer(1, page_h * 0.30))
+
+    logo_s = ParagraphStyle("_logo", parent=s_cover_title, fontSize=36, textColor=WHITE)
+    flowables.append(Paragraph('lowtouch<font color="#E930CF">.ai</font>', logo_s))
+    flowables.append(sp(8))
+    flowables.append(_p("Private, No-Code Agentic AI Platform", s_divider_sub))
+    flowables.append(sp(16))
+    flowables.append(_p("Pulse Content Engine v0.3", s_dark_gray))
+    if report_id:
+        rid_s = ParagraphStyle("_rid", parent=s_dark_gray, fontSize=9, alignment=TA_CENTER)
+        flowables.append(_p(f"Report ID: {report_id}", rid_s))
+
+    # =================================================================
+    # BUILD PDF with BaseDocTemplate
+    # =================================================================
+    frame = Frame(LEFT_M, BOTTOM_M, CONTENT_W, page_h - TOP_M - BOTTOM_M, id="main")
+    dark_template = PageTemplate(id="dark", frames=[frame], onPage=_dark_page_bg)
+    light_template = PageTemplate(id="light", frames=[frame], onPage=_light_page_bg)
+
+    doc = BaseDocTemplate(
+        out_path, pagesize=(page_w, page_h),
+        leftMargin=LEFT_M, rightMargin=RIGHT_M,
+        topMargin=TOP_M, bottomMargin=BOTTOM_M,
+    )
+    doc.addPageTemplates([dark_template, light_template])
+    doc.build(flowables)
+    logger.info("PDF generated at %s", out_path)
+
+
+
 REDIS_REPORT_TTL = 86400 * 7  # 7 days
 
 
@@ -1991,7 +3330,7 @@ def assemble_report(**context):
     # Persist source data and report to Redis (7 day TTL)
     report_data = {
         "report_id": report_id,
-        "generated_at": pendulum.now("Asia/Kolkata").isoformat(),
+        "generated_at": pendulum.now("Asia/Kolkata").format("D MMM, YYYY h:mm A"),
         "week_of": calendar.get("week_of", ""),
         "source": {
             "channels": channels,
@@ -2041,6 +3380,228 @@ def assemble_report(**context):
 
 
 # ---------------------------------------------------------------------------
+# Task callables — Auto mode (PDF + Email)
+# ---------------------------------------------------------------------------
+
+
+def generate_report_pdf(**context):
+    """Generate a branded landscape PDF of the weekly report.
+
+    Skips in interactive mode (agent trigger).
+    """
+    set_request_id(context)
+    if _is_interactive(context):
+        lot.info("interactive mode (agent trigger), skipping pdf generation")
+        return "skipped"
+
+    lot.info("generating branded pdf report...")
+    ti = context["ti"]
+
+    channels = ti.xcom_pull(task_ids="discover_channels_and_videos") or []
+    videos = ti.xcom_pull(task_ids="discover_channels_and_videos", key="videos") or []
+    emerging_channels = ti.xcom_pull(task_ids="discover_emerging_channels") or []
+    emerging_videos = ti.xcom_pull(task_ids="discover_emerging_channels", key="emerging_videos") or []
+    trends_data = ti.xcom_pull(task_ids="analysis.analyze_trends") or {}
+    youtube_ideas = ti.xcom_pull(task_ids="content_drafting.draft_youtube_ideas") or {}
+    linkedin_posts = ti.xcom_pull(task_ids="content_drafting.draft_linkedin_posts") or {}
+    carousels_data = ti.xcom_pull(task_ids="content_drafting.draft_linkedin_carousels") or {}
+    reels_data = ti.xcom_pull(task_ids="content_drafting.draft_reel_scripts") or {}
+    blog_outlines = ti.xcom_pull(task_ids="content_drafting.draft_blog_outlines") or {}
+    engagement = ti.xcom_pull(task_ids="content_drafting.draft_engagement_targets") or {}
+    founders_data = ti.xcom_pull(task_ids="content_drafting.draft_founders_notebook") or {}
+    calendar_data = ti.xcom_pull(task_ids="generate_posting_calendar") or {}
+    report_id = ti.xcom_pull(task_ids="assemble_report", key="report_id")
+
+    timestamp = pendulum.now("Asia/Kolkata")
+    filename = f"pulse_weekly_report_{timestamp.format('YYYYMMDD_hhmm')}IST.pdf"
+    out_path = f"/tmp/{filename}"
+
+    _render_report_pdf(
+        out_path, channels, videos, trends_data, youtube_ideas,
+        linkedin_posts, carousels_data, reels_data, blog_outlines,
+        engagement, founders_data, calendar_data,
+        report_id=report_id,
+        emerging_channels=emerging_channels,
+        emerging_videos=emerging_videos,
+    )
+
+    ti.xcom_push(key="pdf_path", value=out_path)
+    ti.xcom_push(key="pdf_filename", value=filename)
+    lot.info(f"pdf generated: {filename}")
+    return out_path
+
+
+def _build_email_summary(report_id, calendar_data, channels, videos,
+                         emerging_channels, emerging_videos, trends_data,
+                         youtube_ideas, linkedin_posts, carousels_data,
+                         reels_data, blog_outlines, engagement):
+    """Build a lightweight HTML email body (cover letter for the PDF attachment)."""
+    week_of = calendar_data.get("week_of", pendulum.now("Asia/Kolkata").format("D MMM, YYYY"))
+    ch_count = len(channels)
+    vid_count = len(videos)
+    em_ch = len(emerging_channels or [])
+    em_vid = len(emerging_videos or [])
+    yt_count = len(youtube_ideas.get("ideas", []))
+    li_count = len(linkedin_posts.get("posts", []))
+    car_count = len(carousels_data.get("carousels", []))
+    reel_count = len(reels_data.get("reels", []))
+    blog_count = len(blog_outlines.get("outlines", []))
+    eng_count = len(engagement.get("targets", []))
+
+    # Top keywords
+    keywords = trends_data.get("keywords", [])
+    top_kw = []
+    for k in keywords[:5]:
+        if isinstance(k, dict):
+            text = (k.get("keyword") or k.get("name") or k.get("phrase")
+                    or k.get("term") or k.get("text") or "")
+            if text:
+                top_kw.append(text)
+        else:
+            top_kw.append(str(k))
+
+    kw_html = ", ".join(top_kw) if top_kw else "N/A"
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;
+line-height:1.5;color:#333333;background:#ffffff;">
+<div style="max-width:640px;margin:0 auto;padding:24px;">
+
+<h2 style="color:#1B2A4A;margin-bottom:4px;">Pulse Weekly Content Report</h2>
+<p style="color:#666;margin-top:0;">Week of {week_of} | Report ID: {report_id}</p>
+
+<p>Your weekly content intelligence report is attached as a branded PDF.</p>
+
+<h3 style="color:#1B2A4A;border-bottom:2px solid #E91E8C;padding-bottom:4px;">
+Data Snapshot</h3>
+<ul style="padding-left:20px;">
+<li>{ch_count} mainstream channels, {vid_count} videos scanned</li>
+<li>{em_ch} emerging channels, {em_vid} videos discovered</li>
+</ul>
+
+<h3 style="color:#1B2A4A;border-bottom:2px solid #E91E8C;padding-bottom:4px;">
+Top Trending Keywords</h3>
+<p style="color:#333;">{kw_html}</p>
+
+<h3 style="color:#1B2A4A;border-bottom:2px solid #E91E8C;padding-bottom:4px;">
+Content Drafted</h3>
+<table style="border-collapse:collapse;width:100%;font-size:13px;" cellpadding="6">
+<tr style="background:#F5F5F5;">
+  <td style="border:1px solid #ddd;"><strong>{yt_count}</strong> YouTube ideas</td>
+  <td style="border:1px solid #ddd;"><strong>{li_count}</strong> LinkedIn posts</td>
+  <td style="border:1px solid #ddd;"><strong>{car_count}</strong> carousels</td>
+</tr>
+<tr style="background:#ffffff;">
+  <td style="border:1px solid #ddd;"><strong>{reel_count}</strong> Reel scripts</td>
+  <td style="border:1px solid #ddd;"><strong>{blog_count}</strong> blog outlines</td>
+  <td style="border:1px solid #ddd;"><strong>{eng_count}</strong> engagement targets</td>
+</tr>
+</table>
+
+<p style="margin-top:20px;color:#666;font-size:12px;">
+Open the attached PDF for the full branded report.</p>
+
+<p style="margin-top:24px;color:#999;font-size:11px;">
+Generated by Pulse Content Engine v0.3 |
+<span style="color:#333;">lowtouch</span><span style="color:#E91E8C;">.ai</span>
+</p>
+
+</div></body></html>"""
+
+
+def send_report_email(**context):
+    """Send the weekly report email with PDF attachment.
+
+    Skips in interactive mode (agent trigger).
+    Fails hard if PULSE_NOTIFICATION_EMAIL is not set.
+    """
+    set_request_id(context)
+    if _is_interactive(context):
+        lot.info("interactive mode (agent trigger), skipping email delivery")
+        return "skipped"
+
+    lot.info("sending weekly report email...")
+    ti = context["ti"]
+
+    # Required -- DAG fails if not configured (tries PULSE_ prefix, then bare name)
+    recipient = _get_variable("NOTIFICATION_EMAIL")
+
+    pdf_path = ti.xcom_pull(task_ids="generate_report_pdf", key="pdf_path")
+    pdf_filename = ti.xcom_pull(task_ids="generate_report_pdf", key="pdf_filename")
+    report_id = ti.xcom_pull(task_ids="assemble_report", key="report_id") or "unknown"
+
+    # Pull report data for summary
+    channels = ti.xcom_pull(task_ids="discover_channels_and_videos") or []
+    videos = ti.xcom_pull(task_ids="discover_channels_and_videos", key="videos") or []
+    emerging_channels = ti.xcom_pull(task_ids="discover_emerging_channels") or []
+    emerging_videos = ti.xcom_pull(task_ids="discover_emerging_channels", key="emerging_videos") or []
+    trends_data = ti.xcom_pull(task_ids="analysis.analyze_trends") or {}
+    youtube_ideas = ti.xcom_pull(task_ids="content_drafting.draft_youtube_ideas") or {}
+    linkedin_posts = ti.xcom_pull(task_ids="content_drafting.draft_linkedin_posts") or {}
+    carousels_data = ti.xcom_pull(task_ids="content_drafting.draft_linkedin_carousels") or {}
+    reels_data = ti.xcom_pull(task_ids="content_drafting.draft_reel_scripts") or {}
+    blog_outlines = ti.xcom_pull(task_ids="content_drafting.draft_blog_outlines") or {}
+    engagement = ti.xcom_pull(task_ids="content_drafting.draft_engagement_targets") or {}
+    calendar_data = ti.xcom_pull(task_ids="generate_posting_calendar") or {}
+
+    # SMTP config (tries PULSE_ prefix, then bare name, then default)
+    smtp_host = _get_variable("SMTP_HOST", default="mail.authsmtp.com")
+    smtp_port = int(_get_variable("SMTP_PORT", default="2525"))
+    smtp_user = _get_variable("SMTP_USER")
+    smtp_password = _get_variable("SMTP_PASSWORD")
+    from_suffix = _get_variable(
+        "SMTP_FROM_SUFFIX",
+        default="via lowtouch.ai <webmaster@ecloudcontrol.com>",
+    )
+    sender = _get_variable("FROM_ADDRESS", default="webmaster@ecloudcontrol.com")
+
+    html_body = _build_email_summary(
+        report_id, calendar_data, channels, videos,
+        emerging_channels, emerging_videos, trends_data,
+        youtube_ideas, linkedin_posts, carousels_data,
+        reels_data, blog_outlines, engagement,
+    )
+
+    date_str = pendulum.now("Asia/Kolkata").format("D MMM, YYYY")
+    msg = MIMEMultipart("mixed")
+    # Split comma-separated recipients into To + Cc
+    all_recipients = [e.strip() for e in recipient.split(",") if e.strip()]
+
+    msg["Subject"] = f"Pulse Weekly Content Report | {date_str}"
+    msg["From"] = f"Pulse Content Engine v0.3 via lowtouch.ai <{sender}>"
+    msg["To"] = all_recipients[0]
+    if len(all_recipients) > 1:
+        msg["Cc"] = ", ".join(all_recipients[1:])
+
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(html_body, "html", "utf-8"))
+    msg.attach(alt)
+
+    if pdf_path and os.path.exists(pdf_path):
+        with open(pdf_path, "rb") as f:
+            part = MIMEApplication(f.read(), _subtype="pdf")
+            part.add_header("Content-Disposition", "attachment", filename=pdf_filename)
+            msg.attach(part)
+        lot.info(f"pdf attached: {pdf_filename}")
+    else:
+        logger.warning("PDF file not found at %s, sending email without attachment", pdf_path)
+        lot.info("warning: pdf not found, sending email without attachment")
+
+    server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+    try:
+        server.starttls()
+        server.login(smtp_user, smtp_password)
+        server.sendmail(sender, all_recipients, msg.as_string())
+    finally:
+        server.quit()
+
+    lot.info(f"email with pdf sent to {', '.join(all_recipients)}")
+    logger.info("Report email sent to %s", ", ".join(all_recipients))
+    return "sent"
+
+
+# ---------------------------------------------------------------------------
 # DAG definition
 # ---------------------------------------------------------------------------
 
@@ -2054,7 +3615,7 @@ except Exception:
 with DAG(
     "pulse_content_engine",
     default_args=default_args,
-    schedule=None,
+    schedule="30 0 * * 1",  # Monday 6:00 AM IST = Monday 0:30 UTC
     catchup=False,
     doc_md=_readme_content,
     tags=["pulse", "content", "weekly"],
@@ -2098,6 +3659,9 @@ with DAG(
 
     cal = PythonOperator(task_id="generate_posting_calendar", python_callable=generate_posting_calendar)
     assemble = PythonOperator(task_id="assemble_report", python_callable=assemble_report)
+    generate_pdf = PythonOperator(task_id="generate_report_pdf", python_callable=generate_report_pdf)
+    send_email_task = PythonOperator(task_id="send_report_email", python_callable=send_report_email)
 
     # discover and discover_emerging run in parallel, both feed into analysis
-    [discover, discover_emerging] >> analysis_tg >> drafting_tg >> cal >> assemble
+    # auto mode: assemble >> pdf >> email (skipped in interactive mode)
+    [discover, discover_emerging] >> analysis_tg >> drafting_tg >> cal >> assemble >> generate_pdf >> send_email_task
