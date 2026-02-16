@@ -75,6 +75,7 @@ GMAIL_CREDENTIALS = Variable.get("ltai.v3.hubspot.gmail.credentials")
 OLLAMA_HOST = Variable.get("ltai.v3.hubspot.ollama.host","http://agentomatic:8000")
 DEFAULT_OWNER_NAME = Variable.get("ltai.v3.hubspot.default.owner.name")
 DEFAULT_OWNER_ID = Variable.get("ltai.v3.hubspot.default.owner.id")
+HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name",default = 'hubspot-v6af_cl')
 TASK_THRESHOLD = 15
 def authenticate_gmail():
     try:
@@ -92,7 +93,7 @@ def authenticate_gmail():
 
 def get_ai_response(prompt, conversation_history=None, expect_json=False, stream=True):
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': f'{HUBSPOT_MODEL}'})
         messages = []
 
         # Strong system prompt when expecting JSON
@@ -121,7 +122,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
         messages.append({"role": "user", "content": prompt})
 
         # Call Ollama
-        response = client.chat(model='hubspot:v6af', messages=messages, stream=stream)
+        response = client.chat(model=f'{HUBSPOT_MODEL}', messages=messages, stream=stream)
 
         # Accumulate streamed response
         ai_content = ""
@@ -344,6 +345,11 @@ def analyze_user_response(ti, **context):
     # === Prompt (unchanged) ===
     from datetime import datetime
     prompt = f"""You are a HubSpot assistant analyzing an email conversation to understand what actions to take.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 CONVERSATION HISTORY:
 {chat_history}
 
@@ -576,7 +582,18 @@ CRITICAL REMINDERS:
         
     except Exception as e:
         logging.info (f"Failed to parse AI response: {e}")
-    
+        results = {
+            "status": "failure",
+            "user_intent": "error",
+            "entities_to_create": {},
+            "entities_to_update": {},
+            "selected_entities": {},
+            "reasoning": f"Failed to parse AI response: {e}",
+            "tasks_to_execute": ["compose_response_html", "collect_and_save_results", "send_final_email"],
+            "should_determine_owner": False,
+            "should_check_task_threshold": False,
+            "casual_comments_detected": False
+        }
     ti.xcom_push(key="analysis_results", value=results)
     logging.info(f"Analysis completed for thread {thread_id}")
     return results
@@ -608,7 +625,11 @@ def validate_and_clean_analysis(ti, **context):
     
     # Build validation prompt for AI agent
     prompt = f"""You are a validation assistant for HubSpot operations. Your job is to verify and clean the analysis results.
-
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 LATEST USER MESSAGE:
 {latest_user_message}
 
@@ -776,8 +797,12 @@ def determine_owner(ti, **context):
     entities_to_create = analysis_results.get("entities_to_create", {})
     tasks_to_create = entities_to_create.get("tasks", [])
 
-    prompt = f"""You are a HubSpot API assistant. Analyze this conversation to identify deal owner and task owners.
-
+    prompt = f"""You are a HubSpot API assistant. Analyze this conversation to identify deal owner and task owners. You do not have any capability to call any hubspot tools. you can only make the decision.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 LATEST USER MESSAGE:
 {latest_user_message}
 
@@ -910,7 +935,11 @@ def check_task_threshold(ti, **context):
         })
 
     prompt = f"""You are a HubSpot API assistant. Check task volume thresholds.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 LATEST USER MESSAGE:
 {latest_user_message}
 
@@ -957,6 +986,7 @@ If no dates found in email, check today's date as default for each owner.
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
+    warnings = []
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
     except Exception as e:
@@ -1032,8 +1062,12 @@ def create_contacts(ti, **context):
         contact.setdefault("contactOwnerId", contact_owner_id)
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create contacts in HubSpot.
-
+    base_prompt = f"""Your role is to only Create contacts in HubSpot by using the tool `create_contact`. You cannot call any other tools other than `create_contact`
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Contact Details to Create:
 {json.dumps(to_create_contacts, indent=2)}
 
@@ -1153,11 +1187,12 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         # On failure: mark ALL filtered contacts as failed
         failed_list = [
             {
-                "firstname": c.get("firstname", ""),
-                "lastname": c.get("lastname", ""),
-                "email": c.get("email", ""),
+                "firstname": contact.get("firstname", ""),
+                "lastname": contact.get("lastname", ""),
+                "email": contact.get("email", ""),
                 "error": error_msg
             }
+            for contact in to_create_contacts
         ]
 
         fallback = {
@@ -1212,15 +1247,18 @@ def create_companies(ti, **context):
         return []
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create companies in HubSpot.
-
+    base_prompt = f"""Your role is to only Create companies in HubSpot by using the tool `create_company`. You cannot call any other tools other than `create_company`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Company Details to Create:
 {json.dumps(to_create_companies, indent=2)}
 
 Steps:
 1. For each company, invoke create_company tool with the provided properties
 2. Return the created company ID and all properties
-
 Return ONLY this JSON structure (no other text):
 {{
     "status": "success|failure",
@@ -1397,8 +1435,12 @@ def create_deals(ti, **context):
         deal.setdefault("dealOwnerId", deal_owner_id)
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create deals in HubSpot.
-
+    base_prompt = f"""Your role is to only Create deals in HubSpot by using the tool `create_deal`. You cannot call any other tools other than `create_deal`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Deal Details to Create:
 {json.dumps(to_create_deals, indent=2)}
 
@@ -1590,8 +1632,12 @@ def create_meetings(ti, **context):
         return []
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create meetings in HubSpot.
-
+    base_prompt = f"""Your role is to only Create meetings in HubSpot by using the tool `create_meeting`. You cannot call any other tools other than `create_meeting`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Meeting Details to Create:
 {json.dumps(to_create_meetings, indent=2)}
 
@@ -1758,10 +1804,14 @@ def create_notes(ti, **context):
     current_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""You are a HubSpot Note Creation Assistant. Your role is to **create notes in HubSpot** using the provided note details.  
+    base_prompt = f"""You are a HubSpot Note Creation Assistant. Your role is to **create notes in HubSpot** using the provided note details by calling the `create_note` API. You cannot call any other tools other than `create_note`.  
 **You MUST invoke the `create_notes` API for every note in the input.**  
 No parsing of user intent — assume all input notes are confirmed and ready to create.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 ---
 Current UTC Time: {current_utc}
 NOTES TO CREATE:
@@ -1980,22 +2030,33 @@ def create_tasks(ti, **context):
             ti.xcom_push(key=k, value=v)
         return []
 
-    # === Assign correct task owners (critical logic preserved) ===
-    task_owners = owner_info.get("task_owners", [])
+    # === Assign correct task owners ===
+    # Primary: task_owners from search_results (passed via dag_run.conf from search DAG)
+    # Fallback: AI-derived owners from determine_owner task
+    search_results = ti.xcom_pull(key="search_results", task_ids="load_context_from_dag_run", default={})
+    search_task_owners = search_results.get("task_owners", [])
+    task_owners = search_task_owners or owner_info.get("task_owners", [])
+
+    logging.info(f"Using {'search DAG' if search_task_owners else 'AI-derived'} task owners ({len(task_owners)} entries)")
+
     for idx, task in enumerate(to_create_tasks, 1):
         matching_owner = next((o for o in task_owners if o.get("task_index") == idx), None)
         if matching_owner:
-            task["task_owner_id"] = matching_owner.get("task_owner_id", DEFAULT_OWNER_ID)
-            task["task_owner_name"] = matching_owner.get("task_owner_name", DEFAULT_OWNER_NAME)
+            task["task_owner_id"] = matching_owner.get("task_owner_id") or DEFAULT_OWNER_ID
+            task["task_owner_name"] = matching_owner.get("task_owner_name") or DEFAULT_OWNER_NAME
         else:
-            task.setdefault("task_owner_id", DEFAULT_OWNER_ID)
-            task.setdefault("task_owner_name", DEFAULT_OWNER_NAME)
+            task["task_owner_id"] = task.get("task_owner_id") or DEFAULT_OWNER_ID
+            task["task_owner_name"] = task.get("task_owner_name") or DEFAULT_OWNER_NAME
 
     logging.info(f"Tasks prepared with owners: {json.dumps(to_create_tasks, indent=2)}")
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create tasks in HubSpot.
-
+    base_prompt = f"""Your role is to only Create tasks in HubSpot by using the tool `create_task`. You cannot call any other tools other than `create_task`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Task Details to Create (with assigned owners):
 {json.dumps(to_create_tasks, indent=2)}
 
@@ -2195,8 +2256,12 @@ def update_contacts(ti, **context):
         return []
 
     # === Base Prompt ===
-    base_prompt = f"""Update contacts in HubSpot.
-
+    base_prompt = f"""Your role is to only Update contacts in HubSpot by using the tool `update_contact`. You cannot call any other tools other than `update_contact`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Contacts to Update:
 {json.dumps(to_update, indent=2)}
 
@@ -2354,8 +2419,12 @@ def update_companies(ti, **context):
         return []
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Update the following companies in HubSpot.
-
+    base_prompt = f"""Your role is to only Update the following companies in HubSpot using the tool `update_company`. You cannot call any other tools other than `update_company`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Companies to Update:
 {json.dumps(to_update, indent=2)}
 
@@ -2598,7 +2667,13 @@ If error, set status as failure, error message in reason and include individual 
         # This is the initial attempt - use initial prompt
         logging.info(f"INITIAL ATTEMPT - Using initial prompt (attempt {current_try_number}/{max_tries})")
         
-        prompt = f"""Update deals: {json.dumps(to_update, indent=2)}
+        prompt = f""" Your role is to only Update the following deals in HubSpot using the tool `update_deal`. You cannot call any other tools other than `update_deal`.
+Update deals: {json.dumps(to_update, indent=2)}
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
@@ -2740,8 +2815,12 @@ def update_meetings(ti, **context):
         return []
 
     # === Base Prompt ===
-    base_prompt = f"""Update the following meetings in HubSpot.
-
+    base_prompt = f"""Your role is to only Update the following meetings in HubSpot using the tool `update_meeting`. You cannot call any other tools other than `update_meeting`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Meetings to Update:
 {json.dumps(to_update, indent=2)}
 
@@ -2879,8 +2958,12 @@ def update_notes(ti, **context):
             ti.xcom_push(key=k, value=v)
         return []
 
-    base_prompt = f"""Update the following notes in HubSpot.
-
+    base_prompt = f"""Your role is to only Update the following notes in HubSpot using the tool `update_note`. You cannot call any other tools other than `update_note`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Notes to Update:
 {json.dumps(to_update, indent=2)}
 
@@ -3048,8 +3131,12 @@ def update_tasks(ti, **context):
             task_update["task_owner_name"] = original.get("task_owner_name", DEFAULT_OWNER_NAME)
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Update tasks in HubSpot.
-
+    base_prompt = f"""Your role is to only Update tasks in HubSpot using the tool `update_task`. You cannot call any other tools other than `update_task`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Tasks to update: {json.dumps(to_update, indent=2)}
 Current task details: {json.dumps(task_details_map, indent=2)}
 
@@ -3606,6 +3693,10 @@ def compose_response_html(ti, **context):
         return None
     owner_info = ti.xcom_pull(key="owner_info", task_ids="determine_owner", default={})
     task_threshold_info = ti.xcom_pull(key="task_threshold_info", task_ids="check_task_threshold", default={}) or {}
+
+    contact_creation_final_status = ti.xcom_pull(key="contact_creation_final_status")
+    contact_creation_failure_reason = ti.xcom_pull(key="contact_creation_failure_reason")
+    
     created_contacts = ti.xcom_pull(key="created_contacts", task_ids="create_contacts", default=[]) or []
     created_companies = ti.xcom_pull(key="created_companies", task_ids="create_companies", default=[]) or []
     created_deals = ti.xcom_pull(key="created_deals", task_ids="create_deals", default=[]) or []
@@ -4388,8 +4479,9 @@ def send_final_email(ti, **context):
     
     # Get latest email for headers
     latest_email = email_thread[-1]
-    sender_email = latest_email["headers"].get("From", "")
-    original_subject = latest_email['headers'].get('Subject', 'HubSpot Request')
+    headers = latest_email.get("headers", {})
+    sender_email = headers.get("From", "")
+    original_subject = headers.get('Subject', 'HubSpot Request')
     
     # Extract email address from "From" header (might be "Name <email@domain.com>")
     sender_match = re.search(r'<([^>]+)>', sender_email)
@@ -4399,8 +4491,8 @@ def send_final_email(ti, **context):
         primary_recipient = sender_email
     
     subject = f"Re: {original_subject}" if not original_subject.lower().startswith('re:') else original_subject
-    in_reply_to = latest_email["headers"].get("Message-ID", "")
-    references = latest_email["headers"].get("References", "")
+    in_reply_to = headers.get("Message-ID", "")
+    references = headers.get("References", "")
     
     # Build final CC list (excluding sender and bot)
     final_cc_recipients = []
@@ -4575,7 +4667,7 @@ with DAG(
     update_meetings_task = PythonOperator(
         task_id="update_meetings",
         python_callable=update_meetings,
-        retries=2 
+        retries=2
     )
 
     update_notes_task = PythonOperator(
@@ -4587,7 +4679,7 @@ with DAG(
     update_tasks_task = PythonOperator(
         task_id="update_tasks",
         python_callable=update_tasks,
-        retries=2     
+        retries=2
     )
 
     # New join task to handle branching and skip propagation
@@ -4609,7 +4701,7 @@ with DAG(
 
     compose_response_task = PythonOperator(
         task_id="compose_response_html",
-        python_callable=compose_response_html    
+        python_callable=compose_response_html
     )
 
     send_final_email_task = PythonOperator(
