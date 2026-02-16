@@ -1,10 +1,12 @@
 import base64
 from email import message_from_bytes
-from airflow.sdk import DAG, Variable, task
+from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator, BranchPythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.sdk import task
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from airflow.sdk import Variable
 from datetime import datetime, timedelta, timezone
 import os
 import json
@@ -5217,7 +5219,7 @@ except FileNotFoundError:
 with DAG(
     "hubspot_monitor_mailbox",
     default_args=default_args,
-    schedule_interval=timedelta(minutes=1),
+    schedule=timedelta(minutes=1),
     catchup=False,
     doc_md=readme_content,
     tags=["hubspot", "monitor", "email", "mailbox"],
@@ -5228,56 +5230,47 @@ with DAG(
     fetch_emails_task = PythonOperator(
         task_id="fetch_unread_emails",
         python_callable=fetch_unread_emails,
-        provide_context=True
     )
 
     branch_task = BranchPythonOperator(
         task_id="branch_task",
         python_callable=branch_function,
-        provide_context=True
     )
 
     trigger_meeting_minutes_task = PythonOperator(
         task_id="trigger_meeting_minutes",
         python_callable=trigger_meeting_minutes,
-        provide_context=True
     )
 
     trigger_continuation_task = PythonOperator(
         task_id="trigger_continuation_dag",
         python_callable=trigger_continuation_dag,
-        provide_context=True
     )
 
     decide_and_search = PythonOperator(
         task_id='analyze_and_search_with_tools',
         python_callable=analyze_and_search_with_tools,
-        provide_context=True # Important: allows **kwargs with ti
     )
     
     # === NEW TASK 2: Format response or trigger report ===
     generate_response = PythonOperator(
         task_id='generate_final_response_or_trigger_report',
         python_callable=generate_final_response_or_trigger_report,
-        provide_context=True,
     )
 
     trigger_report_task = PythonOperator(
         task_id="trigger_report_dag",
         python_callable=trigger_report_dag,
-        provide_context=True
     )
 
     trigger_task_completion_task = PythonOperator(
         task_id="trigger_task_completion",
         python_callable=trigger_task_completion_dag,
-        provide_context=True
     )
 
     no_email_found_task = PythonOperator(
         task_id="no_email_found_task",
         python_callable=no_email_found,
-        provide_context=True
     )
 
     fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, decide_and_search, trigger_report_task, trigger_task_completion_task, no_email_found_task]
