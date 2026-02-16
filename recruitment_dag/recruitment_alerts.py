@@ -117,9 +117,9 @@ def recruitment_failure_callback(context):
         <p style="color: #666; font-size: 12px;">This is an automated alert from the Recruitment Pipeline.</p>
         """
 
-        gmail_creds = Variable.get("ltai.v3.lowtouch.recruitment.email_credentials", default_var=None)
-        from_address = Variable.get("ltai.v3.lowtouch.recruitment.from_address", default_var=None)
-        recruiter_email = Variable.get("ltai.v3.lowtouch.recruitment.recruiter_email", default_var="athira@lowtouch.ai")
+        gmail_creds = Variable.get("ltai.v3.lowtouch.recruitment.email_credentials", default=None)
+        from_address = Variable.get("ltai.v3.lowtouch.recruitment.from_address", default=None)
+        recruiter_email = Variable.get("ltai.v3.lowtouch.recruitment.recruiter_email", default="athira@lowtouch.ai")
 
         if not gmail_creds or not from_address:
             logging.error("Cannot send failure alert: missing Gmail credentials or from_address")

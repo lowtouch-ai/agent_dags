@@ -372,10 +372,10 @@ def find_cv_in_thread(service, thread_id, attachment_dir):
         return None
 
 # Configuration constants
-GMAIL_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.email_credentials", default_var=None)
-RECRUITMENT_FROM_ADDRESS = Variable.get("ltai.v3.lowtouch.recruitment.from_address", default_var=None)
-GOOGLE_SHEETS_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.sheets_credentials", default_var=None)
-GOOGLE_SHEETS_ID = Variable.get("ltai.v3.lowtouch.recruitment.sheets_id", default_var=None)
+GMAIL_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.email_credentials", default=None)
+RECRUITMENT_FROM_ADDRESS = Variable.get("ltai.v3.lowtouch.recruitment.from_address", default=None)
+GOOGLE_SHEETS_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.sheets_credentials", default=None)
+GOOGLE_SHEETS_ID = Variable.get("ltai.v3.lowtouch.recruitment.sheets_id", default=None)
 LAST_PROCESSED_FILE = "/appz/cache/cv_last_processed_email.json"
 ATTACHMENT_DIR = "/appz/data/cv_attachments/"
 
@@ -516,7 +516,7 @@ def classify_email_type(**kwargs):
     # Google Sheets auth
     auth_type = Variable.get(
         "ltai.v3.lowtouch.recruitment.sheets_auth_type",
-        default_var="oauth"
+        default="oauth"
     )
     sheets_service = authenticate_google_sheets(
         GOOGLE_SHEETS_CREDENTIALS,
@@ -526,7 +526,7 @@ def classify_email_type(**kwargs):
 
     MODEL_NAME = Variable.get(
         "ltai.v3.lowtouch.recruitment.model_name",
-        default_var="recruitment:0.3af"
+        default="recruitment:0.3af"
     )
 
     classified_emails = []

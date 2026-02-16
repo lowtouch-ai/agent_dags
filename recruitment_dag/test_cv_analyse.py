@@ -19,14 +19,14 @@ from unittest.mock import patch, MagicMock, mock_open
 # level and several dependencies may not be installed in the test environment.
 # ---------------------------------------------------------------------------
 _mock_variable = MagicMock()
-_mock_variable.get = MagicMock(side_effect=lambda key, default_var=None: {
+_mock_variable.get = MagicMock(side_effect=lambda key, default=None: {
     "ltai.v3.lowtouch.recruitment.email_credentials": '{"token": "fake"}',
     "ltai.v3.lowtouch.recruitment.from_address": "recruit@test.com",
     "ltai.v3.lowtouch.recruitment.sheets_credentials": '{"creds": "fake"}',
     "ltai.v3.lowtouch.recruitment.sheets_id": "sheet123",
     "ltai.v3.lowtouch.recruitment.sheets_auth_type": "oauth",
     "ltai.v3.lowtouch.recruitment.model_name": "test-model",
-}.get(key, default_var))
+}.get(key, default))
 
 # Airflow modules (Airflow 3.0 import paths)
 sys.modules.setdefault('airflow', MagicMock())

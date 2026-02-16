@@ -35,10 +35,10 @@ from agent_dags.utils.sheets_utils import (
 from agent_dags.recruitment_dag.recruitment_alerts import recruitment_failure_callback
 
 # Configuration constants
-GMAIL_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.email_credentials", default_var=None)
-RECRUITMENT_FROM_ADDRESS = Variable.get("ltai.v3.lowtouch.recruitment.from_address", default_var=None)
-GOOGLE_SHEETS_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.sheets_credentials", default_var=None)
-GOOGLE_SHEETS_ID = Variable.get("ltai.v3.lowtouch.recruitment.sheets_id", default_var=None)
+GMAIL_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.email_credentials", default=None)
+RECRUITMENT_FROM_ADDRESS = Variable.get("ltai.v3.lowtouch.recruitment.from_address", default=None)
+GOOGLE_SHEETS_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.sheets_credentials", default=None)
+GOOGLE_SHEETS_ID = Variable.get("ltai.v3.lowtouch.recruitment.sheets_id", default=None)
 
 # Default DAG arguments
 default_args = {
@@ -196,7 +196,7 @@ def retrive_jd_from_web(**kwargs):
     }}
     ```
     """
-    MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
+    MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default="recruitment:0.3af")
     jd_response = get_ai_response(prompt, stream=False, model=MODEL_NAME)
     logging.info(f"Retrieved Job Description: {jd_response}...")
     jd_data = extract_json_from_text(jd_response)
@@ -228,7 +228,7 @@ def get_the_jd_for_cv_analysis(**kwargs):
 
     MODEL_NAME = Variable.get(
         "ltai.v3.lowtouch.recruitment.model_name",
-        default_var="recruitment:0.3af"
+        default="recruitment:0.3af"
     )
 
     # ------------------------------------------------------------------
@@ -434,7 +434,7 @@ def get_the_score_for_cv_analysis(**kwargs):
 ```
     """
     
-    MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
+    MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default="recruitment:0.3af")
     score_response = get_ai_response(prompt, stream=False, model=MODEL_NAME)
     logging.info(f"Match Score Response: {score_response}")
     
@@ -506,7 +506,7 @@ def save_to_google_sheets(**kwargs):
     # Get authentication type (default to oauth)
     auth_type = Variable.get(
         "ltai.v3.lowtouch.recruitment.sheets_auth_type", 
-        default_var="oauth"
+        default="oauth"
     )
     
     # Authenticate with Google Sheets
@@ -643,7 +643,7 @@ def send_response_email(**kwargs):
         logging.info("Candidate not selected, sending rejection email.")
     else:
         # Selection email
-        MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
+        MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default="recruitment:0.3af")
         agent_response_prompt = f"""Compose a personalized response email for a selected candidate after initial screening. Include the following structure in the email body:
 
 - Greeting: Use a professional greeting with the candidate's name if available from the CV data: {cv_data}. If no name is available, use 'Dear Candidate'.

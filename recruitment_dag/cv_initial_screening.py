@@ -25,10 +25,10 @@ from agent_dags.utils.agent_utils import get_ai_response, extract_json_from_text
 from agent_dags.recruitment_dag.recruitment_alerts import recruitment_failure_callback
 
 # Configuration constants
-GMAIL_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.email_credentials", default_var=None)
-RECRUITMENT_FROM_ADDRESS = Variable.get("ltai.v3.lowtouch.recruitment.from_address", default_var=None)
-RECRUITER_EMAIL = Variable.get("ltai.v3.lowtouch.recruitment.recruiter_email", default_var="athira@lowtouch.ai")
-RECRUITER_CC_EMAILS = Variable.get("ltai.v3.lowtouch.recruitment.recruiter_cc_emails", default_var=None)
+GMAIL_CREDENTIALS = Variable.get("ltai.v3.lowtouch.recruitment.email_credentials", default=None)
+RECRUITMENT_FROM_ADDRESS = Variable.get("ltai.v3.lowtouch.recruitment.from_address", default=None)
+RECRUITER_EMAIL = Variable.get("ltai.v3.lowtouch.recruitment.recruiter_email", default="athira@lowtouch.ai")
+RECRUITER_CC_EMAILS = Variable.get("ltai.v3.lowtouch.recruitment.recruiter_cc_emails", default=None)
 
 # Default DAG arguments
 default_args = {
@@ -216,7 +216,7 @@ def analyze_screening_responses(**kwargs):
 ```
 """
     
-    MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
+    MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default="recruitment:0.3af")
     analysis_response = get_ai_response(prompt, stream=False, model=MODEL_NAME)
     
     logging.info(f"Screening Analysis Response: {analysis_response}")
@@ -316,7 +316,7 @@ def send_screening_result_email(**kwargs):
 
     decision = (analysis_data.get('decision') or 'PENDING').upper()
     
-    MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
+    MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default="recruitment:0.3af")
     
     if decision == 'REJECT':
         # Rejection email
@@ -432,7 +432,7 @@ def notify_recruiter_for_interview(**kwargs):
     screening_score = analysis_data.get('overall_score', 'N/A')
 
     # --- AI call: Generate candidate summary and interview questions ---
-    MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default_var="recruitment:0.3af")
+    MODEL_NAME = Variable.get("ltai.v3.lowtouch.recruitment.model_name", default="recruitment:0.3af")
 
     interview_prep_prompt = f"""You are helping a recruiter prepare for a candidate interview.
 

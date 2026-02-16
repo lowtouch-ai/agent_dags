@@ -23,13 +23,13 @@ from unittest.mock import MagicMock, Mock, mock_open, patch
 # because cv_initial_screening.py calls Variable.get() at module level.
 # ---------------------------------------------------------------------------
 mock_variable = MagicMock()
-mock_variable.get = MagicMock(side_effect=lambda key, default_var=None: {
+mock_variable.get = MagicMock(side_effect=lambda key, default=None: {
     "ltai.v3.lowtouch.recruitment.email_credentials": '{"token": "fake"}',
     "ltai.v3.lowtouch.recruitment.from_address": "recruit@test.com",
     "ltai.v3.lowtouch.recruitment.recruiter_email": "athira@test.com",
     "ltai.v3.lowtouch.recruitment.recruiter_cc_emails": None,
     "ltai.v3.lowtouch.recruitment.model_name": "test-model",
-}.get(key, default_var))
+}.get(key, default))
 
 # Inject mocked airflow modules into sys.modules (Airflow 3.0 import paths)
 sys.modules.setdefault('airflow', MagicMock())
