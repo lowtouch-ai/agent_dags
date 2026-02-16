@@ -4,10 +4,6 @@ Shared fixtures for tracker_weekly_report.py test suite.
 The DAG has 13 Variable.get() calls at module scope (lines 26-44) that execute
 at import time. We patch airflow.models.Variable.get BEFORE importing the module
 via importlib.import_module().
-
-Adapted for Airflow 3.x imports:
-  - airflow.sdk (Variable, Param)
-  - airflow.providers.standard.operators.python (PythonOperator)
 """
 import copy
 import json
@@ -66,10 +62,10 @@ VARIABLE_STORE = {
 
 
 def _mock_variable_get(key, *args, **kwargs):
-    """Handle all Variable.get() calling conventions used in the DAG."""
+    """Handle all 4 Variable.get() calling conventions used in the DAG."""
     deserialize_json = kwargs.get("deserialize_json", False)
 
-    # Determine default value (supports both default_var= and default=)
+    # Determine default value
     if "default_var" in kwargs:
         default = kwargs["default_var"]
     elif "default" in kwargs:
@@ -113,26 +109,16 @@ def tracker_module():
     airflow_mod.models = MagicMock()
     airflow_mod.models.Variable = mock_variable_cls
 
+    operators_mod = MagicMock()
+    python_mod = MagicMock()
+    python_mod.PythonOperator = _make_python_operator_class()
+    operators_mod.python = python_mod
+
     # Provide a lightweight Param stand-in
     class FakeParam:
         def __init__(self, default=None, **kwargs):
             self.default = default
             self.kwargs = kwargs
-
-    # --- Airflow 3.x: airflow.sdk module (Variable, Param) ---
-    sdk_mod = MagicMock()
-    sdk_mod.Variable = mock_variable_cls
-    sdk_mod.Param = FakeParam
-
-    # --- Airflow 3.x: airflow.providers.standard.operators.python ---
-    providers_python_mod = MagicMock()
-    providers_python_mod.PythonOperator = _make_python_operator_class()
-
-    # --- Legacy: airflow.operators.python (kept for backwards compat) ---
-    operators_mod = MagicMock()
-    python_mod = MagicMock()
-    python_mod.PythonOperator = _make_python_operator_class()
-    operators_mod.python = python_mod
 
     param_mod = MagicMock()
     param_mod.Param = FakeParam
@@ -144,15 +130,6 @@ def tracker_module():
     sys.modules.setdefault("airflow.models.param", param_mod)
     sys.modules.setdefault("airflow.operators", operators_mod)
     sys.modules.setdefault("airflow.operators.python", python_mod)
-
-    # Airflow 3.x SDK module
-    sys.modules.setdefault("airflow.sdk", sdk_mod)
-
-    # Airflow 3.x providers path
-    sys.modules.setdefault("airflow.providers", MagicMock())
-    sys.modules.setdefault("airflow.providers.standard", MagicMock())
-    sys.modules.setdefault("airflow.providers.standard.operators", MagicMock())
-    sys.modules.setdefault("airflow.providers.standard.operators.python", providers_python_mod)
 
     # Stub google and ollama (not needed for unit tests)
     for mod_name in [
@@ -179,7 +156,6 @@ def _make_dag_class():
             self.default_args = kwargs.get("default_args", {})
             self.description = kwargs.get("description", "")
             self.schedule_interval = kwargs.get("schedule_interval")
-            self.schedule = kwargs.get("schedule")
             self.catchup = kwargs.get("catchup", True)
             self.tags = kwargs.get("tags", [])
             self._tasks = {}
@@ -447,7 +423,7 @@ class MockDagRun:
 
 @pytest.fixture
 def airflow_context():
-    """Factory that returns a mock Airflow context dict with pendulum logical_date.
+    """Factory that returns a mock Airflow context dict with pendulum execution_date.
 
     Pass ``conf={"week_start": "...", "week_end": "..."}`` to simulate a manual
     trigger with custom date range via dag_run.conf.
