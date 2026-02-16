@@ -31,6 +31,8 @@ GMAIL_CREDENTIALS = Variable.get("ltai.api.test.gmail_credentials", default_var=
 MODEL_NAME = Variable.get("ltai.api.test.model.name", default_var="APITestAgent:5.0")
 LAST_PROCESSED_EMAIL_FILE = "/appz/cache/api_testing_last_processed_email.json"
 ATTACHMENT_DIR = "/appz/data/attachments/"
+# JSON attachments larger than this (bytes) route to the large-payload DAG
+LARGE_PAYLOAD_THRESHOLD = int(Variable.get("ltai.api.test.large_payload_threshold", default_var=str(500 * 1024)))  # 500 KB
 
 def authenticate_gmail():
     """Authenticate Gmail API and verify the correct email account is used."""
@@ -180,6 +182,7 @@ def fetch_unread_emails(**kwargs):
 
         json_attachments = []
         pdf_attachments = []
+        proto_attachments = []
         config_attachment = None
 
         if "parts" in msg_data["payload"]:
@@ -190,9 +193,10 @@ def fetch_unread_emails(**kwargs):
                 is_json = filename.lower().endswith(".json")
                 is_pdf = filename.lower().endswith(".pdf")
                 is_yaml = filename.lower().endswith((".yaml", ".yml"))
-                
+                is_proto = filename.lower().endswith(".proto")
+
                 # Skip if not a supported file type
-                if not (is_json or is_pdf or is_yaml):
+                if not (is_json or is_pdf or is_yaml or is_proto):
                     continue
 
                 if not part.get("body", {}).get("attachmentId"):
@@ -268,11 +272,28 @@ def fetch_unread_emails(**kwargs):
                         "metadata": pdf_content.get("metadata", {})
                     })
 
+                # Handle .proto files (gRPC service definitions)
+                elif is_proto:
+                    safe_filename = f"{msg['id']}_{filename}"
+                    attachment_path = os.path.join(ATTACHMENT_DIR, safe_filename)
+
+                    with open(attachment_path, "wb") as f:
+                        f.write(file_data)
+
+                    logging.info(f"Saved .proto attachment: {filename}")
+
+                    proto_attachments.append({
+                        "filename": filename,
+                        "path": attachment_path,
+                        "mime_type": part.get("mimeType", "application/x-protobuf"),
+                        "size": len(file_data),
+                    })
+
         # Extract full email body for AI classification
         email_body = _extract_email_body(msg_data["payload"])
 
         # Process emails that have attachments OR non-trivial body content
-        has_attachments = json_attachments or pdf_attachments
+        has_attachments = json_attachments or pdf_attachments or proto_attachments
         has_body = len(email_body.strip()) > 10
         if has_attachments or has_body:
             email_object = {
@@ -283,6 +304,7 @@ def fetch_unread_emails(**kwargs):
                 "timestamp": timestamp,
                 "json_attachments": json_attachments,
                 "pdf_attachments": pdf_attachments,
+                "proto_attachments": proto_attachments,
                 "config": config_attachment,
                 "has_pdf": len(pdf_attachments) > 0
             }
@@ -293,6 +315,7 @@ def fetch_unread_emails(**kwargs):
             status_parts = [
                 f"{len(json_attachments)} JSON file(s)",
                 f"{len(pdf_attachments)} PDF file(s)" if pdf_attachments else "no PDFs",
+                f"{len(proto_attachments)} .proto file(s)" if proto_attachments else "no .proto files",
                 "with config" if config_attachment else "without config",
                 "with body" if has_body else "no body"
             ]
@@ -333,7 +356,16 @@ def classify_and_route(**kwargs):
         '- "general_inquiry": The sender is asking a general question (what can you do, help, '
         "status, how does this work, etc.) that does not require running the test pipeline.\n\n"
         "When in doubt between scenario_testing and api_testing, prefer api_testing.\n\n"
-        'Return ONLY strict JSON: {"intent": "scenario_testing" or "api_testing" or "postman_export" or "general_inquiry", "reason": "..."}'
+        "ALSO determine the API protocol:\n"
+        '- "rest": Standard REST / HTTP APIs (GET, POST, PUT, PATCH endpoints, JSON over HTTP). '
+        "This is the default when unclear.\n"
+        '- "grpc": gRPC APIs. Clues: the sender mentions gRPC, protobuf, proto files, '
+        "service/method names (e.g. MyService/GetUser), .proto attachments, "
+        "grpc-web, streaming RPC, protocol buffers, channels, stubs, or the Postman collection "
+        "uses gRPC protocol settings.\n\n"
+        "Return ONLY strict JSON: "
+        '{"intent": "scenario_testing" or "api_testing" or "postman_export" or "general_inquiry", '
+        '"api_protocol": "rest" or "grpc", "reason": "..."}'
     )
 
     emails_to_test = []
@@ -344,7 +376,8 @@ def classify_and_route(**kwargs):
         subject = email["headers"].get("Subject", "")
         body_preview = (email.get("content") or "")[:2000]
         attachment_names = [a["filename"] for a in email.get("json_attachments", [])] + \
-                           [a["filename"] for a in email.get("pdf_attachments", [])]
+                           [a["filename"] for a in email.get("pdf_attachments", [])] + \
+                           [a["filename"] for a in email.get("proto_attachments", [])]
 
         user_prompt = (
             f"Subject: {subject}\n"
@@ -361,22 +394,27 @@ def classify_and_route(**kwargs):
             )
             classification = extract_json_from_text(ai_response)
             intent = (classification or {}).get("intent", "general_inquiry")
+            api_protocol = (classification or {}).get("api_protocol", "rest")
             reason = (classification or {}).get("reason", "")
             logging.info(
-                f"Email {email['id']} classified as '{intent}': {reason}"
+                f"Email {email['id']} classified as '{intent}' "
+                f"(protocol={api_protocol}): {reason}"
             )
         except Exception as e:
             logging.error(f"AI classification failed for email {email['id']}: {e}")
             # Fallback: if there are any attachments (JSON or PDF), assume api_testing
             has_test_attachments = email.get("json_attachments") or email.get("pdf_attachments")
             intent = "api_testing" if has_test_attachments else "general_inquiry"
+            api_protocol = "rest"
             logging.info(f"Fallback classification for email {email['id']}: {intent}")
 
         if intent == "scenario_testing":
             email["testing_type"] = "scenario"
+            email["api_protocol"] = api_protocol
             emails_to_test.append(email)
         elif intent == "api_testing":
             email["testing_type"] = "api_only"
+            email["api_protocol"] = api_protocol
             emails_to_test.append(email)
         elif intent == "postman_export":
             emails_to_export.append(email)
@@ -406,8 +444,24 @@ def classify_and_route(**kwargs):
     )
     return branches
 
+def _has_large_json_attachment(email: dict) -> bool:
+    """Return True if any JSON attachment exceeds LARGE_PAYLOAD_THRESHOLD."""
+    for att in email.get("json_attachments", []):
+        if att.get("size", 0) > LARGE_PAYLOAD_THRESHOLD:
+            logging.info(
+                f"Large JSON detected: {att.get('filename')} "
+                f"({att['size']:,} bytes > {LARGE_PAYLOAD_THRESHOLD:,} threshold)"
+            )
+            return True
+    return False
+
+
 def trigger_response_tasks(**kwargs):
-    """Trigger the test case runner DAG for each email classified as api_testing."""
+    """Trigger the appropriate test runner DAG for each email classified as api_testing.
+
+    Emails with JSON attachments exceeding LARGE_PAYLOAD_THRESHOLD are routed
+    to api_test_executor_large_payload; all others go to api_test_executor_scenario_based.
+    """
     ti = kwargs['ti']
     emails = ti.xcom_pull(task_ids="classify_and_route", key="emails_to_test")
 
@@ -416,30 +470,37 @@ def trigger_response_tasks(**kwargs):
         return
 
     for email in emails:
-        task_id = f"trigger_test_runner_{email['id'].replace('-','_')}"
-        
-        # Prepare configuration for the test runner
         conf_data = {
             "email_id": email['id'],
             "thread_id": email['threadId'],
             "json_files": email['json_attachments'],
             "pdf_files": email['pdf_attachments'],
+            "proto_files": email.get('proto_attachments', []),
             "config_file": email.get('config'),
             "has_pdf": email.get('has_pdf', False),
             "email_headers": email['headers'],
             "email_content": email['content'],
-            "testing_type": email.get('testing_type', 'api_only')
+            "testing_type": email.get('testing_type', 'api_only'),
+            "api_protocol": email.get('api_protocol', 'rest'),
         }
-        
+
+        if _has_large_json_attachment(email):
+            target_dag = "api_test_executor_large_payload"
+        else:
+            target_dag = "api_test_executor_scenario_based"
+
+        task_id = f"trigger_{target_dag}_{email['id'].replace('-','_')}"
+
         logging.info(
-            f"Triggering api_test_case_eapi_test_executor_scenario_based executor for email {email['id']} with "
-            f"{len(email['json_attachments'])} JSON file(s) and "
-            f"{len(email['pdf_attachments'])} PDF file(s)"
+            f"Triggering {target_dag} for email {email['id']} with "
+            f"{len(email['json_attachments'])} JSON file(s), "
+            f"{len(email['pdf_attachments'])} PDF file(s), and "
+            f"{len(email.get('proto_attachments', []))} .proto file(s)"
         )
 
         TriggerDagRunOperator(
             task_id=task_id,
-            trigger_dag_id="api_test_executor_scenario_based",
+            trigger_dag_id=target_dag,
             conf=conf_data,
             wait_for_completion=False,
         ).execute(context=kwargs)
