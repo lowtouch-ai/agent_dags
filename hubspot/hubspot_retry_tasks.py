@@ -1,8 +1,7 @@
-from airflow import DAG
-from airflow.decorators import task
-from airflow.models import DagRun, TaskInstance, XCom, Variable
+from airflow.sdk import DAG, Variable, task
+from airflow.models import DagRun, TaskInstance, XCom
 from airflow.utils.state import State
-from airflow.api.common.trigger_dag import trigger_dag
+from airflow.utils.types import DagRunType
 from airflow import settings
 
 from datetime import datetime, timedelta
@@ -40,7 +39,7 @@ def check_and_retry_failed_tasks(**context):
         ]
         
         # Get shared retry tracker
-        retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+        retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
         
         logger.info("="*60)
         logger.info("RETRY TRACKER STATUS")
@@ -75,7 +74,7 @@ def check_and_retry_failed_tasks(**context):
                     DagRun.dag_id == target_dag_id,
                     DagRun.state == State.FAILED
                 )
-                .order_by(DagRun.execution_date.desc())
+                .order_by(DagRun.logical_date.desc())
                 .limit(50)
                 .all()
             )
@@ -105,7 +104,7 @@ def check_and_retry_failed_tasks(**context):
                 logger.info(f"\nProcessing run: {run_id}")
                 logger.info(f"  Tracker key: {tracker_key}")
                 logger.info(f"  Run state: {dag_run.state}")
-                logger.info(f"  Execution date: {dag_run.execution_date}")
+                logger.info(f"  Execution date: {dag_run.logical_date}")
                 
                 entry = retry_tracker.get(tracker_key)
                 
@@ -126,7 +125,7 @@ def check_and_retry_failed_tasks(**context):
                 tracked_count += 1
                 
                 # NEW: Check if max retries reached
-                if entry.get("max_retries_reached", False) or entry.get("retry_count", 0) >= 2:
+                if entry.get("max_retries_reached", False) or entry.get("retry_count", 0) >= 3:
                     logger.warning(f"  ⚠️ MAX RETRIES EXCEEDED - No more retry attempts")
                     max_retries_count += 1
                     
@@ -167,7 +166,7 @@ def check_and_retry_failed_tasks(**context):
                         DagRun.dag_id == target_dag_id,
                         DagRun.run_id.like(f"retry_{run_id}%")
                     )
-                    .order_by(DagRun.execution_date.desc())
+                    .order_by(DagRun.logical_date.desc())
                     .all()
                 )
 
@@ -195,8 +194,8 @@ def check_and_retry_failed_tasks(**context):
                 current_retry_count = entry.get("retry_count", 0)
                 next_retry_count = current_retry_count + 1
                 
-                if next_retry_count > 2:
-                    logger.warning(f"  ❌ Cannot retry - would exceed max attempts (current: {current_retry_count}, max: 2)")
+                if next_retry_count > 3:
+                    logger.warning(f"  ❌ Cannot retry - would exceed max attempts (current: {current_retry_count}, max: 3)")
                     entry["max_retries_reached"] = True
                     entry["status"] = "max_retries_exceeded"
                     retry_tracker[tracker_key] = entry
@@ -238,13 +237,18 @@ def check_and_retry_failed_tasks(**context):
                 retry_run_id = f"retry_{run_id}_{timestamp}"
 
                 try:
-                    trigger_dag(
+                    dag_run_obj = DagRun(
                         dag_id=target_dag_id,
                         run_id=retry_run_id,
                         conf=retry_conf,
-                        execution_date=datetime.now(pytz.utc)
+                        logical_date=datetime.now(pytz.utc),
+                        run_type=DagRunType.MANUAL,
+                        state=State.QUEUED,
+                        external_trigger=True,
                     )
-                    logger.info(f"  ✓ TRIGGERED RETRY {next_retry_count}/2: {retry_run_id}")
+                    session.add(dag_run_obj)
+                    session.commit()
+                    logger.info(f"  ✓ TRIGGERED RETRY {next_retry_count}/3: {retry_run_id}")
                     retry_count += 1
                     retry_summary["total_retries_triggered"] += 1
 
@@ -317,7 +321,7 @@ def cleanup_successful_retries(**context):
                     DagRun.dag_id == dag_id,
                     DagRun.run_id.like('retry_%'),
                     DagRun.state == State.SUCCESS,
-                    DagRun.execution_date >= lookback_time
+                    DagRun.logical_date >= lookback_time
                 )
                 .all()
             )
@@ -369,7 +373,7 @@ def cleanup_successful_retries(**context):
                                 XCom.dag_id == original_dag_id,
                                 XCom.key == "fallback_sent_threads"
                             )
-                            .order_by(desc(DagRun.execution_date))
+                            .order_by(desc(DagRun.logical_date))
                             .limit(1)
                             .first()
                         )
@@ -410,7 +414,7 @@ def log_retry_statistics(**context):
         logger.warning("No retry results available")
         return
     
-    tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     stats = {
         "timestamp": datetime.now(pytz.timezone("Asia/Kolkata")).isoformat(),

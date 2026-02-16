@@ -2,9 +2,9 @@ import logging
 import json
 from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
-from airflow import DAG
-from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.empty import EmptyOperator
+from airflow.sdk import DAG
+from airflow.providers.standard.operators.python import PythonOperator, BranchPythonOperator
+from airflow.providers.standard.operators.empty import EmptyOperator
 import base64
 import os
 import re
@@ -15,7 +15,7 @@ from email import message_from_bytes
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from googleapiclient.errors import HttpError
-from airflow.models import Variable
+from airflow.sdk import Variable
 import time
 import html
 import sys
@@ -46,7 +46,7 @@ def clear_retry_tracker_on_success(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         del retry_tracker[tracker_key]
@@ -63,7 +63,7 @@ def update_retry_tracker_on_failure(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         retry_tracker[tracker_key]["status"] = "failed"
@@ -92,7 +92,7 @@ def authenticate_gmail():
 
 def get_ai_response(prompt, conversation_history=None, expect_json=False, stream=True):
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af_cl'})
         messages = []
 
         # Strong system prompt when expecting JSON
@@ -121,7 +121,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
         messages.append({"role": "user", "content": prompt})
 
         # Call Ollama
-        response = client.chat(model='hubspot:v6af', messages=messages, stream=stream)
+        response = client.chat(model='hubspot:v6af_cl', messages=messages, stream=stream)
 
         # Accumulate streamed response
         ai_content = ""
@@ -344,6 +344,11 @@ def analyze_user_response(ti, **context):
     # === Prompt (unchanged) ===
     from datetime import datetime
     prompt = f"""You are a HubSpot assistant analyzing an email conversation to understand what actions to take.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 CONVERSATION HISTORY:
 {chat_history}
 
@@ -576,7 +581,18 @@ CRITICAL REMINDERS:
         
     except Exception as e:
         logging.info (f"Failed to parse AI response: {e}")
-    
+        results = {
+            "status": "failure",
+            "user_intent": "error",
+            "entities_to_create": {},
+            "entities_to_update": {},
+            "selected_entities": {},
+            "reasoning": f"Failed to parse AI response: {e}",
+            "tasks_to_execute": ["compose_response_html", "collect_and_save_results", "send_final_email"],
+            "should_determine_owner": False,
+            "should_check_task_threshold": False,
+            "casual_comments_detected": False
+        }
     ti.xcom_push(key="analysis_results", value=results)
     logging.info(f"Analysis completed for thread {thread_id}")
     return results
@@ -586,7 +602,7 @@ def validate_and_clean_analysis(ti, **context):
     Validate and clean analysis results to ensure consistency and correctness.
     This function verifies that the analysis from analyze_user_response is accurate and complete.
     """
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="analyze_user_response", default={})
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
     chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
     latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="")
     
@@ -608,7 +624,11 @@ def validate_and_clean_analysis(ti, **context):
     
     # Build validation prompt for AI agent
     prompt = f"""You are a validation assistant for HubSpot operations. Your job is to verify and clean the analysis results.
-
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 LATEST USER MESSAGE:
 {latest_user_message}
 
@@ -767,8 +787,8 @@ CRITICAL:
     
 def determine_owner(ti, **context):
     """Determine deal and task owners from conversation"""
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis", default={}) or {}
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
     latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="")
 
     
@@ -776,8 +796,12 @@ def determine_owner(ti, **context):
     entities_to_create = analysis_results.get("entities_to_create", {})
     tasks_to_create = entities_to_create.get("tasks", [])
 
-    prompt = f"""You are a HubSpot API assistant. Analyze this conversation to identify deal owner and task owners.
-
+    prompt = f"""You are a HubSpot API assistant. Analyze this conversation to identify deal owner and task owners. You do not have any capability to call any hubspot tools. you can only make the decision.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 LATEST USER MESSAGE:
 {latest_user_message}
 
@@ -869,9 +893,9 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
 def check_task_threshold(ti, **context):
     """Check if task volume exceeds threshold"""
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis", default={}) or {}
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
-    owner_info = ti.xcom_pull(key="owner_info", task_ids="determine_owner", default={}) or {}
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
+    owner_info = ti.xcom_pull(key="owner_info", default={})
     latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="")
     
     entities_to_create = analysis_results.get("entities_to_create", {})
@@ -910,7 +934,11 @@ def check_task_threshold(ti, **context):
         })
 
     prompt = f"""You are a HubSpot API assistant. Check task volume thresholds.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 LATEST USER MESSAGE:
 {latest_user_message}
 
@@ -957,6 +985,7 @@ If no dates found in email, check today's date as default for each owner.
 
 RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
+    warnings = []
     try:
         response = get_ai_response(prompt, conversation_history=chat_history, expect_json=True)
     except Exception as e:
@@ -987,11 +1016,11 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 def create_contacts(ti, **context):
     """Create new contacts in HubSpot with full retry logic."""
     
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis")
+    analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_contacts = analysis_results.get("entities_to_create", {}).get("contacts", [])
     logging.info(f"Contacts to create (pre-filter): {to_create_contacts}")
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
-    owner_info = ti.xcom_pull(key="owner_info", task_ids="determine_owner", default={}) or {}
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
+    owner_info = ti.xcom_pull(key="owner_info", default={})
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1001,8 +1030,8 @@ def create_contacts(ti, **context):
     logging.info(f"=== CREATE CONTACTS - Attempt {current_try}/{max_tries} ===")
     logging.info(f"Contacts to create: {len(to_create_contacts)}")
 
-    previous_status = ti.xcom_pull(key="contact_creation_status", task_ids="create_contacts")
-    previous_response = ti.xcom_pull(key="contact_creation_response", task_ids="create_contacts")
+    previous_status = ti.xcom_pull(key="contact_creation_status")
+    previous_response = ti.xcom_pull(key="contact_creation_response")
     is_retry = current_try > 1
 
     # REMOVED: All filtration logic - trust analyze_user_response decision
@@ -1032,8 +1061,12 @@ def create_contacts(ti, **context):
         contact.setdefault("contactOwnerId", contact_owner_id)
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create contacts in HubSpot.
-
+    base_prompt = f"""Your role is to only Create contacts in HubSpot by using the tool `create_contact`. You cannot call any other tools other than `create_contact`
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Contact Details to Create:
 {json.dumps(to_create_contacts, indent=2)}
 
@@ -1153,11 +1186,12 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
         # On failure: mark ALL filtered contacts as failed
         failed_list = [
             {
-                "firstname": c.get("firstname", ""),
-                "lastname": c.get("lastname", ""),
-                "email": c.get("email", ""),
+                "firstname": contact.get("firstname", ""),
+                "lastname": contact.get("lastname", ""),
+                "email": contact.get("email", ""),
                 "error": error_msg
             }
+            for contact in to_create_contacts
         ]
 
         fallback = {
@@ -1180,9 +1214,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
 
 def create_companies(ti, **context):
     """Create new companies in HubSpot with full retry support"""
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
+    analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_companies = analysis_results.get("entities_to_create", {}).get("companies", [])
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1192,8 +1226,8 @@ def create_companies(ti, **context):
     logging.info(f"=== CREATE COMPANIES - Attempt {current_try}/{max_tries} ===")
     logging.info(f"Companies to create: {len(to_create_companies)}")
 
-    previous_status = ti.xcom_pull(key="company_creation_status", task_ids="create_companies")
-    previous_response = ti.xcom_pull(key="company_creation_response", task_ids="create_companies")
+    previous_status = ti.xcom_pull(key="company_creation_status")
+    previous_response = ti.xcom_pull(key="company_creation_response")
     is_retry = current_try > 1
     
     # REMOVED: All filtration logic - trust analyze_user_response decision
@@ -1212,15 +1246,18 @@ def create_companies(ti, **context):
         return []
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create companies in HubSpot.
-
+    base_prompt = f"""Your role is to only Create companies in HubSpot by using the tool `create_company`. You cannot call any other tools other than `create_company`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Company Details to Create:
 {json.dumps(to_create_companies, indent=2)}
 
 Steps:
 1. For each company, invoke create_company tool with the provided properties
 2. Return the created company ID and all properties
-
 Return ONLY this JSON structure (no other text):
 {{
     "status": "success|failure",
@@ -1357,10 +1394,10 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
 
 def create_deals(ti, **context):
     """Create new deals in HubSpot with full retry logic"""
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
+    analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_deals = analysis_results.get("entities_to_create", {}).get("deals", [])
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
-    owner_info = ti.xcom_pull(key="owner_info", task_ids="determine_owner", default={}) or {}
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
+    owner_info = ti.xcom_pull(key="owner_info", default={})
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1370,8 +1407,8 @@ def create_deals(ti, **context):
     logging.info(f"=== CREATE DEALS - Attempt {current_try}/{max_tries} ===")
     logging.info(f"Deals to create: {len(to_create_deals)}")
 
-    previous_status = ti.xcom_pull(key="deal_creation_status", task_ids="create_deals")
-    previous_response = ti.xcom_pull(key="deal_creation_response", task_ids="create_deals")
+    previous_status = ti.xcom_pull(key="deal_creation_status")
+    previous_response = ti.xcom_pull(key="deal_creation_response")
     is_retry = current_try > 1
     
     # REMOVED: All filtration logic - trust analyze_user_response decision
@@ -1397,8 +1434,12 @@ def create_deals(ti, **context):
         deal.setdefault("dealOwnerId", deal_owner_id)
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create deals in HubSpot.
-
+    base_prompt = f"""Your role is to only Create deals in HubSpot by using the tool `create_deal`. You cannot call any other tools other than `create_deal`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Deal Details to Create:
 {json.dumps(to_create_deals, indent=2)}
 
@@ -1561,9 +1602,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
 
 def create_meetings(ti, **context):
     """Create meetings in HubSpot with full retry logic and clean error handling"""
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
+    analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_meetings = analysis_results.get("entities_to_create", {}).get("meetings", [])
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1572,8 +1613,8 @@ def create_meetings(ti, **context):
 
     logging.info(f"=== CREATE MEETINGS - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="meeting_creation_status", task_ids="create_meetings")
-    previous_response = ti.xcom_pull(key="meeting_creation_response", task_ids="create_meetings")
+    previous_status = ti.xcom_pull(key="meeting_creation_status")
+    previous_response = ti.xcom_pull(key="meeting_creation_response")
     is_retry = current_try > 1
 
     if not to_create_meetings:
@@ -1590,8 +1631,12 @@ def create_meetings(ti, **context):
         return []
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create meetings in HubSpot.
-
+    base_prompt = f"""Your role is to only Create meetings in HubSpot by using the tool `create_meeting`. You cannot call any other tools other than `create_meeting`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Meeting Details to Create:
 {json.dumps(to_create_meetings, indent=2)}
 
@@ -1727,9 +1772,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
 
 def create_notes(ti, **context):
     """Create notes in HubSpot with full retry logic and consistent error handling"""
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
+    analysis_results = ti.xcom_pull(key="analysis_results")
     to_create_notes = analysis_results.get("entities_to_create", {}).get("notes", [])
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1738,8 +1783,8 @@ def create_notes(ti, **context):
 
     logging.info(f"=== CREATE NOTES - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="note_creation_status", task_ids="create_notes")
-    previous_response = ti.xcom_pull(key="note_creation_response", task_ids="create_notes")
+    previous_status = ti.xcom_pull(key="note_creation_status")
+    previous_response = ti.xcom_pull(key="note_creation_response")
     is_retry = current_try > 1
 
     if not to_create_notes:
@@ -1758,10 +1803,14 @@ def create_notes(ti, **context):
     current_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""You are a HubSpot Note Creation Assistant. Your role is to **create notes in HubSpot** using the provided note details.  
+    base_prompt = f"""You are a HubSpot Note Creation Assistant. Your role is to **create notes in HubSpot** using the provided note details by calling the `create_note` API. You cannot call any other tools other than `create_note`.  
 **You MUST invoke the `create_notes` API for every note in the input.**  
 No parsing of user intent — assume all input notes are confirmed and ready to create.
-
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 ---
 Current UTC Time: {current_utc}
 NOTES TO CREATE:
@@ -1951,10 +2000,10 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
 
 def create_tasks(ti, **context):
     """Create HubSpot tasks with correct owner assignment and full retry resilience"""
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
-    owner_info = ti.xcom_pull(key="owner_info", task_ids="determine_owner", default={}) or {}
+    analysis_results = ti.xcom_pull(key="analysis_results")
+    owner_info = ti.xcom_pull(key="owner_info", default={})
     to_create_tasks = analysis_results.get("entities_to_create", {}).get("tasks", [])
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -1963,8 +2012,8 @@ def create_tasks(ti, **context):
 
     logging.info(f"=== CREATE TASKS - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="task_creation_status", task_ids="create_tasks")
-    previous_response = ti.xcom_pull(key="task_creation_response", task_ids="create_tasks")
+    previous_status = ti.xcom_pull(key="task_creation_status")
+    previous_response = ti.xcom_pull(key="task_creation_response")
     is_retry = current_try > 1
 
     if not to_create_tasks:
@@ -1980,22 +2029,33 @@ def create_tasks(ti, **context):
             ti.xcom_push(key=k, value=v)
         return []
 
-    # === Assign correct task owners (critical logic preserved) ===
-    task_owners = owner_info.get("task_owners", [])
+    # === Assign correct task owners ===
+    # Primary: task_owners from search_results (passed via dag_run.conf from search DAG)
+    # Fallback: AI-derived owners from determine_owner task
+    search_results = ti.xcom_pull(key="search_results", task_ids="load_context_from_dag_run", default={})
+    search_task_owners = search_results.get("task_owners", [])
+    task_owners = search_task_owners or owner_info.get("task_owners", [])
+
+    logging.info(f"Using {'search DAG' if search_task_owners else 'AI-derived'} task owners ({len(task_owners)} entries)")
+
     for idx, task in enumerate(to_create_tasks, 1):
         matching_owner = next((o for o in task_owners if o.get("task_index") == idx), None)
         if matching_owner:
-            task["task_owner_id"] = matching_owner.get("task_owner_id", DEFAULT_OWNER_ID)
-            task["task_owner_name"] = matching_owner.get("task_owner_name", DEFAULT_OWNER_NAME)
+            task["task_owner_id"] = matching_owner.get("task_owner_id") or DEFAULT_OWNER_ID
+            task["task_owner_name"] = matching_owner.get("task_owner_name") or DEFAULT_OWNER_NAME
         else:
-            task.setdefault("task_owner_id", DEFAULT_OWNER_ID)
-            task.setdefault("task_owner_name", DEFAULT_OWNER_NAME)
+            task["task_owner_id"] = task.get("task_owner_id") or DEFAULT_OWNER_ID
+            task["task_owner_name"] = task.get("task_owner_name") or DEFAULT_OWNER_NAME
 
     logging.info(f"Tasks prepared with owners: {json.dumps(to_create_tasks, indent=2)}")
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Create tasks in HubSpot.
-
+    base_prompt = f"""Your role is to only Create tasks in HubSpot by using the tool `create_task`. You cannot call any other tools other than `create_task`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Task Details to Create (with assigned owners):
 {json.dumps(to_create_tasks, indent=2)}
 
@@ -2166,9 +2226,9 @@ import logging
 
 def update_contacts(ti, **context):
     """Update existing contacts in HubSpot with full retry support"""
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
+    analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("contacts", [])
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -2177,8 +2237,8 @@ def update_contacts(ti, **context):
 
     logging.info(f"=== UPDATE CONTACTS - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="contact_update_status", task_ids="update_contacts")
-    previous_response = ti.xcom_pull(key="contact_update_response", task_ids="update_contacts")
+    previous_status = ti.xcom_pull(key="contact_update_status")
+    previous_response = ti.xcom_pull(key="contact_update_response")
     is_retry = current_try > 1
 
     if not to_update:
@@ -2195,8 +2255,12 @@ def update_contacts(ti, **context):
         return []
 
     # === Base Prompt ===
-    base_prompt = f"""Update contacts in HubSpot.
-
+    base_prompt = f"""Your role is to only Update contacts in HubSpot by using the tool `update_contact`. You cannot call any other tools other than `update_contact`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Contacts to Update:
 {json.dumps(to_update, indent=2)}
 
@@ -2326,9 +2390,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
 
 def update_companies(ti, **context):
     """Update existing companies in HubSpot with full retry support"""
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
+    analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("companies", [])
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -2337,8 +2401,8 @@ def update_companies(ti, **context):
 
     logging.info(f"=== UPDATE COMPANIES - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="company_update_status", task_ids="update_companies")
-    previous_response = ti.xcom_pull(key="company_update_response", task_ids="update_companies")
+    previous_status = ti.xcom_pull(key="company_update_status")
+    previous_response = ti.xcom_pull(key="company_update_response")
     is_retry = current_try > 1
 
     if not to_update:
@@ -2354,8 +2418,12 @@ def update_companies(ti, **context):
         return []
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Update the following companies in HubSpot.
-
+    base_prompt = f"""Your role is to only Update the following companies in HubSpot using the tool `update_company`. You cannot call any other tools other than `update_company`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Companies to Update:
 {json.dumps(to_update, indent=2)}
 
@@ -2489,9 +2557,9 @@ YOU MUST RETURN ONLY CLEAN, VALID JSON."""
             raise
 
 def update_deals(ti, **context):
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
+    analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("deals", [])
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
     # Get current attempt number
     task_instance = context['task_instance']
     current_try_number = task_instance.try_number
@@ -2500,8 +2568,8 @@ def update_deals(ti, **context):
     logging.info(f"=== UPDATE DEALS - Attempt {current_try_number}/{max_tries} ===")
     
     # Check if this is a retry by pulling previous status
-    previous_status = ti.xcom_pull(key="deal_update_status", task_ids="update_deals")
-    previous_response = ti.xcom_pull(key="deal_update_response", task_ids="update_deals")
+    previous_status = ti.xcom_pull(key="deal_update_status")
+    previous_response = ti.xcom_pull(key="deal_update_response")
     
     if not to_update:
         logging.info("No deals to update")
@@ -2598,7 +2666,13 @@ If error, set status as failure, error message in reason and include individual 
         # This is the initial attempt - use initial prompt
         logging.info(f"INITIAL ATTEMPT - Using initial prompt (attempt {current_try_number}/{max_tries})")
         
-        prompt = f"""Update deals: {json.dumps(to_update, indent=2)}
+        prompt = f""" Your role is to only Update the following deals in HubSpot using the tool `update_deal`. You cannot call any other tools other than `update_deal`.
+Update deals: {json.dumps(to_update, indent=2)}
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 IMPORTANT: Respond with ONLY a valid JSON object.
 
 Steps:
@@ -2713,9 +2787,9 @@ If error, set status as failure, error message in reason and include individual 
 
 def update_meetings(ti, **context):
     """Update meetings in HubSpot with full retry support"""
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
+    analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("meetings", [])
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -2724,8 +2798,8 @@ def update_meetings(ti, **context):
 
     logging.info(f"=== UPDATE MEETINGS - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="meeting_update_status", task_ids="update_meetings")
-    previous_response = ti.xcom_pull(key="meeting_update_response", task_ids="update_meetings")
+    previous_status = ti.xcom_pull(key="meeting_update_status")
+    previous_response = ti.xcom_pull(key="meeting_update_response")
     is_retry = current_try > 1
 
     if not to_update:
@@ -2740,8 +2814,12 @@ def update_meetings(ti, **context):
         return []
 
     # === Base Prompt ===
-    base_prompt = f"""Update the following meetings in HubSpot.
-
+    base_prompt = f"""Your role is to only Update the following meetings in HubSpot using the tool `update_meeting`. You cannot call any other tools other than `update_meeting`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Meetings to Update:
 {json.dumps(to_update, indent=2)}
 
@@ -2854,9 +2932,9 @@ RETURN ONLY CLEAN JSON."""
             raise
 def update_notes(ti, **context):
     """Update notes in HubSpot with full retry support"""
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
+    analysis_results = ti.xcom_pull(key="analysis_results")
     to_update = analysis_results.get("entities_to_update", {}).get("notes", [])
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     task_instance = context['task_instance']
     current_try = task_instance.try_number
@@ -2864,8 +2942,8 @@ def update_notes(ti, **context):
 
     logging.info(f"=== UPDATE NOTES - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="note_update_status", task_ids="update_notes")
-    previous_response = ti.xcom_pull(key="note_update_response", task_ids="update_notes")
+    previous_status = ti.xcom_pull(key="note_update_status")
+    previous_response = ti.xcom_pull(key="note_update_response")
     is_retry = current_try > 1
 
     if not to_update:
@@ -2879,8 +2957,12 @@ def update_notes(ti, **context):
             ti.xcom_push(key=k, value=v)
         return []
 
-    base_prompt = f"""Update the following notes in HubSpot.
-
+    base_prompt = f"""Your role is to only Update the following notes in HubSpot using the tool `update_note`. You cannot call any other tools other than `update_note`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Notes to Update:
 {json.dumps(to_update, indent=2)}
 
@@ -2987,10 +3069,10 @@ RETURN ONLY VALID JSON."""
 
 def update_tasks(ti, **context):
     """Update HubSpot tasks with full retry support and owner preservation"""
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
-    owner_info = ti.xcom_pull(key="owner_info", task_ids="determine_owner", default={})
+    analysis_results = ti.xcom_pull(key="analysis_results")
+    owner_info = ti.xcom_pull(key="owner_info", default={})
     to_update = analysis_results.get("entities_to_update", {}).get("tasks", [])
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
 
     # === Retry Context ===
     task_instance = context['task_instance']
@@ -2999,8 +3081,8 @@ def update_tasks(ti, **context):
 
     logging.info(f"=== UPDATE TASKS - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="task_update_status", task_ids="update_tasks")
-    previous_response = ti.xcom_pull(key="task_update_response", task_ids="update_tasks")
+    previous_status = ti.xcom_pull(key="task_update_status")
+    previous_response = ti.xcom_pull(key="task_update_response")
     is_retry = current_try > 1
 
     if not to_update:
@@ -3048,8 +3130,12 @@ def update_tasks(ti, **context):
             task_update["task_owner_name"] = original.get("task_owner_name", DEFAULT_OWNER_NAME)
 
     # === Base Prompt (shared) ===
-    base_prompt = f"""Update tasks in HubSpot.
-
+    base_prompt = f"""Your role is to only Update tasks in HubSpot using the tool `update_task`. You cannot call any other tools other than `update_task`.
+YOU ARE A JSON-ONLY API. 
+DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+DO NOT USE <think> TAGS.
+DO NOT SAY "invoking" OR "successful".
+IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Tasks to update: {json.dumps(to_update, indent=2)}
 Current task details: {json.dumps(task_details_map, indent=2)}
 
@@ -3212,37 +3298,37 @@ def create_associations(ti, **context):
 
     logging.info(f"=== CREATE ASSOCIATIONS - Attempt {current_try}/{max_tries} ===")
 
-    previous_status = ti.xcom_pull(key="association_creation_status", task_ids="create_associations")
-    previous_response = ti.xcom_pull(key="association_creation_response", task_ids="create_associations")
+    previous_status = ti.xcom_pull(key="association_creation_status")
+    previous_response = ti.xcom_pull(key="association_creation_response")
     is_retry = current_try > 1
 
     # === Load all data ===
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis") or {}
-    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[]) or []
-    thread_history = ti.xcom_pull(key="thread_history", task_ids="load_context_from_dag_run", default=[]) or []
-    latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="") or []
+    analysis_results = ti.xcom_pull(key="analysis_results")
+    chat_history = ti.xcom_pull(key="chat_history", task_ids="load_context_from_dag_run", default=[])
+    thread_history = ti.xcom_pull(key="thread_history", task_ids="load_context_from_dag_run", default=[])
+    latest_user_message = ti.xcom_pull(key="latest_message", task_ids="load_context_from_dag_run", default="")
     # Created entities
-    created_contacts = ti.xcom_pull(key="created_contacts", task_ids="create_contacts", default=[]) or []
-    created_companies = ti.xcom_pull(key="created_companies", task_ids="create_companies", default=[]) or []
-    created_deals = ti.xcom_pull(key="created_deals", task_ids="create_deals", default=[]) or []
-    created_meetings = ti.xcom_pull(key="created_meetings", task_ids="create_meetings", default=[]) or []
-    created_notes = ti.xcom_pull(key="created_notes", task_ids="create_notes", default=[]) or []
-    created_tasks = ti.xcom_pull(key="created_tasks", task_ids="create_tasks", default=[]) or []
+    created_contacts = ti.xcom_pull(key="created_contacts", default=[])
+    created_companies = ti.xcom_pull(key="created_companies", default=[])
+    created_deals = ti.xcom_pull(key="created_deals", default=[])
+    created_meetings = ti.xcom_pull(key="created_meetings", default=[])
+    created_notes = ti.xcom_pull(key="created_notes", default=[])
+    created_tasks = ti.xcom_pull(key="created_tasks", default=[])
     # Updated entities
-    updated_contacts = ti.xcom_pull(key="updated_contacts", task_ids="update_contacts", default=[]) or []
-    updated_companies = ti.xcom_pull(key="updated_companies", task_ids="update_companies", default=[]) or []
-    updated_deals = ti.xcom_pull(key="updated_deals", task_ids="update_deals", default=[]) or []
+    updated_contacts = ti.xcom_pull(key="updated_contacts", default=[])
+    updated_companies = ti.xcom_pull(key="updated_companies", default=[])
+    updated_deals = ti.xcom_pull(key="updated_deals", default=[])
 
-    failed_contacts = ti.xcom_pull(key="failed_contacts", task_ids="create_contacts", default=[]) or []
-    failed_companies = ti.xcom_pull(key="failed_companies", task_ids="create_companies", default=[]) or []
-    failed_deals = ti.xcom_pull(key="failed_deals", task_ids="create_deals", default=[]) or []
-    failed_meetings = ti.xcom_pull(key="failed_meetings", task_ids="create_meetings", default=[]) or []
-    failed_notes = ti.xcom_pull(key="failed_notes", task_ids="create_notes", default=[]) or []
-    failed_tasks = ti.xcom_pull(key="failed_tasks", task_ids="create_tasks", default=[]) or []
+    failed_contacts = ti.xcom_pull(key="failed_contacts", default=[])
+    failed_companies = ti.xcom_pull(key="failed_companies", default=[])
+    failed_deals = ti.xcom_pull(key="failed_deals", default=[])
+    failed_meetings = ti.xcom_pull(key="failed_meetings", default=[])
+    failed_notes = ti.xcom_pull(key="failed_notes", default=[])
+    failed_tasks = ti.xcom_pull(key="failed_tasks", default=[])
 
-    failed_updated_contacts = ti.xcom_pull(key="failed_updated_contacts", task_ids="update_contacts", default=[]) or []
-    failed_updated_companies = ti.xcom_pull(key="failed_updated_companies", task_ids="update_companies", default=[]) or []
-    failed_updated_deals = ti.xcom_pull(key="failed_updated_deals", task_ids="update_deals", default=[]) or []
+    failed_updated_contacts = ti.xcom_pull(key="failed_updated_contacts", default=[])
+    failed_updated_companies = ti.xcom_pull(key="failed_updated_companies", default=[])
+    failed_updated_deals = ti.xcom_pull(key="failed_updated_deals", default=[])
 
     errors = []
 
@@ -3556,23 +3642,23 @@ RETURN ONLY CLEAN JSON."""
 
 def collect_and_save_results(ti, **context):
     """Collect all results for final email"""
-    created_contacts = ti.xcom_pull(key="created_contacts", task_ids="create_contacts", default=[]) or []
-    created_companies = ti.xcom_pull(key="created_companies", task_ids="create_companies", default=[]) or []
-    created_deals = ti.xcom_pull(key="created_deals", task_ids="create_deals", default=[]) or []
-    created_meetings = ti.xcom_pull(key="created_meetings", task_ids="create_meetings", default=[]) or []
-    created_notes = ti.xcom_pull(key="created_notes", task_ids="create_notes", default=[]) or []
-    created_tasks = ti.xcom_pull(key="created_tasks", task_ids="create_tasks", default=[]) or []
+    created_contacts = ti.xcom_pull(key="created_contacts", default=[])
+    created_companies = ti.xcom_pull(key="created_companies", default=[])
+    created_deals = ti.xcom_pull(key="created_deals", default=[])
+    created_meetings = ti.xcom_pull(key="created_meetings", default=[])
+    created_notes = ti.xcom_pull(key="created_notes", default=[])
+    created_tasks = ti.xcom_pull(key="created_tasks", default=[])
     
-    updated_contacts = ti.xcom_pull(key="updated_contacts", task_ids="update_contacts", default=[]) or []
-    updated_companies = ti.xcom_pull(key="updated_companies", task_ids="update_companies", default=[]) or []
-    updated_deals = ti.xcom_pull(key="updated_deals", task_ids="update_deals", default=[]) or []
-    updated_meetings = ti.xcom_pull(key="updated_meetings", task_ids="update_meetings", default=[]) or []
-    updated_notes = ti.xcom_pull(key="updated_notes", task_ids="update_notes", default=[]) or []
-    updated_tasks = ti.xcom_pull(key="updated_tasks", task_ids="update_tasks", default=[]) or []
-
-    associations_created = ti.xcom_pull(key="associations_created", task_ids="create_associations", default=[]) or []
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis", default={}) or {}
-    selected_entities = analysis_results.get("selected_entities", {}) or {}
+    updated_contacts = ti.xcom_pull(key="updated_contacts", default=[])
+    updated_companies = ti.xcom_pull(key="updated_companies", default=[])
+    updated_deals = ti.xcom_pull(key="updated_deals", default=[])
+    updated_meetings = ti.xcom_pull(key="updated_meetings", default=[])
+    updated_notes = ti.xcom_pull(key="updated_notes", default=[])
+    updated_tasks = ti.xcom_pull(key="updated_tasks", default=[])
+    
+    associations_created = ti.xcom_pull(key="associations_created", default=[])
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    selected_entities = analysis_results.get("selected_entities", {})
     
     create_results = {
         "created_contacts": {"total": len(created_contacts), "results": created_contacts},
@@ -3599,31 +3685,35 @@ def collect_and_save_results(ti, **context):
 
 def compose_response_html(ti, **context):
     """Compose HTML response email with all created/updated/selected entities"""
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis", default={}) or {}
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
     if analysis_results.get("fallback_email_sent", False):
         logging.info("Fallback email was already sent - skipping compose_response_html")
         ti.xcom_push(key="response_html", value=None)
         return None
-    owner_info = ti.xcom_pull(key="owner_info", task_ids="determine_owner", default={})
-    task_threshold_info = ti.xcom_pull(key="task_threshold_info", task_ids="check_task_threshold", default={}) or {}
-    created_contacts = ti.xcom_pull(key="created_contacts", task_ids="create_contacts", default=[]) or []
-    created_companies = ti.xcom_pull(key="created_companies", task_ids="create_companies", default=[]) or []
-    created_deals = ti.xcom_pull(key="created_deals", task_ids="create_deals", default=[]) or []
-    created_meetings = ti.xcom_pull(key="created_meetings", task_ids="create_meetings", default=[]) or []
-    created_notes = ti.xcom_pull(key="created_notes", task_ids="create_notes", default=[]) or []
-    created_tasks = ti.xcom_pull(key="created_tasks", task_ids="create_tasks", default=[]) or []
+    owner_info = ti.xcom_pull(key="owner_info", default={})
+    task_threshold_info = ti.xcom_pull(key="task_threshold_info", default={})
+
+    contact_creation_final_status = ti.xcom_pull(key="contact_creation_final_status")
+    contact_creation_failure_reason = ti.xcom_pull(key="contact_creation_failure_reason")
     
-    updated_contacts = ti.xcom_pull(key="updated_contacts", task_ids="update_contacts", default=[]) or []
-    updated_companies = ti.xcom_pull(key="updated_companies", task_ids="update_companies", default=[]) or []
-    updated_deals = ti.xcom_pull(key="updated_deals", task_ids="update_deals", default=[]) or []
-    updated_meetings = ti.xcom_pull(key="updated_meetings", task_ids="update_meetings", default=[]) or []
-    updated_notes = ti.xcom_pull(key="updated_notes", task_ids="update_notes", default=[]) or []
-    updated_tasks = ti.xcom_pull(key="updated_tasks", task_ids="update_tasks", default=[]) or []
+    created_contacts = ti.xcom_pull(key="created_contacts", default=[])
+    created_companies = ti.xcom_pull(key="created_companies", default=[])
+    created_deals = ti.xcom_pull(key="created_deals", default=[])
+    created_meetings = ti.xcom_pull(key="created_meetings", default=[])
+    created_notes = ti.xcom_pull(key="created_notes", default=[])
+    created_tasks = ti.xcom_pull(key="created_tasks", default=[])
     
-    selected_entities = analysis_results.get("selected_entities", {}) or []
-    existing_contacts = selected_entities.get("contacts", []) or []
-    existing_companies = selected_entities.get("companies", []) or []
-    existing_deals = selected_entities.get("deals", []) or []
+    updated_contacts = ti.xcom_pull(key="updated_contacts", default=[])
+    updated_companies = ti.xcom_pull(key="updated_companies", default=[])
+    updated_deals = ti.xcom_pull(key="updated_deals", default=[])
+    updated_meetings = ti.xcom_pull(key="updated_meetings", default=[])
+    updated_notes = ti.xcom_pull(key="updated_notes", default=[])
+    updated_tasks = ti.xcom_pull(key="updated_tasks", default=[])
+    
+    selected_entities = analysis_results.get("selected_entities", {})
+    existing_contacts = selected_entities.get("contacts", [])
+    existing_companies = selected_entities.get("companies", [])
+    existing_deals = selected_entities.get("deals", [])
     
     thread_id = context['dag_run'].conf.get("thread_id")
     email_data = ti.xcom_pull(key="email_data", task_ids="load_context_from_dag_run", default={})
@@ -3633,16 +3723,16 @@ def compose_response_html(ti, **context):
     updated_task_ids = [task.get("id") for task in updated_tasks if task.get("id")]
     final_created_tasks = [t for t in created_tasks if t.get("id") not in updated_task_ids]
 
-    failed_contacts = ti.xcom_pull(key="failed_contacts", task_ids="create_contacts", default=[]) or []
-    failed_companies = ti.xcom_pull(key="failed_companies", task_ids="create_companies", default=[]) or []
-    failed_deals = ti.xcom_pull(key="failed_deals", task_ids="create_deals", default=[]) or []
-    failed_meetings = ti.xcom_pull(key="failed_meetings", task_ids="create_meetings", default=[]) or []
-    failed_notes = ti.xcom_pull(key="failed_notes", task_ids="create_notes", default=[]) or []
-    failed_tasks = ti.xcom_pull(key="failed_tasks", task_ids="create_tasks", default=[]) or []
+    failed_contacts = ti.xcom_pull(key="failed_contacts", default=[])
+    failed_companies = ti.xcom_pull(key="failed_companies", default=[])
+    failed_deals = ti.xcom_pull(key="failed_deals", default=[])
+    failed_meetings = ti.xcom_pull(key="failed_meetings", default=[])
+    failed_notes = ti.xcom_pull(key="failed_notes", default=[])
+    failed_tasks = ti.xcom_pull(key="failed_tasks", default=[])
 
-    failed_updated_contacts = ti.xcom_pull(key="failed_updated_contacts", task_ids="update_contacts", default=[]) or []
-    failed_updated_companies = ti.xcom_pull(key="failed_updated_companies", task_ids="update_companies", default=[]) or []
-    failed_updated_deals = ti.xcom_pull(key="failed_updated_deals", task_ids="update_deals", default=[]) or []
+    failed_updated_contacts = ti.xcom_pull(key="failed_updated_contacts", default=[])
+    failed_updated_companies = ti.xcom_pull(key="failed_updated_companies", default=[])
+    failed_updated_deals = ti.xcom_pull(key="failed_updated_deals", default=[])
 
     errors = []
 
@@ -4344,12 +4434,12 @@ def compose_response_html(ti, **context):
 def send_final_email(ti, **context):
     """Send final completion email with proper recipient handling"""
     import re
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis", default={})
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
     if analysis_results.get("fallback_email_sent", False):
         logging.info("Fallback email was already sent - skipping send_final_email")
         return None
     email_data = ti.xcom_pull(key="email_data", task_ids="load_context_from_dag_run", default={})
-    response_html = ti.xcom_pull(key="response_html", task_ids="compose_response_html")
+    response_html = ti.xcom_pull(key="response_html")
     
     service = authenticate_gmail()
     if not service:
@@ -4388,8 +4478,9 @@ def send_final_email(ti, **context):
     
     # Get latest email for headers
     latest_email = email_thread[-1]
-    sender_email = latest_email["headers"].get("From", "")
-    original_subject = latest_email['headers'].get('Subject', 'HubSpot Request')
+    headers = latest_email.get("headers", {})
+    sender_email = headers.get("From", "")
+    original_subject = headers.get('Subject', 'HubSpot Request')
     
     # Extract email address from "From" header (might be "Name <email@domain.com>")
     sender_match = re.search(r'<([^>]+)>', sender_email)
@@ -4399,8 +4490,8 @@ def send_final_email(ti, **context):
         primary_recipient = sender_email
     
     subject = f"Re: {original_subject}" if not original_subject.lower().startswith('re:') else original_subject
-    in_reply_to = latest_email["headers"].get("Message-ID", "")
-    references = latest_email["headers"].get("References", "")
+    in_reply_to = headers.get("Message-ID", "")
+    references = headers.get("References", "")
     
     # Build final CC list (excluding sender and bot)
     final_cc_recipients = []
@@ -4447,8 +4538,8 @@ def send_final_email(ti, **context):
     raise ValueError("Failed to send final email")
 
 def branch_to_creation_tasks(ti, **context):
-    analysis_results = ti.xcom_pull(key="analysis_results", task_ids="validate_and_clean_analysis", default={})
-
+    analysis_results = ti.xcom_pull(key="analysis_results", default={})
+    
     if analysis_results.get("fallback_email_sent", False):
         return ["end_workflow"]
     
@@ -4479,7 +4570,7 @@ def branch_to_creation_tasks(ti, **context):
 with DAG(
     "hubspot_create_objects",
     default_args=default_args,
-    schedule=None,
+    schedule_interval=None,
     catchup=False,
     tags=["hubspot", "create", "objects"],
     on_success_callback=clear_retry_tracker_on_success,
@@ -4490,104 +4581,122 @@ with DAG(
 
     load_context_task = PythonOperator(
         task_id="load_context_from_dag_run",
-        python_callable=load_context_from_dag_run
+        python_callable=load_context_from_dag_run,
+        provide_context=True
     )
 
     analyze_task = PythonOperator(
         task_id="analyze_user_response",
-        python_callable=analyze_user_response
+        python_callable=analyze_user_response,
+        provide_context=True
     )
 
     validate_and_clean_task = PythonOperator(
         task_id="validate_and_clean_analysis",
-        python_callable=validate_and_clean_analysis
+        python_callable=validate_and_clean_analysis,
+        provide_context=True
     )
 
     branch_task = BranchPythonOperator(
         task_id="branch_to_creation_tasks",
-        python_callable=branch_to_creation_tasks
+        python_callable=branch_to_creation_tasks,
+        provide_context=True
     )
 
     determine_owner_task = PythonOperator(
         task_id="determine_owner",
-        python_callable=determine_owner
+        python_callable=determine_owner,
+        provide_context=True
     )
 
     check_task_threshold_task = PythonOperator(
         task_id="check_task_threshold",
-        python_callable=check_task_threshold
+        python_callable=check_task_threshold,
+        provide_context=True
     )
 
     create_contacts_task = PythonOperator(
         task_id="create_contacts",
         python_callable=create_contacts,
-        retries=2
+        retries=2,
+        provide_context=True
     )
 
     create_companies_task = PythonOperator(
         task_id="create_companies",
         python_callable=create_companies,
-        retries=2
+        retries=2,
+        provide_context=True
     )
 
     create_deals_task = PythonOperator(
         task_id="create_deals",
         python_callable=create_deals,
-        retries=2
+        retries=2,
+        provide_context=True
     )
 
     create_meetings_task = PythonOperator(
         task_id="create_meetings",
         python_callable=create_meetings,
-        retries=2
+        retries=2,
+        provide_context=True
     )
 
     create_notes_task = PythonOperator(
         task_id="create_notes",
         python_callable=create_notes,
-        retries=2
+        retries=2,
+        provide_context=True
     )
 
     create_tasks_task = PythonOperator(
         task_id="create_tasks",
         python_callable=create_tasks,
-        retries=2
+        retries=2,
+        provide_context=True
     )
 
     update_contacts_task = PythonOperator(
         task_id="update_contacts",
         python_callable=update_contacts,
-        retries=2
+        retries=2,
+        provide_context=True
     )
 
     update_companies_task = PythonOperator(
         task_id="update_companies",
         python_callable=update_companies,
-        retries=2
+        retries=2,
+        provide_context=True
     )
 
     update_deals_task = PythonOperator(
         task_id="update_deals",
         python_callable=update_deals,
-        retries=2
+        retries=2,
+        provide_context=True
     )
 
     update_meetings_task = PythonOperator(
         task_id="update_meetings",
         python_callable=update_meetings,
-        retries=2 
+        retries=2,
+        provide_context=True
     )
 
     update_notes_task = PythonOperator(
         task_id="update_notes",
         python_callable=update_notes,
-        retries=2
+        retries=2,
+        provide_context=True
     )
 
     update_tasks_task = PythonOperator(
         task_id="update_tasks",
         python_callable=update_tasks,
-        retries=2     
+        retries=2,
+        provide_context=True
     )
 
     # New join task to handle branching and skip propagation
@@ -4599,22 +4708,26 @@ with DAG(
     create_associations_task = PythonOperator(
         task_id="create_associations",
         python_callable=create_associations,
+        provide_context=True,
         retries=2
     )
 
     collect_results_task = PythonOperator(
         task_id="collect_and_save_results",
-        python_callable=collect_and_save_results   
+        python_callable=collect_and_save_results,
+        provide_context=True
     )
 
     compose_response_task = PythonOperator(
         task_id="compose_response_html",
-        python_callable=compose_response_html    
+        python_callable=compose_response_html,
+        provide_context=True
     )
 
     send_final_email_task = PythonOperator(
         task_id="send_final_email",
-        python_callable=send_final_email    
+        python_callable=send_final_email,
+        provide_context=True
     )
 
     end_task = EmptyOperator(

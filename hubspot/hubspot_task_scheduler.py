@@ -8,9 +8,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import pytz
 import requests
-from airflow import DAG
-from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.models import Variable
+from airflow.sdk import DAG, Variable
+from airflow.providers.standard.operators.python import PythonOperator, BranchPythonOperator
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
@@ -77,7 +76,7 @@ def is_business_day(owner_country, check_date):
 def get_holiday_countries():
     """Load holiday country config from Airflow Variable (optional override)"""
     try:
-        config_json = Variable.get("ltai.v3.hubspot.task.holiday_countries", default_var="{}")
+        config_json = Variable.get("ltai.v3.hubspot.task.holiday_countries", default="{}")
         config = json.loads(config_json)
         logging.info(f"Loaded holiday config for countries: {list(config.keys())}")
         return config
@@ -137,7 +136,7 @@ def get_initiated_owners_today(ti, owner_id, owner_timezone):
         
         key = f"initiated_owners_{owner_local_date}_{owner_id}"
         
-        initiated = ti.xcom_pull(key=key, task_ids='check_delivery_window', include_prior_dates=True, dag_id=ti.dag_id)
+        initiated = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=True, dag_id=ti.dag_id)
         return initiated is not None
     except Exception as e:
         logging.warning(f"Failed to check initiated status: {e}")
@@ -166,7 +165,7 @@ def get_sent_reminders_today(ti, owner_id, owner_timezone):
         key = f"sent_reminders_{owner_local_date}_{owner_id}"
 
         # Try current run XCom first
-        sent_list = ti.xcom_pull(key=key, task_ids='send_spaced_reminders', include_prior_dates=False)
+        sent_list = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=False)
         if sent_list is not None:
             sent_set = set(sent_list)
             logging.info(f" Loaded {len(sent_set)} sent reminder(s) for owner {owner_id} from current run")
@@ -175,7 +174,7 @@ def get_sent_reminders_today(ti, owner_id, owner_timezone):
         # Try from previous DAG runs today (cross-run persistence)
         sent_list = ti.xcom_pull(
             key=key,
-            task_ids='send_spaced_reminders',
+            task_ids=None,
             include_prior_dates=True,
             dag_id=ti.dag_id
         )
@@ -189,10 +188,6 @@ def get_sent_reminders_today(ti, owner_id, owner_timezone):
 
     except Exception as e:
         logging.warning(f"Failed to load sent reminders for owner {owner_id}: {e}")
-        return set()
-
-    except Exception as e:
-        logging.warning(f"Failed to load sent reminders, treating as empty: {e}")
         return set()
 
 def mark_reminder_sent(ti, task_id, owner_id, owner_timezone):
@@ -231,7 +226,7 @@ def authenticate_gmail():
 def get_ai_response(prompt, conversation_history=None, expect_json=False):
     """Get response from AI model"""
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af_cl'})
         messages = []
 
         if expect_json:
@@ -246,7 +241,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
                     messages.append({"role": item["role"], "content": item["content"]})
 
         messages.append({"role": "user", "content": prompt})
-        response = client.chat(model='hubspot:v6af', messages=messages, stream=False)
+        response = client.chat(model='hubspot:v6af_cl', messages=messages, stream=False)
         ai_content = response.message.content
         ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
         return ai_content.strip()
@@ -303,27 +298,47 @@ def send_task_reminder_email(service, task, owner_info):
         associations = task.get("associations", {})
 
         # Contacts
+        contact_section = ""
         contact_lines = []
         for contact in associations.get("contacts", []):
             cp = contact.get("properties", {})
+            contact_id = contact.get("id", "N/A")
             name = f"{cp.get('firstname', '')} {cp.get('lastname', '')}".strip() or "Unknown"
             email = cp.get("email", "")
+    
+            contact_lines.append(f'<li><strong>Contact ID:</strong> {contact_id}</li>')
+            contact_lines.append(f'<li><strong>Name:</strong> {name}</li>')
             if email:
-                contact_lines.append(f'<li>{name} – <a href="mailto:{email}">{email}</a></li>')
-            else:
-                contact_lines.append(f'<li>{name}</li>')
+                contact_lines.append(f'<li><strong>Email:</strong> <a href="mailto:{email}">{email}</a></li>')
+
+        if contact_lines:
+            contact_section = f"""
+            <li><strong>Contacts:</strong>
+                <ul>{''.join(contact_lines)}</ul>
+            </li>
+            """
 
         # Company
-        company_name = "No company associated"
+        company_section = ""
         companies = associations.get("companies", [])
         if companies:
             company_name = companies[0].get("properties", {}).get("name", "Unknown Company").strip()
+            company_id = companies[0].get("id", "N/A")
+            company_section = f"""
+            <li><strong>Company:</strong>
+                <ul>
+                    <li><strong>Company ID:</strong> {company_id}</li>
+                    <li><strong>Company Name:</strong> {company_name}</li>
+                </ul>
+            </li>
+            """
 
         # Deal - only if exists
         deal_section = ""
         deals = associations.get("deals", [])
         if deals:
             deal = deals[0].get("properties", {})
+            deal_id = deals[0].get("id", "N/A")
             deal_name = deal.get("dealname", "Unknown Deal")
             amount = deal.get("amount", "")
             if amount:
@@ -346,6 +361,7 @@ def send_task_reminder_email(service, task, owner_info):
                     close_date = ""
 
             deal_lines = []
+            deal_lines.append(f"<li><strong>Deal ID:</strong> {deal_id}</li>")
             deal_lines.append(f"<li><strong>Deal Name:</strong> {deal_name}</li>")
             if amount:
                 deal_lines.append(f"<li><strong>Amount:</strong> {amount}</li>")
@@ -462,10 +478,8 @@ def send_task_reminder_email(service, task, owner_info):
 
     <p><strong>Associated Records</strong></p>
     <ul>
-        <li><strong>Contacts:</strong>
-            <ul>{''.join(contact_lines) or '<li>None</li>'}</ul>
-        </li>
-        <li><strong>Company:</strong> {company_name}</li>
+        {contact_section}
+        {company_section}
         {deal_section}
     </ul>
 
@@ -604,7 +618,7 @@ def get_all_task_owners(ti, **context):
 def check_delivery_window(ti, **context):
     """Check if we're in the delivery window AND it's a business day for any owner"""
     try:
-        owners = ti.xcom_pull(key="all_owners", task_ids='get_all_task_owners', default=[])
+        owners = ti.xcom_pull(key="all_owners", default=[])
 
         if not owners:
             logging.info("No owners found, skipping delivery window check")
@@ -669,7 +683,7 @@ def check_delivery_window(ti, **context):
 
 def collect_due_tasks(ti, **context):
     """Collect tasks due today or overdue for each owner, using their local timezone"""
-    owners = ti.xcom_pull(key="owners_to_process", task_ids='check_delivery_window', default=[])
+    owners = ti.xcom_pull(key="owners_to_process", default=[])
     if not owners:
         ti.xcom_push(key="tasks_by_owner", value={})
         return {}
@@ -678,7 +692,6 @@ def collect_due_tasks(ti, **context):
     for owner in owners:
         mark_owner_initiated(ti, owner["id"], owner["timezone"])
 
-    sent_today = get_sent_reminders_today(ti, owner_id=None, owner_timezone=None)  # Get all sent today across owners
     now_utc = datetime.now(timezone.utc)
     one_month_ago = now_utc - timedelta(days=30)
 
@@ -691,6 +704,7 @@ def collect_due_tasks(ti, **context):
         tz = owner["timezone"]
 
         logging.info(f"Collecting tasks for {owner_name}")
+        sent_today = get_sent_reminders_today(ti, owner_id=owner_id, owner_timezone=tz)
 
         # Calculate date boundaries in OWNER'S timezone
         owner_tz = pytz.timezone(tz)
@@ -771,7 +785,7 @@ Use <h4> for headings and concise paragraphs/lists."""
 def send_spaced_reminders(ti, **context):
     """Send task reminder emails with 3-minute spacing - ONE EMAIL PER TASK"""
     try:
-        tasks_by_owner = ti.xcom_pull(key="tasks_by_owner", task_ids='collect_due_tasks', default={})
+        tasks_by_owner = ti.xcom_pull(key="tasks_by_owner", default={})
 
         if not tasks_by_owner:
             logging.info("No tasks to send reminders for")
@@ -873,7 +887,7 @@ def safe_json_loads(text, default=None):
 with DAG(
     "hubspot_daily_task_reminders",
     default_args=default_args,
-    schedule="0 * * * *",
+    schedule_interval="0 * * * *",
     catchup=False,
     tags=["hubspot", "tasks", "reminders", "daily"],
     description="Send daily HubSpot task reminders (one email per task) during business hours"
@@ -882,26 +896,31 @@ with DAG(
     get_owners = PythonOperator(
         task_id="get_all_task_owners",
         python_callable=get_all_task_owners,
+        provide_context=True,
     )
 
     check_window = BranchPythonOperator(
         task_id="check_delivery_window",
         python_callable=check_delivery_window,
+        provide_context=True,
     )
 
     collect_tasks = PythonOperator(
         task_id="collect_due_tasks",
         python_callable=collect_due_tasks,
+        provide_context=True,
     )
 
     send_reminders = PythonOperator(
         task_id="send_spaced_reminders",
         python_callable=send_spaced_reminders,
+        provide_context=True,
     )
 
     skip_collection = PythonOperator(
         task_id="skip_task_collection",
         python_callable=skip_task_collection,
+        provide_context=True,
     )
 
     get_owners >> check_window
