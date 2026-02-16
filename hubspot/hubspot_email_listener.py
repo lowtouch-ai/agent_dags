@@ -1228,7 +1228,18 @@ def trigger_task_completion_dag(**kwargs):
     
     for email in task_completion_emails:
         task_id = email.get("task_id")
-        
+
+        # Fallback: extract task_id from thread history headers
+        if not task_id:
+            task_id = check_if_task_completion_reply(email)
+            if task_id:
+                email["task_id"] = task_id
+                logging.info(f"Extracted task_id from thread history: {task_id}")
+
+        if not task_id:
+            logging.warning(f"Skipping email {email.get('id', 'unknown')}: no task_id found")
+            continue
+
         trigger_conf = {
             "email_data": email,
             "task_id": task_id,
@@ -1237,8 +1248,8 @@ def trigger_task_completion_dag(**kwargs):
             "thread_id": email.get("threadId", ""),
             "message_id": email.get("id", "")
         }
-        
-        task_id_safe = task_id.replace('-', '_')
+
+        task_id_safe = str(task_id).replace('-', '_')
         trigger_task = TriggerDagRunOperator(
             task_id=f"trigger_task_completion_{task_id_safe}",
             trigger_dag_id="hubspot_task_completion_handler",
@@ -1549,8 +1560,8 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
         try:
             client = Client(
                 host=OLLAMA_HOST, 
-                headers={'x-ltai-client': 'hubspot-v6af'},
-                timeout=60.0  # Add explicit timeout
+                headers={'x-ltai-client': 'hubspot-v6af_cl'},
+                timeout=300 # Add explicit timeout
             )
             messages = []
 
@@ -1572,7 +1583,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
                 logging.info(f"Retry attempt {attempt + 1}/{max_retries}")
             
             response = client.chat(
-                model='hubspot:v6af', 
+                model='hubspot:v6af_cl', 
                 messages=messages, 
                 stream=stream,
                 options={
@@ -1965,67 +1976,108 @@ def branch_function(**kwargs):
     unread_emails = ti.xcom_pull(task_ids="fetch_unread_emails", key="unread_emails")
 
     if not unread_emails:
-        logging.info("No unread emails found, proceeding to no_email_found_task.")
+        logging.info("No unread emails found")
+        ti.xcom_push(key="has_emails", value=False)
         return "no_email_found_task"
 
+    ti.xcom_push(key="has_emails", value=True)
+    
     task_completion_emails = []
     other_emails = []
-    logging.info(f"task completion email is :{task_completion_emails}")
-    logging.info(f"other emails is :{other_emails}")
     
+    # Separate task completion emails
     for email in unread_emails:
-        task_id = check_if_task_completion_reply(email)
-        if task_id:
-            # This is a task completion reply
-            email["task_id"] = task_id
-            task_completion_emails.append(email)
-            logging.info(f"Identified task completion reply for task {task_id}")
+        email_id = email.get("id", "unknown")[:8]
+        headers = email.get("headers", {})
+        subject = headers.get("Subject", "No Subject")
+        
+        logging.info(f"\n📧 Processing email {email_id}: {subject}")
+    
+        task_id_in_header = headers.get("X-Task-ID")
+        task_type_in_header = headers.get("X-Task-Type")
+        
+        if task_id_in_header and task_type_in_header == "daily-reminder":
+            logging.info(f"DIRECT task email detected (X-Task-ID: {task_id_in_header})")
+            logging.info(f"Routing through AI classification to determine user intent")
+            email["task_id"] = task_id_in_header
+            email["is_task_association"] = True
+            other_emails.append(email)
+            continue
+    
+        is_reply_to_task = False
+        task_id_from_thread = None
+        
+        if email.get("is_reply", False):
+            logging.info(f"Email is a reply, checking thread history...")
+            thread_history = email.get("thread_history", [])
+            for msg in reversed(thread_history):
+                if msg.get("from_bot", False):
+                    msg_headers = msg.get("headers", {})
+                    t_id = msg_headers.get("X-Task-ID")
+                    t_type = msg_headers.get("X-Task-Type")
+                    if t_id and t_type == "daily-reminder":
+                        is_reply_to_task = True
+                        task_id_from_thread = t_id
+                        logging.info(f"✓ Found task reminder in thread: task_id={t_id}")
+                    break
+
+            if not is_reply_to_task:
+                logging.info(f" No task reminder found in thread history")
+        else:
+            logging.info(f"Not a reply email, skipping thread check")
+
+        if is_reply_to_task and task_id_from_thread:
+            email["task_id"] = task_id_from_thread
+            email["is_task_association"] = True
+            other_emails.append(email)
         else:
             other_emails.append(email)
     
-    # If we have task completion emails, route them separately
-    if task_completion_emails:
-        ti.xcom_push(key="task_completion_emails", value=task_completion_emails)
-        logging.info(f"Routing {len(task_completion_emails)} task completion emails")
-        return "trigger_task_completion"
+    # Route other emails individually
+    search_emails = []
+    continuation_emails = []
+    report_emails = []
+    no_action_emails = []
     
-    # For other emails, continue with existing routing logic
-    if not other_emails:
-        logging.info("No other emails to route after task completion separation")
-        return "no_email_found_task"
-
-    # Build email details for AI analysis with FULL chat history context
-    email_details = []
-    for idx, email in enumerate(unread_emails, 1):
+    for email in other_emails:
         headers = email.get("headers", {})
         
         email_info = {
-            "email_number": idx,
             "from": headers.get("From", "Unknown"),
             "subject": headers.get("Subject", "No Subject"),
             "latest_message": email.get("content", ""),
             "is_reply": email.get("is_reply", False)
         }
-        email_details.append(email_info)
-        logging.info(f"email details is: {email_details}")
-    
-    # Enhanced routing prompt with REPORT INTENT capability
-    prompt = f"""You are an extremely strict, zero-tolerance email router for a HubSpot AI agent.
+        
+        logging.info(f"Routing email {email.get('id', 'unknown')[:8]}...")
+        
+        # Route THIS email
+        prompt = f"""You are an extremely strict, zero-tolerance email router for a HubSpot AI agent.
 You have exactly 4 possible outputs. You must pick ONE and only.
+    YOU ARE A JSON-ONLY API. 
+    DO NOT WRITE ANY TEXT, EXPLANATION, OR NARRATIVE.
+    DO NOT USE <think> TAGS.
+    DO NOT SAY "invoking" OR "successful".
+    IMMEDIATELY OUTPUT THE RAW JSON AND NOTHING ELSE.
 Emails (with full thread context):
-{email_details}
+{email_info}
 RETURN ONLY ONE OF THESE FOUR JSONS — NO TEXT BEFORE/AFTER:
-{{"task_type": "search_dag"}}
-{{"task_type": "continuation_dag"}}
-{{"task_type": "report_dag"}}
-{{"task_type": "no_action"}}
+{{"task_type": "search_dag", "reason": "<REASON>"}}
+{{"task_type": "continuation_dag", "reason": "<REASON>"}}
+{{"task_type": "report_dag", "reason": "<REASON>"}}
+{{"task_type": "no_action", "reason": "<REASON>"}}
+{{"task_type": "trigger_task_completion", "reason": "<REASON>"}}
 # RULES — MEMORIZE AND OBEY 100%
-# ROUTE TO **search_dag** → FIRST-TIME ACTION (use only in these 8 cases):
+# ROUTE TO **search_dag** → FIRST-TIME ACTION(use in these cases):
     1. User wants to CREATE anything new → deal, contact, company, task, meeting, note, call log. Exclude the situation when the user is replying to a confirmation template.
     2. User asks for "360 view", "full picture", "deep dive", "what do we know about X", "research company"
     3. User pastes meeting notes/transcript and clearly expects them to be saved in HubSpot
     4. User gives a meeting minutes or a conversational prompt AND it's followed by a creation intent. exclude the situation when the user is confirming and adding changes to the confirmation mail.
     5. User explicitly says "summarize our history with Acme" (because this requires pulling engagements).Mainly used before the next meeting with the exiisting client
+    6. User wants to ASSOCIATE/LINK a task with an existing entity (deal, contact, company) as a reply to daily task reminder email.
+    7. User sends meeting minutes as a reply to the daily task reminder email.
+    8. User wants to attach/link/associate the task to a new or existing deal/contact/company.
+    9. User provides information about entities to associate with the task (e.g., "Associate with Acme Corp deal").
 → {{"task_type": "search_dag"}}
 
 # ROUTE TO **continuation_dag** → USER IS REPLYING TO OUR CONFIRMATION EMAIL
@@ -2047,7 +2099,7 @@ RETURN ONLY ONE OF THESE FOUR JSONS — NO TEXT BEFORE/AFTER:
 → {{"task_type": "continuation_dag"}}
 
 # ROUTE TO **report_dag** → ONLY when user explicitly asks for a report.
-- Route to report_dag only when the user's prompt explicitly includes one of the following phrases: "generate report", "create report", "send report", "export", "quarterly report", or "deal report".
+- Route to report_dag only when the user's prompt explicitly includes the phrases like: "report", "generate report", "create report", "send report", "export", "quarterly report", "get me the report" or "deal report".
 If none of these terms are present, do not trigger report_dag under any circumstances.”
 - Do NOT route to report_dag when:
 - The user requests details, information, summary, 360 view, overview, or insights without using the word “report”.
@@ -2069,8 +2121,24 @@ Includes:
    - "What's the status of deal X?"
 • Blank emails or just "?"
 • You dont have the capability to act on casual comments or chit-chat.
+• You dont have the capability to act on when the user explicitly uses the key word report.
 → {{"task_type": "no_action"}}
 
+# ROUTE TO **trigger_task_completion** → Only for Daily Task Reminder replies with valid task-management intent
+Includes:
+* ONLY when the header/context confirms the message is a response to a **Daily Task Reminder**.
+* Requests to mark task as complete/incomplete
+* Requests to change task status (complete, in progress, etc.)
+* Requests to reschedule/change task due date
+* Requests to update task description or notes
+* Requests to change task priority
+
+Do NOT route here if user wants to:
+* Associate task with a deal/contact/company → use search_dag instead
+* Create a new task → use search_dag instead
+* Send meeting minutes → use search_dag instead
+
+→ {{"task_type": "trigger_task_completion"}}
 EXAMPLES — YOU MUST GET THESE 100% RIGHT
 
 ┌────────────────────────────────────────────────────────────────────┬──────────────────────┐
@@ -2079,26 +2147,30 @@ EXAMPLES — YOU MUST GET THESE 100% RIGHT
 │ "Create a $300k deal for Nvidia closing Q4"                        │ search_dag           │
 │ "Log today's call with Sarah from Stripe"                          │ search_dag           │
 │ "Give me a 360 view of the Enterprise deal"                        │ search_dag           │
+│ "Associate this task to deal X"                                    │ search_dag           │
 │ "Yes, proceed" (in thread with our confirmation)                   │ continuation_dag     │
 │ "Change amount to $350k and add Sarah as contact"                  │ continuation_dag     │
 │ "Looks good, just change close date to Dec 20"                     │ continuation_dag     │
 │ "Generate quarterly sales report"                                  │ report_dag           │
-│ "Send me a pipeline report"                                        │ report_dag           │
+│ "ge me the report of all the deals with deal stage X"              │ report_dag           │
 │ "Hi there!"                                                        │ no_action            │
 │ "Thanks!"                                                          │ no_action            │
 │ "Show all deals closing this month"                                │ no_action            │
 │ "Any follow-ups due today?"                                        │ no_action            │
 │ "Can you pull contact details for john@acme.com?"                  │ no_action            │
 │ "THis was a great meeting, looking forward to our next steps"      │ continuation_dag     │
+│ "Get me the report of all deals or deals associated with X"        │ report_dag           │
+│ "Mark the task as complete"                                        │ task_completion_dag  │
+│ "Create a followup task to call the client next week"              │ task_completion_dag  │
+│ "Update the deal amount of the associated deal to $90000"          │ task_completion_dag  │
+│ "Reschedule the task to next Friday"                               │ task_completion_dag  │
 └────────────────────────────────────────────────────────────────────┴──────────────────────┘
 Final instruction: If in doubt → route to **no_action**. Never guess creation**.
 
 Return exactly one valid JSON. No reasoning field. No extra text.
 """
-    logging.info(f"Sending routing prompt to AI with {len(email_details)} emails and conversation context")
-    
-    conversation_history_for_ai = []
-    for email in unread_emails:
+        
+        conversation_history_for_ai = []
         chat_history = email.get("chat_history", [])
         for i in range(0, len(chat_history), 2):
             if i + 1 < len(chat_history):
@@ -2110,43 +2182,73 @@ Return exactly one valid JSON. No reasoning field. No extra text.
                         "response": assistant_msg["content"]
                     })
 
-    response = get_ai_response(
-        prompt=prompt,
-        conversation_history=conversation_history_for_ai,
-        expect_json=True
-    )
-    logging.info(f"AI routing response: {response}")   
-    # Parse JSON response
-    try:
-        json_response = json.loads(response)
-    except json.JSONDecodeError:
-        json_response = extract_json_from_text(response)
+        response = get_ai_response(
+            prompt=prompt,
+            conversation_history=conversation_history_for_ai,
+            expect_json=True
+        )
+        
+        try:
+            json_response = json.loads(response)
+        except json.JSONDecodeError:
+            json_response = extract_json_from_text(response)
 
-    # Route based on AI decision
-    if json_response and "task_type" in json_response:
-        task_type = json_response["task_type"].lower()
-        reasoning = json_response.get("reasoning", "No reasoning provided")
-        logging.info(f"✓ AI DECISION: {task_type}, REASONING: {reasoning}")
-        
-        if "report" in task_type:
-            ti.xcom_push(key="report_emails", value=unread_emails)
-            logging.info(f"→ Routing {len(unread_emails)} emails to report_dag")
-            return "trigger_report_dag"
+        if json_response and "task_type" in json_response:
+            task_type = json_response["task_type"].lower()
+            reasoning = json_response.get("reason", "No reasoning provided")
+            logging.info(f"✓ Email {email.get('id', 'unknown')[:8]}... → {task_type}, REASON: {reasoning}")
             
-        elif "continuation" in task_type:
-            ti.xcom_push(key="reply_emails", value=unread_emails)
-            logging.info(f"→ Routing {len(unread_emails)} emails to continuation_dag")
-            return "trigger_continuation_dag"
-            
-        elif "search" in task_type:
-            ti.xcom_push(key="new_emails", value=unread_emails)
-            logging.info(f"→ Routing {len(unread_emails)} emails to search_dag")
-            return "trigger_meeting_minutes"
-        
-        elif "no_action" in task_type:
-            ti.xcom_push(key="no_action_emails", value=unread_emails)
-            logging.info("→ No action needed for the emails")
-            return "analyze_and_search_with_tools"
+            if "report" in task_type:
+                report_emails.append(email)
+            elif "continuation" in task_type:
+                continuation_emails.append(email)
+            elif "search" in task_type:
+                search_emails.append(email)
+            elif "no_action" in task_type:
+                no_action_emails.append(email)
+            elif "trigger_task_completion" in task_type:
+                if not email.get("task_id"):
+                    extracted_id = check_if_task_completion_reply(email)
+                    if extracted_id:
+                        email["task_id"] = extracted_id
+                        logging.info(f"Extracted task_id from thread: {extracted_id}")
+                task_completion_emails.append(email)
+    
+    # Push ALL categorized emails
+    tasks_to_run = []
+    
+    if task_completion_emails:
+        ti.xcom_push(key="task_completion_emails", value=task_completion_emails)
+        logging.info(f"→ {len(task_completion_emails)} emails for task_completion")
+        tasks_to_run.append("trigger_task_completion")
+    
+    if search_emails:
+        ti.xcom_push(key="new_emails", value=search_emails)
+        logging.info(f"→ {len(search_emails)} emails for search_dag")
+        tasks_to_run.append("trigger_meeting_minutes")
+    
+    if continuation_emails:
+        ti.xcom_push(key="reply_emails", value=continuation_emails)
+        logging.info(f"→ {len(continuation_emails)} emails for continuation_dag")
+        tasks_to_run.append("trigger_continuation_dag")
+    
+    if report_emails:
+        ti.xcom_push(key="report_emails", value=report_emails)
+        logging.info(f"→ {len(report_emails)} emails for report_dag")
+        tasks_to_run.append("trigger_report_dag")
+    
+    if no_action_emails:
+        ti.xcom_push(key="no_action_emails", value=no_action_emails)
+        logging.info(f"→ {len(no_action_emails)} emails for no_action")
+        tasks_to_run.append("analyze_and_search_with_tools")
+    
+    logging.info(f"✓ Routing complete. Total emails processed: {len(unread_emails)}")
+    
+    # ✅ CRITICAL: Return the list of task IDs to execute
+    if not tasks_to_run:
+        return "no_email_found_task"
+    
+    return tasks_to_run
 
 
 def extract_latest_reply(email_content):
@@ -2203,10 +2305,29 @@ def extract_json_from_text(text):
         text = text.strip()
         text = re.sub(r'```json\s*', '', text)
         text = re.sub(r'```\s*', '', text)
-        
-        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group())
+
+        # Try parsing the whole text first
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Find balanced braces to handle nested JSON
+        start = text.find('{')
+        if start == -1:
+            return None
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i+1])
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    break
         return None
     except Exception as e:
         logging.error(f"Error extracting JSON: {e}")
@@ -2227,7 +2348,9 @@ def trigger_meeting_minutes(**kwargs):
             "chat_history": email.get("chat_history", []),
             "thread_history": email.get("thread_history", []),
             "thread_id": email.get("threadId", ""),  # ADD THIS
-            "message_id": email.get("id", "")
+            "message_id": email.get("id", ""),
+            "task_id": email.get("task_id"),
+            "is_task_association": email.get("is_task_association", False)
         }
         
         task_id = f"trigger_search_{email['id'].replace('-', '_')}"
@@ -2248,16 +2371,20 @@ def trigger_continuation_dag(**kwargs):
         logging.info("No reply emails to process")
         return
 
+    # Pull search_results from the search DAG so create DAG gets the correct owners
+    search_results = ti.xcom_pull(dag_id="hubspot_search_entities", task_ids="compile_search_results", key="search_results") or {}
+
     for email in reply_emails:
+
         # Pass email with full chat_history to continuation DAG
         trigger_conf = {
             "email_data": email,
             "chat_history": email.get("chat_history", []),
             "thread_history": email.get("thread_history", []),
-            "thread_id": email.get("threadId"),
-            "thread_id": email.get("threadId", ""),  # ADD THIS
+            "thread_id": email.get("threadId", ""),
             "message_id": email.get("id", "")
         }
+
         
         task_id = f"trigger_continuation_{email['id'].replace('-', '_')}"
         trigger_task = TriggerDagRunOperator(
@@ -2867,56 +2994,126 @@ Always return valid JSON. No extra text or tables.
 # HELPER FUNCTIONS - UPDATE THESE IN YOUR CODEBASE
 # ═══════════════════════════════════════════════════════════════════
 
-def build_clarification_email_html(sender_name, results, entity, search_term, total_count, query_type="direct_search", target_entity="none", original_query="",closest_match_name=None, was_typo=False):
-    """Build HTML email for clarification with metadata embedded as HTML comments."""
+def build_clarification_email_html(sender_name, results, entity, search_term, total_count, 
+                                   query_type="direct_search", target_entity="none", 
+                                   original_query="", closest_match_name=None, was_typo=False):
+    """
+    Universal clarification email builder - works for ANY entity type or mixed types.
+    No hardcoded conditions - dynamically adapts to whatever fields are in the results.
+    """
     
-    entity_display = entity.replace("_", " ").title()
+    entity_display = entity.replace("_", " ").replace("|", " or ").title()
     
-    # Build table rows
-    if entity == "contacts":
-        header_row = "<th>Row</th><th>Contact ID</th><th>Name</th><th>Email</th><th>Phone</th>"
-        table_rows = ""
-        for idx, result in enumerate(results[:10], 1):
-            name = f"{result.get('Firstname', '')} {result.get('Lastname', '')}".strip() or "N/A"
-            table_rows += f"""
-            <tr>
-                <td>{idx}</td>
-                <td>{result.get('Contact ID', result.get('id', 'N/A'))}</td>
-                <td>{name}</td>
-                <td>{result.get('Email', 'N/A')}</td>
-                <td>{result.get('Phone', 'N/A')}</td>
-            </tr>"""
+    # ============================================================================
+    # STEP 1: AUTO-DISCOVER ALL UNIQUE FIELDS FROM RESULTS
+    # ============================================================================
+    all_fields = set()
+    for result in results[:10]:  # Only check first 10 for performance
+        all_fields.update(result.keys())
     
-    elif entity == "companies":
-        header_row = "<th>Row</th><th>Company ID</th><th>Company Name</th><th>Domain</th>"
-        table_rows = ""
-        for idx, result in enumerate(results[:10], 1):
-            table_rows += f"""
-            <tr>
-                <td>{idx}</td>
-                <td>{result.get('Company Id', result.get('id', 'N/A'))}</td>
-                <td>{result.get('Company Name', result.get('name', 'N/A'))}</td>
-                <td>{result.get('Domain', result.get('domain', 'N/A'))}</td>
-            </tr>"""
+    # ============================================================================
+    # STEP 2: PRIORITIZE FIELDS FOR DISPLAY (based on importance)
+    # ============================================================================
+    # Define priority order - fields at the top are shown first
+    field_priority = [
+        # IDs (always show first)
+        'ID', 'id', 'hs_object_id', 'Contact ID', 'Company Id', 'Deal ID',
+        
+        # Names (most important for identification)
+        'Firstname', 'firstname', 'Lastname', 'lastname', 
+        'Company Name', 'name', 'Deal Name', 'dealname',
+        
+        # Contact info (critical for disambiguation)
+        'Email', 'email', 'Phone', 'phone',
+        
+        # Job/role info
+        'Job Title', 'jobtitle', 'Title', 'title',
+        
+        # Deal-specific
+        'Deal Amount', 'amount', 'Deal Stage', 'dealstage', 'pipeline',
+        
+        # Company-specific
+        'Domain', 'domain', 'Industry', 'industry',
+        
+        # Dates (useful but lower priority)
+        'Close Date', 'closedate', 'Last Modified Date', 'lastmodifieddate',
+        
+        # Owners
+        'Contact Owner Name', 'Deal Owner', 'hubspot_owner_name',
+    ]
     
-    elif entity == "deals":
-        header_row = "<th>Row</th><th>Deal ID</th><th>Deal Name</th><th>Amount</th><th>Stage</th>"
-        table_rows = ""
-        for idx, result in enumerate(results[:10], 1):
-            table_rows += f"""
-            <tr>
-                <td>{idx}</td>
-                <td>{result.get('Deal ID', result.get('id', 'N/A'))}</td>
-                <td>{result.get('Deal Name', result.get('dealname', 'N/A'))}</td>
-                <td>{result.get('Deal Amount', result.get('amount', 'N/A'))}</td>
-                <td>{result.get('Deal Stage', result.get('dealstage', 'N/A'))}</td>
-            </tr>"""
+    # Select top 4-5 most relevant fields from results (excluding helper fields)
+    visible_fields = []
+    for field in field_priority:
+        if field in all_fields and not field.startswith('_'):
+            visible_fields.append(field)
+            if len(visible_fields) >= 5:  # Limit to 5 columns for readability
+                break
     
-    # Build query type message
+    # Fallback if no priority fields found
+    if not visible_fields:
+        visible_fields = [f for f in all_fields if not f.startswith('_')][:5]
+    
+    # ============================================================================
+    # STEP 3: BUILD TABLE HEADER DYNAMICALLY
+    # ============================================================================
+    header_columns = ['Row'] + visible_fields
+    header_row = "".join([f"<th>{col.replace('_', ' ').title()}</th>" for col in header_columns])
+    
+    # ============================================================================
+    # STEP 4: BUILD TABLE ROWS DYNAMICALLY
+    # ============================================================================
+    table_rows = ""
+    for idx, result in enumerate(results[:10], 1):
+        row_cells = [f"<td>{idx}</td>"]  # Row number
+        
+        for field in visible_fields:
+            value = result.get(field, 'N/A')
+            
+            # Special formatting for specific data types
+            if value and value != 'N/A':
+                # Format names (combine first + last)
+                if field in ['Firstname', 'firstname'] and 'Lastname' in result:
+                    value = f"{value} {result.get('Lastname', result.get('lastname', ''))}".strip()
+                elif field in ['Lastname', 'lastname']:
+                    continue  # Skip lastname if we already combined it with firstname
+                
+                # Format amounts
+                elif 'amount' in field.lower() or 'value' in field.lower():
+                    try:
+                        value = f"${int(float(value)):,}"
+                    except:
+                        pass
+                
+                # Format dates
+                elif 'date' in field.lower():
+                    try:
+                        from datetime import datetime
+                        if isinstance(value, int) and value > 1000000000000:
+                            dt = datetime.fromtimestamp(value / 1000)
+                            value = dt.strftime('%Y-%m-%d')
+                        elif isinstance(value, str) and 'T' in value:
+                            dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                            value = dt.strftime('%Y-%m-%d')
+                    except:
+                        pass
+            
+            row_cells.append(f"<td>{value}</td>")
+        
+        table_rows += f"<tr>{''.join(row_cells)}</tr>\n"
+    
+    # ============================================================================
+    # STEP 5: BUILD CONTEXTUAL MESSAGES
+    # ============================================================================
     query_type_msg = ""
     if "for" in query_type:
         target_display = target_entity.replace("_", " ").title() if target_entity != "none" else "associated data"
-        query_type_msg = f"<p><strong>Note:</strong> Once you clarify which {entity_display.lower()} you're referring to, I'll fetch the associated <strong>{target_display}</strong> for you.</p>"
+        query_type_msg = f"""
+        <div class="note">
+            <strong>Note:</strong> Once you clarify which {entity_display.lower()} you're referring to, 
+            I'll fetch the associated <strong>{target_display}</strong> for you.
+        </div>
+        """
     
     if was_typo:
         closest_text = f" <strong>{closest_match_name}</strong>" if closest_match_name else " a close match"
@@ -2927,28 +3124,54 @@ def build_clarification_email_html(sender_name, results, entity, search_term, to
         """
     else:
         intro_message = f"""
-        <p>I found <strong>{total_count} {entity_display}</strong> matching "<strong>{search_term}</strong>".</p>
+        <p>I found <strong>{total_count}</strong> matching results for "<strong>{search_term}</strong>".</p>
         """
     
-    # EMBED METADATA AS HTML COMMENTS (invisible to user, readable by code)
+    # ============================================================================
+    # STEP 6: EMBED METADATA AS HTML COMMENTS
+    # ============================================================================
     metadata_comments = f"""
 <!-- QUERY_TYPE: {query_type} -->
 <!-- TARGET_ENTITY: {target_entity} -->
 <!-- ORIGINAL_QUERY: {original_query} -->
 """
     
+    # ============================================================================
+    # STEP 7: ASSEMBLE FINAL HTML
+    # ============================================================================
     html = f"""
 <html>
 <head>
     <style>
         body {{ font-family: Arial, sans-serif; padding: 20px; max-width: 900px; margin: 0 auto; }}
         .content {{ margin: 20px 0; }}
-        table {{ border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 0.9em; }}
-        th {{ background-color: #f0f0f0; padding: 10px; text-align: left; border: 1px solid #ddd; }}
-        td {{ padding: 10px; border: 1px solid #ddd; }}
+        table {{ 
+            border-collapse: collapse; 
+            width: 100%; 
+            margin: 20px 0; 
+            font-size: 0.9em;
+            table-layout: auto;
+        }}
+        th {{ 
+            background-color: #f0f0f0; 
+            padding: 10px; 
+            text-align: left; 
+            border: 1px solid #ddd;
+            white-space: nowrap;
+        }}
+        td {{ 
+            padding: 10px; 
+            border: 1px solid #ddd;
+            word-wrap: break-word;
+        }}
         tr:nth-child(even) {{ background-color: #f9f9f9; }}
         .footer {{ margin-top: 20px; font-size: 0.9em; color: #666; }}
-        .note {{ background-color: #fff3cd; padding: 10px; border-left: 4px solid #ffc107; margin: 15px 0; }}
+        .note {{ 
+            background-color: #fff3cd; 
+            padding: 10px; 
+            border-left: 4px solid #ffc107; 
+            margin: 15px 0; 
+        }}
     </style>
 </head>
 <body>
@@ -2958,11 +3181,11 @@ def build_clarification_email_html(sender_name, results, entity, search_term, to
         {intro_message}
         {query_type_msg}
         
-        <p>Please reply with one of the following to help me identify the specific {entity_display.lower()}:</p>
+        <p>Please reply with one of the following to help me identify the specific record:</p>
         <ul>
             <li><strong>Row number</strong> from the table below (e.g., "row 1" or "first one")</li>
-            <li><strong>Email address</strong> (e.g., "priya.desai@northpeaksys.com")</li>
-            <li><strong>Full name with company</strong> (e.g., "Priya Desai at NorthPeak")</li>
+            <li><strong>Email address</strong> (if available in the results)</li>
+            <li><strong>Name with additional context</strong> (e.g., "John Smith at Acme Corp")</li>
         </ul>
         
         <table>
@@ -2974,7 +3197,7 @@ def build_clarification_email_html(sender_name, results, entity, search_term, to
             </tbody>
         </table>
         
-        {'<p><em>Showing the matches. Reply with identifying information to proceed.</em></p>' if total_count > 10 else ''}
+        {'<p><em>Showing top 10 matches. Reply with identifying information to proceed.</em></p>' if total_count > 10 else ''}
     </div>
     
     <div class="signature">
@@ -3544,12 +3767,12 @@ def generate_final_response_or_trigger_report(**kwargs):
                 # Casual response
                 casual_html = f"""
                 <html>
-                <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+                <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 15px 0; padding: 20px;">
                     <p>Hello {sender_name},</p>
                     <p>Thank you for your message! We're happy to help with anything HubSpot-related.</p>
                     <p>Feel free to ask about contacts, deals, tasks, or anything else!</p>
                     <p>Best regards,<br>The HubSpot Assistant Team<br>
-                    <a href="http://lowtouch.ai" style="color:#666;font-size:0.9em;">lowtouch.ai</a></p>
+                    <a href="http://lowtouch.ai" style="margin-top: 15px; font-weight: bold;">lowtouch.ai</a></p>
                 </body>
                 </html>
                 """
@@ -4092,8 +4315,8 @@ def trigger_report_dag(**kwargs):
     """Enhanced trigger_report_dag with professional report email formatting"""
     DEAL_STAGE_LABELS = get_deal_stage_labels()
     ti = kwargs['ti']
-    report_emails = ti.xcom_pull(key="report_emails") or []
-    general_report_emails = ti.xcom_pull(key="general_query_report") or []
+    report_emails = ti.xcom_pull(key="report_emails", task_ids="branch_task") or []
+    general_report_emails = ti.xcom_pull(key="general_query_report", task_ids="branch_task") or []
     
     all_report_emails = report_emails + general_report_emails
     
@@ -4219,14 +4442,17 @@ extract the enitites details also use the spelling variants:{spelling_inject_tex
 - Always generate a report whenever the user explicitly requests it using phrases like "create a report", "generate a report", "give the report", "provide the report", "prepare a report", "build a report", or "produce a report", regardless of record count or thresholds.
 IMPORTANT RULES:
 1. For company-related queries (e.g., "deals associated with company XYZ"):
+   - Parse the company name and used the company id for the filters. 
+   - Use `search_companies` tool to find company id from company name.
    - Use the "associations.company" property to filter by company id
-   - Parse the company name and search the company using search_company tool and get the id for the filters.
    - Operator should be CONTAINS_TOKEN for partial matches
    - Example: {{"propertyName": "associations.company", "operator": "CONTAINS_TOKEN", "value": "123"}}
 
 2. For contact-related queries (e.g., "deals for contact John Doe"):
+   - Parse the contact name and use the contact id for the filters.
+   - Use `search_contacts` tool to find contact id from contact name.
    - Use the "associations.contact" property to filter by contact id
-   -  Parse the contact name and search the contact using search_contact tool and get the id for the filters. ALways use
+   - example : contact name parsed abc, use the tool `search_contacts` to find the contact id 123.
    - Example: {{"propertyName": "associations.contact", "operator": "CONTAINS_TOKEN", "value": "123"}}
 
 3. For date ranges:
@@ -4248,13 +4474,20 @@ IMPORTANT RULES:
 
 6. Report title should describe what data is shown (e.g., "Deals Associated with Company XYZ")
 
-7. CRITICAL - Deal Stage Mapping:
+7. CRITICAL Strict Rule for Deal Stage Mapping when user queries to get deals with X deal stage or pipeline:
    - When user mentions a deal stage name (like "lead", "qualified", "closed won"), you MUST:
      a) First call the get_deal_stage_labels() function to get the stage ID mapping
      b) Find the matching stage ID (e.g., "lead" might be "appointmentscheduled")
      c) Use the STAGE ID in the filter, not the human-readable name
    - Example: If user says "lead stage", search for the ID that maps to "Lead"
    - The stage IDs are already loaded in DEAL_STAGE_LABELS variable
+
+8. CRITICAL Strict Rule for Deal Owner Mapping when user queries to get deals owned by X owner:
+    - When user mentions an owner by name (e.g., "deals owned by John Doe"), you MUST:
+        a) Use the `get_all_owners` tool to fetch all owners.
+        b) Match the provided name against all known owner names (first, last, full) and their spelling variants.
+        c) Use the corresponding owner ID in the filter.
+    - Example: If user says "owned by John Doe", find the owner ID for "John Doe" and use that ID in the "hubspot_owner_id" filter.
 
 Return ONLY a valid JSON object:
 {{
@@ -4916,8 +5149,8 @@ Supported operators: EQ, NEQ, LT, LTE, GT, GTE, CONTAINS_TOKEN, NOT_CONTAINS_TOK
                 final_response = ai_response
                 log_prefix = "SUCCESS Report"
             else:
-                raise
-                
+                raise ValueError(f"Report generation failed for email {email_id}: report_success={report_success}, ai_response is None")
+
            
             # Build and send email (keep your existing send logic)
             try:
@@ -5050,4 +5283,4 @@ with DAG(
     )
 
     fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, decide_and_search, trigger_report_task, trigger_task_completion_task, no_email_found_task]
-    fetch_emails_task >> branch_task >> decide_and_search >> generate_response
+    decide_and_search >> generate_response
