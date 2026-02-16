@@ -58,7 +58,7 @@ def get_ai_response(prompt, conversation_history=None):
 with DAG(
     dag_id='imageguard_eol_monitor',
     default_args=default_args,
-    schedule_interval='30 05 1 * *',
+    schedule='30 05 1 * *',
     start_date=datetime(2025, 12, 1),
     catchup=False,
     tags=['imageguard', 'eol', 'alert'],

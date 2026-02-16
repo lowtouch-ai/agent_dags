@@ -12,7 +12,7 @@ class TestDAGExists:
 
 class TestDAGConfig:
     def test_schedule(self, tracker_module):
-        assert tracker_module.dag.schedule_interval == "30 2-6 * * 1"
+        assert tracker_module.dag.schedule == "30 2-6 * * 1"
 
     def test_catchup_disabled(self, tracker_module):
         assert tracker_module.dag.catchup is False

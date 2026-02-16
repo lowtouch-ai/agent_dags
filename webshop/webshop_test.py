@@ -1,15 +1,11 @@
-from airflow import DAG
-from airflow.operators.bash import BashOperator
-from airflow.operators.python import PythonOperator
-from airflow.models import Variable
-from datetime import datetime, timedelta
+from airflow.sdk import DAG, Variable
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import PythonOperator
+from datetime import timedelta
 import pendulum
 import requests
 import os
 import re
-
-# Set IST timezone
-ist = pendulum.timezone("Asia/Kolkata")
 
 # Fetch Airflow variables
 api_token = Variable.get("API_TOKEN")
@@ -20,7 +16,7 @@ server_name = Variable.get("SERVER")
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
-    'start_date': datetime(2025, 8, 12, tzinfo=ist),
+    'start_date': pendulum.datetime(2025, 8, 12, tz="Asia/Kolkata"),
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
 }
@@ -58,7 +54,7 @@ def slack_alert(**context):
 with DAG(
     dag_id='webshop_run_chatapi_automation',
     default_args=default_args,
-    schedule_interval='30 14 * * *',  # 14:30 IST
+    schedule='30 14 * * *',  # 14:30 IST
     catchup=False,
     tags=['maven', 'automation', 'test'],
 ) as dag:
@@ -76,7 +72,6 @@ with DAG(
     slack_notify = PythonOperator(
         task_id="slack_notify",
         python_callable=slack_alert,
-        provide_context=True,
     )
 
     run_mvn_test >> slack_notify
