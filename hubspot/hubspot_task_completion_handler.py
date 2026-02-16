@@ -31,6 +31,7 @@ def clear_retry_tracker_on_success(context):
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
     retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
+    HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name",default = 'hubspot-v6af_cl')
     
     if tracker_key in retry_tracker:
         del retry_tracker[tracker_key]
@@ -97,7 +98,7 @@ def authenticate_gmail():
 def get_ai_response(prompt, conversation_history=None, expect_json=False):
     """Get response from AI model"""
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af_cl'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': f'{HUBSPOT_MODEL}'})
         messages = []
 
         if expect_json:
@@ -112,8 +113,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
                 messages.append({"role": "assistant", "content": item["response"]})
         
         messages.append({"role": "user", "content": prompt})
-        response = client.chat(model='hubspot:v6af_cl', messages=messages, stream=False)
-        ai_content = response.message.content
+        response = client.chat(model=f'{HUBSPOT_MODEL}', messages=messages, stream=False)
         ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
         return ai_content.strip()
     except Exception as e:

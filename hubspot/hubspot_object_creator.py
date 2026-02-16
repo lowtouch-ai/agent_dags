@@ -75,6 +75,7 @@ GMAIL_CREDENTIALS = Variable.get("ltai.v3.hubspot.gmail.credentials")
 OLLAMA_HOST = Variable.get("ltai.v3.hubspot.ollama.host","http://agentomatic:8000")
 DEFAULT_OWNER_NAME = Variable.get("ltai.v3.hubspot.default.owner.name")
 DEFAULT_OWNER_ID = Variable.get("ltai.v3.hubspot.default.owner.id")
+HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name",default = 'hubspot-v6af_cl')
 TASK_THRESHOLD = 15
 def authenticate_gmail():
     try:
@@ -92,7 +93,7 @@ def authenticate_gmail():
 
 def get_ai_response(prompt, conversation_history=None, expect_json=False, stream=True):
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af_cl'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': f'{HUBSPOT_MODEL}'})
         messages = []
 
         # Strong system prompt when expecting JSON
@@ -121,7 +122,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
         messages.append({"role": "user", "content": prompt})
 
         # Call Ollama
-        response = client.chat(model='hubspot:v6af_cl', messages=messages, stream=stream)
+        response = client.chat(model=f'{HUBSPOT_MODEL}', messages=messages, stream=stream)
 
         # Accumulate streamed response
         ai_content = ""

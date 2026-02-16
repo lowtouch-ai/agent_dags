@@ -74,6 +74,7 @@ HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")
 HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
 DEFAULT_OWNER_ID = Variable.get("ltai.v3.hubspot.default.owner.id")
 DEFAULT_OWNER_NAME = Variable.get("ltai.v3.hubspot.default.owner.name")
+HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name",default = 'hubspot-v6af_cl')
 TASK_THRESHOLD = 15
 def authenticate_gmail():
     try:
@@ -109,9 +110,9 @@ def decode_email_payload(msg):
         logging.error(f"Error decoding email payload: {e}")
         return ""
 
-def get_ai_response(prompt, conversation_history=None, expect_json=False, model='hubspot:v6af_cl', stream=True):
+def get_ai_response(prompt, conversation_history=None, expect_json=False,model=f'{HUBSPOT_MODEL}', stream=True):
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af_cl'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': f'{HUBSPOT_MODEL}'})
         messages = []
         
         if expect_json and model != "hubspot:v7-perplexity":

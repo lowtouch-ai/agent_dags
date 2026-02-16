@@ -21,6 +21,7 @@ default_args = {
     "retries": 2,
 }
 
+HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name",default = 'hubspot-v6af_cl')
 
 @task
 def check_and_retry_failed_tasks(**context):

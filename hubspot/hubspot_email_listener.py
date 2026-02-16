@@ -27,6 +27,8 @@ from openpyxl.styles import Font
 import pytz
 from dateutil import parser
 
+HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name",default = 'hubspot-v6af_cl')
+
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 def send_fallback_email_on_failure(context):
@@ -1560,7 +1562,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
         try:
             client = Client(
                 host=OLLAMA_HOST, 
-                headers={'x-ltai-client': 'hubspot-v6af_cl'},
+                headers={'x-ltai-cient':f'{HUBSPOT_MODEL}'},
                 timeout=300 # Add explicit timeout
             )
             messages = []
@@ -1583,7 +1585,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
                 logging.info(f"Retry attempt {attempt + 1}/{max_retries}")
             
             response = client.chat(
-                model='hubspot:v6af_cl', 
+                model=f'{HUBSPOT_MODEL}', 
                 messages=messages, 
                 stream=stream,
                 options={
