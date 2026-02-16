@@ -282,11 +282,25 @@ def fetch_pdf_from_api(**context):
 
     set_project_status(project_id, "analyzing", headers)
 
-    url = f"{RFP_API_BASE}/rfp/projects/{project_id}/rfpfile"
+    url = f"{RFP_API_BASE}/rfp/projects/{project_id}"
+
+    # Fetch project details to get context_and_instructions
+    try:
+        logging.info(f"Fetching project details for project_id={project_id}")
+        project_response = requests.get(url, headers=headers, timeout=30)
+        project_response.raise_for_status()
+        project_data = project_response.json()
+        context_and_instructions = project_data.get("context_and_instructions", "")
+        logging.info(f"Fetched project context. Length: {len(context_and_instructions) if context_and_instructions else 0} characters")
+        context["ti"].xcom_push(key="context_and_instructions", value=context_and_instructions or "")
+    except Exception as e:
+        logging.warning(f"Failed to fetch project details: {e}. Continuing without context.")
+        context["ti"].xcom_push(key="context_and_instructions", value="")
+
     logging.info(f"Downloading PDF for project_id={project_id}")
 
     try:
-        response = requests.get(url, headers=headers, timeout=90)
+        response = requests.get(f"{url}/rfpfile", headers=headers, timeout=90)
         response.raise_for_status()
 
         pdf_bytes = response.content
@@ -1085,6 +1099,12 @@ You are generating an answer for a single RFP question inside the lowtouch.ai Au
 This prompt OVERRIDES any other formatting instructions.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROJECT CONTEXT AND INSTRUCTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{project_context}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MANDATORY RAG EXECUTION RULE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1164,11 +1184,18 @@ If you cannot answer using retrieved knowledge (Step 3), return:
 def generate_answers_with_ai(**context):
     """Generate answers for all questions using AI and update immediately"""
     questions_with_id = context["ti"].xcom_pull(task_ids="validate_and_fix_questions", key="questions_with_id")
+    context_and_instructions = context["ti"].xcom_pull(task_ids="fetch_pdf_from_api", key="context_and_instructions") or ""
     conf, project_id, workspace_uuid, x_ltai_user_email, headers, api_headers = _get_conf_and_headers(context)
     set_project_status(project_id, "generating", api_headers)
 
     answers_dict = {}
     project_url = f"{RFP_API_BASE}/rfp/projects/{project_id}"
+
+    # Format project context for the prompt
+    if context_and_instructions and context_and_instructions.strip():
+        project_context = f"Use the following project-specific context and instructions when generating answers:\n\n{context_and_instructions.strip()}"
+    else:
+        project_context = "No additional project-specific context provided."
 
     def process_single_question(q_num, question_data):
         question_text = question_data["text"]
@@ -1179,6 +1206,7 @@ def generate_answers_with_ai(**context):
         question_id = question_data["id"]
 
         prompt_answer = ANSWER_PROMPT_TEMPLATE.format(
+            project_context=project_context,
             q_num=q_num,
             question_text=question_text,
             answer_instructions=answer_instructions

@@ -25,10 +25,10 @@ Contains all shared logic via a `create_rfp_processing_dag(dag_id, description, 
 
 Each `rfp_*_processing_dag.py` is a thin wrapper (~9 lines) that calls `create_rfp_processing_dag()` with its unique `dag_id`, `description`, and `tags`. The factory creates an identical 6-task pipeline:
 
-1. `fetch_pdf_from_api` — Downloads PDF, converts to markdown via `pymupdf4llm`
+1. `fetch_pdf_from_api` — Fetches project details (including `context_and_instructions`), downloads PDF, converts to markdown via `pymupdf4llm`
 2. `extract_questions_with_ai` — Chunk-Map-Reduce extraction using `MODEL_FOR_EXTRACTION`
 3. `validate_and_fix_questions` — Chunk-level validation: sends each text chunk + known keys to AI to recover missed questions
-4. `generate_answers_with_ai` — Generates answers using `MODEL_FOR_ANSWERING` with RAG tool calls
+4. `generate_answers_with_ai` — Generates answers using `MODEL_FOR_ANSWERING` with RAG tool calls; incorporates project context
 5. `log_completion` — Updates project status to `review`, saves `processing_dag_run_id`
 6. `trigger_quality_audit` — Triggers quality audit DAG as background process (non-blocking)
 
@@ -141,8 +141,8 @@ Re-generates answers for specific questions with quality scoring (threshold: 8/1
 
 ## API Endpoints Used
 
+- `GET /rfp/projects/{id}` — Fetch project details including `context_and_instructions` (used by processing DAGs and quality audit)
 - `GET /rfp/projects/{id}/rfpfile` — Download project PDF
-- `GET /rfp/projects/{id}` — Fetch project details (used by quality audit)
 - `GET /rfp/projects/{id}/questions` — Fetch all questions for a project (used by quality audit)
 - `PATCH /rfp/projects/{id}` — Update project status, doc type, run IDs, answer count, quality audit results
 - `POST /rfp/projects/{id}/questions` — Create extracted questions
@@ -172,6 +172,40 @@ Quality audit runs in parallel after processing completes. Results stored in `qu
 - Key collision handling: if two chunks produce the same question key, the later one is suffixed (`_1`, `_2`, …) instead of overwriting
 - Question extraction retries 3 times per chunk; answer generation retries 3 times per question
 - `handle_task_failure` callback sets project status to `failed` on any task error
+
+## Project Context and Instructions
+
+The processing pipeline supports project-specific context and instructions via the `context_and_instructions` field in the project record.
+
+**How It Works:**
+
+1. **Fetch Stage** (`fetch_pdf_from_api` task):
+   - Retrieves project details via `GET /rfp/projects/{id}` before downloading the PDF
+   - Extracts the `context_and_instructions` field and stores it in XCom
+   - If the field is empty or the fetch fails, the pipeline continues with empty context (graceful degradation)
+
+2. **Answer Generation** (`generate_answers_with_ai` task):
+   - Pulls the `context_and_instructions` from XCom
+   - Injects it at the top of the answer prompt in a dedicated "PROJECT CONTEXT AND INSTRUCTIONS" section
+   - The AI model sees this context before processing each question
+
+**Use Cases:**
+- Provide firm-specific information (fund names, strategies, AUM, key personnel)
+- Set tone/style preferences (formal vs. conversational, technical depth)
+- Define answer constraints (max length, required structure, terminology to use/avoid)
+- Supply boilerplate text for common questions (e.g., firm history, regulatory status)
+
+**Example Context:**
+```
+Our firm is XYZ Capital Management with $5B AUM. We focus on large-cap value strategies.
+When answering questions about performance, always reference our flagship Large Cap Value Fund.
+Keep responses professional and concise, avoiding jargon when possible.
+```
+
+**Technical Details:**
+- Context is passed to `ANSWER_PROMPT_TEMPLATE` as the `{project_context}` variable
+- If no context provided, prompt shows: "No additional project-specific context provided."
+- Context is fetched once per DAG run and reused for all questions (efficient design)
 
 ## Extraction Logic
 
