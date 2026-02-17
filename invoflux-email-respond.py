@@ -1,6 +1,6 @@
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.models import Variable
+from airflow.sdk import DAG, Variable
+from airflow.providers.standard.operators.python import PythonOperator
+import pendulum
 from datetime import datetime, timedelta
 import base64
 import json
@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 default_args = {
     "owner": "lowtouch.ai_developers",
     "depends_on_past": False,
-    "start_date": datetime(2024, 2, 18),
+    "start_date": pendulum.datetime(2024, 2, 18),
     "retries": 0,
     "retry_delay": timedelta(seconds=15),
 }
@@ -329,16 +329,16 @@ def step_1_process_email(ti, **context):
 
 def step_2_create_vendor_bill(ti, **context):
     """Step 2: Extract and prepare for system entry"""
-    step_1_response = ti.xcom_pull(key="step_1_response")
-    
+    step_1_response = ti.xcom_pull(task_ids="step_1_process_email", key="step_1_response")
+
     prompt = "Create the Vendor bill"
-    
+
     # Pass only the previous step's response as history
     history = [{"role": "assistant", "content": step_1_response}] if step_1_response else []
     response = get_ai_response(prompt, conversation_history=history)
-    
+
     # Append to history for consistency with downstream tasks
-    full_history = ti.xcom_pull(key="conversation_history") or []
+    full_history = ti.xcom_pull(task_ids="step_1_process_email", key="conversation_history") or []
     full_history.append({"role": "user", "content": prompt})
     full_history.append({"role": "assistant", "content": response})
     ti.xcom_push(key="step_2_prompt", value=prompt)
@@ -350,8 +350,8 @@ def step_2_create_vendor_bill(ti, **context):
 
 def step_3_compose_email(ti, **context):
     """Step 3: Create the vendor bill"""
-    step_1_response = ti.xcom_pull(key="step_1_response")
-    step_2_response = ti.xcom_pull(key="step_2_response")
+    step_1_response = ti.xcom_pull(task_ids="step_1_process_email", key="step_1_response")
+    step_2_response = ti.xcom_pull(task_ids="step_2_create_vendor_bill", key="step_2_response")
     if step_1_response:
         # Remove the specific confirmation sentence, case-insensitive
         confirmation_pattern = r'Please confirm the extracted details\. Would you like to create the vendor bill by performing three-way matching\?'
@@ -561,7 +561,7 @@ def step_3_compose_email(ti, **context):
             cleaned_response = f"<html><body>{cleaned_response}</body></html>"
     
     # Append to history for consistency with downstream tasks
-    full_history = ti.xcom_pull(key="conversation_history") or []
+    full_history = ti.xcom_pull(task_ids="step_2_create_vendor_bill", key="conversation_history") or []
     full_history.append({"role": "user", "content": prompt})
     full_history.append({"role": "assistant", "content": response})
     ti.xcom_push(key="email content", value=content_appended)
@@ -582,7 +582,7 @@ def step_4_send_email(ti, **context):
             logging.warning("No email data received! This DAG was likely triggered manually.")
             return "No email data available"
         
-        final_html_content = ti.xcom_pull(key="final_html_content")
+        final_html_content = ti.xcom_pull(task_ids="step_3_compose_email", key="final_html_content")
         if not final_html_content:
             logging.error("No final HTML content found from previous steps")
             return "Error: No content to send"
