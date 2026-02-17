@@ -75,7 +75,7 @@ GMAIL_CREDENTIALS = Variable.get("ltai.v3.hubspot.gmail.credentials")
 OLLAMA_HOST = Variable.get("ltai.v3.hubspot.ollama.host","http://agentomatic:8000")
 DEFAULT_OWNER_NAME = Variable.get("ltai.v3.hubspot.default.owner.name")
 DEFAULT_OWNER_ID = Variable.get("ltai.v3.hubspot.default.owner.id")
-HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name",default = 'hubspot-v6af_cl')
+HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name","hubspot-v6af_cl")
 TASK_THRESHOLD = 15
 def authenticate_gmail():
     try:
