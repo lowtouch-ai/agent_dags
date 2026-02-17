@@ -368,32 +368,46 @@ def get_ai_response(prompt, agent_url="http://agentomatic:8000", conversation_hi
 import json
 
 def extract_json_from_text(text):
-    """
-    Extract and fix JSON from LLM responses that may be incomplete or malformed.
-    """
-    # Find JSON-like content between ```json and ``` or standalone braces
-    json_pattern = r'```json\s*(.*?)\s*```|(\{.*?\})'
-    matches = re.findall(json_pattern, text, re.DOTALL)
-    
-    # Flatten matches (regex groups)
-    potential_json = [m[0] or m[1] for m in matches if m[0] or m[1]]
-    
-    for json_str in potential_json:
-        json_str = json_str.strip()
-        
-        # Try parsing as-is first
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            pass
-        
-        # Attempt to fix common issues
-        fixed_json = fix_incomplete_json(json_str)
-        try:
-            return json.loads(fixed_json)
-        except json.JSONDecodeError as e:
-            logging.debug(f"Failed to parse even after fixing: {e}")
-            continue
-    
-    logging.warning("No valid JSON found in text")
+    """Extract the largest valid JSON object from text, handling arbitrary nesting depth."""
+    results = []
+    i = 0
+    while i < len(text):
+        if text[i] == '{':
+            # Track balanced braces, accounting for JSON strings
+            depth = 0
+            in_string = False
+            escape_next = False
+            for j in range(i, len(text)):
+                ch = text[j]
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == '\\' and in_string:
+                    escape_next = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if not in_string:
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                    if depth == 0:
+                        candidate = text[i:j+1]
+                        try:
+                            parsed = json.loads(candidate)
+                            if isinstance(parsed, dict):
+                                results.append((len(candidate), parsed))
+                        except json.JSONDecodeError as e:
+                            logging.debug(f"JSON parse failed: {e}")
+                        break
+        i += 1
+
+    if results:
+        # Return the largest valid JSON object (the complete outermost one)
+        results.sort(key=lambda x: x[0], reverse=True)
+        return results[0][1]
+
+    logging.warning("No valid JSON object found in text.")
     return None
