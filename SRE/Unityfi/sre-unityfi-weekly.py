@@ -1,11 +1,9 @@
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.decorators import task, task_group
+from airflow.sdk import DAG, task, task_group, Variable
+from airflow.providers.standard.operators.python import PythonOperator
 from typing import List
 from datetime import datetime, timedelta, timezone
 import logging
 from ollama import Client
-from airflow.models import Variable
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
