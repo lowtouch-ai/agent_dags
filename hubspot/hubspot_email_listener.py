@@ -3837,6 +3837,7 @@ def generate_final_response_or_trigger_report(**kwargs):
 
             # For count <= 10, generate HTML directly using templates
             prompt = f"""You are a friendly HubSpot email assistant. Generate a professional HTML email response.
+            You cannot create or update records, only format the results into an email. Use the following templates based on the number of results:
 
 Sender: {sender_name}
 Entity: {entity}
