@@ -1,11 +1,9 @@
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.decorators import task, task_group
+from airflow.sdk import DAG, task, task_group, Variable
+from airflow.providers.standard.operators.python import PythonOperator
 from typing import List
 from datetime import datetime, timedelta, timezone
 import logging
 from ollama import Client
-from airflow.models import Variable
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
@@ -332,8 +330,10 @@ def node_cpu_lastweek(ti, **context):
     return fetch_node_cpu_basic(ti, "node_cpu_lastweek", PREVIOUS_START, PREVIOUS_END)
 
 def node_cpu_thisweek_vs_lastweek(ti, **context):
-    data_thisweek = json.loads(ti.xcom_pull(key="node_cpu_thisweek_data"))
-    data_lastweek = json.loads(ti.xcom_pull(key="node_cpu_lastweek_data"))
+    raw_thisweek = ti.xcom_pull(task_ids="node_cpu_thisweek", key="node_cpu_thisweek_data")
+    raw_lastweek = ti.xcom_pull(task_ids="node_cpu_lastweek", key="node_cpu_lastweek_data")
+    data_thisweek = json.loads(raw_thisweek) if raw_thisweek else []
+    data_lastweek = json.loads(raw_lastweek) if raw_lastweek else []
 
     thisweek_dict = {d['node_name']: d for d in data_thisweek}
     lastweek_dict = {d['node_name']: d for d in data_lastweek}
@@ -531,8 +531,10 @@ def node_memory_lastweek(ti, **context):
     return fetch_node_memory_basic(ti, "node_memory_lastweek", PREVIOUS_START, PREVIOUS_END)
 
 def node_memory_thisweek_vs_lastweek(ti, **context):
-    data_thisweek = json.loads(ti.xcom_pull(key="node_memory_thisweek_data"))
-    data_lastweek = json.loads(ti.xcom_pull(key="node_memory_lastweek_data"))
+    raw_thisweek = ti.xcom_pull(task_ids="node_memory_thisweek", key="node_memory_thisweek_data")
+    raw_lastweek = ti.xcom_pull(task_ids="node_memory_lastweek", key="node_memory_lastweek_data")
+    data_thisweek = json.loads(raw_thisweek) if raw_thisweek else []
+    data_lastweek = json.loads(raw_lastweek) if raw_lastweek else []
 
     thisweek_dict = {d['node_name']: d for d in data_thisweek}
     lastweek_dict = {d['node_name']: d for d in data_lastweek}
@@ -745,8 +747,10 @@ def node_disk_lastweek(ti, **context):
     return fetch_node_disk_basic(ti, "node_disk_lastweek", PREVIOUS_START, PREVIOUS_END)
 
 def node_disk_thisweek_vs_lastweek(ti, **context):
-    data_thisweek = json.loads(ti.xcom_pull(key="node_disk_thisweek_data"))
-    data_lastweek = json.loads(ti.xcom_pull(key="node_disk_lastweek_data"))
+    raw_thisweek = ti.xcom_pull(task_ids="node_disk_thisweek", key="node_disk_thisweek_data")
+    raw_lastweek = ti.xcom_pull(task_ids="node_disk_lastweek", key="node_disk_lastweek_data")
+    data_thisweek = json.loads(raw_thisweek) if raw_thisweek else []
+    data_lastweek = json.loads(raw_lastweek) if raw_lastweek else []
 
     # Map by (node_name, mountpoint) tuple
     thisweek_dict = {(d['node_name'], d['mountpoint']): d for d in data_thisweek}
@@ -1039,8 +1043,10 @@ def mysql_health_lastweek(ti, **context):
     return fetch_mysql_health_basic(ti, "mysql_health_lastweek", PREVIOUS_START, PREVIOUS_END)
 
 def mysql_health_thisweek_vs_lastweek(ti, **context):
-    data_thisweek = json.loads(ti.xcom_pull(key="mysql_health_thisweek_data"))
-    data_lastweek = json.loads(ti.xcom_pull(key="mysql_health_lastweek_data"))
+    raw_thisweek = ti.xcom_pull(task_ids="mysql_health_thisweek", key="mysql_health_thisweek_data")
+    raw_lastweek = ti.xcom_pull(task_ids="mysql_health_lastweek", key="mysql_health_lastweek_data")
+    data_thisweek = json.loads(raw_thisweek) if raw_thisweek else []
+    data_lastweek = json.loads(raw_lastweek) if raw_lastweek else []
 
     # Map by endpoint
     thisweek_dict = {d['endpoint']: d for d in data_thisweek}
@@ -1455,8 +1461,10 @@ def lke_pvc_storage_details_lastweek(ti, **context):
     return fetch_lke_pvc_storage_basic(ti, "lke_pvc_storage_details_lastweek", PREVIOUS_START, PREVIOUS_END)
 
 def lke_pvc_thisweek_vs_lastweek(ti, **context):
-    data_thisweek = json.loads(ti.xcom_pull(key="lke_pvc_storage_details_data"))
-    data_lastweek = json.loads(ti.xcom_pull(key="lke_pvc_storage_details_lastweek_data"))
+    raw_thisweek = ti.xcom_pull(task_ids="lke_pvc_storage_details", key="lke_pvc_storage_details_data")
+    raw_lastweek = ti.xcom_pull(task_ids="lke_pvc_storage_details_lastweek", key="lke_pvc_storage_details_lastweek_data")
+    data_thisweek = json.loads(raw_thisweek) if raw_thisweek else []
+    data_lastweek = json.loads(raw_lastweek) if raw_lastweek else []
 
     # Map keys
     thisweek_dict = {(d['namespace'], d['pvc_name']): d for d in data_thisweek}
@@ -1687,9 +1695,11 @@ def pod_details_lastweek(ti, **context):
     return "Fetched Pod Details for Last Week"
 
 def pod_details_thisweek_vs_lastweek(ti, **context):
-    data_thisweek = json.loads(ti.xcom_pull(key="pod_details_thisweek_data"))
-    data_lastweek = json.loads(ti.xcom_pull(key="pod_details_lastweek_data"))
-    
+    raw_thisweek = ti.xcom_pull(task_ids="pod_details_thisweek", key="pod_details_thisweek_data")
+    raw_lastweek = ti.xcom_pull(task_ids="pod_details_lastweek", key="pod_details_lastweek_data")
+    data_thisweek = json.loads(raw_thisweek) if raw_thisweek else []
+    data_lastweek = json.loads(raw_lastweek) if raw_lastweek else []
+
     # Organize by Namespace
     thisweek_map = {d['namespace']: d for d in data_thisweek}
     lastweek_map = {d['namespace']: d for d in data_lastweek}

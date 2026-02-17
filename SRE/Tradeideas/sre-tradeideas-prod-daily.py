@@ -1,11 +1,9 @@
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.decorators import task, task_group
+from airflow.sdk import DAG, task, task_group, Variable
+from airflow.providers.standard.operators.python import PythonOperator
 from typing import List
 from datetime import datetime, timedelta, timezone
 import logging
 from ollama import Client
-from airflow.models import Variable
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
@@ -332,8 +330,10 @@ def node_cpu_yesterday(ti, **context):
     return fetch_node_cpu_basic(ti, "node_cpu_yesterday", PREVIOUS_START, PREVIOUS_END)
 
 def node_cpu_today_vs_yesterday(ti, **context):
-    data_today = json.loads(ti.xcom_pull(key="node_cpu_today_data"))
-    data_yesterday = json.loads(ti.xcom_pull(key="node_cpu_yesterday_data"))
+    raw_today = ti.xcom_pull(task_ids="node_cpu_today", key="node_cpu_today_data")
+    raw_yesterday = ti.xcom_pull(task_ids="node_cpu_yesterday", key="node_cpu_yesterday_data")
+    data_today = json.loads(raw_today) if raw_today else []
+    data_yesterday = json.loads(raw_yesterday) if raw_yesterday else []
 
     today_dict = {d['node_name']: d for d in data_today}
     yesterday_dict = {d['node_name']: d for d in data_yesterday}
@@ -531,8 +531,10 @@ def node_memory_yesterday(ti, **context):
     return fetch_node_memory_basic(ti, "node_memory_yesterday", PREVIOUS_START, PREVIOUS_END)
 
 def node_memory_today_vs_yesterday(ti, **context):
-    data_today = json.loads(ti.xcom_pull(key="node_memory_today_data"))
-    data_yesterday = json.loads(ti.xcom_pull(key="node_memory_yesterday_data"))
+    raw_today = ti.xcom_pull(task_ids="node_memory_today", key="node_memory_today_data")
+    raw_yesterday = ti.xcom_pull(task_ids="node_memory_yesterday", key="node_memory_yesterday_data")
+    data_today = json.loads(raw_today) if raw_today else []
+    data_yesterday = json.loads(raw_yesterday) if raw_yesterday else []
 
     today_dict = {d['node_name']: d for d in data_today}
     yesterday_dict = {d['node_name']: d for d in data_yesterday}
@@ -745,8 +747,10 @@ def node_disk_yesterday(ti, **context):
     return fetch_node_disk_basic(ti, "node_disk_yesterday", PREVIOUS_START, PREVIOUS_END)
 
 def node_disk_today_vs_yesterday(ti, **context):
-    data_today = json.loads(ti.xcom_pull(key="node_disk_today_data"))
-    data_yesterday = json.loads(ti.xcom_pull(key="node_disk_yesterday_data"))
+    raw_today = ti.xcom_pull(task_ids="node_disk_today", key="node_disk_today_data")
+    raw_yesterday = ti.xcom_pull(task_ids="node_disk_yesterday", key="node_disk_yesterday_data")
+    data_today = json.loads(raw_today) if raw_today else []
+    data_yesterday = json.loads(raw_yesterday) if raw_yesterday else []
 
     # Map by (node_name, mountpoint) tuple
     today_dict = {(d['node_name'], d['mountpoint']): d for d in data_today}
@@ -1039,8 +1043,10 @@ def mysql_health_yesterday(ti, **context):
     return fetch_mysql_health_basic(ti, "mysql_health_yesterday", PREVIOUS_START, PREVIOUS_END)
 
 def mysql_health_today_vs_yesterday(ti, **context):
-    data_today = json.loads(ti.xcom_pull(key="mysql_health_today_data"))
-    data_yesterday = json.loads(ti.xcom_pull(key="mysql_health_yesterday_data"))
+    raw_today = ti.xcom_pull(task_ids="mysql_health_today", key="mysql_health_today_data")
+    raw_yesterday = ti.xcom_pull(task_ids="mysql_health_yesterday", key="mysql_health_yesterday_data")
+    data_today = json.loads(raw_today) if raw_today else []
+    data_yesterday = json.loads(raw_yesterday) if raw_yesterday else []
 
     # Map by endpoint
     today_dict = {d['endpoint']: d for d in data_today}
@@ -1455,8 +1461,10 @@ def lke_pvc_storage_details_yesterday(ti, **context):
     return fetch_lke_pvc_storage_basic(ti, "lke_pvc_storage_details_yesterday", PREVIOUS_START, PREVIOUS_END)
 
 def lke_pvc_today_vs_yesterday(ti, **context):
-    data_today = json.loads(ti.xcom_pull(key="lke_pvc_storage_details_data"))
-    data_yesterday = json.loads(ti.xcom_pull(key="lke_pvc_storage_details_yesterday_data"))
+    raw_today = ti.xcom_pull(task_ids="lke_pvc_storage_details", key="lke_pvc_storage_details_data")
+    raw_yesterday = ti.xcom_pull(task_ids="lke_pvc_storage_details_yesterday", key="lke_pvc_storage_details_yesterday_data")
+    data_today = json.loads(raw_today) if raw_today else []
+    data_yesterday = json.loads(raw_yesterday) if raw_yesterday else []
 
     # Map keys
     today_dict = {(d['namespace'], d['pvc_name']): d for d in data_today}
@@ -1687,9 +1695,11 @@ def pod_details_yesterday(ti, **context):
     return "Fetched Pod Details for Yesterday"
 
 def pod_details_today_vs_yesterday(ti, **context):
-    data_today = json.loads(ti.xcom_pull(key="pod_details_today_data"))
-    data_yesterday = json.loads(ti.xcom_pull(key="pod_details_yesterday_data"))
-    
+    raw_today = ti.xcom_pull(task_ids="pod_details_today", key="pod_details_today_data")
+    raw_yesterday = ti.xcom_pull(task_ids="pod_details_yesterday", key="pod_details_yesterday_data")
+    data_today = json.loads(raw_today) if raw_today else []
+    data_yesterday = json.loads(raw_yesterday) if raw_yesterday else []
+
     # Organize by Namespace
     today_map = {d['namespace']: d for d in data_today}
     yest_map = {d['namespace']: d for d in data_yesterday}
