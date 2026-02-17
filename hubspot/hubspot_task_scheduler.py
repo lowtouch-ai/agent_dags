@@ -36,6 +36,7 @@ DEFAULT_OWNER_NAME = Variable.get("ltai.v3.hubspot.default.owner.name")
 DEFAULT_OWNER_DETAILS = Variable.get("ltai.v3.hubspot.task.owners")
 HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")  # Note: original variable name had typo
 HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
+HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name",default = 'hubspot-v6af_cl')
 # Email spacing configuration
 EMAIL_SPACING_MINUTES = 3
 DELIVERY_START_HOUR = 9  # Start sending at 9 AM local time
@@ -137,7 +138,7 @@ def get_initiated_owners_today(ti, owner_id, owner_timezone):
         
         key = f"initiated_owners_{owner_local_date}_{owner_id}"
         
-        initiated = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=True, dag_id=ti.dag_id)
+        initiated = ti.xcom_pull(key=key, task_ids='check_delivery_window', include_prior_dates=True, dag_id=ti.dag_id)
         return initiated is not None
     except Exception as e:
         logging.warning(f"Failed to check initiated status: {e}")
@@ -166,7 +167,7 @@ def get_sent_reminders_today(ti, owner_id, owner_timezone):
         key = f"sent_reminders_{owner_local_date}_{owner_id}"
 
         # Try current run XCom first
-        sent_list = ti.xcom_pull(key=key, task_ids=None, include_prior_dates=False)
+        sent_list = ti.xcom_pull(key=key, task_ids='send_spaced_reminders', include_prior_dates=False)
         if sent_list is not None:
             sent_set = set(sent_list)
             logging.info(f" Loaded {len(sent_set)} sent reminder(s) for owner {owner_id} from current run")
@@ -175,7 +176,7 @@ def get_sent_reminders_today(ti, owner_id, owner_timezone):
         # Try from previous DAG runs today (cross-run persistence)
         sent_list = ti.xcom_pull(
             key=key,
-            task_ids=None,
+            task_ids='send_spaced_reminders',
             include_prior_dates=True,
             dag_id=ti.dag_id
         )
@@ -227,7 +228,7 @@ def authenticate_gmail():
 def get_ai_response(prompt, conversation_history=None, expect_json=False):
     """Get response from AI model"""
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af_cl'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': f'{HUBSPOT_MODEL}'})
         messages = []
 
         if expect_json:
@@ -242,7 +243,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
                     messages.append({"role": item["role"], "content": item["content"]})
 
         messages.append({"role": "user", "content": prompt})
-        response = client.chat(model='hubspot:v6af_cl', messages=messages, stream=False)
+        response = client.chat(model=f'{HUBSPOT_MODEL}', messages=messages, stream=False)
         ai_content = response.message.content
         ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
         return ai_content.strip()
@@ -619,7 +620,7 @@ def get_all_task_owners(ti, **context):
 def check_delivery_window(ti, **context):
     """Check if we're in the delivery window AND it's a business day for any owner"""
     try:
-        owners = ti.xcom_pull(key="all_owners", default=[])
+        owners = ti.xcom_pull(key="all_owners", task_ids='get_all_task_owners', default=[])
 
         if not owners:
             logging.info("No owners found, skipping delivery window check")
@@ -684,7 +685,7 @@ def check_delivery_window(ti, **context):
 
 def collect_due_tasks(ti, **context):
     """Collect tasks due today or overdue for each owner, using their local timezone"""
-    owners = ti.xcom_pull(key="owners_to_process", default=[])
+    owners = ti.xcom_pull(key="owners_to_process", task_ids='check_delivery_window', default=[])
     if not owners:
         ti.xcom_push(key="tasks_by_owner", value={})
         return {}
@@ -786,7 +787,7 @@ Use <h4> for headings and concise paragraphs/lists."""
 def send_spaced_reminders(ti, **context):
     """Send task reminder emails with 3-minute spacing - ONE EMAIL PER TASK"""
     try:
-        tasks_by_owner = ti.xcom_pull(key="tasks_by_owner", default={})
+        tasks_by_owner = ti.xcom_pull(key="tasks_by_owner", task_ids='collect_due_tasks', default={})
 
         if not tasks_by_owner:
             logging.info("No tasks to send reminders for")
@@ -888,7 +889,7 @@ def safe_json_loads(text, default=None):
 with DAG(
     "hubspot_daily_task_reminders",
     default_args=default_args,
-    schedule_interval="0 * * * *",
+    schedule="0 * * * *",
     catchup=False,
     tags=["hubspot", "tasks", "reminders", "daily"],
     description="Send daily HubSpot task reminders (one email per task) during business hours"
@@ -897,31 +898,26 @@ with DAG(
     get_owners = PythonOperator(
         task_id="get_all_task_owners",
         python_callable=get_all_task_owners,
-        provide_context=True,
     )
 
     check_window = BranchPythonOperator(
         task_id="check_delivery_window",
         python_callable=check_delivery_window,
-        provide_context=True,
     )
 
     collect_tasks = PythonOperator(
         task_id="collect_due_tasks",
         python_callable=collect_due_tasks,
-        provide_context=True,
     )
 
     send_reminders = PythonOperator(
         task_id="send_spaced_reminders",
         python_callable=send_spaced_reminders,
-        provide_context=True,
     )
 
     skip_collection = PythonOperator(
         task_id="skip_task_collection",
         python_callable=skip_task_collection,
-        provide_context=True,
     )
 
     get_owners >> check_window

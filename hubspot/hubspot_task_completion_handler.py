@@ -6,9 +6,8 @@ from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import requests
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.models import Variable
+from airflow.sdk import DAG, Variable
+from airflow.providers.standard.operators.python import PythonOperator
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from ollama import Client
@@ -31,7 +30,8 @@ def clear_retry_tracker_on_success(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
+    HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name",default = 'hubspot-v6af_cl')
     
     if tracker_key in retry_tracker:
         del retry_tracker[tracker_key]
@@ -48,7 +48,7 @@ def update_retry_tracker_on_failure(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         retry_tracker[tracker_key]["status"] = "failed"
@@ -98,7 +98,7 @@ def authenticate_gmail():
 def get_ai_response(prompt, conversation_history=None, expect_json=False):
     """Get response from AI model"""
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af_cl'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': f'{HUBSPOT_MODEL}'})
         messages = []
 
         if expect_json:
@@ -113,8 +113,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False):
                 messages.append({"role": "assistant", "content": item["response"]})
         
         messages.append({"role": "user", "content": prompt})
-        response = client.chat(model='hubspot:v6af_cl', messages=messages, stream=False)
-        ai_content = response.message.content
+        response = client.chat(model=f'{HUBSPOT_MODEL}', messages=messages, stream=False)
         ai_content = re.sub(r'```(?:html|json)\n?|```', '', ai_content)
         return ai_content.strip()
     except Exception as e:
@@ -1202,7 +1201,7 @@ def send_confirmation_email(**kwargs):
 with DAG(
     "hubspot_task_completion_handler",
     default_args=default_args,
-    schedule_interval=None,  # Triggered by email listener
+    schedule=None,  # Triggered by email listener
     catchup=False,
     tags=["hubspot", "tasks", "deal", "completion"],
     on_success_callback=clear_retry_tracker_on_success,
@@ -1210,8 +1209,8 @@ with DAG(
     description="Handle task completion + deal updates via email with dynamic stage mapping"
 ) as dag:
 
-    analyze = PythonOperator(task_id="analyze_request", python_callable=analyze_task_completion_request, provide_context=True)
-    process = PythonOperator(task_id="process_task", python_callable=process_task_completion, provide_context=True)
-    confirm = PythonOperator(task_id="send_confirmation", python_callable=send_confirmation_email, provide_context=True)
+    analyze = PythonOperator(task_id="analyze_request", python_callable=analyze_task_completion_request)
+    process = PythonOperator(task_id="process_task", python_callable=process_task_completion)
+    confirm = PythonOperator(task_id="send_confirmation", python_callable=send_confirmation_email)
 
     analyze >> process >> confirm

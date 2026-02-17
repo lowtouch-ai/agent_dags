@@ -1,7 +1,7 @@
 from airflow import DAG
-from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.dummy import DummyOperator
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.providers.standard.operators.python import PythonOperator, BranchPythonOperator
+from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from datetime import datetime, timedelta
 import base64
 import logging
@@ -15,8 +15,7 @@ from email import message_from_bytes
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
-from airflow.models import Variable
-from airflow.api.common.trigger_dag import trigger_dag
+from airflow.sdk import Variable
 import requests
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -33,7 +32,7 @@ def clear_retry_tracker_on_success(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         del retry_tracker[tracker_key]
@@ -50,7 +49,7 @@ def update_retry_tracker_on_failure(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         retry_tracker[tracker_key]["status"] = "failed"
@@ -75,6 +74,7 @@ HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")
 HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
 DEFAULT_OWNER_ID = Variable.get("ltai.v3.hubspot.default.owner.id")
 DEFAULT_OWNER_NAME = Variable.get("ltai.v3.hubspot.default.owner.name")
+HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name",default = 'hubspot-v6af_cl')
 TASK_THRESHOLD = 15
 def authenticate_gmail():
     try:
@@ -110,9 +110,9 @@ def decode_email_payload(msg):
         logging.error(f"Error decoding email payload: {e}")
         return ""
 
-def get_ai_response(prompt, conversation_history=None, expect_json=False, model='hubspot:v6af_cl', stream=True):
+def get_ai_response(prompt, conversation_history=None, expect_json=False,model=f'{HUBSPOT_MODEL}', stream=True):
     try:
-        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': 'hubspot-v6af_cl'})
+        client = Client(host=OLLAMA_HOST, headers={'x-ltai-client': f'{HUBSPOT_MODEL}'})
         messages = []
         
         if expect_json and model != "hubspot:v7-perplexity":
@@ -546,7 +546,7 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
 
 def summarize_engagement_details(ti, **context):
     """Retrieve and summarize engagement details based on conversation"""
-    entity_flags = ti.xcom_pull(key="entity_search_flags", default={})
+    entity_flags = ti.xcom_pull(key="entity_search_flags", task_ids="analyze_thread_entities", default={})
     if not entity_flags.get("request_summary", False):
         logging.info("No summary requested, skipping engagement summary")
         ti.xcom_push(key="engagement_summary", value={})
@@ -4938,7 +4938,7 @@ except FileNotFoundError:
 with DAG(
     "hubspot_search_entities",
     default_args=default_args,
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     doc_md=readme_content,
     tags=["hubspot", "search", "entities"],
@@ -4949,192 +4949,162 @@ with DAG(
     load_context_task = PythonOperator(
         task_id="load_context_from_dag_run",
         python_callable=load_context_from_dag_run,
-        provide_context=True
     )
 
     generate_variants_task = PythonOperator(
     task_id="generate_spelling_variants",
     python_callable=generate_and_inject_spelling_variants,
-    provide_context=True
     )
 
     analyze_entities_task = PythonOperator(
         task_id="analyze_thread_entities",
         python_callable=analyze_thread_entities,
-        provide_context=True
     )
 
     summarize_engagement_task = PythonOperator(
         task_id="summarize_engagement_details",
         python_callable=summarize_engagement_details,
-        provide_context=True
     )
 
     summarize_engagement_360_task = PythonOperator(
     task_id="summarize_engagement_details_360",
     python_callable=summarize_engagement_details_360,
-    provide_context=True,
     )
 
     branch_task = BranchPythonOperator(
         task_id="decide_workflow_path",
         python_callable=decide_workflow_path,
-        provide_context=True
     )
 
     determine_owner_task = PythonOperator(
         task_id="determine_owner",
         python_callable=determine_owner,
-        provide_context=True
     )
     
     # ADD THIS NEW TASK
     validate_deal_stage_task = PythonOperator(
         task_id="validate_deal_stage",
         python_callable=validate_deal_stage,
-        provide_context=True
     )
 
     search_contacts_task = PythonOperator(
         task_id="search_contacts_with_associations",
         python_callable=search_contacts_with_associations,
-        provide_context=True,
         retries=2
     )
 
     validate_companies_task = PythonOperator(
         task_id="validate_companies_against_associations",
         python_callable=validate_companies_against_associations,
-        provide_context=True
     )
 
     validate_deals_task = PythonOperator(
         task_id="validate_deals_against_associations",
         python_callable=validate_deals_against_associations,
-        provide_context=True
     )
 
     refine_contacts_task = PythonOperator(
         task_id="refine_contacts_by_associations",
         python_callable=refine_contacts_by_associations,
-        provide_context=True
     )
 
     search_deals_directly_task = PythonOperator(
     task_id="search_deals_directly",
     python_callable=search_deals_directly,
-    provide_context=True
     )
 
     search_companies_directly_task = PythonOperator(
         task_id="search_companies_directly",
         python_callable=search_companies_directly,
-        provide_context=True
     )
 
     merge_results_task = PythonOperator(
         task_id="merge_search_results",
         python_callable=merge_search_results,
-        provide_context=True
     )
 
     validate_context_task = PythonOperator(
         task_id="validate_associations_against_context",
         python_callable=validate_associations_against_context,
-        provide_context=True
     )
 
     parse_notes_tasks_task = PythonOperator(
         task_id="parse_notes_tasks_meeting",
         python_callable=parse_notes_tasks_meeting,
-        provide_context=True
     )
 
     check_threshold_task = PythonOperator(
         task_id="check_task_threshold",
         python_callable=check_task_threshold,
-        provide_context=True
     )
 
     validate_rules_task = PythonOperator(
         task_id="validate_entity_creation_rules",
         python_callable=validate_entity_creation_rules,
-        provide_context=True
     )
 
     validation_branch_task = BranchPythonOperator(
         task_id="decide_validation_path",
         python_callable=decide_validation_path,
-        provide_context=True
     )
 
     compile_task = PythonOperator(
         task_id="compile_search_results",
         python_callable=compile_search_results,
-        provide_context=True
     )
 
     # NEW: Branch to check if any action is needed
     check_action_branch_task = BranchPythonOperator(
         task_id="check_if_action_needed",
         python_callable=check_if_action_needed,
-        provide_context=True
     )
 
     compose_email_task = PythonOperator(
         task_id="compose_confirmation_email",
         python_callable=compose_confirmation_email,
-        provide_context=True
     )
 
     send_email_task = PythonOperator(
         task_id="send_confirmation_email",
         python_callable=send_confirmation_email,
-        provide_context=True
     )
 
     # NEW: No-action acknowledgment tasks
     compose_no_action_task = PythonOperator(
         task_id="compose_no_action_email",
         python_callable=compose_no_action_email,
-        provide_context=True
     )
 
     send_no_action_task = PythonOperator(
         task_id="send_no_action_email",
         python_callable=send_no_action_email,
-        provide_context=True
     )
 
     compose_validation_error_task = PythonOperator(
         task_id="compose_validation_error_email",
         python_callable=compose_validation_error_email,
-        provide_context=True
     )
 
     send_validation_error_task = PythonOperator(
         task_id="send_validation_error_email",
         python_callable=send_validation_error_email,
-        provide_context=True
     )
 
-    validation_end_task = DummyOperator(
+    validation_end_task = EmptyOperator(
         task_id="validation_end"
     )
 
     compose_summary_email_task = PythonOperator(
         task_id="compose_engagement_summary_email",
         python_callable=compose_engagement_summary_email,
-        provide_context=True
     )
 
     send_summary_email_task = PythonOperator(
         task_id="send_engagement_summary_email",
         python_callable=send_engagement_summary_email,
-        provide_context=True
     )
 
-    end_task = DummyOperator(
+    end_task = EmptyOperator(
         task_id="end_workflow"
     )
 

@@ -21,21 +21,21 @@ class TestISTSafeguards:
         result = tracker_module.filter_users_by_timezone(ti=mock_ti_with_data, **ctx)
         assert result == []
 
-    def test_ist_hour_12_skips_all(self, tracker_module, mock_ti_with_data, airflow_context):
-        # Mon 2025-01-27 06:30 UTC = Mon 12:00 IST → outside window (12 not in [8,12))
+    def test_ist_hour_12_still_in_window(self, tracker_module, mock_ti_with_data, airflow_context):
+        # Mon 2025-01-27 06:30 UTC = Mon 12:00 IST → inside wider window [8,24)
         ctx = airflow_context("2025-01-27T06:30:00")
         result = tracker_module.filter_users_by_timezone(ti=mock_ti_with_data, **ctx)
-        assert result == []
+        assert len(result) >= 1
 
-    def test_ist_hour_after_12_skips_all(self, tracker_module, mock_ti_with_data, airflow_context):
-        # Mon 2025-01-27 08:00 UTC = Mon 13:30 IST → outside window
+    def test_ist_hour_after_12_still_in_window(self, tracker_module, mock_ti_with_data, airflow_context):
+        # Mon 2025-01-27 08:00 UTC = Mon 13:30 IST → inside wider window [8,24)
         ctx = airflow_context("2025-01-27T08:00:00")
         result = tracker_module.filter_users_by_timezone(ti=mock_ti_with_data, **ctx)
-        assert result == []
+        assert len(result) >= 1
 
 
 class TestISTBoundary:
-    """Exact boundary tests for the 8:00-12:00 IST window."""
+    """Exact boundary tests for the 8:00 AM - 11:59 PM IST window."""
 
     def test_mon_0759_ist_rejected(self, tracker_module, mock_ti_with_data, airflow_context):
         # Mon 07:59 IST = Mon 02:29 UTC
@@ -72,12 +72,13 @@ class TestCrossTimezone:
 
     def test_utc_1300_us_user_included(self, tracker_module, mock_ti_with_data, airflow_context):
         # Mon 13:00 UTC = Mon 08:00 EST → US user should pass local Monday 8 AM check
-        # But IST is 18:30 → outside the IST [8,12) window → safeguard 2 blocks ALL
-        # This tests the IST window safeguard takes priority
+        # IST is 18:30 → inside wider [8,24) window → both users can be processed
         ctx = airflow_context("2025-01-27T13:00:00")
         result = tracker_module.filter_users_by_timezone(ti=mock_ti_with_data, **ctx)
-        # IST hour is 18:30 → outside window → all skipped
-        assert result == []
+        user_names = [u["name"] for u in result]
+        # Both IST and US users should be included at this time
+        assert "Alice" in user_names
+        assert "Dave" in user_names
 
     def test_utc_0430_both_ist_and_us_users(self, tracker_module, airflow_context, mock_ti):
         """At Mon 04:30 UTC = Mon 10:00 IST (in window), but Mon 23:30 EST (Sun) —

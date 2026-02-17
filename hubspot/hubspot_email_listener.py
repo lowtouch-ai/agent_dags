@@ -1,12 +1,12 @@
 import base64
 from email import message_from_bytes
 from airflow import DAG
-from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.decorators import task
+from airflow.providers.standard.operators.python import PythonOperator, BranchPythonOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.sdk import task
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from airflow.models import Variable
+from airflow.sdk import Variable
 from datetime import datetime, timedelta, timezone
 import os
 import json
@@ -26,6 +26,8 @@ from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font
 import pytz
 from dateutil import parser
+
+HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name",default = 'hubspot-v6af_cl')
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -103,7 +105,7 @@ def send_fallback_email_on_failure(context):
         logging.warning("Could not find email data in XCom for fallback - skipping email send")
         
         # 🔥 STILL TRACK THE FAILURE even without email_data
-        retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+        retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
         
         retry_tracker[tracker_key] = {
             "status": "failed",
@@ -133,7 +135,7 @@ def send_fallback_email_on_failure(context):
     # STEP 3: Check retry count and max retries
     # ============================================================
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     existing_entry = retry_tracker.get(tracker_key, {})
     current_retry_count = existing_entry.get("retry_count", 0)
     
@@ -309,7 +311,7 @@ secure, and no action is required from your side. Thank you for your patience an
     # STEP 5: ALWAYS UPDATE RETRY TRACKER (critical fix)
     # ============================================================
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     # Increment retry count for the next attempt
     new_retry_count = current_retry_count if is_retry else 0
@@ -360,8 +362,8 @@ secure, and no action is required from your side. Thank you for your patience an
     except Exception as e:
         logging.warning(f"Could not push failure metadata: {e}")
 
-SLACK_WEBHOOK_URL = Variable.get("ltai.v3.hubspot.slack_webhook_url", default_var=None)
-SERVER_NAME = Variable.get("ltai.v3.hubspot.server_name", default_var="UNKNOWN")
+SLACK_WEBHOOK_URL = Variable.get("ltai.v3.hubspot.slack_webhook_url", default=None)
+SERVER_NAME = Variable.get("ltai.v3.hubspot.server_name", default="UNKNOWN")
 
 def send_hubspot_slack_alert(context):
     """
@@ -409,7 +411,7 @@ def send_hubspot_slack_alert(context):
     # STEP 2: Get retry tracker info
     # ============================================================
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     existing_entry = retry_tracker.get(tracker_key, {})
     current_retry_count = existing_entry.get("retry_count", 0)
     max_retries_reached = existing_entry.get("max_retries_reached", False)
@@ -643,7 +645,7 @@ def send_final_failure_email_to_user(context):
         tracker_key = f"{dag_id}:{run_id}"
     
     # Get retry tracker
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     existing_entry = retry_tracker.get(tracker_key, {})
     current_retry_count = existing_entry.get("retry_count", 0)
     
@@ -803,7 +805,7 @@ def clear_retry_tracker_on_success(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         del retry_tracker[tracker_key]
@@ -820,7 +822,7 @@ def update_retry_tracker_on_failure(context):
     
     tracker_key = f"{original_dag_id}:{original_run_id}"
     
-    retry_tracker = Variable.get("hubspot_retry_tracker", default_var={}, deserialize_json=True)
+    retry_tracker = Variable.get("hubspot_retry_tracker", default={}, deserialize_json=True)
     
     if tracker_key in retry_tracker:
         retry_tracker[tracker_key]["status"] = "failed"
@@ -926,8 +928,8 @@ def is_email_authorized(raw_email: str) -> bool:
     """
     try:
         # Load both whitelists once
-        company_raw = Variable.get("ltai.v3.hubspot.email.whitelist", default_var="[]")
-        external_raw = Variable.get("hubspot.email.whitelist.external", default_var="[]")
+        company_raw = Variable.get("ltai.v3.hubspot.email.whitelist", default="[]")
+        external_raw = Variable.get("hubspot.email.whitelist.external", default="[]")
         
         company_list = json.loads(company_raw)
         external_list = json.loads(external_raw)
@@ -1560,7 +1562,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
         try:
             client = Client(
                 host=OLLAMA_HOST, 
-                headers={'x-ltai-client': 'hubspot-v6af_cl'},
+                headers={'x-ltai-client':f'{HUBSPOT_MODEL}'},
                 timeout=300 # Add explicit timeout
             )
             messages = []
@@ -1583,7 +1585,7 @@ def get_ai_response(prompt, conversation_history=None, expect_json=False, stream
                 logging.info(f"Retry attempt {attempt + 1}/{max_retries}")
             
             response = client.chat(
-                model='hubspot:v6af_cl', 
+                model=f'{HUBSPOT_MODEL}', 
                 messages=messages, 
                 stream=stream,
                 options={
@@ -5221,7 +5223,7 @@ except FileNotFoundError:
 with DAG(
     "hubspot_monitor_mailbox",
     default_args=default_args,
-    schedule_interval=timedelta(minutes=1),
+    schedule=timedelta(minutes=1),
     catchup=False,
     doc_md=readme_content,
     tags=["hubspot", "monitor", "email", "mailbox"],
@@ -5232,56 +5234,47 @@ with DAG(
     fetch_emails_task = PythonOperator(
         task_id="fetch_unread_emails",
         python_callable=fetch_unread_emails,
-        provide_context=True
     )
 
     branch_task = BranchPythonOperator(
         task_id="branch_task",
         python_callable=branch_function,
-        provide_context=True
     )
 
     trigger_meeting_minutes_task = PythonOperator(
         task_id="trigger_meeting_minutes",
         python_callable=trigger_meeting_minutes,
-        provide_context=True
     )
 
     trigger_continuation_task = PythonOperator(
         task_id="trigger_continuation_dag",
         python_callable=trigger_continuation_dag,
-        provide_context=True
     )
 
     decide_and_search = PythonOperator(
         task_id='analyze_and_search_with_tools',
         python_callable=analyze_and_search_with_tools,
-        provide_context=True # Important: allows **kwargs with ti
     )
     
     # === NEW TASK 2: Format response or trigger report ===
     generate_response = PythonOperator(
         task_id='generate_final_response_or_trigger_report',
         python_callable=generate_final_response_or_trigger_report,
-        provide_context=True,
     )
 
     trigger_report_task = PythonOperator(
         task_id="trigger_report_dag",
         python_callable=trigger_report_dag,
-        provide_context=True
     )
 
     trigger_task_completion_task = PythonOperator(
         task_id="trigger_task_completion",
         python_callable=trigger_task_completion_dag,
-        provide_context=True
     )
 
     no_email_found_task = PythonOperator(
         task_id="no_email_found_task",
         python_callable=no_email_found,
-        provide_context=True
     )
 
     fetch_emails_task >> branch_task >> [trigger_meeting_minutes_task, trigger_continuation_task, decide_and_search, trigger_report_task, trigger_task_completion_task, no_email_found_task]
