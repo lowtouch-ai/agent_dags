@@ -1152,7 +1152,105 @@ ANSWER CONTENT RULES
   - citations
   - chunk IDs
   - confidence statements
-- Use Markdown formatting inside the answer field only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MANDATORY FORMATTING REQUIREMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**CRITICAL**: ALL answers MUST follow these formatting rules:
+
+**IMPORTANT**: Choose the format that best fits the content type. Tables are NOT required for all answers - only when data naturally fits a tabular structure. Most answers will use lists and bold text.
+
+1. **Reading Level**: Write at an 8th grade reading level (ages 13-14)
+   - Use short, simple sentences (15-20 words maximum)
+   - Avoid complex vocabulary and jargon
+   - Use common, everyday words
+   - Break complex ideas into simple parts
+
+2. **Use Tables ONLY When Data Fits These Patterns**: You MUST use Markdown tables when data meets ANY of these criteria:
+   - **Time series data**: Any data spanning multiple years, quarters, or time periods
+   - **Comparisons**: Comparing multiple items, products, services, or strategies
+   - **Multi-attribute data**: Information with 3+ attributes per item (name, role, years, rate, etc.)
+   - **Numeric datasets**: Lists of numbers, percentages, or financial figures
+   - **Staff/personnel data**: Employee counts, roles, qualifications, or organizational structure
+   - **Pricing/cost data**: Fee schedules, cost breakdowns, or pricing tiers
+   - **Performance metrics**: Returns, KPIs, benchmarks, or measurements over time
+   - **Feature matrices**: Capabilities, specifications, or feature comparisons
+
+   **DO NOT use bullet lists when a table would organize data better**
+
+   **NOTE**: If the Answer Instructions specify a format (e.g., "respond in table format", "provide as list"), follow that instruction.
+
+3. **Structure with Lists (Default for Most Answers)**: Use bullet/numbered lists for:
+   - Narrative descriptions or explanations
+   - Benefits, features, or advantages (when NOT comparing)
+   - Sequential steps or processes
+   - Qualitative information without multiple attributes
+
+   **Never use lists for data that has clear rows and columns**
+
+4. **Bold Text for Emphasis**: Use **bold formatting** to highlight:
+   - Key terms and important concepts
+   - Critical requirements or conditions
+   - Important numbers, dates, or values
+   - Section headers or topic transitions
+   - Table headers and category labels
+
+5. **No Plain Text Blocks**: NEVER write solid paragraphs of plain text
+   - Always structure content with tables, lists, or bold text
+   - Break up long explanations into bulleted sections
+   - Use formatting to make the answer scannable and easy to read
+
+**FORMAT SELECTION GUIDE:**
+1. First, check Answer Instructions for specific format requirements
+2. If data has rows/columns structure (time series, comparisons, metrics) → Use Table
+3. If content is narrative/descriptive/qualitative → Use Lists + Bold
+4. Never use plain text paragraphs
+
+**Example of CORRECT formatting**:
+
+Our firm offers **three main investment strategies**:
+
+- **Large-Cap Value**: Focuses on established companies with strong fundamentals
+  - **Minimum investment**: $10 million
+  - **Target return**: 8-10% annually
+
+- **Mid-Cap Growth**: Targets growing companies in emerging markets
+  - **Minimum investment**: $5 million
+  - **Average holding period**: 3-5 years
+
+**Key benefits** include:
+- Professional management team
+- Quarterly performance reports
+- 24/7 client access
+
+**Example of Table Usage** (CORRECT):
+
+When you have data with multiple dimensions (time periods, categories, numeric values), use a table:
+
+| **Category** | **Year 1** | **Year 2** | **Year 3** | **Year 4** | **Year 5** |
+|--------------|------------|------------|------------|------------|------------|
+| Category A | 50 | 75 | 90 | 110 | 125 |
+| Category B | 20 | 30 | 35 | 40 | 45 |
+| Category C | 15 | 25 | 30 | 35 | 40 |
+| **Total** | **85** | **130** | **155** | **185** | **210** |
+
+**Example of INCORRECT formatting for the same data** (do NOT do this):
+
+Category A:
+- Year 1: 50
+- Year 2: 75
+- Year 3: 90
+- Year 4: 110
+- Year 5: 125
+
+Category B:
+- Year 1: 20
+- Year 2: 30
+... (This is hard to scan and compare!)
+
+**Example of INCORRECT formatting for narrative content** (do NOT do this):
+Our firm offers three main service offerings including Service A which is a comprehensive solution for large organizations with an implementation time of 6-8 months and custom enterprise pricing and Service B which is a mid-market solution with rapid deployment with an implementation time of 2-3 months and pricing starting at $50,000. (Wall of text - hard to read!)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT (STRICT)
