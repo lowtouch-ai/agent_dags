@@ -25,10 +25,10 @@ Contains all shared logic via a `create_rfp_processing_dag(dag_id, description, 
 
 Each `rfp_*_processing_dag.py` is a thin wrapper (~9 lines) that calls `create_rfp_processing_dag()` with its unique `dag_id`, `description`, and `tags`. The factory creates an identical 6-task pipeline:
 
-1. `fetch_pdf_from_api` — Downloads PDF, converts to markdown via `pymupdf4llm`
+1. `fetch_pdf_from_api` — Fetches project details (including `context_and_instructions`), downloads PDF, converts to markdown via `pymupdf4llm`
 2. `extract_questions_with_ai` — Chunk-Map-Reduce extraction using `MODEL_FOR_EXTRACTION`
 3. `validate_and_fix_questions` — Chunk-level validation: sends each text chunk + known keys to AI to recover missed questions
-4. `generate_answers_with_ai` — Generates answers using `MODEL_FOR_ANSWERING` with RAG tool calls
+4. `generate_answers_with_ai` — Generates answers using `MODEL_FOR_ANSWERING` with RAG tool calls; incorporates project context
 5. `log_completion` — Updates project status to `review`, saves `processing_dag_run_id`
 6. `trigger_quality_audit` — Triggers quality audit DAG as background process (non-blocking)
 
@@ -141,8 +141,8 @@ Re-generates answers for specific questions with quality scoring (threshold: 8/1
 
 ## API Endpoints Used
 
+- `GET /rfp/projects/{id}` — Fetch project details including `context_and_instructions` (used by processing DAGs and quality audit)
 - `GET /rfp/projects/{id}/rfpfile` — Download project PDF
-- `GET /rfp/projects/{id}` — Fetch project details (used by quality audit)
 - `GET /rfp/projects/{id}/questions` — Fetch all questions for a project (used by quality audit)
 - `PATCH /rfp/projects/{id}` — Update project status, doc type, run IDs, answer count, quality audit results
 - `POST /rfp/projects/{id}/questions` — Create extracted questions
@@ -172,6 +172,112 @@ Quality audit runs in parallel after processing completes. Results stored in `qu
 - Key collision handling: if two chunks produce the same question key, the later one is suffixed (`_1`, `_2`, …) instead of overwriting
 - Question extraction retries 3 times per chunk; answer generation retries 3 times per question
 - `handle_task_failure` callback sets project status to `failed` on any task error
+
+## Project Context and Instructions
+
+The processing pipeline supports project-specific context and instructions via the `context_and_instructions` field in the project record.
+
+**How It Works:**
+
+1. **Fetch Stage** (`fetch_pdf_from_api` task):
+   - Retrieves project details via `GET /rfp/projects/{id}` before downloading the PDF
+   - Extracts the `context_and_instructions` field and stores it in XCom
+   - If the field is empty or the fetch fails, the pipeline continues with empty context (graceful degradation)
+
+2. **Answer Generation** (`generate_answers_with_ai` task):
+   - Pulls the `context_and_instructions` from XCom
+   - Injects it at the top of the answer prompt in a dedicated "PROJECT CONTEXT AND INSTRUCTIONS" section
+   - The AI model sees this context before processing each question
+
+**Use Cases:**
+- Provide firm-specific information (fund names, strategies, AUM, key personnel)
+- Set tone/style preferences (formal vs. conversational, technical depth)
+- Define answer constraints (max length, required structure, terminology to use/avoid)
+- Supply boilerplate text for common questions (e.g., firm history, regulatory status)
+
+**Example Context:**
+```
+Our firm is XYZ Capital Management with $5B AUM. We focus on large-cap value strategies.
+When answering questions about performance, always reference our flagship Large Cap Value Fund.
+Keep responses professional and concise, avoiding jargon when possible.
+```
+
+**Technical Details:**
+- Context is passed to `ANSWER_PROMPT_TEMPLATE` as the `{project_context}` variable
+- If no context provided, prompt shows: "No additional project-specific context provided."
+- Context is fetched once per DAG run and reused for all questions (efficient design)
+
+## Answer Formatting Requirements
+
+The `ANSWER_PROMPT_TEMPLATE` enforces strict formatting rules to ensure all AI-generated answers are professional, readable, and scannable. These rules apply to all RFP types and question types.
+
+**Format Selection Priority:**
+1. Check `answer_instructions` field for specific format requirements (derived from question context)
+2. If data has rows/columns structure (time series, comparisons, metrics) → Use Table
+3. If content is narrative/descriptive/qualitative → Use Lists + Bold Text
+4. Never use plain text paragraphs
+
+### Formatting Rules
+
+**1. Reading Level**: 8th grade (ages 13-14)
+- Short, simple sentences (15-20 words max)
+- Common, everyday words (avoid jargon)
+- Break complex ideas into simple parts
+
+**2. Table Usage (Conditional)**: Tables are NOT required for all answers - only when data naturally fits tabular structure
+- **MUST use tables for**: Time series data, comparisons, multi-attribute data (3+ attributes), numeric datasets, staff/personnel data, pricing/cost data, performance metrics, feature matrices
+- **DO NOT** use bullet lists when a table would organize data better
+- Include clear column headers, keep tables concise
+
+**3. Lists (Default for Most Answers)**: Use for narrative/descriptive content
+- Bullet points for related items
+- Numbered lists for steps/sequences
+- Break dense paragraphs into bulleted points
+- **Never** use lists for data with clear rows/columns
+
+**4. Bold Text for Emphasis**: Highlight key information
+- Key terms and important concepts
+- Critical requirements or conditions
+- Important numbers, dates, values
+- Section headers and topic transitions
+- Table headers and category labels
+
+**5. No Plain Text Blocks**: Never write solid paragraphs
+- Always structure with tables, lists, or bold text
+- Make answers scannable and easy to read
+
+### Examples
+
+**CORRECT (Time Series → Table):**
+```markdown
+| **Department** | **2020** | **2021** | **2022** | **2023** |
+|----------------|----------|----------|----------|----------|
+| Category A     | 50       | 75       | 90       | 110      |
+| Category B     | 20       | 30       | 35       | 40       |
+```
+
+**INCORRECT (Time Series → Bullets):**
+```markdown
+Category A:
+- 2020: 50
+- 2021: 75
+- 2022: 90
+```
+(Hard to scan and compare across categories)
+
+**CORRECT (Narrative → Lists + Bold):**
+```markdown
+Our firm offers **three main services**:
+
+- **Service A**: Comprehensive solution for large organizations
+  - **Implementation**: 6-8 months
+  - **Pricing**: Custom enterprise pricing
+```
+
+**INCORRECT (Narrative → Wall of Text):**
+```markdown
+Our firm offers three main services including Service A which is a comprehensive solution for large organizations with an implementation time of 6-8 months and custom enterprise pricing...
+```
 
 ## Extraction Logic
 
