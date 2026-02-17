@@ -217,9 +217,39 @@ def _remove_env_file(test_session_id: str):
 
 
 # ═══════════════════════════════════════════════════════════════
+# Helper: Parse proto files for package, service, and rpc names
+# ═══════════════════════════════════════════════════════════════
+def _parse_proto_services(test_dir: str, proto_filenames: list) -> list:
+    """
+    Parse .proto files to extract fully-qualified service/method names.
+
+    Returns list of dicts: [{"fqn": "pkg.Service/Method", "service": ..., "method": ...}]
+    """
+    services = []
+    for pf in proto_filenames:
+        path = os.path.join(test_dir, pf)
+        if not os.path.exists(path):
+            continue
+        with open(path, 'r') as f:
+            content = f.read()
+        pkg_match = re.search(r'^package\s+([\w.]+)\s*;', content, re.MULTILINE)
+        package = pkg_match.group(1) if pkg_match else ""
+        for svc_match in re.finditer(
+            r'service\s+(\w+)\s*\{([^}]*)\}', content, re.DOTALL
+        ):
+            svc_name = svc_match.group(1)
+            svc_body = svc_match.group(2)
+            for rpc_match in re.finditer(r'rpc\s+(\w+)\s*\(', svc_body):
+                method = rpc_match.group(1)
+                fqn = f"{package}.{svc_name}/{method}" if package else f"{svc_name}/{method}"
+                services.append({"fqn": fqn, "service": svc_name, "method": method, "package": package})
+    return services
+
+
+# ═══════════════════════════════════════════════════════════════
 # Helper: Protocol-specific instructions (REST vs gRPC)
 # ═══════════════════════════════════════════════════════════════
-def _build_protocol_instructions(api_protocol: str, proto_files: list = None) -> str:
+def _build_protocol_instructions(api_protocol: str, proto_files: list = None, grpc_services: list = None) -> str:
     """
     Return a block of text that tells the AI agent how to write tests
     for the given API protocol.
@@ -227,6 +257,7 @@ def _build_protocol_instructions(api_protocol: str, proto_files: list = None) ->
     if api_protocol == "grpc":
         # Build proto file instructions when .proto files are available
         proto_note = ""
+        service_fqn = "package.Service/Method"
         if proto_files:
             proto_list = ", ".join(proto_files)
             proto_flags = " ".join(f"-proto {pf}" for pf in proto_files)
@@ -239,9 +270,22 @@ def _build_protocol_instructions(api_protocol: str, proto_files: list = None) ->
                 -import-path . {proto_flags}
             """
 
+        # Include real service/method names parsed from proto files
+        if grpc_services:
+            svc_lines = "\n            ".join(
+                f'- {s["fqn"]}' for s in grpc_services
+            )
+            proto_note += f"""
+        DISCOVERED gRPC SERVICES & METHODS (use these EXACT fully-qualified names):
+            {svc_lines}
+            IMPORTANT: Use the fully-qualified name (package.ServiceName/MethodName) as shown above.
+            Do NOT guess or fabricate service/method names.
+            """
+            service_fqn = grpc_services[0]["fqn"]
+
         grpcurl_example = (
             '    ["grpcurl", "-plaintext", "-d", f"@{tmp_path}",\n'
-            '                     BASE_URL, "package.Service/Method"]'
+            f'                     BASE_URL, "{service_fqn}"]'
         )
         if proto_files:
             proto_args = ", ".join(
@@ -251,7 +295,7 @@ def _build_protocol_instructions(api_protocol: str, proto_files: list = None) ->
                 '    ["grpcurl", "-plaintext",\n'
                 '                     "-import-path", ".", ' + proto_args + ',\n'
                 '                     "-d", f"@{tmp_path}",\n'
-                '                     BASE_URL, "package.Service/Method"]'
+                f'                     BASE_URL, "{service_fqn}"]'
             )
 
         return f"""
@@ -297,7 +341,8 @@ def _build_protocol_instructions(api_protocol: str, proto_files: list = None) ->
             try:
                 result = subprocess.run(
                 {grpcurl_example},
-                    capture_output=True, text=True, timeout=60
+                    capture_output=True, text=True, timeout=60,
+                    cwd=os.path.dirname(os.path.abspath(__file__))
                 )
             finally:
                 os.unlink(tmp_path)
@@ -895,7 +940,9 @@ def generate_all_test_files(scenario_data: dict):
 
     # Protocol-specific instructions (REST vs gRPC)
     proto_files = email_data.get("proto_files", [])
-    protocol_instructions = _build_protocol_instructions(api_protocol, proto_files=proto_files)
+    test_dir = Variable.get("ltai.test.base_dir", default_var="/appz/pyunit_testing") + f"/{test_session_id}"
+    grpc_services = _parse_proto_services(test_dir, proto_files) if proto_files else []
+    protocol_instructions = _build_protocol_instructions(api_protocol, proto_files=proto_files, grpc_services=grpc_services)
 
     # Build available schemas info for the prompt
     schemas_info = ""
@@ -1006,7 +1053,7 @@ def generate_all_test_files(scenario_data: dict):
         - Only test documented {"services/methods" if api_protocol == "grpc" else "endpoints"}
         - {"All credentials MUST come from .env via os.getenv() — NEVER hardcode secrets" if requires_auth else "Skip auth"}
         - Do NOT duplicate tests that were already generated in previous files
-        {"- For gRPC with grpcurl: NEVER pass JSON payloads as -d command-line arguments (causes Errno 7 Argument list too long). ALWAYS write payload to a temp file and use -d @filepath." + (" Also ALWAYS include: -import-path . " + " ".join(f"-proto {pf}" for pf in proto_files) + " (the .proto files are in the test directory)." if proto_files else " If the server does not support reflection, use -proto <file> flags.") if api_protocol == "grpc" else ""}
+        {"- For gRPC with grpcurl: NEVER pass JSON payloads as -d command-line arguments (causes Errno 7 Argument list too long). ALWAYS write payload to a temp file and use -d @filepath. ALWAYS set cwd=os.path.dirname(os.path.abspath(__file__)) in subprocess.run() so grpcurl can find the .proto files." + (" Also ALWAYS include: -import-path . " + " ".join(f"-proto {pf}" for pf in proto_files) + " (the .proto files are in the test directory)." if proto_files else " If the server does not support reflection, use -proto <file> flags.") if api_protocol == "grpc" else ""}
 
         TEST DATA:
         - When creating test cases, generate test data as needed and load it in the test scenario

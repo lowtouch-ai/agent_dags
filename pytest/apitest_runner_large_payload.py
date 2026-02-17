@@ -159,9 +159,39 @@ def _remove_env_file(test_session_id: str):
 
 
 # ═══════════════════════════════════════════════════════════════
+# Helper: Parse proto files for package, service, and rpc names
+# ═══════════════════════════════════════════════════════════════
+def _parse_proto_services(test_dir: str, proto_filenames: list) -> list:
+    """
+    Parse .proto files to extract fully-qualified service/method names.
+
+    Returns list of dicts: [{"fqn": "pkg.Service/Method", "service": ..., "method": ...}]
+    """
+    services = []
+    for pf in proto_filenames:
+        path = os.path.join(test_dir, pf)
+        if not os.path.exists(path):
+            continue
+        with open(path, 'r') as f:
+            content = f.read()
+        pkg_match = re.search(r'^package\s+([\w.]+)\s*;', content, re.MULTILINE)
+        package = pkg_match.group(1) if pkg_match else ""
+        for svc_match in re.finditer(
+            r'service\s+(\w+)\s*\{([^}]*)\}', content, re.DOTALL
+        ):
+            svc_name = svc_match.group(1)
+            svc_body = svc_match.group(2)
+            for rpc_match in re.finditer(r'rpc\s+(\w+)\s*\(', svc_body):
+                method = rpc_match.group(1)
+                fqn = f"{package}.{svc_name}/{method}" if package else f"{svc_name}/{method}"
+                services.append({"fqn": fqn, "service": svc_name, "method": method, "package": package})
+    return services
+
+
+# ═══════════════════════════════════════════════════════════════
 # Helper: Protocol-specific instructions (REST vs gRPC)
 # ═══════════════════════════════════════════════════════════════
-def _build_protocol_instructions(api_protocol: str, proto_files: list = None) -> str:
+def _build_protocol_instructions(api_protocol: str, proto_files: list = None, grpc_services: list = None) -> str:
     """
     Return a block of text that tells the AI agent how to write tests
     for the given API protocol.
@@ -169,6 +199,7 @@ def _build_protocol_instructions(api_protocol: str, proto_files: list = None) ->
     if api_protocol == "grpc":
         # Build proto file instructions when .proto files are available
         proto_note = ""
+        service_fqn = "package.Service/Method"
         if proto_files:
             proto_list = ", ".join(proto_files)
             proto_flags = " ".join(f"-proto {pf}" for pf in proto_files)
@@ -181,9 +212,22 @@ def _build_protocol_instructions(api_protocol: str, proto_files: list = None) ->
                 -import-path . {proto_flags}
             """
 
+        # Include real service/method names parsed from proto files
+        if grpc_services:
+            svc_lines = "\n            ".join(
+                f'- {s["fqn"]}' for s in grpc_services
+            )
+            proto_note += f"""
+        DISCOVERED gRPC SERVICES & METHODS (use these EXACT fully-qualified names):
+            {svc_lines}
+            IMPORTANT: Use the fully-qualified name (package.ServiceName/MethodName) as shown above.
+            Do NOT guess or fabricate service/method names.
+            """
+            service_fqn = grpc_services[0]["fqn"]
+
         grpcurl_example = (
             '    ["grpcurl", "-plaintext", "-d", f"@{tmp_path}",\n'
-            '                     BASE_URL, "package.Service/Method"]'
+            f'                     BASE_URL, "{service_fqn}"]'
         )
         if proto_files:
             proto_args = ", ".join(
@@ -193,7 +237,7 @@ def _build_protocol_instructions(api_protocol: str, proto_files: list = None) ->
                 '    ["grpcurl", "-plaintext",\n'
                 '                     "-import-path", ".", ' + proto_args + ',\n'
                 '                     "-d", f"@{tmp_path}",\n'
-                '                     BASE_URL, "package.Service/Method"]'
+                f'                     BASE_URL, "{service_fqn}"]'
             )
 
         return f"""
@@ -772,7 +816,8 @@ def generate_test_files_from_chunks(schema_data: dict):
         auth_instructions = _build_auth_instructions(config_path)
 
     proto_files = email_data.get("proto_files", [])
-    protocol_instructions = _build_protocol_instructions(api_protocol, proto_files=proto_files)
+    grpc_services = _parse_proto_services(test_dir, proto_files) if proto_files else []
+    protocol_instructions = _build_protocol_instructions(api_protocol, proto_files=proto_files, grpc_services=grpc_services)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     conversation_history = []
@@ -842,7 +887,8 @@ def generate_test_files_from_chunks(schema_data: dict):
                     f'{proto_flags_str}'
                     '                          "-d", f"@{{tmp_path}}",\n'
                     '                          BASE_URL, "service/Method"],\n'
-                    "                         capture_output=True, text=True, timeout=60)\n"
+                    "                         capture_output=True, text=True, timeout=60,\n"
+                    "                         cwd=os.path.dirname(os.path.abspath(__file__)))\n"
                     "                 finally:\n"
                     "                     os.unlink(tmp_path)"
                 )
