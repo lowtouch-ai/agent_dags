@@ -1,6 +1,5 @@
-from airflow import DAG
+from airflow.sdk import DAG, task, task_group, Variable
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.sdk import task, task_group, Variable
 from typing import List
 from datetime import datetime, timedelta, timezone
 import logging
