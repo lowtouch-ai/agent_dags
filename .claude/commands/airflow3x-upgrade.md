@@ -174,6 +174,16 @@ Verify `astronomer-cosmos>=1.10.0` is installed for Airflow 3 compatibility.
 
 If the file uses `xcom_push`/`xcom_pull` with non-JSON-serializable objects (e.g., pickled Python objects), these will fail with the default XCom backend. Ensure values are JSON-serializable or use a custom XCom backend.
 
+### 18. `xcom_pull` requires explicit `task_ids`
+
+In Airflow 3, `ti.xcom_pull(key="...")` without a `task_ids` parameter will not resolve correctly. Every `xcom_pull` call must specify `task_ids` pointing to the task that pushed the value.
+
+| Before | After |
+|---|---|
+| `ti.xcom_pull(key="my_key")` | `ti.xcom_pull(task_ids="<source_task_id>", key="my_key")` |
+
+Determine the correct `task_ids` by tracing which upstream task calls `ti.xcom_push(key="my_key", ...)`. Use the `task_id` string of that task.
+
 ---
 
 ## After applying changes
