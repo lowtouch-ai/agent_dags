@@ -366,20 +366,34 @@ def get_ai_response(prompt, agent_url="http://agentomatic:8000", conversation_hi
         return f"An error occurred while processing your request: {str(e)}"
 
 import json
+
 def extract_json_from_text(text):
-    # Improved regex: Match a standalone JSON object (not nested in larger text)
-    # This looks for { ... } that's not inside quotes or other braces
-    pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
-    matches = re.findall(pattern, text, re.DOTALL)
+    """
+    Extract and fix JSON from LLM responses that may be incomplete or malformed.
+    """
+    # Find JSON-like content between ```json and ``` or standalone braces
+    json_pattern = r'```json\s*(.*?)\s*```|(\{.*?\})'
+    matches = re.findall(json_pattern, text, re.DOTALL)
     
-    for match in matches:  # Try each potential match
+    # Flatten matches (regex groups)
+    potential_json = [m[0] or m[1] for m in matches if m[0] or m[1]]
+    
+    for json_str in potential_json:
+        json_str = json_str.strip()
+        
+        # Try parsing as-is first
         try:
-            parsed = json.loads(match)
-            if isinstance(parsed, dict):  # Ensure it's an object, not array/primitive
-                return parsed
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+        
+        # Attempt to fix common issues
+        fixed_json = fix_incomplete_json(json_str)
+        try:
+            return json.loads(fixed_json)
         except json.JSONDecodeError as e:
-            logging.debug(f"JSON parse failed on match '{match[:100]}...': {e}")
+            logging.debug(f"Failed to parse even after fixing: {e}")
             continue
     
-    logging.warning("No valid JSON object found in text.")
+    logging.warning("No valid JSON found in text")
     return None

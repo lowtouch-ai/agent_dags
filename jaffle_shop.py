@@ -1,13 +1,9 @@
-from pendulum import datetime
-from airflow import DAG
-from airflow.operators.empty import EmptyOperator
-from airflow.operators.python import PythonOperator
-from airflow.operators.email_operator import EmailOperator
-from datetime import datetime, timedelta
-from airflow.models import Variable
+import pendulum
+from airflow.sdk import DAG
+from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.providers.standard.operators.python import PythonOperator
 from cosmos import DbtTaskGroup, RenderConfig
 from cosmos.config import ProfileConfig, ProjectConfig, ExecutionConfig
-from cosmos.profiles import PostgresUserPasswordProfileMapping
 from pathlib import Path
 import os
 
@@ -16,17 +12,17 @@ def on_failure_callback(context,SVC_NAME):
     task=context.get("task_instance").task_id
     dag=context.get("task_instance").dag_id
     ti=context.get("task_instance")
-    exec_date=context.get("execution_date")
+    exec_date=context.get("logical_date")
     dag_run = context.get('dag_run')
     log_url = context.get("task_instance").log_url
-    msg = f""" 
+    msg = f"""
             SVC: {svc}
             Dag: {dag}
             Task: {task}
             DagRun: {dag_run}
             TaskInstance: {ti}
-            Log Url: {log_url} 
-            Execution Time: {exec_date} 
+            Log Url: {log_url}
+            Execution Time: {exec_date}
             """
     print(msg)
 
@@ -46,7 +42,7 @@ with open(readme_path, 'r') as file:
 
 with DAG(
     dag_id="jaffle_shop",
-    start_date=datetime(2023, 11, 10),
+    start_date=pendulum.datetime(2023, 11, 10),
     schedule='0 0/12 * * *',
     tags=["sample-dag"],
     doc_md=readme_content,
@@ -57,7 +53,6 @@ with DAG(
 ):
     e1 = PythonOperator(task_id = "print_variables",
                         python_callable = print_variable,
-                        provide_context=True,
                        )
 
     seeds_tg = DbtTaskGroup(
@@ -114,14 +109,14 @@ with DAG(
     ),
         default_args={"retries": 2},
     )
-    
-    # send_email = EmailOperator( 
-    #     task_id='send_email', 
-    #     to='mpmathew@ecloudcontrol.com', 
-    #     subject='test email for airflow', 
-    #     html_content="Date: {{ ds }}", 
+
+    # send_email = EmailOperator(
+    #     task_id='send_email',
+    #     to='mpmathew@ecloudcontrol.com',
+    #     subject='test email for airflow',
+    #     html_content="Date: {{ ds }}",
     # )
-   
+
     e2 = EmptyOperator(task_id="post_dbt")
-    
-e1 >> seeds_tg >> stg_tg >> dbt_tg >> e2
+
+    e1 >> seeds_tg >> stg_tg >> dbt_tg >> e2
