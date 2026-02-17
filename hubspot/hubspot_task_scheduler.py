@@ -36,7 +36,7 @@ DEFAULT_OWNER_NAME = Variable.get("ltai.v3.hubspot.default.owner.name")
 DEFAULT_OWNER_DETAILS = Variable.get("ltai.v3.hubspot.task.owners")
 HUBSPOT_API_KEY = Variable.get("ltai.v3.husbpot.api.key")  # Note: original variable name had typo
 HUBSPOT_BASE_URL = Variable.get("ltai.v3.hubspot.url")
-HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name",default = 'hubspot-v6af_cl')
+HUBSPOT_MODEL = Variable.get("ltai.v3.hubspot.model.name","hubspot-v6af_cl")
 # Email spacing configuration
 EMAIL_SPACING_MINUTES = 3
 DELIVERY_START_HOUR = 9  # Start sending at 9 AM local time
