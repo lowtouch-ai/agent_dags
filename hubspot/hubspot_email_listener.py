@@ -2471,8 +2471,9 @@ If names look correct, return:
             return "", {}
 
         inject_text = """
-IMPORTANT SPELLING VARIANTS DETECTED:
-The user may have misspelled names. Use the most plausible/correct spelling when interpreting the request, building filters, or report titles:
+SPELLING VARIANTS DETECTED:
+The user may have misspelled names. Search for BOTH the original term AND these variants.
+Do NOT replace the user's original term - include it as the primary search, and add variants as additional search terms:
 
 """
         if variants.get("contacts"):
@@ -2482,7 +2483,7 @@ The user may have misspelled names. Use the most plausible/correct spelling when
         if variants.get("deals"):
             inject_text += f"DEALS: {json.dumps(variants['deals'], indent=2)}\n"
 
-        inject_text += "\nPrefer the correct spelling (usually the 2nd item) in searches and titles.\n"
+        inject_text += "\nSearch for ALL variants including the original. Let HubSpot results determine the correct match.\n"
 
         logging.info(f"Spelling variants generated: {variants}")
         return inject_text, variants
@@ -2583,8 +2584,8 @@ def analyze_and_search_with_tools(**kwargs):
                             original_query = original_query_match.group(1)
                         
                         clarification_context = f"""
-IMPORTANT: A clarification request was previously sent to the user.
-Original user request: "{original_query if original_query else 'get associated data'}"
+CLARIFICATION CONTEXT: User is replying to a previous clarification request.
+Original user request (DO NOT modify): "{original_query if original_query else 'get associated data'}"
 Query type: {original_query_type if original_query_type else 'unknown'}
 Target entity: {target_entity if target_entity else 'unknown'}
 User is now replying with: "{content}"
@@ -2594,32 +2595,32 @@ INSTRUCTIONS FOR CLARIFICATION RESPONSE:
    - If they mention a row number (e.g., "row 1", "first one"), use that
    - If they provide an email address, match by email
    - If they provide a name with company, match by that combination
-   
-2. Extract the entity ID from the clarification
-   
-3. CRITICAL: If the original query type contains "for" (like "company_for_contact", "deals_for_contact"):
-   This means they want ASSOCIATED data, not the entity itself.
-   After identifying the entity:
-   - Use the entity ID to search for the TARGET entity
-   - For "company_for_contact": use contact_id to search companies
-   - For "deals_for_contact": use contact_id to search deals
-   - For "contacts_for_company": use company_id to search contacts
-   
-4. Return the FINAL results (the target entity data) with proper fields
+
+2.After identifying the entity, extract its ID, then:
+- If query_type contains "for" (e.g., "company_for_contact"): search for TARGET entity using the ID
+- If query_type is "direct_search": return the selected entity directly
 """
                         break
             
             # MAIN PROMPT
-            prompt = f"""You are a friendly HubSpot email assistant with the following capabilities:
+            prompt = f"""You are a HubSpot email assistant that searches CRM data and responds to queries.
 
-CRITICAL RULE: ALWAYS fetch ALL matching results up to 200 maximum. NEVER use pagination or limits of 10.
-When searching, use max_results=200 parameter to get everything at once.
+═══════════════════════════════════════════════════════════════════
+CRITICAL RULES - MUST FOLLOW:
+═══════════════════════════════════════════════════════════════════
+1. NEVER modify, rephrase, or reinterpret the user's request. Search for EXACTLY what they asked.
+2. Use the user's exact names, terms, and criteria as search filters. Do NOT correct, improve, or alter them.
+3. Return ONLY data retrieved from HubSpot search tools. Never fabricate or hallucinate results.
+4. Always use max_results=200 in ALL search calls.
+5. The "search_term" in output must contain the user's EXACT words, unmodified.
+6. Do NOT add search filters or criteria that the user did not explicitly request.
 
-- Answer generic HubSpot questions
-- Handle greetings and casual conversation
+CAPABILITIES:
 - Search HubSpot data (contacts, companies, deals, tasks)
 - Handle associated data queries (e.g., "deals for a contact", "company for a contact")
-- consider spelling variants when searching: {spelling_inject_text}
+- Respond to casual greetings and thanks
+- Handle clarification responses from previous ambiguous queries
+{spelling_inject_text}
 
 User message: "{content}"
 {clarification_context}
@@ -2678,14 +2679,14 @@ IMPORTANT:
    - Associated data query: "deals for contact X", "company for contact Y", "contacts in company Z"
    - Cross-entity query: "tasks for deal X", "deals for company Y"
 
-**2. FOR DIRECT QUERIES:**
+**2. FOR DIRECT QUERIES (use user's exact search terms as filters):**
    - Contact query → call `search_contacts`
    - Company query → call `search_companies`
    - Deal query → call `search_deals`
    - Task query → first get owner_id via `get_all_owners`, then call `search_tasks`
 
-**3. FOR ASSOCIATED DATA QUERIES (CRITICAL):**
-   Step 1: Search for PRIMARY entity first
+**3. FOR ASSOCIATED DATA QUERIES (use user's exact terms for PRIMARY entity search):**
+   Step 1: Search for PRIMARY entity first using user's exact terms
    Step 2: If multiple matches found → Mark as ambiguous and return:
       {{
         "is_ambiguous": true,
@@ -2693,7 +2694,7 @@ IMPORTANT:
         "ambiguous_entity": "contacts|companies|deals",
         "results": [...all matches with ALL required fields...],
         "result_count": <count>,
-        "search_term": "what user searched for",
+        "search_term": "<user's EXACT search term - do not modify>",
         "metadata": {{
           "query_type": "company_for_contact|deals_for_contact|contacts_for_company|deals_for_company|etc",
           "original_query": "{content}",
@@ -2764,6 +2765,7 @@ IMPORTANT:
 SEARCH GUIDELINES:
 ═══════════════════════════════════════════════════════════════════
 
+- Use the user's EXACT search terms as filters. Do NOT add criteria the user didn't specify
 - Search by partial names (first or last name only is fine)
 - Fetch ALL results up to 200 max (no pagination in email)
 - Keep data single-line (no wrapping for phone/email)
@@ -2820,7 +2822,7 @@ MANDATORY OUTPUT FORMAT:
   "ambiguous_entity": "contacts|companies|deals",
   "results": [...all matching entities with ALL required fields in json format...],
   "result_count": <number>,
-  "search_term": "what user searched for",
+  "search_term": "<user's EXACT search term - do not modify>",
   "metadata": {{
     "query_type": "company_for_contact|deals_for_contact|direct_search|etc",
     "original_query": "{content}",
@@ -3835,6 +3837,7 @@ def generate_final_response_or_trigger_report(**kwargs):
 
             # For count <= 10, generate HTML directly using templates
             prompt = f"""You are a friendly HubSpot email assistant. Generate a professional HTML email response.
+            You cannot create or update records, only format the results into an email. Use the following templates based on the number of results:
 
 Sender: {sender_name}
 Entity: {entity}

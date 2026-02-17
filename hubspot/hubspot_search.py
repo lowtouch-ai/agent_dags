@@ -2498,8 +2498,8 @@ RESPOND WITH ONLY THE JSON OBJECT - NO OTHER TEXT."""
                 lastname = (details.get("lastname") or "").strip()
                 email = (details.get("email") or "").strip()
                 
-                if not firstname or not lastname:
-                    logging.warning(f"Skipping invalid new contact - missing name: {details}")
+                if not firstname:
+                    logging.warning(f"Skipping invalid new contact - missing firstname: {details}")
                     continue
                 
                 # Duplicate check using tuple for consistency

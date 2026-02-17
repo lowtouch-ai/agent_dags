@@ -5,7 +5,7 @@ This directory contains the pytest-based API testing pipeline: a two-DAG system 
 ## Architecture
 
 ```
-Email (Postman JSON + optional PDF/config.yaml)
+Email (Postman JSON + optional PDF/config.yaml/.proto)
   │
   ▼
 api_testing_listner.py  (DAG: api_testing_monitor_mailbox)
@@ -21,7 +21,7 @@ Email reply with HTML report + Postman collection link
 
 ### api_testing_listner.py — `api_testing_monitor_mailbox`
 - **Schedule**: every 1 minute
-- **Purpose**: Polls Gmail for unread emails with JSON attachments (Postman collections). Optionally processes PDF docs and `config.yaml` for auth credentials.
+- **Purpose**: Polls Gmail for unread emails with JSON attachments (Postman collections). Optionally processes PDF docs, `config.yaml` for auth credentials, and `.proto` files for gRPC service definitions.
 - **Flow**: `fetch_unread_emails` → `branch_task` → `trigger_test_dag` | `no_email_found_task`
 - **Trigger target**: `api_test_executor_scenario_based` (the v2 runner)
 - **Timestamp tracking**: `/appz/cache/api_testing_last_processed_email.json` (milliseconds)
@@ -32,7 +32,7 @@ Email reply with HTML report + Postman collection link
 - **Purpose**: End-to-end AI-driven API test generation, execution, and reporting.
 - **Uses Airflow TaskFlow API** (`@task` decorator) — data flows via return values, not XCom push/pull.
 - **Steps**:
-  1. `extract_inputs_from_email` — parse dag_run.conf, load JSON/PDF, ask AI to extract requirements
+  1. `extract_inputs_from_email` — parse dag_run.conf, load JSON/PDF, copy `.proto` files to test dir, ask AI to extract requirements
   2. `generate_sub_test_scenarios` — AI generates 5-15 granular per-file test scenarios
   3. `extract_request_body_schemas` — AI extracts POST/PUT/PATCH body schemas to `testdata/schemas/`
   4. `generate_all_test_files` — AI generates all pytest files (max 10 tests each, conversation history avoids duplication)
@@ -70,6 +70,7 @@ Email reply with HTML report + Postman collection link
 
 - Test session dir: `{ltai.test.base_dir}/{thread_id}/`
 - Schemas: `{test_session_dir}/testdata/schemas/`
+- Proto files: `{test_session_dir}/*.proto` (copied from attachments for gRPC tests)
 - `.env` (runtime credentials): `{test_session_dir}/.env` (created and removed per run)
 - Attachments: `/appz/data/attachments/`
 - Timestamp file: `/appz/cache/api_testing_last_processed_email.json`
@@ -101,6 +102,7 @@ auth:
 - **Fix-and-retry loop** (step 5) is currently **skipped** in the DAG wiring but the function is retained
 - `MAX_FIX_ITERATIONS = 3` — caps the fix loop when re-enabled
 - Thread continuity maintained via `Message-ID`, `References`, and `threadId`
+- **gRPC `.proto` files** — when attached, copied to test session dir and `-import-path . -proto <filename>` flags are injected into all `grpcurl` commands (avoids reliance on server reflection)
 
 ## Common Tasks
 
