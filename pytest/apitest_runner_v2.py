@@ -7,6 +7,7 @@ import os
 import json
 import logging
 import re
+import shutil
 
 # Import utility functions
 from agent_dags.utils.email_utils import (
@@ -216,6 +217,149 @@ def _remove_env_file(test_session_id: str):
 
 
 # ═══════════════════════════════════════════════════════════════
+# Helper: Protocol-specific instructions (REST vs gRPC)
+# ═══════════════════════════════════════════════════════════════
+def _build_protocol_instructions(api_protocol: str, proto_files: list = None) -> str:
+    """
+    Return a block of text that tells the AI agent how to write tests
+    for the given API protocol.
+    """
+    if api_protocol == "grpc":
+        # Build proto file instructions when .proto files are available
+        proto_note = ""
+        if proto_files:
+            proto_list = ", ".join(proto_files)
+            proto_flags = " ".join(f"-proto {pf}" for pf in proto_files)
+            proto_note = f"""
+        PROTO FILES (available in the test session directory):
+            Files: {proto_list}
+            These .proto files define the gRPC service descriptors.
+            When using grpcurl, you MUST include these flags so grpcurl
+            does not rely on server reflection:
+                -import-path . {proto_flags}
+            """
+
+        grpcurl_example = (
+            '    ["grpcurl", "-plaintext", "-d", f"@{tmp_path}",\n'
+            '                     BASE_URL, "package.Service/Method"]'
+        )
+        if proto_files:
+            proto_args = ", ".join(
+                '"-proto", "{}"'.format(pf) for pf in proto_files
+            )
+            grpcurl_example = (
+                '    ["grpcurl", "-plaintext",\n'
+                '                     "-import-path", ".", ' + proto_args + ',\n'
+                '                     "-d", f"@{tmp_path}",\n'
+                '                     BASE_URL, "package.Service/Method"]'
+            )
+
+        return f"""
+        API PROTOCOL: gRPC
+        ──────────────────
+        This is a gRPC API — do NOT use the `requests` library.
+        {proto_note}
+        REQUIRED IMPORTS:
+            import grpc
+            import json
+            import os
+            from google.protobuf.json_format import ParseDict, MessageToDict
+            from google.protobuf import descriptor_pool, symbol_database
+
+        CONNECTION:
+            channel = grpc.insecure_channel(BASE_URL)
+            # or grpc.secure_channel(BASE_URL, grpc.ssl_channel_credentials())
+
+        LARGE PAYLOADS — set max message size on the channel:
+            channel = grpc.insecure_channel(
+                BASE_URL,
+                options=[
+                    ('grpc.max_send_message_length',    50 * 1024 * 1024),
+                    ('grpc.max_receive_message_length',  50 * 1024 * 1024),
+                ],
+            )
+
+        CALLING RPCs:
+          Option A — Proto stubs (if *_pb2.py / *_pb2_grpc.py files exist):
+            from generated import service_pb2, service_pb2_grpc
+            stub = service_pb2_grpc.MyServiceStub(channel)
+            request = service_pb2.MyRequest(field1="value")
+            response = stub.MyMethod(request)
+
+          Option B — grpcurl subprocess (when stubs are unavailable):
+            import subprocess, json, tempfile, os
+            payload = json.dumps(request_data)
+            # IMPORTANT: Write payload to a temp file to avoid "Argument list too long"
+            # errors with large payloads. Use grpcurl's -d @filename syntax.
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
+                tmp.write(payload)
+                tmp_path = tmp.name
+            try:
+                result = subprocess.run(
+                {grpcurl_example},
+                    capture_output=True, text=True, timeout=60
+                )
+            finally:
+                os.unlink(tmp_path)
+            assert result.returncode == 0
+            response = json.loads(result.stdout)
+
+          Option C — grpc_requests library (JSON-friendly):
+            from grpc_requests import Client
+            client = Client(BASE_URL)
+            response = client.request("package.Service", "Method", request_data)
+
+        ASSERTIONS — use gRPC status codes, not HTTP status codes:
+            assert response is not None
+            # For error tests, catch grpc.RpcError:
+            with pytest.raises(grpc.RpcError) as exc_info:
+                stub.MyMethod(bad_request)
+            assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+
+        STREAMING RPCs:
+            # Server streaming
+            responses = list(stub.MyServerStream(request))
+            assert len(responses) > 0
+
+            # Client streaming
+            def request_iterator():
+                for item in items:
+                    yield service_pb2.MyRequest(**item)
+            response = stub.MyClientStream(request_iterator())
+
+        METADATA (equivalent of HTTP headers):
+            response = stub.MyMethod(request, metadata=[
+                ('authorization', f'Bearer {{os.getenv("TOKEN")}}'),
+            ])
+        """
+    else:
+        return """
+        API PROTOCOL: REST (HTTP)
+        ─────────────────────────
+        Use the `requests` library for all API calls.
+
+        IMPORTS:
+            import requests
+            import json
+            import os
+
+        CALLING ENDPOINTS:
+            response = requests.get(f"{BASE_URL}/endpoint")
+            response = requests.post(f"{BASE_URL}/endpoint", json=data)
+            response = requests.put(f"{BASE_URL}/endpoint/{id}", json=data)
+            response = requests.patch(f"{BASE_URL}/endpoint/{id}", json=data)
+
+        ASSERTIONS — use HTTP status codes:
+            assert response.status_code == 200
+            assert response.json()["field"] == expected_value
+
+        HEADERS / AUTH:
+            headers = {"Authorization": f"Bearer {os.getenv('TOKEN')}"}
+            response = requests.get(url, headers=headers)
+        """
+
+
+# ═══════════════════════════════════════════════════════════════
 # STEP 1: Extract and Parse Inputs from Email (NO CHANGE)
 # ═══════════════════════════════════════════════════════════════
 @task
@@ -235,12 +379,17 @@ def extract_inputs_from_email(**kwargs):
         has_pdf = conf.get('has_pdf', False)
         email_headers = conf.get('email_headers', {})
         email_content = conf.get('email_content', '')
+        testing_type = conf.get('testing_type', 'api_only')
+        api_protocol = conf.get('api_protocol', 'rest')
+        proto_files = conf.get('proto_files', [])
 
         if not email_id:
             raise ValueError("No email_id provided in DAG configuration")
 
         logging.info(f"Processing email ID: {email_id}")
         logging.info(f"Thread ID: {thread_id}")
+        logging.info(f"Testing type: {testing_type}")
+        logging.info(f"API protocol: {api_protocol}")
 
         # Extract email metadata
         sender = email_headers.get("From", "")
@@ -251,13 +400,17 @@ def extract_inputs_from_email(**kwargs):
         email_data_for_recipients = {"headers": email_headers}
         all_recipient = extract_all_recipients(email_data_for_recipients)
 
-        # Validate and load JSON
-        if not json_files:
-            raise ValueError("No JSON attachments found")
-
-        json_path = json_files[0].get("path")
-        with open(json_path, "r", encoding="utf-8") as f:
-            api_documentation = json.load(f)
+        # Load API documentation from available sources
+        api_documentation = {}
+        if json_files:
+            json_path = json_files[0].get("path")
+            with open(json_path, "r", encoding="utf-8") as f:
+                api_documentation = json.load(f)
+            logging.info(f"Loaded API documentation from JSON: {json_path}")
+        else:
+            logging.info(
+                "No JSON attachments — will use PDF/email content as API documentation source"
+            )
 
         # Process PDFs
         pdf_context = ""
@@ -277,13 +430,19 @@ def extract_inputs_from_email(**kwargs):
         config_path = config_file.get("path") if config_file else None
 
         # Parse requirements
+        api_docs_section = (
+            f"API Docs (Postman Collection): {json.dumps(api_documentation, indent=2)[:2000]}..."
+            if api_documentation
+            else "API Docs: No Postman collection provided — extract API details from the email body and PDF documents below."
+        )
+
         parse_prompt = f"""
         Extract test requirements from email and documents:
 
         Subject: {subject}
         Email: {email_content}
-        API Docs: {json.dumps(api_documentation, indent=2)[:2000]}...
-        PDF Context: {"Available" if pdf_context else "None"}
+        {api_docs_section}
+        PDF Context: {pdf_context[:3000] if pdf_context else "None"}
 
         Return strict JSON:
         {{
@@ -309,6 +468,19 @@ def extract_inputs_from_email(**kwargs):
         test_dir = Variable.get("ltai.test.base_dir", default_var="/appz/pyunit_testing") + f"/{test_session_id}"
         os.makedirs(test_dir, exist_ok=True)
 
+        # Copy .proto files into the test session directory
+        proto_filenames = []
+        for proto in proto_files:
+            src_path = proto.get("path", "")
+            original_name = proto.get("filename", "")
+            if src_path and os.path.exists(src_path) and original_name:
+                dest_path = os.path.join(test_dir, original_name)
+                shutil.copy2(src_path, dest_path)
+                proto_filenames.append(original_name)
+                logging.info(f"Copied .proto file to test dir: {original_name}")
+        if proto_filenames:
+            logging.info(f"Total .proto files copied: {len(proto_filenames)}")
+
         # Return all data as dict
         return {
             "sender_email": sender,
@@ -329,7 +501,11 @@ def extract_inputs_from_email(**kwargs):
             "has_pdf": has_pdf,
             "pdf_context": pdf_context,
             "pdf_insights": parsed_requirements.get("pdf_insights", ""),
-            "pdf_count": len(pdf_files)
+            "pdf_count": len(pdf_files),
+            "testing_type": testing_type,
+            "email_content": email_content,
+            "api_protocol": api_protocol,
+            "proto_files": proto_filenames,
         }
 
     except Exception as e:
@@ -340,11 +516,12 @@ def extract_inputs_from_email(**kwargs):
 # ═══════════════════════════════════════════════════════════════
 # STEP 2: Generate Granular Sub-Test Scenarios
 # ═══════════════════════════════════════════════════════════════
-@task
-def generate_sub_test_scenarios(email_data: dict):
+
+
+def _generate_api_sub_scenarios(email_data: dict) -> dict:
     """
-    Generates granular per-file sub-scenarios instead of broad categories.
-    Each sub-scenario maps to one test file.
+    Generates standard per-endpoint sub-scenarios (existing behaviour).
+    Each sub-scenario maps to one independent test file.
     """
     api_docs = email_data["api_documentation"]
     test_reqs = email_data["test_requirements"]
@@ -353,6 +530,7 @@ def generate_sub_test_scenarios(email_data: dict):
     pdf_context = email_data["pdf_context"]
     pdf_insights = email_data["pdf_insights"]
     has_pdf = email_data["has_pdf"]
+    api_protocol = email_data.get("api_protocol", "rest")
 
     pdf_info = ""
     if has_pdf and pdf_context:
@@ -370,9 +548,19 @@ def generate_sub_test_scenarios(email_data: dict):
             "    Focus all test scenarios exclusively on this endpoint."
         )
 
+    protocol_note = (
+        "**API PROTOCOL**: gRPC — scenarios should target gRPC service methods "
+        "(e.g. 'test_GetUser_positive', 'test_CreateOrder_validation'). "
+        "Use gRPC status codes, not HTTP status codes."
+        if api_protocol == "grpc"
+        else "**API PROTOCOL**: REST — scenarios should target HTTP endpoints."
+    )
+
     scenario_prompt = f"""
     Analyze the API documentation and generate a GRANULAR list of test sub-scenarios.
     Each sub-scenario will become ONE separate pytest test file.
+
+    {protocol_note}
 
     API Docs: {json.dumps(api_docs, indent=2)[:3000]}
     Requirements: {test_reqs}
@@ -382,14 +570,14 @@ def generate_sub_test_scenarios(email_data: dict):
 
     {endpoint_constraint}
     Generate 5-15 sub-scenarios. Each should be specific enough for a single test file.
-    Examples: "test_user_crud_positive", "test_input_validation", "test_auth_flows",
-    "test_error_responses", "test_pagination", "test_rate_limiting", etc.
+    {"Examples: 'test_GetUser_positive', 'test_CreateOrder_validation', 'test_streaming_rpc', 'test_deadline_exceeded', 'test_metadata_auth', etc." if api_protocol == "grpc" else "Examples: 'test_user_crud_positive', 'test_input_validation', 'test_auth_flows', 'test_error_responses', 'test_pagination', 'test_rate_limiting', etc."}
 
     Consider: Functional (positive/negative), Security, Error Handling, Data Validation,
     Boundary Testing, Integration, Performance edge cases.
     - User-specified categories from email/PDF take priority
     - Include authentication tests ONLY if requires_auth=true
-    - NO DELETE endpoint tests
+    - NO DELETE endpoint tests{"" if api_protocol == "grpc" else ""}
+    {"- For gRPC: also consider streaming tests, deadline/timeout, large message, and metadata tests" if api_protocol == "grpc" else ""}
 
     **FILE NAMING**: Use format test_<descriptive_name>_{timestamp}.py
     Timestamp: {timestamp}
@@ -435,6 +623,151 @@ def generate_sub_test_scenarios(email_data: dict):
         "timestamp": timestamp,
         "email_data": email_data
     }
+
+
+def _generate_scenario_sub_scenarios(email_data: dict) -> dict:
+    """
+    Generates ordered, sequential sub-scenarios for end-to-end business flow testing.
+    Each sub-scenario becomes one pytest file, executed in order via zero-padded filenames.
+    Later steps can depend on data produced by earlier steps (shared via testdata/ JSON files).
+    """
+    api_docs = email_data["api_documentation"]
+    test_reqs = email_data["test_requirements"]
+    special_instructions = email_data["special_instructions"]
+    requires_auth = email_data["requires_authentication"]
+    pdf_context = email_data["pdf_context"]
+    pdf_insights = email_data["pdf_insights"]
+    has_pdf = email_data["has_pdf"]
+    email_content = email_data.get("email_content", "")
+    api_protocol = email_data.get("api_protocol", "rest")
+
+    pdf_info = ""
+    if has_pdf and pdf_context:
+        pdf_info = f"""
+    **PDF Documentation**: {pdf_context[:2000]}...
+    **Insights**: {pdf_insights}
+    """
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    protocol_note = (
+        "**API PROTOCOL**: gRPC — steps should target gRPC service/method calls, "
+        "use gRPC status codes, and handle streaming RPCs where applicable."
+        if api_protocol == "grpc"
+        else "**API PROTOCOL**: REST — steps should target HTTP endpoints."
+    )
+
+    scenario_prompt = f"""
+    The user wants to test an END-TO-END BUSINESS FLOW / SCENARIO.
+    Analyze the API documentation and the user's description to generate ORDERED,
+    SEQUENTIAL test sub-scenarios that cover the full flow.
+
+    {protocol_note}
+
+    USER'S SCENARIO DESCRIPTION:
+    {email_content[:3000]}
+
+    API Docs: {json.dumps(api_docs, indent=2)[:3000]}
+    Requirements: {test_reqs}
+    Special Instructions: {special_instructions}
+    Requires Auth: {requires_auth}
+    {pdf_info}
+
+    IMPORTANT RULES:
+    - Generate scenarios in the EXACT ORDER they must execute
+    - Each scenario becomes ONE pytest file
+    - Use ZERO-PADDED file names so pytest runs them alphabetically in order:
+      test_01_<step_name>_{timestamp}.py, test_02_<step_name>_{timestamp}.py, etc.
+    - Each step may produce data (e.g. a created resource ID) that later steps consume
+    - Specify what data each step produces and consumes via JSON files in testdata/
+    - NO DELETE endpoint tests
+    - Include authentication/setup as the first step if requires_auth=true
+    - Generate 3-10 sequential steps that cover the described flow
+
+    Return STRICT JSON:
+    {{
+        "scenario_name": "short name for the overall flow",
+        "flow_description": "one-sentence summary of the end-to-end flow",
+        "sub_scenarios": [
+            {{
+                "file_name": "test_01_create_product_{timestamp}.py",
+                "description": "Step 1: Create a new product via POST /api/products",
+                "endpoints": ["/api/products"],
+                "test_type": "scenario_step",
+                "priority": "high",
+                "order": 1,
+                "depends_on": [],
+                "data_produces": ["product_id"],
+                "data_consumes": []
+            }},
+            {{
+                "file_name": "test_02_add_stock_{timestamp}.py",
+                "description": "Step 2: Add stock to the created product",
+                "endpoints": ["/api/products/{{product_id}}/stock"],
+                "test_type": "scenario_step",
+                "priority": "high",
+                "order": 2,
+                "depends_on": ["test_01_create_product_{timestamp}.py"],
+                "data_produces": ["stock_id"],
+                "data_consumes": ["product_id"]
+            }}
+        ],
+        "total_scenarios": 0,
+        "estimated_test_count": 0,
+        "timestamp": "{timestamp}"
+    }}
+    """
+
+    response = get_ai_response(scenario_prompt, model=MODEL_NAME)
+    scenarios_data = extract_json_from_text(response)
+    logging.info(f"Scenario sub-scenario generation response: {scenarios_data}")
+
+    if not scenarios_data:
+        raise ValueError(f"Invalid scenario JSON: {response[:500]}")
+
+    sub_scenarios = scenarios_data.get("sub_scenarios", [])
+
+    # Ensure ordering by the order field
+    sub_scenarios.sort(key=lambda s: s.get("order", 0))
+
+    if TEST_MODE and len(sub_scenarios) > 1:
+        logging.info(f"TEST_MODE enabled — trimming {len(sub_scenarios)} scenarios to 1")
+        sub_scenarios = sub_scenarios[:1]
+
+    logging.info(f"Generated {len(sub_scenarios)} scenario sub-scenarios (sequential):")
+    for idx, s in enumerate(sub_scenarios):
+        logging.info(
+            f"  {idx+1}. [{s.get('order', '?')}] {s['file_name']}: {s['description']}"
+            f"  produces={s.get('data_produces', [])} consumes={s.get('data_consumes', [])}"
+        )
+
+    return {
+        "sub_scenarios": sub_scenarios,
+        "total_scenarios": len(sub_scenarios),
+        "estimated_test_count": scenarios_data.get("estimated_test_count", 0),
+        "timestamp": timestamp,
+        "email_data": email_data,
+        "testing_type": "scenario",
+        "scenario_name": scenarios_data.get("scenario_name", ""),
+        "flow_description": scenarios_data.get("flow_description", ""),
+    }
+
+
+@task
+def generate_sub_test_scenarios(email_data: dict):
+    """
+    Generates granular per-file sub-scenarios instead of broad categories.
+    Each sub-scenario maps to one test file.
+
+    Dispatches to scenario-based or standard API generation based on testing_type.
+    """
+    testing_type = email_data.get("testing_type", "api_only")
+    logging.info(f"Generating sub-scenarios with testing_type={testing_type}")
+
+    if testing_type == "scenario":
+        return _generate_scenario_sub_scenarios(email_data)
+    else:
+        return _generate_api_sub_scenarios(email_data)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -548,6 +881,7 @@ def generate_all_test_files(scenario_data: dict):
     base_url = email_data.get("base_url") or "http://connector:8000"
     pdf_insights = email_data["pdf_insights"]
     requires_auth = email_data["requires_authentication"]
+    api_protocol = email_data.get("api_protocol", "rest")
 
     config_info = ""
     if config_path and os.path.exists(config_path):
@@ -559,6 +893,10 @@ def generate_all_test_files(scenario_data: dict):
     if requires_auth and config_path:
         auth_instructions = _build_auth_instructions(config_path)
 
+    # Protocol-specific instructions (REST vs gRPC)
+    proto_files = email_data.get("proto_files", [])
+    protocol_instructions = _build_protocol_instructions(api_protocol, proto_files=proto_files)
+
     # Build available schemas info for the prompt
     schemas_info = ""
     if saved_schemas:
@@ -567,6 +905,11 @@ def generate_all_test_files(scenario_data: dict):
             "AVAILABLE REQUEST BODY SCHEMAS (already saved in testdata/schemas/):\n"
             + "\n".join(schema_lines)
         )
+
+    # Detect scenario mode from upstream data
+    is_scenario_mode = scenario_data.get("testing_type") == "scenario"
+    scenario_name = scenario_data.get("scenario_name", "")
+    flow_description = scenario_data.get("flow_description", "")
 
     conversation_history = []
     generated_files = []
@@ -583,6 +926,45 @@ def generate_all_test_files(scenario_data: dict):
         logging.info(f"Description: {description}")
         logging.info(f"═══════════════════════════════════════════════════")
 
+        # Build scenario-specific instructions when in scenario mode
+        scenario_context = ""
+        if is_scenario_mode:
+            order = scenario.get("order", idx + 1)
+            depends_on = scenario.get("depends_on", [])
+            data_produces = scenario.get("data_produces", [])
+            data_consumes = scenario.get("data_consumes", [])
+
+            scenario_context = f"""
+        SCENARIO MODE — SEQUENTIAL BUSINESS FLOW TESTING
+        ─────────────────────────────────────────────────
+        Scenario: {scenario_name}
+        Flow: {flow_description}
+        This is step {order} of {len(sub_scenarios)} in a sequential end-to-end test flow.
+
+        DATA SHARING BETWEEN STEPS:
+        - This step CONSUMES data from previous steps: {', '.join(data_consumes) if data_consumes else 'none (first step or independent)'}
+        - This step PRODUCES data for later steps: {', '.join(data_produces) if data_produces else 'none'}
+        - Depends on files: {', '.join(depends_on) if depends_on else 'none'}
+
+        DATA SHARING PATTERN — use JSON files in testdata/ directory:
+          WRITE (produce data for later steps):
+            DATA_DIR = os.path.join(os.path.dirname(__file__), "testdata")
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(os.path.join(DATA_DIR, "step_{order:02d}_output.json"), "w") as f:
+                json.dump({{"product_id": response.json()["id"]}}, f)
+
+          READ (consume data from earlier steps):
+            DATA_DIR = os.path.join(os.path.dirname(__file__), "testdata")
+            with open(os.path.join(DATA_DIR, "step_XX_output.json")) as f:
+                prev_data = json.load(f)
+            product_id = prev_data["product_id"]
+
+        TEST ORDERING:
+        - File names use zero-padded prefixes (test_01_, test_02_, ...) so pytest
+          runs them in the correct sequential order alphabetically.
+        - Each file is ONE step in the flow — do NOT test steps out of order.
+        """
+
         generation_prompt = f"""
         Generate a COMPLETE Python pytest test file for the following sub-scenario.
         Save it in subdirectory "{test_session_id}" with filename "{file_name}".
@@ -591,9 +973,13 @@ def generate_all_test_files(scenario_data: dict):
         File: {file_name}
         Test type: {test_type}
         Priority: {priority}
-        Endpoints: {', '.join(endpoints) if endpoints else 'All relevant endpoints from the API docs'}
+        {"Service/Methods" if api_protocol == "grpc" else "Endpoints"}: {', '.join(endpoints) if endpoints else 'All relevant from the API docs'}
         Requires Auth: {requires_auth}
         {config_info}
+
+        {protocol_instructions}
+
+        {scenario_context}
 
         API Docs: {json.dumps(api_docs, indent=2)[:3000]}
         Requirements: {test_reqs}
@@ -604,8 +990,8 @@ def generate_all_test_files(scenario_data: dict):
         {auth_instructions if auth_instructions else ""}
 
         Generate pytest file with:
-        - All imports (pytest, requests, json, etc.)
-        - Fixtures if needed (auth, test data)
+        - All imports (pytest, {"grpc, google.protobuf" if api_protocol == "grpc" else "requests"}, json, etc.)
+        - Fixtures if needed ({"channel, stub" if api_protocol == "grpc" else "auth, test data"})
         - MAXIMUM 10 test functions per file
         - Each test: descriptive name, docstring, ONE assertion, proper error handling
         - Use @pytest.mark.{test_type} markers
@@ -617,9 +1003,10 @@ def generate_all_test_files(scenario_data: dict):
         - ONE assertion per test
         - MAXIMUM 10 test cases per file - focus on the most important ones
         - Prefer Special Instructions
-        - Only test documented endpoints
+        - Only test documented {"services/methods" if api_protocol == "grpc" else "endpoints"}
         - {"All credentials MUST come from .env via os.getenv() — NEVER hardcode secrets" if requires_auth else "Skip auth"}
         - Do NOT duplicate tests that were already generated in previous files
+        {"- For gRPC with grpcurl: NEVER pass JSON payloads as -d command-line arguments (causes Errno 7 Argument list too long). ALWAYS write payload to a temp file and use -d @filepath." + (" Also ALWAYS include: -import-path . " + " ".join(f"-proto {pf}" for pf in proto_files) + " (the .proto files are in the test directory)." if proto_files else " If the server does not support reflection, use -proto <file> flags.") if api_protocol == "grpc" else ""}
 
         TEST DATA:
         - When creating test cases, generate test data as needed and load it in the test scenario
@@ -631,7 +1018,7 @@ def generate_all_test_files(scenario_data: dict):
           DATA_DIR = os.path.join(os.path.dirname(__file__), "testdata")
           with open(os.path.join(DATA_DIR, "filename.json")) as f:
               test_data = json.load(f)
-          response = requests.post(url, json=test_data)
+          {"response = stub.MethodName(ParseDict(test_data, pb2.RequestType()))" if api_protocol == "grpc" else "response = requests.post(url, json=test_data)"}
         - Generate separate data files for positive vs negative test scenarios
 
         Save to: {test_session_id}/{file_name}
